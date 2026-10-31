@@ -111,6 +111,14 @@ process.disconnect(); process.stdin.destroy();
   assert.equal(created.find((item) => item.credentials.email.startsWith("pro")).proxy_id, 3);
   assert(!JSON.stringify(requests).includes('"proxy_id":"balanced"'), "toSub2 marker never reaches Sub2API");
   let page = await jobs();
+  const switchSelectionPage = await (await fetch(`${base}/api/jobs`, { headers })).json();
+  for (const job of switchSelectionPage.jobs) {
+    const selected = switchSelectionPage.selection.find((item) => item.id === job.id);
+    assert.equal(typeof selected?.canSwitchProxy, "boolean", "PlanType batch selection includes proxy-switch eligibility");
+    assert.equal(selected.canSwitchProxy, job.canSwitchProxy, "PlanType batch and row proxy-switch eligibility agree");
+  }
+  assert.equal(switchSelectionPage.selection.find((item) => item.email === "plus-a@example.test").canSwitchProxy, true, "balanced PlanType accounts can enable the switch-IP button");
+  assert.equal(switchSelectionPage.selection.find((item) => item.email === "free-a@example.test").canSwitchProxy, false, "direct PlanType accounts keep the switch-IP button disabled");
   assert.deepEqual(page.find((item) => item.email === "plus-a@example.test").boundIps, [proxies.find((proxy) => proxy.id === page.find((item) => item.email === "plus-a@example.test").assignedProxyId).ip_address]);
   const options = await post("/api/sub2api/options", { config: { baseUrl: poolBase, adminApiKey: "fixture-key" } });
   assert.deepEqual(options.body.proxies.map((proxy) => proxy.accountCount), [2, 2, 2], "both proxy modes count distinct accounts by shared exit IP");

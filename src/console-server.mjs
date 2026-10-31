@@ -6567,6 +6567,7 @@ function publicSelectionJob(job) {
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLogoutAllSessions: canLogoutAllSessions(job),
+    canSwitchProxy: jobUsesBalancedProxy(job),
     canSetupTotp: canSetupTotp(job),
     canReplaceTotp: canReplaceTotp(job),
     canAddPassword: canAddPassword(job),

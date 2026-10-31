@@ -113,6 +113,13 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   assert.equal(created.status, 201, JSON.stringify(created.body));
   const newJobs = created.body.jobs;
   await waitFor(async () => (await page()).jobs.filter((job) => newJobs.some((createdJob) => createdJob.id === job.id && job.status === "completed")).length === 2);
+  const switchSelectionPage = await page();
+  for (const job of switchSelectionPage.jobs) {
+    const selected = switchSelectionPage.selection.find((item) => item.id === job.id);
+    assert.equal(typeof selected?.canSwitchProxy, "boolean", "batch selection includes proxy-switch eligibility");
+    assert.equal(selected.canSwitchProxy, job.canSwitchProxy, "batch and row proxy-switch eligibility agree");
+  }
+  assert(newJobs.every((job) => switchSelectionPage.selection.find((item) => item.id === job.id).canSwitchProxy), "balanced accounts can enable the switch-IP button");
   assert.deepEqual(newJobs.map((job) => job.assignedProxyId).sort(), [2, 3], "new accounts should balance by exit IP rather than proxy ID");
   let traces = await readTrace();
   for (const job of newJobs) {
