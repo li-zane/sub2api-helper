@@ -24,8 +24,8 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("content-type", "application/json");
   if (req.method === "GET" && req.url?.startsWith("/backend-api/accounts/sessions")) {
     res.end(JSON.stringify({ show_session_manager: true, devices: [
-      { session_id: "us_current", render_id: "render-current", display_name: "Mac", is_current_device: true },
-      { session_id: "us_remote", render_id: "render-remote", display_name: "Windows", is_current_device: false },
+      { session_id: "us_current", render_id: "render-current", display_name: "Mac", is_current_device: true, last_signed_in_ip: "203.0.113.42" },
+      { session_id: "us_remote", render_id: "render-remote", display_name: "Windows", is_current_device: false, ip_address: "2001:db8::42" },
     ] }));
     return;
   }
@@ -82,6 +82,9 @@ try {
   assert.equal(listed.devices.length, 2);
   assert.equal(listed.devices[0].isCurrentDevice, true);
   assert.equal(listed.devices[1].sessionId, "us_remote");
+  assert.equal(listed.devices[0].lastSignedInIp, "203.0.113.42", "device IPv4 reaches the session API response");
+  assert.equal(listed.devices[1].lastSignedInIp, "2001:db8::42", "each device keeps its own IPv6 address");
+  assert(!JSON.stringify(listed).includes("mock-refresh"), "session display omits credentials");
   await revokeAccountSession(job, { sessionId: "us_remote" });
   await revokeAllAccountSessions(job);
   const usage = await fetchAccountUsage(job);

@@ -89,6 +89,7 @@ const devices = normalizeSessionDevices({
       last_signed_in_city: "Los Angeles",
       last_signed_in_region_code: "CA",
       last_signed_in_country: "US",
+      last_signed_in_ip_address: "203.0.113.42",
       app_sessions: [{ client_name: "Codex" }, { client_name: "ChatGPT Web" }],
     },
     {
@@ -121,10 +122,20 @@ assert.deepEqual(devices[0], {
   lastSignedInCity: "Los Angeles",
   lastSignedInRegionCode: "CA",
   lastSignedInCountry: "US",
+  lastSignedInIp: "203.0.113.42",
   appSessions: ["Codex", "ChatGPT Web"],
 });
 assert.equal(devices[1].sessionId, null);
 assert.equal(devices[1].deviceIdHash, "device-hash");
+assert.equal(devices[1].lastSignedInIp, null, "missing device IP is not inferred from an account proxy");
+for (const field of ["last_signed_in_ip_address", "last_signed_in_ip", "lastSignedInIp", "ip_address", "ipAddress", "ip"]) {
+  assert.equal(normalizeSessionDevice({ session_id: "ip-alias", [field]: " 2001:db8::42 " }).lastSignedInIp, "2001:db8::42", `${field} supports IPv6`);
+}
+for (const value of [null, undefined, "", "unknown", "999.2.3.4", "203.0.113.42:8080", "203.0.113.42, 198.51.100.7", "https://user:secret@example.test", { ip: "203.0.113.42" }, 123, "2001:db8::42%eth0"]) {
+  assert.equal(normalizeSessionDevice({ session_id: "invalid-ip", last_signed_in_ip: value }).lastSignedInIp, null, "only a literal IP address is exposed");
+}
+assert.equal(normalizeSessionDevice({ session_id: "ip-fallback", last_signed_in_ip: "invalid", ip_address: "198.51.100.7" }).lastSignedInIp, "198.51.100.7");
+assert.equal(normalizeSessionDevice({ session_id: "not-device-ip", proxy_ip: "203.0.113.42", bound_ip: "198.51.100.7", app_sessions: [{ ip: "192.0.2.1" }] }).lastSignedInIp, null, "proxy and app IPs are not substituted for device login IPs");
 assert.equal(normalizeSessionDevice(null), null);
 assert.equal(normalizeSessionDevice({ session_id: "" }), null);
 console.log("account session normalization smoke passed");

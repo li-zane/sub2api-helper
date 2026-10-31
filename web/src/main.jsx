@@ -4113,6 +4113,12 @@ function SessionDialog({ token, job, onClose, onError }) {
                     {formatSessionLocation(device) && <span>{formatSessionLocation(device)}</span>}
                     {device.lastSignedInTimestamp && <time dateTime={new Date(device.lastSignedInTimestamp * 1000).toISOString()}>最近登录 {formatDateTime(new Date(device.lastSignedInTimestamp * 1000).toISOString())}</time>}
                   </div>
+                  <div className={`session-login-ip${device.lastSignedInIp ? "" : " unavailable"}`}>
+                    <span>最近登录 IP</span>
+                    {device.lastSignedInIp
+                      ? <code>{device.lastSignedInIp}</code>
+                      : <span>上游未提供</span>}
+                  </div>
                   {device.appSessions?.length > 0 && (
                     <div className="session-apps">应用：{device.appSessions.join("、")}</div>
                   )}
@@ -4133,6 +4139,8 @@ function SessionDialog({ token, job, onClose, onError }) {
         ) : (
           <div className="session-empty"><MonitorSmartphone size={24} /><strong>没有可显示的设备或会话</strong><span>账号可能刚刚完成登出，刷新后会重新读取状态。</span></div>
         )}
+
+        {!loading && devices.length > 0 && <p className="session-ip-note">登录 IP 仅显示上游返回的设备记录；缺失时标注“上游未提供”，不以账号绑定的代理 IP 代替。</p>}
 
         {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{dialogError}</div>}
         {notice && <div className="credential-notice" role="status"><Check size={15} />{notice}</div>}

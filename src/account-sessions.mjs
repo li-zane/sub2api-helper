@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import { isIP } from "node:net";
 
 import {
   browserIdentityForTlsProfile,
@@ -381,8 +382,25 @@ export function normalizeSessionDevice(device, index = 0) {
     lastSignedInCity: publicText(device.last_signed_in_city, ""),
     lastSignedInRegionCode: publicText(device.last_signed_in_region_code, ""),
     lastSignedInCountry: publicText(device.last_signed_in_country, ""),
+    lastSignedInIp: normalizeSessionIp(
+      device.last_signed_in_ip_address,
+      device.last_signed_in_ip,
+      device.lastSignedInIp,
+      device.ip_address,
+      device.ipAddress,
+      device.ip,
+    ),
     appSessions,
   };
+}
+
+function normalizeSessionIp(...values) {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const text = value.trim();
+    if (text.length <= 45 && !text.includes("%") && isIP(text)) return text;
+  }
+  return null;
 }
 
 function publicSessionDevice(device) {
