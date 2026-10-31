@@ -186,6 +186,42 @@ button:focus-visible, a:focus-visible, select:focus-visible { outline: 2px solid
 .proxy-mode-control button:disabled { cursor: not-allowed; opacity: .6; }
 .proxy-distribution { width: 100%; display: grid; gap: 4px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .proxy-distribution span { overflow-wrap: anywhere; }
+.proxy-quality-panel { width: 100%; margin-top: 3px; border-top: 1px solid var(--line); }
+.proxy-quality-panel > summary { display: flex; align-items: center; gap: 6px; min-height: 36px; color: var(--ink-2); font-size: 12px; font-weight: 600; cursor: pointer; list-style: none; }
+.proxy-quality-panel > summary::-webkit-details-marker { display: none; }
+.proxy-quality-panel > summary span { flex: 1; }
+.proxy-quality-panel[open] > summary > svg:last-child { transform: rotate(180deg); }
+.proxy-quality-panel > summary:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-radius: var(--radius-sm); }
+.proxy-quality-body { display: grid; gap: 8px; padding-bottom: 2px; }
+.proxy-quality-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.proxy-quality-check { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-muted); }
+.proxy-quality-check-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.proxy-quality-check-header > strong { overflow-wrap: anywhere; font-size: 12px; }
+.proxy-quality-check-header > button { flex-shrink: 0; min-height: 30px; padding: 4px 8px; font-size: 12px; }
+.proxy-quality-result { margin-top: 8px; font-size: 12px; line-height: 1.5; }
+.proxy-quality-result.stale { opacity: .6; }
+.proxy-quality-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.proxy-quality-metrics > span { display: grid; gap: 2px; }
+.proxy-quality-metrics small { color: var(--muted); font-size: 11px; }
+.proxy-quality-metrics strong { font-size: 13px; font-variant-numeric: tabular-nums; }
+.proxy-quality-sampling { margin: 7px 0; color: var(--green); }
+.proxy-quality-sampling.changed { color: var(--amber); }
+.proxy-quality-exit { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.proxy-quality-exit-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+.proxy-quality-exit-heading code { font-size: 12px; color: var(--ink); }
+.proxy-quality-exit p { margin: 5px 0; }
+.proxy-risk-badge { padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.proxy-risk-badge.low { color: var(--green); background: var(--green-soft); }
+.proxy-risk-badge.medium { color: var(--amber); background: var(--amber-soft); }
+.proxy-risk-badge.high { color: var(--danger); background: var(--danger-soft); }
+.proxy-risk-badge.unknown { color: var(--muted); background: var(--surface); border: 1px solid var(--line); }
+.proxy-quality-risk { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; margin-top: 8px; }
+.proxy-quality-risk > span { color: var(--muted); }
+.proxy-quality-exit meter { display: block; width: 100%; height: 10px; margin: 3px 0 6px; }
+.proxy-quality-flags { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.proxy-quality-source, .proxy-quality-time { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.proxy-quality-error { margin: 6px 0; color: var(--danger); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.proxy-quality-sampling.unknown { color: var(--muted); }
 .provider-field {
   width: 100%;
   height: 34px;
@@ -413,7 +449,7 @@ col:nth-child(8) { width: 120px; }
 col:nth-child(9) { width: 220px; }
 col:nth-child(10) { width: 120px; }
 col:nth-child(11) { width: 160px; }
-col.overload-column { width: 228px; }
+col.overload-column { width: 256px; }
 col.bound-ip-column { width: 160px; }
 th.bound-ip-heading { width: 160px; min-width: 160px; }
 .bound-ip-cell { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -461,7 +497,21 @@ th.actions-heading, .job-row > .actions-cell { position: sticky; right: 0; box-s
 th.actions-heading { z-index: 4; background: #f7f9f8; }
 .job-row > .actions-cell { z-index: 2; background: var(--surface); }
 .job-row:hover > .actions-cell, .job-row:has(.select-cell input:checked) > .actions-cell { background: var(--surface); }
-.overload-detection { display: flex; align-items: center; gap: 8px; min-width: 204px; }
+.overload-detection { display: flex; align-items: center; gap: 8px; min-width: 232px; }
+.overload-controls { display: grid; gap: 1px; flex: 0 0 60px; }
+.overload-control { display: flex; align-items: center; }
+.overload-control > span { color: var(--muted); font-size: 11px; }
+.overload-chart-status { display: grid; gap: 1px; }
+.overload-cooldown-status { color: var(--amber); font-size: 11px; line-height: 1.4; }
+.overload-cooldown-status.error { color: var(--danger); }
+.overload-rule-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.overload-rule-fields .settings-field { min-width: 0; margin: 8px 0 0; }
+.overload-rule-fields .settings-field:first-child { grid-column: auto; }
+.overload-rule-fields .settings-field > div > span { flex-shrink: 0; white-space: nowrap; }
+.overload-rule-fields input { min-width: 0; width: 100%; }
+.overload-cooldown-settings > h3 { margin: 0; color: var(--ink); font-size: 14px; }
+.overload-cooldown-settings > .task-settings-help { margin: 0; }
+@media (max-width: 600px) { .overload-rule-fields { grid-template-columns: 1fr; } }
 .overload-switch { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 8px; border: 0; border-radius: 50%; background: transparent; cursor: pointer; touch-action: manipulation; }
 .overload-switch > span { display: block; width: 14px; height: 14px; border: 1px solid #e0443e; border-radius: 50%; background: #ff5f57; box-shadow: inset 0 1px 1px rgba(255,255,255,.25), 0 1px 1px rgba(0,0,0,.08); }
 .overload-switch.enabled > span { border-color: #1dad34; background: #28c840; }

@@ -42,6 +42,7 @@ import {
 import "./styles.css";
 import { logoutAccountSessions } from "./account-session-actions.mjs";
 import { OverloadDetection } from "./overload-detection.jsx";
+import { ProxyQualityPanel } from "./proxy-quality.jsx";
 
 const POLL_INTERVAL_MS = 900;
 const SUB2API_PIPELINE_TIMEOUT_MS = 15 * 60_000;
@@ -1792,6 +1793,7 @@ function App() {
                 {proxySettingsSaving ? "保存中…" : "保存代理配置"}
               </button>
               {proxySettingsError && <span role="alert">{proxySettingsError}</span>}
+              <ProxyQualityPanel token={token} mode={accountProxyMode} proxies={accountProxyDistribution} globalProxyUrl={accountProxyUrl} dirty={proxySettingsDirty} />
             </div>
           </section>
         </div>
@@ -3401,6 +3403,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const dialogRef = useRef(null);
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
+  const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
   const [accountProxyMode, setAccountProxyMode] = useState(() => ["sub2api", "plan"].includes(settings.accountProxyMode) ? settings.accountProxyMode : "global");
   const [codexAuthMode, setCodexAuthMode] = useState(() => settings.codexAuthMode || "local");
   const [autoRows, setAutoRows] = useState(() => taskAutoActionRows(settings.autoActions));
@@ -3438,6 +3441,13 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       setError("冷却时长必须是 1 到 43200 分钟的整数");
       return;
     }
+    const overloadAutoCooldown = Object.fromEntries(Object.entries(overloadRule).map(([key, value]) => [key, Number(value)]));
+    if (!Number.isInteger(overloadAutoCooldown.windowMinutes) || overloadAutoCooldown.windowMinutes < 1 || overloadAutoCooldown.windowMinutes > 1440
+      || !Number.isInteger(overloadAutoCooldown.threshold) || overloadAutoCooldown.threshold < 1 || overloadAutoCooldown.threshold > 100000
+      || !Number.isInteger(overloadAutoCooldown.cooldownMinutes) || overloadAutoCooldown.cooldownMinutes < 1 || overloadAutoCooldown.cooldownMinutes > 43200) {
+      setError("自动冷却规则需填写有效整数：窗口 1–1440 分钟、阈值 1–100000 次、冷却 1–43200 分钟");
+      return;
+    }
     const configuredRows = autoRows
       .map((row) => ({ planType: String(row.planType || "").trim(), actions: [...new Set(row.actions || [])] }))
       .filter((row) => row.planType || row.actions.length);
@@ -3460,7 +3470,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode }),
+        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -3526,6 +3536,16 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             <span>分钟</span>
           </div>
         </label>
+        <section className="task-auto-settings overload-cooldown-settings" aria-labelledby="overload-auto-cooldown-title">
+          <h3 id="overload-auto-cooldown-title">过载自动冷却</h3>
+          <p className="task-settings-help">每分钟检查最近一段时间的过载次数，达到阈值后暂停号池分配，到期自动恢复。在账号的“过载检测”列单独开启。</p>
+          <div className="overload-rule-fields">
+            {[{ key: "windowMinutes", label: "过载统计窗口", unit: "分钟", max: 1440 }, { key: "threshold", label: "过载触发阈值", unit: "次", max: 100000 }, { key: "cooldownMinutes", label: "自动冷却时长", unit: "分钟", max: 43200 }].map(field => <label key={field.key} className="settings-field" htmlFor={`overload-rule-${field.key}`}>
+              <span>{field.label}</span><div><input id={`overload-rule-${field.key}`} type="number" min="1" max={field.max} step="1" value={overloadRule[field.key]} disabled={saving} onChange={event => setOverloadRule(current => ({ ...current, [field.key]: event.target.value }))} /><span>{field.unit}</span></div>
+            </label>)}
+          </div>
+          <p className="task-settings-help">最近 {overloadRule.windowMinutes || "—"} 分钟内过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟。恢复后重新计数，服务重启后继续计时。</p>
+        </section>
         <p id="task-settings-description" className="task-settings-help">可设置 {settings.min}–{settings.max} 条，默认 {settings.default} 条。超过上限的任务自动排队。并发越高，服务器和代理的负载越大。</p>
         <p className="task-settings-help">调高后立即启动排队任务；调低后等待当前任务完成，再按新上限调度。服务重启后保留此设置。</p>
         <section className="task-auto-settings" aria-labelledby="task-auto-settings-title">
@@ -3576,7 +3596,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
-          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setCooldownMinutes("60"); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
+          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>

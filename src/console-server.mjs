@@ -29,6 +29,8 @@ import { hasJobTotpKey, isReauthorizationComplete, isTotpRotationComplete } from
 import { normalizeCodexAuthMode } from "./sub2api-oauth.mjs";
 import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-transport.mjs";
 import { OverloadMonitor } from "./overload-monitor.mjs";
+import { ProxyQualityService } from "./proxy-quality.mjs";
+import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4399;
@@ -142,6 +144,12 @@ const SUB2API_SETTINGS_PATH = path.join(OUTPUT_ROOT, SUB2API_SETTINGS_FILENAME);
 const PLAN_TYPE_MAPPING_PATH = path.join(OUTPUT_ROOT, PLAN_TYPE_MAPPING_FILENAME);
 const TASK_SETTINGS_PATH = path.join(OUTPUT_ROOT, TASK_SETTINGS_FILENAME);
 const credentialStore = createCredentialStore();
+const proxyQualityService = new ProxyQualityService({
+  exitUrl: process.env.TOSUB2_PROXY_EXIT_CHECK_URL,
+  reputationUrl: process.env.TOSUB2_PROXY_REPUTATION_URL,
+  profile: process.env.TOSUB2_TLS_PROFILE || DEFAULT_TLS_PROFILE,
+  timeoutMs: process.env.NODE_ENV === "test" ? process.env.TOSUB2_PROXY_CHECK_TIMEOUT_MS : undefined,
+});
 const consoleToken = crypto.randomBytes(24).toString("base64url");
 const jobs = new Map();
 const customSmsPoolPositions = new Map();
@@ -157,6 +165,7 @@ let allowDirectFallback = false;
 let accountProxyMode = "global";
 let codexAuthMode = "local";
 let accountProxyCooldownMinutes = 60;
+let overloadAutoCooldownSettings = { ...DEFAULT_OVERLOAD_COOLDOWN };
 let taskSettingsWritePromise = Promise.resolve();
 let accountProxyAssignmentPromise = Promise.resolve();
 const accountProxyReservations = new Map();
@@ -218,6 +227,27 @@ const overloadMonitor = new OverloadMonitor({
   },
 });
 
+const overloadCooldown = new OverloadCooldown({
+  filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
+  getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
+  backendIdentity: monitorBackendIdentity,
+  getSettings: () => overloadAutoCooldownSettings,
+  request: requestSub2Api,
+  onChange: invalidateSub2ApiAccountStatusCache,
+  listAccounts: async config => {
+    const listing = await listSub2ApiAccounts(config, { withMeta: true });
+    if (!listing.complete) throw new Error("Sub2API 账号列表不完整，自动冷却检查未完成");
+    const mapping = new Map();
+    for (const account of listing.accounts) {
+      const email = sub2ApiAccountEmail(account);
+      const id = normalizeSub2ApiAccountId(account.id);
+      if (!email || !id || (account.platform && account.platform !== "openai")) continue;
+      mapping.set(email, [...(mapping.get(email) || []), { id, enabled: sub2ApiAccountSchedulable(account) }]);
+    }
+    return mapping;
+  },
+});
+
 const hostArg = process.argv.find((item) => item.startsWith("--host="));
 const hostIndex = process.argv.indexOf("--host");
 const requestedHost = String(
@@ -247,6 +277,7 @@ await loadPlanTypeLabelMapping();
 await loadSub2ApiSettingsConfiguration();
 await loadSub2ApiMonitorConfiguration();
 await overloadMonitor.load();
+await overloadCooldown.load();
 await syncCompletedOutputs(true);
 for (const job of jobs.values()) {
   if (job.poolRefreshAction) {
@@ -259,6 +290,7 @@ resumePendingTaskAutoActions();
 scheduleQueuedJobs();
 scheduleSub2ApiMonitor();
 overloadMonitor.start();
+overloadCooldown.start();
 
 const vite = await createViteServer({
   root: WEB_ROOT,
@@ -369,6 +401,8 @@ async function handleApi(req, res, requestUrl) {
         sub2apiAccountPriority: true,
         accountRemarks: true,
         overloadDetection: true,
+        proxyQuality: true,
+        overloadAutoCooldown: true,
       },
     });
     return;
@@ -381,6 +415,33 @@ async function handleApi(req, res, requestUrl) {
 
   if (req.method === "GET" && requestUrl.pathname === "/api/task-settings") {
     sendJson(res, 200, { settings: publicTaskSettings() });
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/proxy-quality/check") {
+    if (shuttingDown) throw httpError(503, "服务正在关闭");
+    const body = await readJson(req);
+    let proxyUrl;
+    let target;
+    if (body.target === "global") {
+      proxyUrl = globalProxyUrl;
+      target = { type: "global", name: "全局代理" };
+    } else if (body.target === "sub2api") {
+      const proxyId = normalizeStoredProxyId(body.proxyId);
+      if (!proxyId) throw httpError(400, "请选择有效的代理节点");
+      const proxy = (await listSub2ApiProxies()).find(item => item.id === proxyId);
+      if (!proxy) throw httpError(404, "代理节点不存在，请重新读取代理");
+      proxyUrl = proxy.url;
+      target = { type: "sub2api", proxyId, name: proxy.name };
+    } else throw httpError(400, "请选择全局代理或 Sub2API 代理节点");
+    if (!proxyUrl) throw httpError(409, "请先保存有效的代理地址");
+    const controller = new AbortController();
+    const stop = () => { if (!res.writableEnded) controller.abort(); };
+    res.once("close", stop);
+    try {
+      const result = await proxyQualityService.check(proxyUrl, { signal: controller.signal });
+      if (!res.destroyed) sendJson(res, 200, { target, result });
+    } finally { res.off("close", stop); }
     return;
   }
 
@@ -774,6 +835,18 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
+  const autoCooldownMatch = /^\/api\/jobs\/([a-f0-9-]+)\/overload-auto-cooldown$/.exec(requestUrl.pathname);
+  if (req.method === "POST" && autoCooldownMatch) {
+    const job = jobs.get(autoCooldownMatch[1]);
+    if (!job) throw httpError(404, "Login flow not found");
+    const body = await readJson(req);
+    if (typeof body.enabled !== "boolean") throw httpError(400, "自动冷却状态必须是布尔值");
+    if (body.enabled && !overloadCooldown.snapshot(job.email).configured) throw httpError(409, "请先配置 Sub2API 后端地址和管理员 API Key");
+    await overloadCooldown.setEnabled(job.email, body.enabled);
+    sendJson(res, 200, { job: publicJob(job) });
+    return;
+  }
+
   const overloadMatch = /^\/api\/jobs\/([a-f0-9-]+)\/overload-detection$/.exec(requestUrl.pathname);
   if (req.method === "POST" && overloadMatch) {
     const job = jobs.get(overloadMatch[1]);
@@ -814,14 +887,14 @@ async function handleApi(req, res, requestUrl) {
     const state = await loadSub2ApiAccountStatus({ forceRefresh: true });
     const entry = state.accounts.get(job.email.toLowerCase());
     if (!entry?.accountIds?.length) throw httpError(409, `${job.email} 尚未加入 Sub2API 号池`);
-    await Promise.all(entry.accountIds.map((accountId) => requestSub2Api(
+    await overloadCooldown.manualOverride(job.email, entry.accountIds, () => Promise.all(entry.accountIds.map((accountId) => requestSub2Api(
       config,
       `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/schedulable`,
       {
         method: "POST",
         body: JSON.stringify({ schedulable: body.enabled }),
       },
-    )));
+    ))));
     const nextEntry = {
       ...entry,
       enabled: body.enabled,
@@ -918,6 +991,7 @@ async function handleApi(req, res, requestUrl) {
     const profileSync = await syncSub2ApiProfileChanges(config, profileSyncTargets, snapshotSub2ApiProfileState());
     const datePrioritySync = await refreshImportDatePriorities(config);
     overloadMonitor.trigger();
+    overloadCooldown.trigger();
     sendJson(res, 200, { ...publicSub2ApiSettingsState(), profileSync, datePrioritySync });
     return;
   }
@@ -942,6 +1016,7 @@ async function handleApi(req, res, requestUrl) {
     const profileSync = await syncSub2ApiProfileChanges(config, profileSyncTargets, snapshotSub2ApiProfileState());
     const datePrioritySync = await refreshImportDatePriorities(config);
     overloadMonitor.trigger();
+    overloadCooldown.trigger();
     sendJson(res, 200, { ...publicSub2ApiMonitorState(), profileSync, datePrioritySync });
     return;
   }
@@ -3290,7 +3365,7 @@ async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2
       credentials,
       extra,
       status: "active",
-      schedulable: true,
+      schedulable: !overloadCooldown.isPaused(sub2ApiAccountEmail(account)),
       group_ids: accountConfig.groupIds.length ? accountConfig.groupIds : (account.group_ids || []),
       ...proxyFields,
       ...(accountConfig.concurrency !== null ? { concurrency: accountConfig.concurrency } : {}),
@@ -3790,6 +3865,7 @@ function publicTaskSettings(includeProxy = true) {
     accountProxyMode,
     codexAuthMode,
     accountProxyCooldownMinutes,
+    overloadAutoCooldown: { ...overloadAutoCooldownSettings },
     allowDirectFallback,
     min: 1,
     max: MAX_ACTIVE_JOBS_LIMIT,
@@ -3809,6 +3885,7 @@ async function loadTaskSettings() {
     accountProxyMode = normalizeAccountProxyMode(saved.accountProxyMode);
     codexAuthMode = normalizeCodexAuthMode(saved.codexAuthMode);
     accountProxyCooldownMinutes = normalizeCooldownMinutes(saved.accountProxyCooldownMinutes);
+    overloadAutoCooldownSettings = normalizeOverloadCooldown(saved.overloadAutoCooldown);
   } catch (error) {
     if (error?.code !== "ENOENT") {
       throw new Error(`任务设置读取失败：${error.message}`);
@@ -3843,6 +3920,11 @@ async function saveTaskSettings(body) {
   const nextCooldownMinutes = Object.hasOwn(source, "accountProxyCooldownMinutes")
     ? normalizeCooldownMinutes(source.accountProxyCooldownMinutes)
     : accountProxyCooldownMinutes;
+  let nextOverloadAutoCooldown = overloadAutoCooldownSettings;
+  if (Object.hasOwn(source, "overloadAutoCooldown")) {
+    try { nextOverloadAutoCooldown = normalizeOverloadCooldown(source.overloadAutoCooldown); }
+    catch (error) { throw httpError(400, error.message); }
+  }
   // Serialize writes so memory and the last persisted setting always agree.
   const operation = taskSettingsWritePromise.catch(() => {}).then(async () => {
     const effectiveLimit = Object.hasOwn(source, "maxActiveJobs") ? nextLimit : maxActiveJobs;
@@ -3852,6 +3934,7 @@ async function saveTaskSettings(body) {
     const effectiveAccountProxyMode = Object.hasOwn(source, "accountProxyMode") ? nextAccountProxyMode : accountProxyMode;
     const effectiveCodexAuthMode = Object.hasOwn(source, "codexAuthMode") ? nextCodexAuthMode : codexAuthMode;
     const effectiveCooldownMinutes = Object.hasOwn(source, "accountProxyCooldownMinutes") ? nextCooldownMinutes : accountProxyCooldownMinutes;
+    const effectiveOverloadAutoCooldown = Object.hasOwn(source, "overloadAutoCooldown") ? nextOverloadAutoCooldown : overloadAutoCooldownSettings;
     const tempPath = `${TASK_SETTINGS_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
       await fs.writeFile(tempPath, `${JSON.stringify({
@@ -3863,6 +3946,7 @@ async function saveTaskSettings(body) {
         accountProxyMode: effectiveAccountProxyMode,
         codexAuthMode: effectiveCodexAuthMode,
         accountProxyCooldownMinutes: effectiveCooldownMinutes,
+        overloadAutoCooldown: effectiveOverloadAutoCooldown,
       }, null, 2)}\n`, { mode: 0o600 });
       await fs.rename(tempPath, TASK_SETTINGS_PATH);
     } finally {
@@ -3875,6 +3959,8 @@ async function saveTaskSettings(body) {
     accountProxyMode = effectiveAccountProxyMode;
     codexAuthMode = effectiveCodexAuthMode;
     accountProxyCooldownMinutes = effectiveCooldownMinutes;
+    overloadAutoCooldownSettings = effectiveOverloadAutoCooldown;
+    overloadCooldown.trigger();
     // Reducing the limit leaves running jobs alone; they drain before new work
     // starts. Increasing it immediately makes extra slots available.
     scheduleQueuedJobs();
@@ -6069,7 +6155,7 @@ async function performSub2ApiAutoRepairSuccess(job) {
       });
       await requestSub2Api(operation.config, `/api/v1/admin/accounts/${accountId}/schedulable`, {
         method: "POST",
-        body: JSON.stringify({ schedulable: true }),
+        body: JSON.stringify({ schedulable: !overloadCooldown.isPaused(job.email) }),
       });
       pendingIds.delete(accountId);
       job.autoRepairPendingAccountIds = [...pendingIds];
@@ -6200,6 +6286,7 @@ function publicJob(job) {
     sub2apiPlanType: sub2ApiStatus.planType,
     sub2apiUsage: publicSub2ApiUsage(sub2ApiStatus.usage),
     overloadDetection: overloadMonitor.snapshot(job.email),
+    overloadAutoCooldown: overloadCooldown.snapshot(job.email),
     lastError: job.lastError,
     canDownload: Boolean(job.resultSaved),
     poolOnly: Boolean(job.poolOnly),
@@ -6824,6 +6911,7 @@ async function deleteSub2ApiAccountsByEmail(email) {
 async function deleteJobsByEmail(email) {
   const sub2api = await deleteSub2ApiAccountsByEmail(email);
   await overloadMonitor.remove(email);
+  await overloadCooldown.remove(email);
   const matching = [...jobs.values()].filter((job) => job.email.toLowerCase() === email);
   const directories = new Set();
   matching.forEach((job) => {
@@ -8537,6 +8625,8 @@ async function shutdown() {
     for (const controller of sub2ApiRequestControllers) controller.abort();
     await Promise.allSettled([
       overloadMonitor.stop(),
+      overloadCooldown.stop(),
+      proxyQualityService.close(),
       sub2ApiMonitorPromise,
       taskSettingsWritePromise,
       ...sub2ApiRequestPromises,

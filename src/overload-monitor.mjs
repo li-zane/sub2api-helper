@@ -27,11 +27,20 @@ function isOverload(row) {
 
 // The split upstream list includes recovered failures, so successful failovers still count.
 // The legacy endpoint is used only when the split endpoint does not exist.
-export async function collectOverloadHours({ config, accountIds, request, now = Date.now(), isEnabled = () => true }) {
-  const points = completedHours(now);
+export async function collectOverloadHours(options) {
+  return collectOverloadCounts({ ...options, points: completedHours(options.now) });
+}
+
+export async function collectOverloadWindow({ start, end, ...options }) {
+  const points = await collectOverloadCounts({ ...options, points: [{ start: new Date(start).toISOString(), end: new Date(end).toISOString() }] });
+  return points?.[0].count ?? null;
+}
+
+async function collectOverloadCounts({ config, accountIds, request, points, isEnabled = () => true }) {
   const start = Date.parse(points[0].start);
   const end = Date.parse(points.at(-1).end);
-  const counts = Array(HOURS).fill(0);
+  const bucketMs = Date.parse(points[0].end) - start;
+  const counts = Array(points.length).fill(0);
   const seen = new Set();
   for (const accountId of new Set(accountIds.map(String))) {
     let endpoint = "/api/v1/admin/ops/upstream-errors";
@@ -81,7 +90,7 @@ export async function collectOverloadHours({ config, accountIds, request, now = 
             throw new Error("运维日志详情与账号不匹配");
           }
         }
-        if (isOverload(row)) counts[Math.floor((timestamp - start) / HOUR_MS)] += 1;
+        if (isOverload(row)) counts[Math.floor((timestamp - start) / bucketMs)] += 1;
       }
       if (received >= total) break;
       if (!data.items.length) throw new Error("运维日志分页不完整");

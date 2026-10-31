@@ -12,6 +12,8 @@ export function OverloadDetection({ job, token, onError }) {
   const [busy, setBusy] = useState(false);
   const [hovered, setHovered] = useState(null);
   const [saved, setSaved] = useState(null);
+  const [cooldownBusy, setCooldownBusy] = useState(false);
+  const [savedCooldown, setSavedCooldown] = useState(null);
   const source = job.overloadDetection;
   useEffect(() => {
     if (source) setSaved((current) => !current || (source.revision ?? 0) > (current.revision ?? 0) ? source : current);
@@ -20,6 +22,12 @@ export function OverloadDetection({ job, token, onError }) {
   // request may still complete later and must never undo the visible saved state.
   const detection = saved && (saved.revision ?? 0) > (source?.revision ?? -1) ? saved : source || saved;
   const enabled = detection?.enabled === true;
+  const cooldownSource = job.overloadAutoCooldown;
+  useEffect(() => {
+    if (cooldownSource) setSavedCooldown(current => !current || cooldownSource.revision >= current.revision ? cooldownSource : current);
+  }, [cooldownSource?.revision, cooldownSource?.settings]);
+  const cooldown = savedCooldown && (savedCooldown.revision ?? 0) > (cooldownSource?.revision ?? -1) ? savedCooldown : cooldownSource || savedCooldown;
+  const cooldownEnabled = cooldown?.enabled === true;
   const points = detection?.points || [];
   const { positioned, overloadSegments, requestSegments } = buildOverloadChart(points);
   const active = hovered === null ? null : positioned[hovered];
@@ -42,8 +50,25 @@ export function OverloadDetection({ job, token, onError }) {
     finally { setBusy(false); }
   }
 
+  async function toggleCooldown() {
+    if (cooldownBusy) return;
+    setCooldownBusy(true);
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/overload-auto-cooldown`, {
+        method: "POST", headers: { "content-type": "application/json", "x-console-token": token }, body: JSON.stringify({ enabled: !cooldownEnabled }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "自动冷却开关保存失败");
+      setSavedCooldown(data.job.overloadAutoCooldown);
+      onError("");
+    } catch (error) { onError(error.message); }
+    finally { setCooldownBusy(false); }
+  }
+
   return (
     <div className="overload-detection">
+      <div className="overload-controls">
+      <div className="overload-control"><span>检测</span>
       <button
         type="button" role="switch" aria-checked={enabled}
         aria-label={`${job.email} 过载检测`} aria-busy={busy}
@@ -51,6 +76,13 @@ export function OverloadDetection({ job, token, onError }) {
         className={`overload-switch ${enabled ? "enabled" : "disabled"}`}
         disabled={busy || !token || (!detection?.configured && !enabled)} onClick={toggle}
       ><span aria-hidden="true" /></button>
+      </div>
+      <div className="overload-control"><span>冷却</span><button type="button" role="switch" aria-checked={cooldownEnabled} aria-busy={cooldownBusy}
+        aria-label={`${job.email} 自动冷却`} className={`overload-switch ${cooldownEnabled ? "enabled" : "disabled"}`}
+        title={cooldown?.configured ? (cooldownEnabled ? "关闭自动冷却，并恢复本功能暂停的账号" : "开启过载自动冷却") : "请先配置 Sub2API 后端"}
+        disabled={cooldownBusy || !token || (!cooldown?.configured && !cooldownEnabled)} onClick={toggleCooldown}><span aria-hidden="true" /></button></div>
+      </div>
+      <div className="overload-chart-status">
       <div className="overload-chart">
         <svg viewBox="0 0 164 56" role="group" aria-label="过去六个完整小时的过载与请求数量，两条线独立缩放">
           <line className="overload-zero" x1="14" x2="156" y1="44" y2="44" />
@@ -76,6 +108,10 @@ export function OverloadDetection({ job, token, onError }) {
           <span className="overload-scale-note">独立缩放</span>
         </div>}
         {errors && <span className="overload-error" role="img" aria-label={errors} title={errors}>!</span>}
+      </div>
+      {cooldown && <span className={`overload-cooldown-status ${cooldown.lastError ? "error" : ""}`} title={cooldown.lastError || (cooldownEnabled ? `最近 ${cooldown.settings.windowMinutes} 分钟 ${cooldown.windowCount ?? "未知"} 次，阈值 ${cooldown.settings.threshold} 次` : "自动冷却已关闭")}>
+        {cooldown.lastError ? "自动冷却异常" : cooldown.phase === "resuming" ? "正在恢复号池…" : cooldown.coolingUntil ? `冷却至 ${new Date(cooldown.coolingUntil).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}` : cooldownEnabled ? `${cooldown.settings.windowMinutes} 分钟 ${cooldown.windowCount ?? "—"}/${cooldown.settings.threshold} 次` : ""}
+      </span>}
       </div>
     </div>
   );
