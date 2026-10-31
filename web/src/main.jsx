@@ -40,7 +40,7 @@ import {
   X,
 } from "lucide-react";
 import "./styles.css";
-import { logoutAccountSessions } from "./account-session-actions.mjs";
+import { logoutAccountSessions, proxySwitchSelectionState } from "./account-session-actions.mjs";
 import { OverloadDetection } from "./overload-detection.jsx";
 import { ProxyQualityPanel } from "./proxy-quality.jsx";
 
@@ -526,9 +526,13 @@ function App() {
   const sessionEligibleSelectedCount = selectedJobs.filter((job) => job.canLogoutAllSessions && job.canForceRelogin).length;
   const canCooldownSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && sessionEligibleSelectedCount > 0;
-  const canSwitchProxySelected = ["sub2api", "plan"].includes(accountProxyMode) && !proxySettingsDirty && canCooldownSelected
-    && selectedJobs.every((job) => job.canSwitchProxy)
-    && hasUsableSub2ApiSettings(sub2apiSettings);
+  const proxySwitchSelection = proxySwitchSelectionState(selectedJobs, {
+    mode: accountProxyMode,
+    proxySettingsDirty,
+    sub2apiReady: hasUsableSub2ApiSettings(sub2apiSettings),
+    selectedCount: selectedJobIds.size,
+  });
+  const canSwitchProxySelected = proxySwitchSelection.canSwitch;
   const canUploadSelected = selectedJobs.length > 0 && downloadableSelectedCount > 0;
   const canRotateAndUploadSelected = selectedJobs.length > 0
     && selectedJobs.length === selectedJobIds.size
@@ -1397,26 +1401,34 @@ function App() {
   async function runSelectedPoolAction(action) {
     if (!selectedJobIds.size || batchAction) return;
     if (action === "switch-proxy" && (!["sub2api", "plan"].includes(accountProxyMode) || proxySettingsDirty)) {
-      setProxySettingsError("请先切换到 Sub2API 代理模式");
+      setProxySettingsError(proxySwitchSelection.reason);
       return;
     }
+    const switching = action === "switch-proxy";
+    if (switching && !proxySwitchSelection.canSwitch) {
+      setError(proxySwitchSelection.reason);
+      return;
+    }
+    const actionIds = switching ? proxySwitchSelection.eligible.map((job) => job.id) : [...selectedJobIds];
+    const actionCount = switching ? actionIds.length : sessionEligibleSelectedCount;
+    const skippedCount = switching ? proxySwitchSelection.skippedCount : 0;
     const endpoint = action === "cooldown" ? "/api/jobs/cooldown-batch" : "/api/jobs/switch-proxy-batch";
     const label = action === "cooldown" ? "一键冷却" : "一键切换 IP";
     if (!window.confirm(action === "cooldown"
       ? `确定登出选中账号的所有设备，并在任务设置的冷却时长后重新登录、授权和同步号池凭据吗？共 ${sessionEligibleSelectedCount} 个账号。`
-      : `确定为选中账号重新分配 Sub2API 代理，然后登出所有设备、重新登录授权并同步号池凭据吗？共 ${sessionEligibleSelectedCount} 个账号。`)) return;
+      : `确定为 ${actionCount} 个可切换账号重新分配 Sub2API 代理，然后登出所有设备、重新登录授权并同步号池凭据吗？${skippedCount ? `其余 ${skippedCount} 个账号将跳过，原代理设置保持不变。` : ""}`)) return;
     setBatchAction(action);
     setError("");
-    setUploadNotice(`${label}正在处理 ${sessionEligibleSelectedCount} 个账号`);
+    setUploadNotice(`${label}正在处理 ${actionCount} 个账号`);
     try {
       const data = await apiFetch(token, endpoint, {
         method: "POST",
-        body: JSON.stringify({ ids: [...selectedJobIds] }),
+        body: JSON.stringify({ ids: actionIds }),
       });
       const failed = Array.isArray(data.failed) ? data.failed : [];
       setUploadNotice(action === "cooldown"
         ? `冷却已开始 ${data.started} 个账号，时长 ${data.cooldownMinutes} 分钟${failed.length ? `，失败 ${failed.length} 个` : ""}`
-        : `已启动切换 IP 并重新授权 ${data.started} 个账号${failed.length ? `，失败 ${failed.length} 个` : ""}`);
+        : `已启动切换 IP 并重新授权 ${data.started} 个账号${skippedCount + Number(data.skipped || 0) ? `，跳过 ${skippedCount + Number(data.skipped || 0)} 个` : ""}${failed.length ? `，失败 ${failed.length} 个` : ""}`);
       if (failed.length) setError(failed.slice(0, 5).map((item) => `${item.email}：${item.error}`).join("；"));
       setSelectedJobIds(new Set());
       void refreshSub2ApiAccountStatus(true).catch(() => {});
@@ -1833,6 +1845,7 @@ function App() {
                 清除选择
               </button>
               {!selectedJobIds.size && <span className="selection-hint">勾选账号后可使用批量操作</span>}
+              {features.accountSessions && selectedJobIds.size > 0 && <span className="selection-hint" role="status">切换 IP：{proxySwitchSelection.reason}</span>}
             </div>
             <div className="bulk-actions">
               {features.cancelAll && (
@@ -1895,7 +1908,7 @@ function App() {
               )}
               {features.accountSessions && (
                 <button type="button" className="secondary-button bulk-button" onClick={() => runSelectedPoolAction("switch-proxy")} disabled={!canSwitchProxySelected || Boolean(batchAction)}
-                  title="为账号重新分配 Sub2API IP，登出并重新授权后同步号池">
+                  title={canSwitchProxySelected ? `${proxySwitchSelection.reason}；重新分配不同出口 IP，登出并重新授权后同步号池` : proxySwitchSelection.reason}>
                   {batchAction === "switch-proxy" ? <LoaderCircle className="spin" size={16} /> : <Shuffle size={16} />}
                   一键切换 IP
                 </button>

@@ -1,5 +1,24 @@
 import assert from "node:assert/strict";
-import { logoutAccountSessions } from "../web/src/account-session-actions.mjs";
+import { logoutAccountSessions, proxySwitchSelectionState } from "../web/src/account-session-actions.mjs";
+
+const balancedReady = { id: "balanced", canSwitchProxy: true, canLogoutAllSessions: true, canForceRelogin: true };
+const directReady = { id: "direct", canSwitchProxy: false, canLogoutAllSessions: true, canForceRelogin: true };
+const running = { ...balancedReady, id: "running", canLogoutAllSessions: false, canForceRelogin: false };
+const switchOptions = { mode: "plan", proxySettingsDirty: false, sub2apiReady: true };
+const mixed = proxySwitchSelectionState([balancedReady, directReady, running], switchOptions);
+assert.equal(mixed.canSwitch, true, "mixed selection enables the action for eligible accounts only");
+assert.deepEqual(mixed.eligible.map((job) => job.id), ["balanced"]);
+assert.equal(mixed.skippedCount, 2);
+assert.match(mixed.reason, /1.*2/);
+assert.equal(proxySwitchSelectionState([directReady], switchOptions).canSwitch, false);
+assert.match(proxySwitchSelectionState([directReady], switchOptions).reason, /均衡分配/);
+assert.match(proxySwitchSelectionState([running], switchOptions).reason, /运行|授权/);
+assert.match(proxySwitchSelectionState([balancedReady], { ...switchOptions, mode: "global" }).reason, /任务设置/);
+assert.match(proxySwitchSelectionState([balancedReady], { ...switchOptions, proxySettingsDirty: true }).reason, /保存/);
+assert.match(proxySwitchSelectionState([balancedReady], { ...switchOptions, sub2apiReady: false }).reason, /Sub2API/);
+assert.equal(proxySwitchSelectionState([], switchOptions).canSwitch, false);
+assert.equal(proxySwitchSelectionState([balancedReady], { ...switchOptions, selectedCount: 2 }).canSwitch, false, "incomplete selection must finish synchronizing first");
+assert.equal(proxySwitchSelectionState([{ ...balancedReady, canSwitchProxy: undefined }], switchOptions).canSwitch, false, "missing eligibility must not grant a switch");
 
 const jobs = Array.from({ length: 8 }, (_, index) => ({ id: `selected-${index}`, email: `selected-${index}@example.test` }));
 const requests = [];

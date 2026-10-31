@@ -45,10 +45,22 @@ const remote = http.createServer(async (req, res) => {
   }
   return send(res, {});
 });
+const sessionUpstream = http.createServer(async (req, res) => {
+  for await (const chunk of req) void chunk;
+  res.setHeader("content-type", "application/json");
+  if (req.url === "/oauth/token") {
+    const claims = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url");
+    res.end(JSON.stringify({ access_token: `header.${claims}.signature`, refresh_token: "fixture-refresh" }));
+  } else {
+    res.statusCode = 503;
+    res.end(JSON.stringify({ error: { message: "fixture logout rejected" } }));
+  }
+});
 let child;
 let headers;
 let logs = "";
 let poolBase;
+let sessionBase;
 const profiles = [
   { id: "default", name: "Balanced", proxyId: "balanced" },
   { id: "free", name: "Direct", proxyId: "direct" },
@@ -78,6 +90,8 @@ process.disconnect(); process.stdin.destroy();
 `);
   await new Promise((resolve) => remote.listen(0, "127.0.0.1", resolve));
   poolBase = `http://127.0.0.1:${remote.address().port}`;
+  await new Promise((resolve) => sessionUpstream.listen(0, "127.0.0.1", resolve));
+  sessionBase = `http://127.0.0.1:${sessionUpstream.address().port}`;
   await start();
   assert.equal((await post("/api/task-settings", { accountProxyMode: "plan" })).status, 409);
   await settings();
@@ -136,7 +150,17 @@ process.disconnect(); process.stdin.destroy();
   assert.equal(free.boundProxyStatus, "direct");
   assert.deepEqual(free.boundProxies, [], "direct accounts never display a stale proxy name");
   const switchResult = await post("/api/jobs/switch-proxy-batch", { ids: [free.id] });
-  assert.equal(switchResult.body.started, 0);
+  assert.equal(switchResult.status, 409);
+  assert.match(switchResult.body.error, /均衡分配/);
+  const switchRequestsBefore = requests.length;
+  const mixedSwitch = await post("/api/jobs/switch-proxy-batch", { ids: [page.find((item) => item.email === "plus-b@example.test").id, free.id] });
+  assert.equal(mixedSwitch.status, 200);
+  assert.equal(mixedSwitch.body.skipped, 1, "mixed batch skips direct accounts before any logout or assignment");
+  assert.equal(mixedSwitch.body.failed.length, 1, "only the eligible account reaches the failing logout fixture");
+  assert.equal(mixedSwitch.body.failed[0].email, "plus-b@example.test");
+  assert.match(mixedSwitch.body.failed[0].error, /fixture logout rejected/);
+  assert.equal((await job(free.id)).assignedProxyId, null);
+  assert.equal(requests.slice(switchRequestsBefore).some((item) => JSON.stringify(item.body).includes(free.email)), false, "skipped direct account is never updated");
   const preservedId = page.find((item) => item.email === "plus-a@example.test").assignedProxyId;
   const preservedProxy = proxies.find((item) => item.id === preservedId);
   profiles[0].proxyId = "direct";
@@ -237,11 +261,13 @@ process.disconnect(); process.stdin.destroy();
   await stop();
   remote.closeAllConnections();
   await new Promise((resolve) => remote.close(resolve));
+  sessionUpstream.closeAllConnections();
+  await new Promise((resolve) => sessionUpstream.close(resolve));
   await fs.rm(temp, { recursive: true, force: true });
 }
 async function settings() { const response = await post("/api/sub2api/settings", { config: { baseUrl: poolBase, adminApiKey: "fixture-key", groupIds: [], proxyId: "balanced" }, profiles, activeProfileId: "default", planTypeBindings: { plus: "default", free: "free", pro: "pro", keep: "keep" } }); assert.equal(response.status, 200, JSON.stringify(response.body)); return response; }
 async function start() {
-  child = spawn(process.execPath, [path.join(root, "src/console-server.mjs"), "--host", "127.0.0.1", "--port", String(port)], { cwd: root, env: { ...process.env, ONBOARDING_OUTPUT_ROOT: output, ONBOARDING_PROTOCOL_SCRIPT: wrapper, LOCALAPPDATA: path.join(temp, "local"), TOSUB2_TLS_PROFILE: "chrome142", NODE_ENV: "test" }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  child = spawn(process.execPath, [path.join(root, "src/console-server.mjs"), "--host", "127.0.0.1", "--port", String(port)], { cwd: root, env: { ...process.env, ONBOARDING_OUTPUT_ROOT: output, ONBOARDING_PROTOCOL_SCRIPT: wrapper, LOCALAPPDATA: path.join(temp, "local"), TOSUB2_TLS_PROFILE: "chrome142", NODE_ENV: "test", TOSUB2_SESSION_NATIVE_HTTP: "1", CHATGPT_BASE: sessionBase, AUTH_BASE: sessionBase }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   child.stdout.on("data", (chunk) => { logs = `${logs}${chunk}`.slice(-12000); });
   child.stderr.on("data", (chunk) => { logs = `${logs}${chunk}`.slice(-12000); });
   await waitFor(async () => { const response = await fetch(`${base}/api/bootstrap`).catch(() => null); if (!response?.ok) return false; headers = { "content-type": "application/json", "x-console-token": (await response.json()).token }; return true; });

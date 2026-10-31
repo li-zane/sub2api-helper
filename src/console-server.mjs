@@ -689,10 +689,10 @@ async function handleApi(req, res, requestUrl) {
 
   if (req.method === "POST" && requestUrl.pathname === "/api/jobs/switch-proxy-batch") {
     const selected = resolveSelectedJobs((await readJson(req)).ids);
-    const eligible = selected.filter((job) => canLogoutAllSessions(job) && canForceRelogin(job));
-    if (!eligible.length) throw httpError(409, "选中的账号当前都不能切换代理");
     if (!["sub2api", "plan"].includes(accountProxyMode)) throw httpError(409, "请先切换并保存 Sub2API 代理模式");
     if (!sub2ApiSettingsConfig?.baseUrl || !sub2ApiSettingsConfig?.adminApiKey) throw httpError(409, "请先配置 Sub2API 后端和管理员 API Key");
+    const eligible = selected.filter((job) => jobUsesBalancedProxy(job) && canLogoutAllSessions(job) && canForceRelogin(job));
+    if (!eligible.length) throw httpError(409, "所选账号没有可切换项：PlanType 方案需选择均衡分配，且账号已有授权、当前未运行任务");
     const results = await Promise.allSettled(eligible.map((job) => withEmailJobLock(job.email, async () => {
       if (!canLogoutAllSessions(job)) throw httpError(409, "账号状态已变化，请刷新后重试");
       if (!jobUsesBalancedProxy(job)) throw httpError(409, "当前 PlanType 的方案未选择均衡分配");
@@ -719,7 +719,7 @@ async function handleApi(req, res, requestUrl) {
     sendJson(res, 200, {
       jobs: started.map(publicJob),
       started: started.length,
-      skipped: selected.length - started.length,
+      skipped: selected.length - eligible.length,
       failed: results.filter((result) => result.status === "rejected").map((result) => ({ email: eligible[results.indexOf(result)].email, error: String(result.reason?.message || result.reason).slice(0, 300) })),
     });
     return;

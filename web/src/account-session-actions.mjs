@@ -1,3 +1,20 @@
+// Keep UI eligibility and the submitted subset consistent without changing plans.
+export function proxySwitchSelectionState(jobs, { mode, proxySettingsDirty = false, sub2apiReady = false, selectedCount = jobs.length } = {}) {
+  const eligible = jobs.filter((job) => job.canSwitchProxy === true && job.canLogoutAllSessions === true && job.canForceRelogin === true);
+  const skippedCount = Math.max(0, selectedCount - eligible.length);
+  let reason = "";
+  if (!selectedCount) reason = "请先勾选账号";
+  else if (jobs.length !== selectedCount) reason = "正在同步所选账号，请稍候";
+  else if (!["sub2api", "plan"].includes(mode)) reason = "请在任务设置中选择并保存 Sub2API 代理模式或按 PlanType 授权模式";
+  else if (proxySettingsDirty) reason = "请先保存代理配置";
+  else if (!sub2apiReady) reason = "请先配置 Sub2API 后端和管理员 API Key";
+  else if (!eligible.length) reason = jobs.some((job) => job.canSwitchProxy === true)
+    ? "所选账号正在运行或缺少已保存的授权，暂不能切换 IP"
+    : "所选账号的 PlanType 方案未选择均衡分配；直连或固定代理账号不参与一键切换";
+  else reason = `可切换 ${eligible.length} 个账号${skippedCount ? `，将跳过 ${skippedCount} 个直连、固定代理或尚未就绪的账号` : ""}`;
+  return { canSwitch: selectedCount === jobs.length && eligible.length > 0 && ["sub2api", "plan"].includes(mode) && !proxySettingsDirty && sub2apiReady, eligible, skippedCount, reason };
+}
+
 // Keep bulk logout bounded; one account failing must not interrupt the others.
 export async function logoutAccountSessions(jobs, request, onProgress = () => {}) {
   const results = new Array(jobs.length);
