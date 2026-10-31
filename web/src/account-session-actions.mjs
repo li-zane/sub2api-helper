@@ -10,8 +10,8 @@ export function proxySwitchSelectionState(jobs, { mode, proxySettingsDirty = fal
   else if (!sub2apiReady) reason = "请先配置 Sub2API 后端和管理员 API Key";
   else if (!eligible.length) reason = jobs.some((job) => job.canSwitchProxy === true)
     ? "所选账号正在运行或缺少已保存的授权，暂不能切换 IP"
-    : "所选账号的 PlanType 方案未选择均衡分配；直连或固定代理账号不参与一键切换";
-  else reason = `可切换 ${eligible.length} 个账号${skippedCount ? `，将跳过 ${skippedCount} 个直连、固定代理或尚未就绪的账号` : ""}`;
+    : "所选账号的当前方案未指定切换目标，请选择直连、固定代理或均衡分配";
+  else reason = `可按当前方案切换 ${eligible.length} 个账号${skippedCount ? `，将跳过 ${skippedCount} 个未指定目标或尚未就绪的账号` : ""}`;
   return { canSwitch: selectedCount === jobs.length && eligible.length > 0 && ["sub2api", "plan"].includes(mode) && !proxySettingsDirty && sub2apiReady, eligible, skippedCount, reason };
 }
 

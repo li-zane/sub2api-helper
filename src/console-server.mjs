@@ -691,26 +691,21 @@ async function handleApi(req, res, requestUrl) {
     const selected = resolveSelectedJobs((await readJson(req)).ids);
     if (!["sub2api", "plan"].includes(accountProxyMode)) throw httpError(409, "请先切换并保存 Sub2API 代理模式");
     if (!sub2ApiSettingsConfig?.baseUrl || !sub2ApiSettingsConfig?.adminApiKey) throw httpError(409, "请先配置 Sub2API 后端和管理员 API Key");
-    const eligible = selected.filter((job) => jobUsesBalancedProxy(job) && canLogoutAllSessions(job) && canForceRelogin(job));
-    if (!eligible.length) throw httpError(409, "所选账号没有可切换项：PlanType 方案需选择均衡分配，且账号已有授权、当前未运行任务");
+    const eligible = selected.filter((job) => jobCanSwitchProxy(job) && canLogoutAllSessions(job) && canForceRelogin(job));
+    if (!eligible.length) throw httpError(409, "所选账号没有可切换项：当前方案需指定直连、固定代理或均衡分配，且账号已有授权、当前未运行任务");
     const results = await Promise.allSettled(eligible.map((job) => withEmailJobLock(job.email, async () => {
       if (!canLogoutAllSessions(job)) throw httpError(409, "账号状态已变化，请刷新后重试");
-      if (!jobUsesBalancedProxy(job)) throw httpError(409, "当前 PlanType 的方案未选择均衡分配");
-      const proxy = (await assignSub2ApiProxies([job], { reassign: true })).get(job.id);
-      if (!proxy) throw httpError(409, `${job.email} 没有可用的切换代理`);
+      const proxy = await resolveManualProxySwitch(job);
       // Use the replacement for logout too, including after a restart without cached proxy credentials.
       try {
-        await revokeAllAccountSessions({ ...job, proxyUrl: proxy.url, fixedProxy: true });
+        await revokeAllAccountSessions({ ...job, proxyUrl: proxy?.url || null, fixedProxy: true });
       } catch (error) {
         accountProxyReservations.delete(job.email.toLowerCase());
         throw error;
       }
-      job.fixedProxy = true;
-      job.assignedProxyId = proxy.id;
-      job.boundIp = proxy.ipAddress;
-      job.boundProxyName = proxy.name;
-      job.proxyUrl = proxy.url;
-      await saveStoredLoginCredentials(job.email, job);
+      job.proxyFallbackActive = false;
+      await saveJobProxyBinding(job, proxy);
+      appendJobLog(job, `[proxy-switch] 已手动应用当前方案：${proxy ? `代理 #${proxy.id}` : "直连（清除原代理绑定）"}；方案配置保持不变。\n`);
       await forceReloginJob(job, { proxyUrl: job.proxyUrl }, { poolRefreshAction: "switch-proxy" });
       await saveJobMetadata(job);
       return job;
@@ -1943,15 +1938,17 @@ async function forceReloginJob(job, options = {}, context = {}) {
 }
 
 async function reloadMissingJobCredentials(job) {
+  const boundDirect = accountProxyMode === "plan" && hasPlanProxyBinding(job) && !normalizeStoredProxyId(job.assignedProxyId);
+  if (boundDirect) job.proxyUrl = null;
   if (
     (job.password || !job.hasPasswordCredential)
     && (job.totpSecret || !job.hasTotpCredential)
-    && job.proxyUrl
+    && (job.proxyUrl || boundDirect)
   ) return;
   const stored = await loadStoredLoginCredentials(job.email);
   job.password ||= stored.password;
   job.totpSecret ||= stored.totpSecret;
-  job.proxyUrl ||= stored.proxyUrl || globalProxyUrl;
+  if (!boundDirect) job.proxyUrl ||= stored.proxyUrl || globalProxyUrl;
   if (job.password) job.hasPasswordCredential = true;
   if (job.totpSecret) job.hasTotpCredential = true;
   if (stored.password || stored.totpSecret || stored.proxyUrl) {
@@ -5796,8 +5793,34 @@ function jobSub2ApiProxyConfig(job, planType = getJobPlanType(job)) {
   return resolveSub2ApiConfigForAccount(sub2ApiSettingsConfig, { credentials: { email: job.email, plan_type: planType } });
 }
 
-function jobUsesBalancedProxy(job) {
-  return accountProxyMode === "sub2api" || (accountProxyMode === "plan" && jobSub2ApiProxyConfig(job)?.proxyId === SUB2API_PROXY_BALANCED);
+function jobProxySwitchMode(job) {
+  if (accountProxyMode === "sub2api") return SUB2API_PROXY_BALANCED;
+  if (accountProxyMode !== "plan") return null;
+  const proxyId = jobSub2ApiProxyConfig(job)?.proxyId;
+  if ([SUB2API_PROXY_BALANCED, SUB2API_PROXY_DIRECT].includes(proxyId)) return proxyId;
+  return normalizeStoredProxyId(proxyId) ? "fixed" : null;
+}
+
+function jobCanSwitchProxy(job) {
+  return Boolean(jobProxySwitchMode(job));
+}
+
+// Manual switching reapplies the current plan; automatic allocation stays sticky.
+async function resolveManualProxySwitch(job) {
+  const mode = jobProxySwitchMode(job);
+  if (mode === SUB2API_PROXY_DIRECT) return null;
+  if (mode === SUB2API_PROXY_BALANCED) {
+    const proxy = (await assignSub2ApiProxies([job], { reassign: true })).get(job.id);
+    if (!proxy) throw httpError(409, "没有可用的切换代理");
+    return proxy;
+  }
+  if (mode === "fixed") {
+    const proxyId = normalizeStoredProxyId(jobSub2ApiProxyConfig(job)?.proxyId);
+    const proxy = (await listSub2ApiProxies()).find((item) => item.id === proxyId);
+    if (!proxy?.url || isSub2ApiProxyExpired(proxy)) throw httpError(409, "当前方案指定的代理已失效，原绑定保持不变");
+    return proxy;
+  }
+  throw httpError(409, "当前方案未指定切换目标，请选择直连、固定代理或均衡分配");
 }
 
 function hasPlanProxyBinding(job) {
@@ -6328,7 +6351,7 @@ function publicJob(job) {
     boundProxies: publicBoundProxies(sub2ApiStatus.inPool === true ? sub2ApiStatus.proxyIds || [] : [job.assignedProxyId].filter(Boolean), job),
     boundProxyStatus: sub2ApiStatus.inPool === true ? (sub2ApiStatus.proxyIds?.length ? "bound" : "direct")
       : job.assignedProxyId ? "bound" : job.authorizationProxySelected ? "direct" : "unbound",
-    canSwitchProxy: jobUsesBalancedProxy(job),
+    canSwitchProxy: jobCanSwitchProxy(job),
     poolRefreshReady: Boolean(job.poolRefreshReady),
     poolRefreshAction: normalizePoolRefreshAction(job.poolRefreshAction),
     poolRefreshDueAt: job.poolRefreshDueAt || null,
@@ -6567,7 +6590,7 @@ function publicSelectionJob(job) {
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLogoutAllSessions: canLogoutAllSessions(job),
-    canSwitchProxy: jobUsesBalancedProxy(job),
+    canSwitchProxy: jobCanSwitchProxy(job),
     canSetupTotp: canSetupTotp(job),
     canReplaceTotp: canReplaceTotp(job),
     canAddPassword: canAddPassword(job),

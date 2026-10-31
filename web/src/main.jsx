@@ -1416,7 +1416,7 @@ function App() {
     const label = action === "cooldown" ? "一键冷却" : "一键切换 IP";
     if (!window.confirm(action === "cooldown"
       ? `确定登出选中账号的所有设备，并在任务设置的冷却时长后重新登录、授权和同步号池凭据吗？共 ${sessionEligibleSelectedCount} 个账号。`
-      : `确定为 ${actionCount} 个可切换账号重新分配 Sub2API 代理，然后登出所有设备、重新登录授权并同步号池凭据吗？${skippedCount ? `其余 ${skippedCount} 个账号将跳过，原代理设置保持不变。` : ""}`)) return;
+      : `确定为 ${actionCount} 个账号手动应用当前方案吗？直连方案会清除原代理绑定，固定代理使用指定节点，均衡分配更换出口；然后登出所有设备、重新登录授权并同步号池。方案配置本身不会修改。${skippedCount ? `其余 ${skippedCount} 个账号将跳过。` : ""}`)) return;
     setBatchAction(action);
     setError("");
     setUploadNotice(`${label}正在处理 ${actionCount} 个账号`);
@@ -1908,7 +1908,7 @@ function App() {
               )}
               {features.accountSessions && (
                 <button type="button" className="secondary-button bulk-button" onClick={() => runSelectedPoolAction("switch-proxy")} disabled={!canSwitchProxySelected || Boolean(batchAction)}
-                  title={canSwitchProxySelected ? `${proxySwitchSelection.reason}；重新分配不同出口 IP，登出并重新授权后同步号池` : proxySwitchSelection.reason}>
+                  title={canSwitchProxySelected ? `${proxySwitchSelection.reason}；按当前方案应用直连、指定代理或均衡出口，登出并重新授权后同步号池` : proxySwitchSelection.reason}>
                   {batchAction === "switch-proxy" ? <LoaderCircle className="spin" size={16} /> : <Shuffle size={16} />}
                   一键切换 IP
                 </button>
