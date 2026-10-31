@@ -101,9 +101,10 @@ async function populated() {
 try {
   for (let index = 0; index < ids.length; index++) {
     const dir = path.join(output, ids[index]);
+    const planType = index === 0 ? "plus" : "free";
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ email: emails[index], status: "completed", plan_type: "plus", pool_only: true, created_at: new Date().toISOString() }));
-    await fs.writeFile(path.join(dir, "sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ name: emails[index], platform: "openai", type: "oauth", credentials: { email: emails[index], plan_type: "plus" }, extra: { email: emails[index], plan_type: "plus" } }] }));
+    await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ email: emails[index], status: "completed", plan_type: planType, last_operation_type: "pool_import", pool_only: true, created_at: new Date().toISOString() }));
+    await fs.writeFile(path.join(dir, "sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ name: emails[index], platform: "openai", type: "oauth", credentials: { email: emails[index], plan_type: planType }, extra: { email: emails[index], plan_type: planType } }] }));
   }
   await start();
   assert.equal((await job()).overloadDetection.configured, false);
@@ -139,23 +140,53 @@ try {
   assert.equal((await job()).overloadDetection.enabled, true);
   await toggle(false);
   const settingsResponse = await fetch(`${base}/api/task-settings`, { method: "POST", headers, body: JSON.stringify({
-    autoActions: { plus: ["enable-overload-detection"] },
+    autoActions: { plus: ["enable-overload-cooldown", "enable-overload-detection"], free: ["enable-overload-detection"] },
   }) });
   assert.equal(settingsResponse.status, 200);
   const imported = await fetch(`${base}/api/jobs/batch`, { method: "POST", headers, body: JSON.stringify({ text: emails[0] }) });
   assert.equal(imported.status, 201, await imported.clone().text());
   for (let i = 0; i < 100; i++) {
     const entry = await job();
-    if (entry.overloadDetection.enabled && entry.autoTaskStatus === "completed") break;
+    if (entry.overloadDetection.enabled && entry.overloadAutoCooldown.enabled && entry.autoTaskStatus === "completed") break;
     if (i === 99) throw new Error(`automatic detection did not complete: ${JSON.stringify({ status: entry.autoTaskStatus, error: entry.autoTaskError, plan: entry.planType })}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.equal((await job(ids[1])).overloadDetection.enabled, false, "auto action affects only imported account");
+  assert.equal((await job(ids[1])).overloadAutoCooldown.enabled, false, "cooldown preset affects only imported account");
+  assert.deepEqual((await job()).autoTaskActions, ["enable-overload-detection", "enable-overload-cooldown"]);
+  const cooldownDisk = JSON.parse(await fs.readFile(path.join(output, "overload-cooldown.json"), "utf8"));
+  assert.equal(cooldownDisk.accounts[emails[0]].enabled, true, "preset writes the per-account cooldown switch");
   await populated();
-  console.log("PASS: overload HTTP auth, validation, six-hour overload+request counts, success+failure pagination, switch/history persistence, enabled restart/backfill, imported PlanType auto-enables detection and isolates other accounts");
+  await stop(); await start();
+  assert.equal((await job()).overloadAutoCooldown.enabled, true, "preset-enabled cooldown persists after restart");
+  assert.equal((await job()).autoTaskStatus, "completed");
+  // A cooldown-only preset operates independently from the chart switch.
+  await toggle(false);
+  const cooldownOnly = await fetch(`${base}/api/task-settings`, { method: "POST", headers, body: JSON.stringify({ autoActions: { plus: ["enable-overload-cooldown"], free: ["enable-overload-detection"] } }) });
+  assert.equal(cooldownOnly.status, 200);
+  const reimport = await fetch(`${base}/api/jobs/batch`, { method: "POST", headers, body: JSON.stringify({ text: emails[0] }) });
+  assert.equal(reimport.status, 201);
+  for (let i = 0; i < 100; i++) {
+    const entry = await job();
+    if (entry.autoTaskStatus === "completed" && entry.autoTaskActions?.length === 1) break;
+    if (i === 99) throw new Error("cooldown-only preset did not complete");
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal((await job()).overloadDetection.enabled, false, "cooldown preset does not force chart detection on");
+  assert.equal((await job()).overloadAutoCooldown.enabled, true);
+  const freeImport = await fetch(`${base}/api/jobs/batch`, { method: "POST", headers, body: JSON.stringify({ text: emails[1] }) });
+  assert.equal(freeImport.status, 201);
+  for (let i = 0; i < 100; i++) {
+    const entry = await job(ids[1]);
+    if (entry.autoTaskStatus === "completed" && entry.overloadDetection.enabled) break;
+    if (i === 99) throw new Error("free PlanType preset did not complete");
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal((await job(ids[1])).overloadAutoCooldown.enabled, false);
+  console.log("PASS: overload HTTP counts/history; PlanType presets auto-enable cooldown and detection independently; imported-account isolation, durable per-account switch and restart recovery");
   if (process.argv.includes("--serve")) {
     const metadata = { url: base, output, emails, ids };
-    await fs.writeFile(path.join(root, "tmp/overload-detection-20261031/browser-fixture.json"), JSON.stringify(metadata, null, 2));
+    await fs.writeFile(process.env.OVERLOAD_PRESET_FIXTURE_FILE || path.join(root, "tmp/overload-detection-20261031/browser-fixture.json"), JSON.stringify(metadata, null, 2));
     console.log(`UI_FIXTURE=${base}`);
     await new Promise((resolve) => { process.once("SIGINT", resolve); process.once("SIGTERM", resolve); });
   }

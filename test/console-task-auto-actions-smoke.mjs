@@ -22,6 +22,7 @@ try {
     "upload",
     "rotate-logout-reauthorize-upload",
     "enable-overload-detection",
+    "enable-overload-cooldown",
   ]);
 
   const saved = await request("/api/task-settings", {
@@ -43,14 +44,14 @@ try {
       maxActiveJobs: 6,
       autoActions: {
         self_serve_business_prolite: ["upload", "rotate-logout-reauthorize-upload"],
-        SELF_SERVE_PRO: ["enable-overload-detection", "upload"],
+        SELF_SERVE_PRO: ["enable-overload-cooldown", "enable-overload-detection", "upload"],
       },
     },
   });
   assert.equal(valid.status, 200);
   assert.deepEqual(valid.body.settings.autoActions, {
     self_serve_business_prolite: ["upload", "rotate-logout-reauthorize-upload"],
-    SELF_SERVE_PRO: ["upload", "enable-overload-detection"],
+    SELF_SERVE_PRO: ["upload", "enable-overload-detection", "enable-overload-cooldown"],
   });
   assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, "utf8")), {
     version: 2,
@@ -63,14 +64,14 @@ try {
     overloadAutoCooldown: { windowMinutes: 15, threshold: 10, cooldownMinutes: 60 },
     autoActions: {
       self_serve_business_prolite: ["upload", "rotate-logout-reauthorize-upload"],
-      SELF_SERVE_PRO: ["upload", "enable-overload-detection"],
+      SELF_SERVE_PRO: ["upload", "enable-overload-detection", "enable-overload-cooldown"],
     },
   });
   await stop();
   await start();
   assert.deepEqual((await get("/api/task-settings")).settings.autoActions, {
     self_serve_business_prolite: ["upload", "rotate-logout-reauthorize-upload"],
-    SELF_SERVE_PRO: ["upload", "enable-overload-detection"],
+    SELF_SERVE_PRO: ["upload", "enable-overload-detection", "enable-overload-cooldown"],
   });
   console.log("console task auto-actions smoke passed: validation, file persistence, restart recovery");
 } finally {

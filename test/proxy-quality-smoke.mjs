@@ -98,15 +98,27 @@ try {
   assert.equal(result.body.result.exits[0].ip, ipA);
   assert.equal(result.body.result.exits[0].riskScore, 0);
   assert.equal(result.body.result.exits[0].provider, "Fixture ISP");
-  assert(proxyRequests.every(item => item.auth === "fixture-user-sid-original:fixture-password"), "exact saved proxy session is used without rotation");
+  assert.equal(result.body.result.sessionRotation, "rotated");
+  const firstAuth = proxyRequests[0].auth;
+  assert.notEqual(firstAuth, "fixture-user-sid-original:fixture-password", "global diagnostics rotate the saved session");
+  assert.match(firstAuth, /^fixture-user-sid-[A-Za-z0-9]{8}:fixture-password$/);
+  assert(proxyRequests.every(item => item.auth === firstAuth), "both exit samples share the same fresh session");
   assert(proxyRequests.every(item => item.host === "exit.fixture.invalid"), "exit request traverses the selected proxy");
   assert.equal(proxyRequests.length, 2);
   assert.equal(reputationRequests.length, 1);
   assert(reputationRequests.every(item => !item.auth && !item.proxyAuth));
   assert(!JSON.stringify(result.body).includes("fixture-password"));
+  assert(!JSON.stringify(result.body).includes(firstAuth.split(":")[0]), "rotation metadata does not expose usernames");
+  const repeated = await post("/api/proxy-quality/check", { target: "global" });
+  assert.equal(repeated.body.result.sessionRotation, "rotated");
+  assert.notEqual(proxyRequests[2].auth, firstAuth, "each later global check uses another fresh session");
+  assert.equal(proxyRequests[2].auth, proxyRequests[3].auth);
+  assert.equal(reputationRequests.length, 1, "fresh exit requests still share IP reputation cache");
   mode = "changed";
   sampleNumber = 0;
   const changed = await post("/api/proxy-quality/check", { target: "sub2api", proxyId: 1 });
+  assert.equal(changed.body.result.sessionRotation, "fixed");
+  assert(proxyRequests.slice(-2).every(item => item.auth === "fixture-user-sid-original:fixture-password"), "Sub2API nodes keep their exact configured session");
   assert.equal(changed.body.target.name, "住宅出口 A");
   assert.equal(changed.body.result.stable, false);
   assert.deepEqual(changed.body.result.exits.map(exit => exit.ip), [ipA, ipB]);
@@ -129,7 +141,7 @@ try {
   const count = proxyRequests.length;
   const first = post("/api/proxy-quality/check", { target: "global" });
   await waitFor(() => proxyRequests.length > count);
-  const duplicate = post("/api/proxy-quality/check", { target: "sub2api", proxyId: 1 });
+  const duplicate = post("/api/proxy-quality/check", { target: "global" });
   const second = post("/api/proxy-quality/check", { target: "sub2api", proxyId: 2 });
   await waitFor(() => proxyRequests.some((entry, i) => i >= count && entry.auth === "fixture-user-2:fixture-password"));
   const excess = await post("/api/proxy-quality/check", { target: "sub2api", proxyId: 3 });
@@ -139,7 +151,31 @@ try {
   const concurrent = await Promise.all([first, duplicate, second]);
   assert(concurrent.every(item => item.status === 200));
   assert.equal(proxyRequests.length - count, 4, "duplicate checks share a transport; only two unique proxies run");
+  mode = "held";
+  const isolatedCount = proxyRequests.length;
+  const rotating = post("/api/proxy-quality/check", { target: "global" });
+  await waitFor(() => proxyRequests.length > isolatedCount);
+  const fixed = post("/api/proxy-quality/check", { target: "sub2api", proxyId: 1, rotateSession: true });
+  await waitFor(() => proxyRequests.length === isolatedCount + 2);
   mode = "stable";
+  for (const send of heldResponses.splice(0)) send();
+  const isolated = await Promise.all([rotating, fixed]);
+  assert.deepEqual(isolated.map(item => item.body.result.sessionRotation), ["rotated", "fixed"], "global and fixed checks never share rotated results; client override ignored");
+  assert.equal(proxyRequests.length - isolatedCount, 4);
+  assert.equal(proxyRequests.slice(isolatedCount).filter(item => item.auth === "fixture-user-sid-original:fixture-password").length, 2);
+  mode = "stable";
+  const rotationService = new ProxyQualityService({ exitUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
+  try {
+    const kookeeyUrl = `http://fixture-user:fixture-US-12345678-30m@127.0.0.1:${proxy.address().port}/`;
+    const passwordRotation = await rotationService.check(kookeeyUrl, { rotateSession: true });
+    assert.equal(passwordRotation.sessionRotation, "rotated");
+    assert.match(proxyRequests.at(-1).auth, /^fixture-user:fixture-US-\d{8}-30m$/);
+    assert.notEqual(proxyRequests.at(-1).auth, "fixture-user:fixture-US-12345678-30m");
+    assert.equal(proxyRequests.at(-1).auth, proxyRequests.at(-2).auth);
+    const unsupported = await rotationService.check(`http://plain:fixture@127.0.0.1:${proxy.address().port}/`, { rotateSession: true });
+    assert.equal(unsupported.sessionRotation, "unsupported");
+    assert.equal(proxyRequests.at(-1).auth, "plain:fixture");
+  } finally { await rotationService.close(); }
   for (const state of ["missing", "unavailable", "malformed"]) {
     reputationMode = state;
     const service = new ProxyQualityService({ exitUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
@@ -162,7 +198,7 @@ try {
   mode = "stable";
   assert.deepEqual(await (await fetch(`${base}/api/account-proxy-settings`, { headers })).json(), before, "diagnostics preserve proxy/fallback settings");
   assert.deepEqual((await (await fetch(`${base}/api/jobs`, { headers })).json()).jobs, initialJobs, "diagnostics do not change jobs or bindings");
-  console.log("PASS: exact proxy route and credentials, two exit samples, latency, changed exits, provider risk, missing/quota data stays unknown, partial/failure/timeout, no direct fallback, credential redaction, concurrency/deduplication and shutdown; settings/bindings unchanged");
+  console.log("PASS: fresh global session per check, two samples share session, fixed node isolation, username/password rotation, unsupported format reporting; latency/reputation/errors/concurrency/shutdown; saved proxy and bindings unchanged");
   if (process.argv.includes("--serve")) {
     await post("/api/task-settings", { accountProxyMode: "plan" });
     const fixture = { url: base, output, temp, proxyUrl, proxyPort: proxy.address().port };

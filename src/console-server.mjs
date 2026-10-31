@@ -41,11 +41,12 @@ const MAX_BATCH_JOBS = 500;
 const TASK_AUTO_PIPELINE_TIMEOUT_MS = 15 * 60_000;
 const TASK_AUTO_POLL_INTERVAL_MS = 900;
 const MAX_ACCOUNT_PROXY_COOLDOWN_MINUTES = 43_200;
-const TASK_AUTO_ACTIONS = new Set(["upload", "rotate-logout-reauthorize-upload", "enable-overload-detection"]);
+const TASK_AUTO_ACTIONS = new Set(["upload", "rotate-logout-reauthorize-upload", "enable-overload-detection", "enable-overload-cooldown"]);
 const TASK_AUTO_ACTION_LABELS = {
   upload: "上传到 Sub2API",
   "rotate-logout-reauthorize-upload": "一键轮换并上传",
   "enable-overload-detection": "自动开启过载检测",
+  "enable-overload-cooldown": "自动开启过载冷却",
 };
 const MAX_PROXY_RISK_RETRIES = 10;
 const MAX_PROXY_CONNECTION_FAILURES = 20;
@@ -439,7 +440,7 @@ async function handleApi(req, res, requestUrl) {
     const stop = () => { if (!res.writableEnded) controller.abort(); };
     res.once("close", stop);
     try {
-      const result = await proxyQualityService.check(proxyUrl, { signal: controller.signal });
+      const result = await proxyQualityService.check(proxyUrl, { signal: controller.signal, rotateSession: body.target === "global" });
       if (!res.destroyed) sendJson(res, 200, { target, result });
     } finally { res.off("close", stop); }
     return;
@@ -3844,8 +3845,8 @@ function normalizeTaskAutoActions(value) {
       throw httpError(400, `PlanType ${planType} 的自动任务包含不支持的命令`);
     }
     if (actions.length) normalized[planType] = [
-      ...actions.filter((action) => action !== "enable-overload-detection"),
-      ...actions.filter((action) => action === "enable-overload-detection"),
+      ...actions.filter((action) => !["enable-overload-detection", "enable-overload-cooldown"].includes(action)),
+      ...["enable-overload-detection", "enable-overload-cooldown"].filter((action) => actions.includes(action)),
     ];
   }
   return normalized;
@@ -8114,6 +8115,8 @@ async function runConfiguredTaskActions(job) {
       } else if (action === "enable-overload-detection") {
         await withEmailJobLock(job.email, () => overloadMonitor.setEnabled(job.email, true));
         overloadMonitor.trigger();
+      } else if (action === "enable-overload-cooldown") {
+        await withEmailJobLock(job.email, () => overloadCooldown.setEnabled(job.email, true));
       }
       job.autoTaskIndex = index + 1;
       touch(job);

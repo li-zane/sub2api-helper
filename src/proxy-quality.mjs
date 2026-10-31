@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { performance } from "node:perf_hooks";
-import { TlsFingerprintTransport } from "./tls-transport.mjs";
+import { TlsFingerprintTransport, proxySupportsSessionRotation, rotateProxySession } from "./tls-transport.mjs";
 
 const DEFAULT_EXIT_URL = "https://api.ipify.org?format=json";
 const DEFAULT_REPUTATION_URL = "https://proxycheck.io/v2/";
@@ -20,9 +20,9 @@ export class ProxyQualityService {
     this.closed = false;
   }
 
-  async check(proxyUrl, { signal } = {}) {
+  async check(proxyUrl, { signal, rotateSession = false } = {}) {
     if (this.closed) throw Object.assign(new Error("服务正在关闭"), { status: 503 });
-    const key = createHash("sha256").update(proxyUrl).digest("hex");
+    const key = createHash("sha256").update(`${rotateSession ? "rotate" : "fixed"}\0${proxyUrl}`).digest("hex");
     const existing = this.running.get(key);
     if (existing) return existing.promise;
     if (this.running.size >= 2) throw Object.assign(new Error("已有两个代理正在检测，请稍后再试"), { status: 429 });
@@ -30,7 +30,7 @@ export class ProxyQualityService {
     const stop = () => controller.abort();
     signal?.addEventListener("abort", stop, { once: true });
     if (signal?.aborted) stop();
-    const promise = this.run(proxyUrl, controller.signal).finally(() => {
+    const promise = this.run(proxyUrl, controller.signal, rotateSession).finally(() => {
       signal?.removeEventListener("abort", stop);
       this.running.delete(key);
     });
@@ -38,7 +38,7 @@ export class ProxyQualityService {
     return promise;
   }
 
-  async run(proxyUrl, externalSignal) {
+  async run(proxyUrl, externalSignal, rotateSession) {
     const transport = new TlsFingerprintTransport({ profile: this.profile, rotateProxySessions: false, sameProxyRiskRetries: 0, cloudflareSolver: false });
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), this.timeoutMs * 4 + 2_000);
@@ -46,9 +46,12 @@ export class ProxyQualityService {
     const stop = () => { void transport.close(); };
     signal.addEventListener("abort", stop, { once: true });
     const samples = [];
+    const sessionRotation = rotateSession ? (proxySupportsSessionRotation(proxyUrl) ? "rotated" : "unsupported") : "fixed";
+    const checkProxyUrl = sessionRotation === "rotated" ? rotateProxySession(proxyUrl) : proxyUrl;
     try {
       signal.throwIfAborted();
-      await transport.configure(proxyUrl, { force: true });
+      // Rotate once per diagnostic run; both samples measure the same new session.
+      await transport.configure(checkProxyUrl, { force: true });
       for (let i = 0; i < 2; i++) {
         signal.throwIfAborted();
         const start = performance.now();
@@ -76,6 +79,7 @@ export class ProxyQualityService {
       const latencies = successful.map(sample => sample.latencyMs);
       return {
         checkedAt: new Date().toISOString(),
+        sessionRotation,
         status: successful.length === 2 ? "ok" : successful.length ? "partial" : "failed",
         samples,
         successCount: successful.length,

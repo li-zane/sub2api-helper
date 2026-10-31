@@ -11,7 +11,7 @@ export function ProxyQualityPanel({ token, mode, proxies, globalProxyUrl, dirty 
     <div className="proxy-quality-body">
       <p className="proxy-quality-help">抽样两次检测实际出口与连接耗时，查询该 IP 的信誉风险。</p>
       {mode !== "sub2api" && <ProxyQualityCheck key={`global:${globalProxyUrl}`} token={token} name="全局代理" target={{ target: "global" }} disabled={!globalProxyUrl || dirty}
-        hint={dirty ? "保存代理配置后检测" : !globalProxyUrl ? "先保存代理地址" : "检测已保存的代理"} />}
+        hint={dirty ? "保存代理配置后检测" : !globalProxyUrl ? "先保存代理地址" : "每次检测使用新代理会话，两次抽样共用该会话"} />}
       {["sub2api", "plan"].includes(mode) && proxies.map(proxy => <ProxyQualityCheck key={`${proxy.id}:${proxy.host}:${proxy.port}`} token={token} name={proxy.name} target={{ target: "sub2api", proxyId: proxy.id }} />)}
       {mode === "sub2api" && !proxies.length && <p className="proxy-quality-help">读取代理后，可逐个检测节点。</p>}
     </div>
@@ -55,6 +55,7 @@ function ProxyQualityCheck({ token, name, target, disabled = false, hint }) {
     {busy && <span className="proxy-quality-help" role="status">正在检测出口与 IP 信誉…</span>}
     {error && <p className="proxy-quality-error" role="alert">{error}</p>}
     {result && <div className={`proxy-quality-result${busy ? " stale" : ""}`}>
+      <p className="proxy-quality-help">{result.sessionRotation === "rotated" ? "本次已轮换代理会话" : result.sessionRotation === "unsupported" ? "当前代理未识别到可轮换会话参数，按原地址检测" : "本次保持节点固定会话"}</p>
       <div className="proxy-quality-metrics">
         <span><small>连接耗时</small><strong>{result.latencyMs === null ? "—" : `${result.latencyMs} ms`}</strong></span>
         <span><small>出口抽样</small><strong>{result.successCount}/{result.sampleCount} 成功</strong></span>
