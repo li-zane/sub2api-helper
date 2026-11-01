@@ -15,7 +15,7 @@ function Dialog({ title, onClose, children }) {
     <div className="dialog-header"><h2>{title}</h2><button type="button" className="icon-button" aria-label={`关闭${title}`} onClick={onClose}><X size={18} /></button></div>{children}
   </dialog>;
 }
-export function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
+function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
   const [text, setText] = useState(() => toText(value.models));
   return <section className="fingerprint-defaults" aria-label="默认降智检测规则">
     <label className="settings-field"><span>默认检测模型（每行一个，最多 8 个）</span><textarea aria-label="默认检测模型" rows={3} value={text} disabled={disabled} placeholder={"模型 ID\n模型别名 => 预期指纹名称"} onChange={event => { setText(event.target.value); onChange({ ...value, models: fromText(event.target.value) }); }} /></label>
@@ -23,7 +23,8 @@ export function FingerprintDefaultsFields({ value, onChange, disabled = false })
       <label className="settings-field"><span>默认检测间隔（分钟）</span><input aria-label="默认检测间隔（分钟）" type="number" min="5" max="43200" value={value.intervalMinutes ?? 360} disabled={disabled} onChange={event => onChange({ ...value, intervalMinutes: event.target.value })} /></label>
       <label className="settings-field"><span>最低归因概率</span><input aria-label="最低归因概率" type="number" min="0.5" max="1" step="0.05" value={value.minProbability ?? 0.8} disabled={disabled} onChange={event => onChange({ ...value, minProbability: event.target.value })} /></label>
     </div>
-    <p className="task-settings-help">每个模型每轮发送 3 条数字指纹提示词，会使用账号额度。名称可写为“请求模型 =&gt; 参考库指纹名称”。仅完整、可校准的高概率结果参与匹配；归因是参考库内的统计排序，不等同于模型身份或智力证明。</p>
+    <label className="settings-field"><span>同时检测账号数量（1–16）</span><input aria-label="同时检测账号数量" type="number" min="1" max="16" value={value.maxConcurrentAccounts ?? 3} disabled={disabled} onChange={event => onChange({ ...value, maxConcurrentAccounts: event.target.value })} /></label>
+    <p className="task-settings-help">每个模型每轮发送 3 条数字指纹提示词，会使用账号额度、网络和本机评分资源。不同账号按并发上限执行，同一账号的请求依次进行；提高并发会增加瞬时资源占用。名称可写为“请求模型 =&gt; 参考库指纹名称”。参考库中的合并类（如 gpt-6-astra/6.1-sol）匹配表示属于该类，不区分其单个模型。归因是参考库内的统计排序，不等同于模型身份或智力证明。</p>
   </section>;
 }
 export function FingerprintSettingsButton({ token, planTypes = [] }) {
@@ -42,7 +43,8 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
     {!data && error && <span role="alert" className="proxy-quality-error">{error}</span>}
     {data && <Dialog title="降智检测设置" onClose={() => setData(null)}><form onSubmit={save} className="fingerprint-form">
       <FingerprintDefaultsFields value={data.settings} onChange={settings => setData(current => ({ ...current, settings }))} disabled={busy} />
-      <div><button type="button" className="secondary-button" disabled={busy} onClick={async () => { setBusy(true); try { setReference(await api(token, "/api/model-fingerprint/reference")); } catch (e) { setError(e.message); } finally { setBusy(false); } }}>读取指纹参考库模型</button>{reference && <p className="task-settings-help">参考库 {reference.builtAt}：{reference.models.map(m => m.id).join("、")}</p>}</div>
+      {data.runtime && <p className="task-settings-help">正在检测 {data.runtime.activeAccounts} 个账号 · 等待 {data.runtime.queuedAccounts} 个账号。仅调整并发不会中断当前检测。</p>}
+      <div><button type="button" className="secondary-button" disabled={busy} onClick={async () => { setBusy(true); try { setReference(await api(token, "/api/model-fingerprint/reference")); } catch (e) { setError(e.message); } finally { setBusy(false); } }}>读取指纹参考库模型</button>{reference && <p className="task-settings-help">参考库 {reference.builtAt}：{reference.models.map(m => m.name || m.id).join("、")}</p>}</div>
       <section className="fingerprint-section"><h3>PlanType 默认开关</h3><p className="task-settings-help">未配置的 PlanType 默认关闭；账号独立设置优先。新账号识别订阅类型后自动继承。</p>
         <div className="fingerprint-plan-list">{plans.map(plan => <label key={plan}><input type="checkbox" checked={data.settings.planDefaults[plan] === true} onChange={e => patch({ planDefaults: { ...data.settings.planDefaults, [plan]: e.target.checked } })} /><span>{plan}</span></label>)}</div>
         <div className="fingerprint-add-plan"><input aria-label="添加检测 PlanType" value={newPlan} onChange={e => setNewPlan(e.target.value)} placeholder="自定义原始 PlanType" /><button type="button" className="secondary-button" disabled={!newPlan.trim()} onClick={() => { patch({ planDefaults: { ...data.settings.planDefaults, [newPlan.trim().toLowerCase()]: false } }); setNewPlan(""); }}>添加类型</button></div>
@@ -57,8 +59,42 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
     </form></Dialog>}
   </>;
 }
+function AttributionModels({ models }) {
+  return <div className="fingerprint-result-models">{models.map((r, index) => <div key={index} className="fingerprint-result-model">
+    <div><strong>{r.model}</strong><span className={`fingerprint-status ${r.status}`}>{TITLES[r.status] || "证据不足"}</span></div>
+    <p>期望：{r.expected} · 归因：{r.predictionName || r.prediction || "未知"}{r.probability != null ? ` · ${(r.probability * 100).toFixed(2)}%` : ""}</p>
+    {(r.reason || r.error) && <p className="task-settings-help">{r.reason || r.error}</p>}
+    {r.expectedReference?.combined && <p className="task-settings-help">合并参考类：{r.expectedReference.name}；该库不区分类内单个模型。</p>}
+    <small>远端账号 ID：{r.accountId || "—"} · 有效样本：{r.usedOutputs ?? 0}/3 · 参考库：{r.referenceBuiltAt || "—"}</small>
+    {r.candidates?.length > 0 && <details><summary>查看候选归因</summary><ol>{r.candidates.map(c => <li key={c.model}>{c.name || c.model}：{c.probability == null ? "—" : `${(c.probability * 100).toFixed(2)}%`}</li>)}</ol></details>}
+  </div>)}</div>;
+}
+function FingerprintHistoryDialog({ job, token, onClose }) {
+  const [data, setData] = useState(null), [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    let stopped = false;
+    const load = async () => { try { const next = await api(token, `/api/jobs/${job.id}/model-fingerprint/history`); if (!stopped) { setData(next); setError(""); } } catch (e) { if (!stopped) setError(e.message); } };
+    void load(); const timer = setInterval(load, 5000); return () => { stopped = true; clearInterval(timer); };
+  }, [job.id, token, refresh]);
+  const time = value => new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  return <Dialog title={`${job.email} 最近一小时归因结果`} onClose={onClose}><div className="fingerprint-form fingerprint-history">
+    <div className="fingerprint-history-toolbar"><span>最近 60 分钟完成的检测 · 每 5 秒刷新</span><button className="secondary-button" type="button" onClick={() => setRefresh(v => v + 1)}>刷新记录</button></div>
+    {data && <><p className="task-settings-help">{time(data.since)} — {time(data.until)}（北京时间）<br />{data.phase === "running" ? "当前正在检测，完成后会自动显示。" : data.phase === "queued" ? `正在排队，前方 ${Math.max(0, data.queuePosition - 1)} 个账号。` : data.enabled ? "自动检测已开启。" : "自动检测已关闭，已有记录仍可查看。"}</p>
+      {!data.models.length && <p className="proxy-quality-error">尚未配置检测模型，请先在“降智检测设置”或账号独立设置中添加。</p>}
+      {data.lastError && <p role="alert" className="proxy-quality-error">{data.lastError}</p>}
+      {!data.records.length ? <p className="fingerprint-history-empty">最近一小时暂无完成的检测记录；点击“立即检测”可生成新记录。</p> : data.records.map((record, index) => <section key={`${record.checkedAt}-${index}`} className="fingerprint-history-record">
+        <div className="fingerprint-history-heading"><strong>{time(record.checkedAt)}</strong><span className={`fingerprint-status ${record.status}`}>{TITLES[record.status] || "证据不足"}</span></div>
+        <p className="task-settings-help">{record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "升级前的最近结果"}{record.durationMs != null ? ` · 耗时 ${(record.durationMs / 1000).toFixed(1)} 秒` : ""}</p>
+        {record.legacy && <p className="task-settings-help">旧版记录按当时结论保留，不回填或修改分组；新检测将使用修正后的参考类匹配。</p>}
+        <AttributionModels models={record.models || []} />{record.error && <p className="proxy-quality-error">{record.error}</p>}
+      </section>)}
+    </>}
+    {!data && !error && <p>正在读取归因记录…</p>}{error && <p role="alert" className="proxy-quality-error">{error}</p>}
+  </div></Dialog>;
+}
 export function ModelFingerprintCell({ job, token, onError }) {
-  const [state, setState] = useState(job.modelFingerprint), [editing, setEditing] = useState(false), [draft, setDraft] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const [state, setState] = useState(job.modelFingerprint), [editing, setEditing] = useState(false), [showHistory, setShowHistory] = useState(false), [draft, setDraft] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
   useEffect(() => setState(job.modelFingerprint), [job.modelFingerprint]);
   if (!state) return <span>—</span>;
   async function update(body, check = false) {
@@ -68,12 +104,13 @@ export function ModelFingerprintCell({ job, token, onError }) {
   const result = state.result;
   return <div className="fingerprint-cell-body">
     <div className="fingerprint-cell-actions"><button type="button" role="switch" aria-checked={state.enabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${state.enabled ? "on" : ""}`} disabled={!token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span><span>{state.enabled ? "开启" : "关闭"}</span></button><button type="button" className="icon-button" aria-label={`${job.email} 独立降智检测设置`} onClick={open}><Settings2 size={14} /></button></div>
-    <span className={`fingerprint-status ${result?.status || "unknown"}`}>{state.phase === "running" ? "检测中…" : !state.models.length ? "待配置模型" : result ? TITLES[result.status] : state.previousResult ? "配置已变更，待复检" : "尚未检测"}</span>
+    <button type="button" className={`fingerprint-status fingerprint-history-link ${result?.status || "unknown"}`} aria-label={`${job.email} 查看最近一小时归因结果`} title="点击查看最近一小时的检测时间、模型归因、概率和候选结果" onClick={() => setShowHistory(true)}>{state.phase === "running" ? "检测中…" : state.phase === "queued" ? `排队中（第 ${state.queuePosition} 个）` : !state.models.length ? "待配置模型" : result ? TITLES[result.status] : state.previousResult ? "配置已变更，待复检" : "尚未检测"}<span className="fingerprint-history-caption">最近一小时 · {state.historyCountLastHour || 0} 轮 ›</span></button>
     <small>{state.override.enabled == null ? "继承 PlanType" : "账号独立开关"} · {state.intervalMinutes} 分钟</small>
     {result && <small title={result.models.map(r => `${r.model} → ${r.predictionName || r.prediction || "未知"} (${r.probability == null ? "—" : `${Math.round(r.probability * 100)}%`})`).join("\n")}>{result.models.map(r => `${r.model}：${TITLES[r.status]}`).join("；")}</small>}
     {result && <small>{new Date(result.checkedAt).toLocaleString("zh-CN")}</small>}
     {(state.lastError || state.groupSyncError) && <small className="proxy-quality-error">{state.lastError || state.groupSyncError}</small>}
-    <button type="button" className="fingerprint-check-button" disabled={!token || busy || state.phase === "running" || !state.models.length || !job.sub2apiInPool} onClick={() => update({}, true)}>立即检测</button>
+    <button type="button" className="fingerprint-check-button" disabled={!token || busy || state.phase === "running" || state.phase === "queued" || !state.models.length || !job.sub2apiInPool} onClick={() => update({}, true)}>立即检测</button>
+    {showHistory && <FingerprintHistoryDialog job={job} token={token} onClose={() => setShowHistory(false)} />}
     {editing && <Dialog title={`${job.email} 降智检测`} onClose={() => setEditing(false)}><form className="fingerprint-form" onSubmit={e => { e.preventDefault(); update({ enabled: draft.enabled, models: draft.customModels ? fromText(draft.text) : null, intervalMinutes: draft.customInterval ? draft.interval : null }); }}>
       <label className="settings-field"><span>账号检测开关</span><select aria-label="账号检测开关" value={draft.enabled == null ? "inherit" : String(draft.enabled)} onChange={e => setDraft({ ...draft, enabled: e.target.value === "inherit" ? null : e.target.value === "true" })}><option value="inherit">继承 PlanType</option><option value="true">独立开启</option><option value="false">独立关闭</option></select></label>
       <label className="fingerprint-checkbox"><input type="checkbox" checked={draft.customModels} onChange={e => setDraft({ ...draft, customModels: e.target.checked })} />使用独立检测模型</label>

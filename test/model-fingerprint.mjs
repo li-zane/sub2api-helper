@@ -10,6 +10,10 @@ assert.equal(fingerprintVerdict(makeAnalysis("gpt-5.4"), "gpt-5.5", .8), "mismat
 assert.equal(fingerprintVerdict(makeAnalysis("gpt-5.4", .6), "gpt-5.5", .8), "unknown");
 assert.equal(fingerprintVerdict(makeAnalysis(), "absent-from-bank", .8), "unknown");
 assert.equal(fingerprintVerdict({ ...makeAnalysis(), used_outputs: 2 }, "gpt-5.5", .8), "unknown");
+const combined = { ...makeAnalysis(), prediction: "gpt-6-astra", prediction_name: "gpt-6-astra/6.1-sol", results: [{ model: "gpt-6-astra", display_name: "gpt-6-astra/6.1-sol", probability: .99 }, { model: "gpt-5.6-luna", display_name: "gpt-5.6-luna", probability: .01 }] };
+assert.equal(fingerprintVerdict(combined, "gpt-6.1-sol", .8), "match", "slash-combined reference class recognizes the model alias");
+assert.equal(fingerprintVerdict({ ...combined, prediction: "gpt-5.6-luna", prediction_name: "gpt-5.6-luna" }, "gpt-6.1-sol", .8), "mismatch", "known combined alias with another high-probability attribution is mismatch, not unknown");
+for (const maxConcurrentAccounts of [0, 17, true, 1.5]) assert.throws(() => normalizeFingerprintSettings({ maxConcurrentAccounts }));
 assert.equal(aggregateFingerprint([{ status: "match" }, { status: "error" }]), "unknown");
 assert.equal(aggregateFingerprint([{ status: "match" }, { status: "mismatch" }]), "mismatch");
 for (const intervalMinutes of [0, 4, 43201, true, ""]) assert.throws(() => normalizeFingerprintSettings({ intervalMinutes }));
@@ -66,5 +70,27 @@ try {
   const slow = new ModelFingerprintService({ ...options, filePath: path.join(directory, "slow.json"), detectorLoader: () => new Promise(() => {}) });
   await slow.saveSettings(settings); const slowRun = slow.run("a@example.test", "free", { manual: true });
   await new Promise(r => setTimeout(r, 20)); await slow.stop(); await slowRun;
+  // A rolling history survives restart and excludes records beyond the hour.
+  phase = "match"; await service.saveOverride("a@example.test", {});
+  time += 1000; await service.run("a@example.test", "free", { manual: true });
+  time += 1000; phase = "mismatch"; await service.run("a@example.test", "free", { manual: true });
+  const recent = service.history("a@example.test", "free"); assert(recent.records.length >= 2); assert.equal(recent.records[0].status, "mismatch"); assert.equal(recent.records[0].models[0].probabilityStatus, "reference_calibrated");
+  const historyRestored = new ModelFingerprintService(options); await historyRestored.load(); assert.equal(historyRestored.history("a@example.test", "free").records.length, recent.records.length); await historyRestored.stop();
+  time += 3600001; assert.equal(service.history("a@example.test", "free").records.length, 0);
+  // Three accounts queued behind a limit of two; raising it drains without abort.
+  let concurrent = 0, peak = 0, started = [], releases = new Map();
+  const jobs = [1, 2, 3].map(id => ({ email: `parallel${id}@example.test`, planType: "free" }));
+  const parallel = new ModelFingerprintService({ ...options, filePath: path.join(directory, "parallel.json"), getContext: () => ({ ...options.getContext(), jobs }), listTargets: async () => jobs.map((j, i) => ({ id: i + 1, email: j.email, profileId: "default" })), getAccount: async (_config, id) => ({ id, status: "active", group_ids: [] }), sample: async (_config, account, _model, _prompt, signal) => {
+    if (!started.includes(account.id)) { started.push(account.id); concurrent++; peak = Math.max(peak, concurrent); await new Promise(resolve => { releases.set(account.id, resolve); signal.addEventListener("abort", resolve, { once: true }); }); concurrent--; }
+    signal.throwIfAborted(); return "1, 20, 42";
+  }, updateGroups: async () => {}, detectorLoader: async () => ({ builtAt: "fixture", analyze: () => makeAnalysis() }) });
+  await parallel.saveSettings({ ...settings, maxConcurrentAccounts: 2 }); parallel.stopped = false;
+  const runs = jobs.map(j => parallel.run(j.email, j.planType, { manual: true }));
+  const wait = async condition => { for (let i = 0; i < 500; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 2)); } throw new Error("concurrency fixture timed out"); };
+  await wait(() => started.length === 2); assert.equal(parallel.snapshot(jobs[2].email, "free").phase, "queued"); assert.equal(peak, 2); assert.strictEqual(parallel.run(jobs[0].email, "free", { manual: true }), runs[0], "same account deduplicates");
+  await parallel.saveSettings({ ...settings, maxConcurrentAccounts: 3 }); await wait(() => started.length === 3); assert.equal(peak, 3);
+  for (const resolve of releases.values()) resolve(); await Promise.all(runs); assert(jobs.every(j => parallel.snapshot(j.email, "free").result?.status === "match"));
+  await parallel.stop();
+  console.log("PASS: combined reference aliases, bounded account concurrency, deduplicated queue, live concurrency increase and persistent rolling one-hour attribution history");
   console.log("PASS: model fingerprint calibrated matching/unknown states, three-sample strictness, inherited/independent settings, persistence, backend isolation, conditional groups, retry without model calls and cancellation");
 } finally { await service.stop(); await fs.rm(directory, { recursive: true, force: true }); }

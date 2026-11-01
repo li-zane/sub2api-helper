@@ -43,7 +43,7 @@ import "./styles.css";
 import { logoutAccountSessions, proxySwitchSelectionState } from "./account-session-actions.mjs";
 import { OverloadDetection } from "./overload-detection.jsx";
 import { ProxyQualityPanel } from "./proxy-quality.jsx";
-import { FingerprintSettingsButton, FingerprintDefaultsFields, ModelFingerprintCell } from "./model-fingerprint.jsx";
+import { FingerprintSettingsButton, ModelFingerprintCell } from "./model-fingerprint.jsx";
 
 const POLL_INTERVAL_MS = 900;
 const SUB2API_PIPELINE_TIMEOUT_MS = 15 * 60_000;
@@ -3456,7 +3456,6 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
-  const [fingerprintDefaults, setFingerprintDefaults] = useState(() => settings.modelFingerprint || { models: [], intervalMinutes: 360, minProbability: 0.8 });
   const [accountProxyMode, setAccountProxyMode] = useState(() => ["sub2api", "plan"].includes(settings.accountProxyMode) ? settings.accountProxyMode : "global");
   const [codexAuthMode, setCodexAuthMode] = useState(() => settings.codexAuthMode || "local");
   const [autoRows, setAutoRows] = useState(() => taskAutoActionRows(settings.autoActions));
@@ -3523,7 +3522,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, modelFingerprint: fingerprintDefaults }),
+        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -3599,7 +3598,6 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           </div>
           <p className="task-settings-help">最近 {overloadRule.windowMinutes || "—"} 分钟内过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟。恢复后重新计数，服务重启后继续计时。</p>
         </section>
-        <section className="task-auto-settings"><h3>降智检测默认规则</h3><FingerprintDefaultsFields value={fingerprintDefaults} onChange={setFingerprintDefaults} disabled={saving} /><p className="task-settings-help">PlanType 默认开关和条件分组在主界面的“降智检测设置”中管理；账号可独立覆盖模型与间隔。</p></section>
         <p id="task-settings-description" className="task-settings-help">可设置 {settings.min}–{settings.max} 条，默认 {settings.default} 条。超过上限的任务自动排队。并发越高，服务器和代理的负载越大。</p>
         <p className="task-settings-help">调高后立即启动排队任务；调低后等待当前任务完成，再按新上限调度。服务重启后保留此设置。</p>
         <section className="task-auto-settings" aria-labelledby="task-auto-settings-title">

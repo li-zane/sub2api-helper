@@ -252,6 +252,22 @@ button:focus-visible, a:focus-visible, select:focus-visible { outline: 2px solid
 .fingerprint-profile legend { font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
 .fingerprint-group-rule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(140px, 1fr); gap: 12px; align-items: center; margin-top: 8px; font-size: 12px; }
 .fingerprint-reference { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.fingerprint-history-link { text-align: left; padding: 0; border: 0; background: transparent; cursor: pointer; display: grid; gap: 3px; }
+.fingerprint-history-link:hover { text-decoration: underline; }
+.fingerprint-history-link:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; border-radius: 3px; }
+.fingerprint-history-caption { color: var(--muted); font-size: 10px; font-weight: 400; }
+.fingerprint-history-toolbar, .fingerprint-history-heading, .fingerprint-result-model > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.fingerprint-history-toolbar { font-size: 12px; }
+.fingerprint-history-empty { padding: 18px 0; color: var(--muted); font-size: 13px; }
+.fingerprint-history-record { border-top: 1px solid var(--line); padding-top: 14px; }
+.fingerprint-history-heading { font-size: 13px; }
+.fingerprint-result-models { display: grid; gap: 10px; margin-top: 10px; }
+.fingerprint-result-model { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.fingerprint-result-model p { margin: 7px 0; line-height: 1.6; }
+.fingerprint-result-model small { color: var(--muted); font-size: 11px; }
+.fingerprint-result-model details { margin-top: 8px; }
+.fingerprint-result-model summary { cursor: pointer; color: var(--green); }
+.fingerprint-result-model ol { margin: 8px 0 0; padding-left: 22px; line-height: 1.8; }
 .proxy-quality-sampling.unknown { color: var(--muted); }
 .provider-field {
   width: 100%;

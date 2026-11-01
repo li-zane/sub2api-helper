@@ -59,10 +59,16 @@ try {
   assert.equal(checked.data.job.modelFingerprint.result.status, "unknown", "non-model numeric fixtures are not treated as genuine identity evidence");
   assert(!JSON.stringify(checked.data).includes("private-fixture-token"));
   assert(!calls.slice(before).some(c => c.method === "PUT"), "unknown evidence leaves existing groups unchanged");
+  const history = await get(`/api/jobs/${job.id}/model-fingerprint/history`); assert.equal(history.records.length, 1); assert.equal(history.records[0].models.length, 2); assert.equal(typeof history.records[0].models[0].probabilityStatus, "string"); assert(!JSON.stringify(history).includes("private-fixture-token"));
+  assert.equal((await fetch(base + `/api/jobs/${job.id}/model-fingerprint/history`)).status, 403);
+  const withConcurrency = { ...settings, maxConcurrentAccounts: 2 };
+  assert.equal((await post("/api/model-fingerprint/settings", { settings: { ...withConcurrency, maxConcurrentAccounts: 0 } })).status, 400);
+  assert.equal((await post("/api/model-fingerprint/settings", { settings: withConcurrency })).status, 200);
   assert.equal((await post(`/api/jobs/${job.id}/model-fingerprint`, { enabled: false, models: ["gpt-5.5"], intervalMinutes: 20 })).status, 200);
   await stop(); await start();
   const restored = (await get("/api/jobs")).jobs.find(j => j.email === account.email);
   assert.equal(restored.modelFingerprint.intervalMinutes, 20); assert.equal(restored.modelFingerprint.override.enabled, false);
+  assert.equal((await get(`/api/jobs/${job.id}/model-fingerprint/history`)).records.length, 1); assert.equal((await get("/api/model-fingerprint/settings")).settings.maxConcurrentAccounts, 2);
   const task = await post("/api/task-settings", { modelFingerprint: { models: ["gpt-5.4"], intervalMinutes: 60, minProbability: .85 } }); assert.equal(task.status, 200);
   assert.equal((await get("/api/model-fingerprint/settings")).settings.groupPolicies.default[20], "verified", "task defaults retain profile group policies");
   assert.equal((await get("/api/model-fingerprint/settings")).settings.models[0].model, "gpt-5.4");

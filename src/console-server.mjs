@@ -468,6 +468,12 @@ async function handleApi(req, res, requestUrl) {
   if (req.method === "GET" && requestUrl.pathname === "/api/model-fingerprint/reference") {
     sendJson(res, 200, await modelFingerprint.referenceInfo()); return;
   }
+  const fingerprintHistoryMatch = /^\/api\/jobs\/([a-f0-9-]+)\/model-fingerprint\/history$/.exec(requestUrl.pathname);
+  if (fingerprintHistoryMatch && req.method === "GET") {
+    const job = jobs.get(fingerprintHistoryMatch[1]);
+    if (!job || job.deleted) throw httpError(404, "账号不存在");
+    sendJson(res, 200, modelFingerprint.history(job.email, getJobPlanType(job) || "unknown")); return;
+  }
   const fingerprintMatch = /^\/api\/jobs\/([a-f0-9-]+)\/model-fingerprint(?:\/(check))?$/.exec(requestUrl.pathname);
   if (fingerprintMatch && req.method === "POST") {
     const job = jobs.get(fingerprintMatch[1]);
