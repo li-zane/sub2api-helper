@@ -200,7 +200,7 @@ button:focus-visible, a:focus-visible, select:focus-visible { outline: 2px solid
 .proxy-quality-check-header > button { flex-shrink: 0; min-height: 30px; padding: 4px 8px; font-size: 12px; }
 .proxy-quality-result { margin-top: 8px; font-size: 12px; line-height: 1.5; }
 .proxy-quality-result.stale { opacity: .6; }
-.proxy-quality-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.proxy-quality-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
 .proxy-quality-metrics > span { display: grid; gap: 2px; }
 .proxy-quality-metrics small { color: var(--muted); font-size: 11px; }
 .proxy-quality-metrics strong { font-size: 13px; font-variant-numeric: tabular-nums; }

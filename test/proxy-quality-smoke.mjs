@@ -12,11 +12,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-proxy-quality-"));
 const output = path.join(temp, "output");
 const proxyRequests = [];
+const chatgptRequests = [];
 const reputationRequests = [];
 const heldResponses = [];
 let mode = "stable";
 let sampleNumber = 0;
 let reputationMode = "normal";
+let chatgptMode = "ok";
 let child;
 let logs = "";
 let headers;
@@ -25,6 +27,16 @@ const ipB = "198.51.100.20";
 const proxy = http.createServer((req, res) => {
   const auth = Buffer.from((req.headers["proxy-authorization"] || "").slice(6), "base64").toString();
   const route = new URL(req.url);
+  if (route.hostname === "chatgpt.fixture.invalid") {
+    chatgptRequests.push({ auth, host: route.hostname, path: route.pathname, method: req.method });
+    const respond = () => {
+      const status = chatgptMode === "challenge" ? 403 : chatgptMode === "limited" ? 429 : chatgptMode === "unavailable" ? 503 : chatgptMode === "redirect" ? 302 : 200;
+      res.writeHead(status, { "content-type": "text/html", ...(chatgptMode === "challenge" ? { "cf-mitigated": "challenge" } : {}), ...(status === 302 ? { location: "https://chatgpt.com/auth/login" } : {}) });
+      res.end("<!doctype html><title>ChatGPT fixture</title>");
+    };
+    if (chatgptMode === "timeout") setTimeout(respond, 3000); else respond();
+    return;
+  }
   proxyRequests.push({ auth, host: route.hostname, path: route.pathname });
   sampleNumber++;
   const send = () => {
@@ -64,6 +76,7 @@ const pool = http.createServer(async (req, res) => {
 });
 await listen(pool);
 const exitUrl = "http://exit.fixture.invalid/ip";
+const chatgptUrl = "http://chatgpt.fixture.invalid/";
 const reputationUrl = `http://127.0.0.1:${reputation.address().port}/v2/`;
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
@@ -74,7 +87,7 @@ try {
   assert.equal(normalizeReputation({ fraudScore: 101 }).riskScore, null, "out-of-range score stays unknown");
   assert.equal(normalizeReputation({}).proxy, null);
   child = spawn(process.execPath, [path.join(root, "src/console-server.mjs"), "--host", "127.0.0.1", "--port", String(port)], {
-    cwd: root, windowsHide: true, env: { ...process.env, NODE_ENV: "test", LOCALAPPDATA: path.join(temp, "local"), ONBOARDING_OUTPUT_ROOT: output, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_PROXY_EXIT_CHECK_URL: exitUrl, TOSUB2_PROXY_REPUTATION_URL: reputationUrl, TOSUB2_PROXY_CHECK_TIMEOUT_MS: "2000" }, stdio: ["ignore", "pipe", "pipe"],
+    cwd: root, windowsHide: true, env: { ...process.env, NODE_ENV: "test", LOCALAPPDATA: path.join(temp, "local"), ONBOARDING_OUTPUT_ROOT: output, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_PROXY_EXIT_CHECK_URL: exitUrl, TOSUB2_PROXY_CHATGPT_CHECK_URL: chatgptUrl, TOSUB2_PROXY_REPUTATION_URL: reputationUrl, TOSUB2_PROXY_CHECK_TIMEOUT_MS: "2000" }, stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout.on("data", data => { logs = `${logs}${data}`.slice(-12000); });
   child.stderr.on("data", data => { logs = `${logs}${data}`.slice(-12000); });
@@ -97,6 +110,11 @@ try {
   const initialJobs = (await (await fetch(`${base}/api/jobs`, { headers })).json()).jobs;
   const result = await post("/api/proxy-quality/check", { target: "global", proxyUrl: "http://ignored.invalid" });
   assert.equal(result.status, 200);
+  assert.equal(result.body.result.chatgpt?.status, "ok", "ChatGPT latency is returned");
+  assert.equal(result.body.result.chatgpt.httpStatus, 200);
+  assert(result.body.result.chatgpt.latencyMs >= 1);
+  assert.equal(chatgptRequests.length, 1);
+  assert.equal(chatgptRequests[0].method, "GET");
   assert.equal(result.body.result.status, "ok");
   assert.equal(result.body.result.stable, true);
   assert.equal(result.body.result.successCount, 2);
@@ -105,6 +123,7 @@ try {
   assert.equal(result.body.result.exits[0].provider, "Fixture ISP");
   assert.equal(result.body.result.sessionRotation, "rotated");
   const firstAuth = proxyRequests[0].auth;
+  assert.equal(chatgptRequests[0].auth, firstAuth, "ChatGPT uses the same selected proxy session as IPPure");
   assert.notEqual(firstAuth, "fixture-user-sid-original:fixture-password", "global diagnostics rotate the saved session");
   assert.match(firstAuth, /^fixture-user-sid-[A-Za-z0-9]{8}:fixture-password$/);
   assert(proxyRequests.every(item => item.auth === firstAuth), "both exit samples share the same fresh session");
@@ -118,11 +137,13 @@ try {
   assert.equal(repeated.body.result.sessionRotation, "rotated");
   assert.notEqual(proxyRequests[2].auth, firstAuth, "each later global check uses another fresh session");
   assert.equal(proxyRequests[2].auth, proxyRequests[3].auth);
+  assert.equal(chatgptRequests[1].auth, proxyRequests[2].auth, "later diagnostics also reuse their fresh session for ChatGPT");
   assert.equal(reputationRequests.length, 0, "each proxy sample carries its own IPPure report");
   mode = "changed";
   sampleNumber = 0;
   const changed = await post("/api/proxy-quality/check", { target: "sub2api", proxyId: 1 });
   assert.equal(changed.body.result.sessionRotation, "fixed");
+  assert.equal(chatgptRequests.at(-1).auth, "fixture-user-sid-original:fixture-password", "ChatGPT keeps the selected fixed node session");
   assert(proxyRequests.slice(-2).every(item => item.auth === "fixture-user-sid-original:fixture-password"), "Sub2API nodes keep their exact configured session");
   assert.equal(changed.body.target.name, "住宅出口 A");
   assert.equal(changed.body.result.stable, false);
@@ -169,8 +190,19 @@ try {
   assert.deepEqual(isolated.map(item => item.body.result.sessionRotation), ["rotated", "fixed"], "global and fixed checks never share rotated results; client override ignored");
   assert.equal(proxyRequests.length - isolatedCount, 4);
   assert.equal(proxyRequests.slice(isolatedCount).filter(item => item.auth === "fixture-user-sid-original:fixture-password").length, 2);
+  for (const [state, expected, httpStatus] of [["challenge", "challenge", 403], ["limited", "http_error", 429], ["unavailable", "http_error", 503], ["redirect", "ok", 302], ["timeout", "failed", null]]) {
+    chatgptMode = state;
+    const checked = await post("/api/proxy-quality/check", { target: "sub2api", proxyId: 1 });
+    assert.equal(checked.body.result.status, "ok", "ChatGPT errors do not discard IPPure results");
+    assert.equal(checked.body.result.chatgpt.status, expected);
+    assert.equal(checked.body.result.chatgpt.httpStatus, httpStatus);
+    if (httpStatus !== null) assert(checked.body.result.chatgpt.latencyMs >= 1, "HTTP error latency remains visible");
+    else assert.equal(checked.body.result.chatgpt.latencyMs, null, "timeouts are not reported as zero latency");
+    assert(!JSON.stringify(checked.body).includes("fixture-password"));
+  }
+  chatgptMode = "ok";
   mode = "stable";
-  const rotationService = new ProxyQualityService({ exitUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
+  const rotationService = new ProxyQualityService({ exitUrl, chatgptUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
   try {
     const kookeeyUrl = `http://fixture-user:fixture-US-12345678-30m@127.0.0.1:${proxy.address().port}/`;
     const passwordRotation = await rotationService.check(kookeeyUrl, { rotateSession: true });
@@ -184,12 +216,13 @@ try {
   } finally { await rotationService.close(); }
   for (const state of ["missing", "unavailable", "malformed"]) {
     reputationMode = state;
-    const service = new ProxyQualityService({ exitUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
+    const service = new ProxyQualityService({ exitUrl, chatgptUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
     try {
       const unknown = await service.check(proxyUrl);
       if (state === "unavailable") {
         assert.equal(unknown.status, "failed", "unavailable IPPure endpoint does not fabricate exit or purity results");
         assert.equal(unknown.exits.length, 0);
+        assert.equal(unknown.chatgpt.status, "ok", "ChatGPT still runs when IPPure is unavailable");
       } else {
         assert.equal(unknown.status, "ok", "measured exit survives a missing or invalid fraud score");
         assert.equal(unknown.exits[0].riskScore, null);
@@ -199,7 +232,7 @@ try {
     } finally { await service.close(); }
   }
   reputationMode = "normal";
-  const service = new ProxyQualityService({ exitUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
+  const service = new ProxyQualityService({ exitUrl, chatgptUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
   mode = "timeout";
   const closingCheck = service.check(proxyUrl);
   await waitFor(() => service.running.size === 1);
@@ -209,7 +242,7 @@ try {
   mode = "stable";
   assert.deepEqual(await (await fetch(`${base}/api/account-proxy-settings`, { headers })).json(), before, "diagnostics preserve proxy/fallback settings");
   assert.deepEqual((await (await fetch(`${base}/api/jobs`, { headers })).json()).jobs, initialJobs, "diagnostics do not change jobs or bindings");
-  console.log("PASS: fresh global session per check, two samples share session, fixed node isolation, username/password rotation, unsupported format reporting; IPPure through selected proxy, zero/unknown scores, latency/errors/concurrency/shutdown; saved proxy and bindings unchanged");
+  console.log("PASS: IPPure and ChatGPT share selected proxy session; ChatGPT latency, HTTP status, challenge, redirects, timeout and independent failures; rotation, concurrency, shutdown and settings preservation");
   if (process.argv.includes("--serve")) {
     await post("/api/task-settings", { accountProxyMode: "plan" });
     const fixture = { url: base, output, temp, proxyUrl, proxyPort: proxy.address().port };

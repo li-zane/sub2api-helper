@@ -151,6 +151,7 @@ const TASK_SETTINGS_PATH = path.join(OUTPUT_ROOT, TASK_SETTINGS_FILENAME);
 const credentialStore = createCredentialStore();
 const proxyQualityService = new ProxyQualityService({
   exitUrl: process.env.TOSUB2_PROXY_EXIT_CHECK_URL,
+  chatgptUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_PROXY_CHATGPT_CHECK_URL : undefined,
   profile: process.env.TOSUB2_TLS_PROFILE || DEFAULT_TLS_PROFILE,
   timeoutMs: process.env.NODE_ENV === "test" ? process.env.TOSUB2_PROXY_CHECK_TIMEOUT_MS : undefined,
 });

@@ -4,12 +4,14 @@ import { performance } from "node:perf_hooks";
 import { TlsFingerprintTransport, proxySupportsSessionRotation, rotateProxySession } from "./tls-transport.mjs";
 
 const DEFAULT_EXIT_URL = "https://my.ippure.com/v1/info";
+const DEFAULT_CHATGPT_URL = "https://chatgpt.com/";
 const REQUEST_TIMEOUT_MS = 8_000;
 
 // Separate transports keep diagnostics independent from account login sessions.
 export class ProxyQualityService {
-  constructor({ exitUrl = DEFAULT_EXIT_URL, profile = "chrome146", timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  constructor({ exitUrl = DEFAULT_EXIT_URL, chatgptUrl = DEFAULT_CHATGPT_URL, profile = "chrome146", timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
     this.exitUrl = exitUrl;
+    this.chatgptUrl = chatgptUrl;
     this.profile = profile === "auto" ? "chrome146" : profile;
     this.timeoutMs = Math.max(100, Math.min(REQUEST_TIMEOUT_MS, Number(timeoutMs) || REQUEST_TIMEOUT_MS));
     this.running = new Map();
@@ -42,6 +44,7 @@ export class ProxyQualityService {
     const stop = () => { void transport.close(); };
     signal.addEventListener("abort", stop, { once: true });
     const samples = [];
+    let chatgpt = { status: "failed", latencyMs: null, httpStatus: null, error: "ChatGPT 访问失败，请检查代理连接或稍后重试" };
     const reports = new Map();
     const sessionRotation = rotateSession ? (proxySupportsSessionRotation(proxyUrl) ? "rotated" : "unsupported") : "fixed";
     const checkProxyUrl = sessionRotation === "rotated" ? rotateProxySession(proxyUrl) : proxyUrl;
@@ -71,6 +74,10 @@ export class ProxyQualityService {
           samples.push({ ok: false, error: "出口检测失败，请检查代理连接、认证或检测服务" });
         }
       }
+      signal.throwIfAborted();
+      // Keep the selected proxy session for the target-site request as well.
+      // This diagnostic transport has no account login cookies or credentials.
+      chatgpt = await measureChatGptLatency(transport, this.chatgptUrl, this.timeoutMs);
     } catch {
       if (!samples.length) samples.push({ ok: false, error: "出口检测失败，请检查代理连接、认证或检测服务" });
     } finally {
@@ -91,6 +98,7 @@ export class ProxyQualityService {
         sampleCount: 2,
         stable: successful.length === 2 ? ips.length === 1 : null,
         latencyMs: latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null,
+        chatgpt,
         exits,
         error: successful.length ? null : "出口检测失败，请检查代理连接、认证或检测服务",
       };
@@ -104,6 +112,19 @@ export class ProxyQualityService {
     this.closed = true;
     for (const operation of this.running.values()) operation.controller.abort();
     await Promise.allSettled([...this.running.values()].map(operation => operation.promise));
+  }
+}
+
+async function measureChatGptLatency(transport, url, timeoutMs) {
+  const start = performance.now();
+  try {
+    const response = await transport.request("GET", url, { timeoutMs, discardBody: true, headers: { accept: "text/html", "cache-control": "no-cache" } });
+    const latencyMs = Math.max(1, Math.round(performance.now() - start));
+    const challenge = /challenge/i.test(response.headers.get("cf-mitigated") || response.headers.get("x-cf-mitigated") || "");
+    const status = challenge ? "challenge" : response.status >= 200 && response.status < 400 ? "ok" : "http_error";
+    return { status, latencyMs, httpStatus: response.status, error: status === "ok" ? null : challenge ? "ChatGPT 返回安全验证页面" : `ChatGPT 返回 HTTP ${response.status}` };
+  } catch {
+    return { status: "failed", latencyMs: null, httpStatus: null, error: "ChatGPT 连接失败或超时（单次最多 8 秒）" };
   }
 }
 
