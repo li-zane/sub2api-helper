@@ -30,7 +30,12 @@ const proxy = http.createServer((req, res) => {
   const send = () => {
     res.setHeader("content-type", "application/json");
     if (mode === "failed" || (mode === "partial" && sampleNumber % 2 === 1)) { res.writeHead(502); res.end("upstream secret fixture-user:fixture-password"); return; }
-    res.end(JSON.stringify({ ip: mode === "invalid" ? "not-an-ip" : mode === "changed" && sampleNumber % 2 === 0 ? ipB : ipA }));
+    if (reputationMode === "unavailable") { res.writeHead(429); res.end('{"error":"quota"}'); return; }
+    const ip = mode === "changed" && sampleNumber % 2 === 0 ? ipB : ipA;
+    res.end(JSON.stringify({ ip: mode === "invalid" ? "not-an-ip" : ip,
+      fraudScore: reputationMode === "missing" ? undefined : reputationMode === "malformed" ? 101 : ip === ipB ? 95 : 0,
+      isResidential: ip !== ipB, isBroadcast: false, country: "Fixture", countryCode: "ZZ",
+      region: "Test Region", city: "Test City", asn: 64500, asOrganization: "Fixture ISP" }));
   };
   if (mode === "held") heldResponses.push(send); else if (mode === "timeout") setTimeout(send, 3000); else send();
 });
@@ -64,9 +69,9 @@ const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 
 try {
-  assert.equal(normalizeReputation({ risk: "" }).riskScore, null, "empty score stays unknown");
-  assert.equal(normalizeReputation({ risk: null }).riskLevel, "unknown", "null does not become a clean score");
-  assert.equal(normalizeReputation({ risk: 101 }).riskScore, null, "out-of-range score stays unknown");
+  assert.equal(normalizeReputation({ fraudScore: "" }).riskScore, null, "empty score stays unknown");
+  assert.equal(normalizeReputation({ fraudScore: null }).riskLevel, "unknown", "null does not become a clean score");
+  assert.equal(normalizeReputation({ fraudScore: 101 }).riskScore, null, "out-of-range score stays unknown");
   assert.equal(normalizeReputation({}).proxy, null);
   child = spawn(process.execPath, [path.join(root, "src/console-server.mjs"), "--host", "127.0.0.1", "--port", String(port)], {
     cwd: root, windowsHide: true, env: { ...process.env, NODE_ENV: "test", LOCALAPPDATA: path.join(temp, "local"), ONBOARDING_OUTPUT_ROOT: output, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_PROXY_EXIT_CHECK_URL: exitUrl, TOSUB2_PROXY_REPUTATION_URL: reputationUrl, TOSUB2_PROXY_CHECK_TIMEOUT_MS: "2000" }, stdio: ["ignore", "pipe", "pipe"],
@@ -105,7 +110,7 @@ try {
   assert(proxyRequests.every(item => item.auth === firstAuth), "both exit samples share the same fresh session");
   assert(proxyRequests.every(item => item.host === "exit.fixture.invalid"), "exit request traverses the selected proxy");
   assert.equal(proxyRequests.length, 2);
-  assert.equal(reputationRequests.length, 1);
+  assert.equal(reputationRequests.length, 0, "IPPure report traverses the proxy without a direct lookup");
   assert(reputationRequests.every(item => !item.auth && !item.proxyAuth));
   assert(!JSON.stringify(result.body).includes("fixture-password"));
   assert(!JSON.stringify(result.body).includes(firstAuth.split(":")[0]), "rotation metadata does not expose usernames");
@@ -113,7 +118,7 @@ try {
   assert.equal(repeated.body.result.sessionRotation, "rotated");
   assert.notEqual(proxyRequests[2].auth, firstAuth, "each later global check uses another fresh session");
   assert.equal(proxyRequests[2].auth, proxyRequests[3].auth);
-  assert.equal(reputationRequests.length, 1, "fresh exit requests still share IP reputation cache");
+  assert.equal(reputationRequests.length, 0, "each proxy sample carries its own IPPure report");
   mode = "changed";
   sampleNumber = 0;
   const changed = await post("/api/proxy-quality/check", { target: "sub2api", proxyId: 1 });
@@ -124,8 +129,9 @@ try {
   assert.deepEqual(changed.body.result.exits.map(exit => exit.ip), [ipA, ipB]);
   assert.equal(changed.body.result.exits[1].riskScore, 95);
   assert.equal(changed.body.result.exits[1].riskLevel, "high");
-  assert.equal(changed.body.result.exits[1].vpn, true);
-  assert.equal(reputationRequests.length, 2, "reputation cache reuses the previously queried IP");
+  assert.equal(changed.body.result.exits[1].residential, false);
+  assert.equal(changed.body.result.exits[1].vpn, null, "IPPure does not expose a VPN verdict");
+  assert.equal(reputationRequests.length, 0, "both changed exits are measured directly through the proxy");
   mode = "partial"; sampleNumber = 0;
   const partial = await post("/api/proxy-quality/check", { target: "global" });
   assert.equal(partial.body.result.status, "partial");
@@ -181,10 +187,15 @@ try {
     const service = new ProxyQualityService({ exitUrl, reputationUrl, profile: "chrome142", timeoutMs: 500 });
     try {
       const unknown = await service.check(proxyUrl);
-      assert.equal(unknown.status, "ok", "reputation failure preserves measured exit connectivity");
-      assert.equal(unknown.exits[0].riskScore, null);
-      assert.equal(unknown.exits[0].riskLevel, "unknown");
-      assert.equal(unknown.exits[0].available, state === "missing");
+      if (state === "unavailable") {
+        assert.equal(unknown.status, "failed", "unavailable IPPure endpoint does not fabricate exit or purity results");
+        assert.equal(unknown.exits.length, 0);
+      } else {
+        assert.equal(unknown.status, "ok", "measured exit survives a missing or invalid fraud score");
+        assert.equal(unknown.exits[0].riskScore, null);
+        assert.equal(unknown.exits[0].riskLevel, "unknown");
+        assert.equal(unknown.exits[0].available, false);
+      }
     } finally { await service.close(); }
   }
   reputationMode = "normal";
@@ -198,7 +209,7 @@ try {
   mode = "stable";
   assert.deepEqual(await (await fetch(`${base}/api/account-proxy-settings`, { headers })).json(), before, "diagnostics preserve proxy/fallback settings");
   assert.deepEqual((await (await fetch(`${base}/api/jobs`, { headers })).json()).jobs, initialJobs, "diagnostics do not change jobs or bindings");
-  console.log("PASS: fresh global session per check, two samples share session, fixed node isolation, username/password rotation, unsupported format reporting; latency/reputation/errors/concurrency/shutdown; saved proxy and bindings unchanged");
+  console.log("PASS: fresh global session per check, two samples share session, fixed node isolation, username/password rotation, unsupported format reporting; IPPure through selected proxy, zero/unknown scores, latency/errors/concurrency/shutdown; saved proxy and bindings unchanged");
   if (process.argv.includes("--serve")) {
     await post("/api/task-settings", { accountProxyMode: "plan" });
     const fixture = { url: base, output, temp, proxyUrl, proxyPort: proxy.address().port };

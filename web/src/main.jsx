@@ -2582,6 +2582,17 @@ function App() {
                   <option value="full">完全收敛</option>
                 </select>
               </label>
+              <div className="settings-field wide-settings-field">
+                <span>自动使用重置卡</span>
+                <button type="button" role="switch" aria-label="自动使用重置卡"
+                  className={`status-toggle sub2api-auto-reset-toggle ${sub2apiSettingsDraft.autoResetCreditEnabled ? "on" : ""}`}
+                  aria-checked={sub2apiSettingsDraft.autoResetCreditEnabled}
+                  onClick={() => updateSub2ApiDraftProfile({ autoResetCreditEnabled: !sub2apiSettingsDraft.autoResetCreditEnabled })}>
+                  <span className="status-toggle-track"><span className="status-toggle-thumb" /></span>
+                  <span>{sub2apiSettingsDraft.autoResetCreditEnabled ? "已开启" : "已关闭"}</span>
+                </button>
+                <small>沿用 Sub2API 的自动用卡机制；未设置阈值时按 5h / 7d 用量达到 100% 触发，已有阈值保持不变。保存后同步至该方案绑定的账号。</small>
+              </div>
               <label className="settings-field wide-settings-field">
                 <span>WS mode</span>
                 <select
@@ -4374,10 +4385,11 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
   const primary = usage.primary;
   const secondary = usage.secondary;
   const credits = usage.credits;
-  if (!primary && !secondary && !credits && usage.allowed === null && usage.limitReached === null) {
+  const resetCredits = usage.resetCredits;
+  if (!primary && !secondary && !credits && !resetCredits && usage.allowed === null && usage.limitReached === null) {
     return (
       <span className="usage-empty">
-        <span className="usage-state muted">暂无数据</span>
+        <span className="usage-state muted">暂无数据 · 重置卡未知</span>
         {onRefresh && <button type="button" className="usage-refresh-icon" onClick={onRefresh} title="从 Sub2API 同步用量" aria-label="从 Sub2API 同步用量"><RefreshCw size={13} /></button>}
       </span>
     );
@@ -4396,6 +4408,9 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
       {windows.map((item) => <UsageWindowProgress key={item.key} tone={item.key} label={item.label} window={item.value} />)}
       {credits && credits.unlimited === true && <span className="usage-window">无限额度</span>}
       {credits && credits.balance !== null && <span className="usage-window">额度 {credits.balance}</span>}
+      <span className="usage-reset-credits" title={resetCredits?.credits?.length ? `重置卡到期时间：${resetCredits.credits.map((credit) => formatDateTime(credit.expiresAt)).join("、")}` : "从 Sub2API 同步可用重置卡数量；点击刷新可查询最新数量"}>
+        重置卡 <strong>{resetCredits ? `${resetCredits.availableCount} 张` : "未知"}</strong>
+      </span>
     </div>
   );
 }
@@ -4972,6 +4987,7 @@ function normalizeSub2ApiSettings(value) {
     codexFingerprintMode: ["off", "device", "session", "full"].includes(stored.codexFingerprintMode)
       ? stored.codexFingerprintMode
       : "session",
+    autoResetCreditEnabled: stored.autoResetCreditEnabled === true,
     wsMode: SUB2API_WS_MODES.has(wsMode) ? wsMode : "off",
   };
   const rawProfiles = Array.isArray(stored.profiles) ? stored.profiles : [];
@@ -5019,6 +5035,7 @@ function normalizeSub2ApiProfile(value, index = 0, fallback = {}) {
     codexFingerprintMode: ["off", "device", "session", "full"].includes(stored.codexFingerprintMode)
       ? stored.codexFingerprintMode
       : fallbackProfile.codexFingerprintMode || "session",
+    autoResetCreditEnabled: stored.autoResetCreditEnabled ?? fallbackProfile.autoResetCreditEnabled ?? false,
     wsMode: SUB2API_WS_MODES.has(wsMode) ? wsMode : "off",
   };
 }

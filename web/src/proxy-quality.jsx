@@ -9,7 +9,7 @@ export function ProxyQualityPanel({ token, mode, proxies, globalProxyUrl, dirty 
   return <details className="proxy-quality-panel">
     <summary><ShieldCheck size={15} aria-hidden="true" /><span>出口与纯净度检测</span><ChevronDown size={14} aria-hidden="true" /></summary>
     <div className="proxy-quality-body">
-      <p className="proxy-quality-help">抽样两次检测实际出口与连接耗时，查询该 IP 的信誉风险。</p>
+      <p className="proxy-quality-help">通过待测代理访问 IPPure，抽样两次检测出口、连接耗时与 IP 风险分。</p>
       {mode !== "sub2api" && <ProxyQualityCheck key={`global:${globalProxyUrl}`} token={token} name="全局代理" target={{ target: "global" }} disabled={!globalProxyUrl || dirty}
         hint={dirty ? "保存代理配置后检测" : !globalProxyUrl ? "先保存代理地址" : "每次检测使用新代理会话，两次抽样共用该会话"} />}
       {["sub2api", "plan"].includes(mode) && proxies.map(proxy => <ProxyQualityCheck key={`${proxy.id}:${proxy.host}:${proxy.port}`} token={token} name={proxy.name} target={{ target: "sub2api", proxyId: proxy.id }} />)}
@@ -80,7 +80,7 @@ function ProxyExit({ exit }) {
     <div className="proxy-quality-risk"><span>纯净度参考 · IP 风险分</span><strong>{exit.riskScore === null ? "未知" : `${exit.riskScore} / 100`}</strong></div>
     {exit.riskScore !== null && <meter min="0" max="100" low="34" high="67" optimum="0" value={exit.riskScore} aria-label={`${exit.ip} 风险分，越低越好`} />}
     {exit.networkType && <p>网络类型：{exit.networkType}</p>}
-    <div className="proxy-quality-flags"><span>代理 {flag(exit.proxy)}</span><span>VPN {flag(exit.vpn)}</span><span>Tor {flag(exit.tor)}</span><span>机房 {flag(exit.hosting)}</span></div>
+    <div className="proxy-quality-flags"><span>住宅 IP {flag(exit.residential)}</span><span>广播 IP {flag(exit.broadcast)}</span></div>
     {exit.error && <p className="proxy-quality-error">{exit.error}</p>}
     <small className="proxy-quality-source">来源：{exit.source} · {timeLabel(exit.checkedAt)}{exit.riskScore !== null ? " · 分数越低风险越低" : ""}</small>
   </div>;

@@ -30,6 +30,7 @@ import { normalizeCodexAuthMode } from "./sub2api-oauth.mjs";
 import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-transport.mjs";
 import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
+import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -99,6 +100,7 @@ const SUB2API_PROFILE_FIELDS = [
   "accountNameTemplate",
   "modelWhitelist",
   "codexFingerprintMode",
+  "autoResetCreditEnabled",
   "wsMode",
 ];
 const SUB2API_TARGET_GROUP_PLATFORMS = ["openai", "composite"];
@@ -147,7 +149,6 @@ const TASK_SETTINGS_PATH = path.join(OUTPUT_ROOT, TASK_SETTINGS_FILENAME);
 const credentialStore = createCredentialStore();
 const proxyQualityService = new ProxyQualityService({
   exitUrl: process.env.TOSUB2_PROXY_EXIT_CHECK_URL,
-  reputationUrl: process.env.TOSUB2_PROXY_REPUTATION_URL,
   profile: process.env.TOSUB2_TLS_PROFILE || DEFAULT_TLS_PROFILE,
   timeoutMs: process.env.NODE_ENV === "test" ? process.env.TOSUB2_PROXY_CHECK_TIMEOUT_MS : undefined,
 });
@@ -3352,7 +3353,7 @@ async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2
     const { proxy_key: _proxyKey, ...accountData } = account;
     const proxyFields = await sub2ApiProxyFieldsForAccount(accountConfig, sub2ApiAccountEmail(account));
     const credentials = { ...(account.credentials || {}) };
-    const extra = buildSub2ApiAccountExtra(account.extra, accountConfig);
+    const extra = buildSub2ApiAccountExtra(account.extra, accountConfig, account);
     const accountName = renderSub2ApiAccountName(accountConfig.accountNameTemplate, account);
     if (accountConfig.modelWhitelist.length) {
       credentials.model_mapping = Object.fromEntries(accountConfig.modelWhitelist.map((model) => [model, model]));
@@ -3521,7 +3522,9 @@ function normalizeSub2ApiConfig(value, options = {}) {
       ?? "off",
   );
   const importDatePriority = normalizeImportDatePriority(config.importDatePriority ?? stored.importDatePriority);
-  return { baseUrl, adminApiKey, groupIds, proxyId, concurrency, loadFactor, priority, importDatePriority, accountNameTemplate, modelWhitelist, codexFingerprintMode, wsMode, profileId: String(config.profileId || stored.profileId || "default") };
+  const autoResetCreditEnabled = config.autoResetCreditEnabled ?? stored.autoResetCreditEnabled ?? false;
+  if (typeof autoResetCreditEnabled !== "boolean") throw httpError(400, "自动使用重置卡开关必须是布尔值");
+  return { baseUrl, adminApiKey, groupIds, proxyId, concurrency, loadFactor, priority, importDatePriority, accountNameTemplate, modelWhitelist, codexFingerprintMode, autoResetCreditEnabled, wsMode, profileId: String(config.profileId || stored.profileId || "default") };
 }
 
 function normalizeImportDatePriority(value) {
@@ -3793,13 +3796,16 @@ function normalizeSub2ApiWsMode(value) {
   return mode;
 }
 
-function buildSub2ApiAccountExtra(value, config) {
+function buildSub2ApiAccountExtra(value, config, account = {}) {
   const extra = value && typeof value === "object" ? { ...value } : {};
   // OpenAI OAuth accounts imported by toSub2 are always opted out of model
   // training. Keep this in the shared payload builder so new uploads,
   // workspace switches, and credential repairs use the same privacy state.
   extra.privacy_mode = "training_off";
   extra.codex_fingerprint_mode = config.codexFingerprintMode;
+  if (account.parent_account_id == null) extra.auto_reset_credit_enabled = config.autoResetCreditEnabled === true;
+  else for (const key of ["auto_reset_credit_enabled", "auto_reset_credit_5h_threshold", "auto_reset_credit_7d_threshold"]) delete extra[key];
+  delete extra.codex_auto_reset_credit_state;
   extra.openai_oauth_responses_websockets_v2_mode = config.wsMode;
   extra.openai_oauth_responses_websockets_v2_enabled = config.wsMode !== "off";
   delete extra.responses_websockets_v2_enabled;
@@ -4059,6 +4065,7 @@ function serializeSub2ApiConfig(config) {
     accountNameTemplate: config.accountNameTemplate,
     modelWhitelist: config.modelWhitelist,
     codexFingerprintMode: config.codexFingerprintMode,
+    autoResetCreditEnabled: config.autoResetCreditEnabled,
     wsMode: config.wsMode,
     profileId: config.profileId || "default",
   };
@@ -4470,6 +4477,7 @@ const SUB2API_PROFILE_FIELD_LABELS = {
   accountNameTemplate: "账号命名模板",
   modelWhitelist: "模型白名单",
   codexFingerprintMode: "Codex 指纹模式",
+  autoResetCreditEnabled: "自动使用重置卡",
   wsMode: "WS mode",
 };
 const SUB2API_PROFILE_SYNC_CONCURRENCY = 4;
@@ -4660,8 +4668,19 @@ async function buildSub2ApiProfileSyncUpdate(remoteAccount, accountConfig, field
     const accountName = renderSub2ApiAccountName(accountConfig.accountNameTemplate, remoteAccount);
     if (accountName) body.name = accountName;
   }
-  if (changed.has("codexFingerprintMode") || changed.has("wsMode")) {
-    body.extra = buildSub2ApiAccountExtra(normalizeSub2ApiExtra(remoteAccount.extra), accountConfig);
+  if (changed.has("codexFingerprintMode") || changed.has("wsMode") || changed.has("autoResetCreditEnabled")) {
+    const originalExtra = normalizeSub2ApiExtra(remoteAccount.extra);
+    body.extra = changed.has("codexFingerprintMode") || changed.has("wsMode")
+      ? buildSub2ApiAccountExtra(originalExtra, accountConfig)
+      : { ...originalExtra, auto_reset_credit_enabled: accountConfig.autoResetCreditEnabled === true };
+    delete body.extra.codex_auto_reset_credit_state;
+    if (!changed.has("autoResetCreditEnabled")) {
+      if (Object.hasOwn(originalExtra, "auto_reset_credit_enabled")) body.extra.auto_reset_credit_enabled = originalExtra.auto_reset_credit_enabled;
+      else delete body.extra.auto_reset_credit_enabled;
+    }
+    if (remoteAccount.parent_account_id != null) {
+      for (const key of ["auto_reset_credit_enabled", "auto_reset_credit_5h_threshold", "auto_reset_credit_7d_threshold"]) delete body.extra[key];
+    }
   }
   if (changed.has("modelWhitelist")) {
     body.credentials = {
@@ -4764,7 +4783,7 @@ async function updateSub2ApiAccountFromProfile(globalConfig, remoteAccount, prof
   if (accountConfig.priority !== null && !accountConfig.importDatePriority?.enabled) body.priority = accountConfig.priority;
   const accountName = renderSub2ApiAccountName(accountConfig.accountNameTemplate, remoteAccount);
   if (accountName) body.name = accountName;
-  body.extra = buildSub2ApiAccountExtra(remoteAccount.extra, accountConfig);
+  body.extra = buildSub2ApiAccountExtra(remoteAccount.extra, accountConfig, remoteAccount);
   if (accountConfig.modelWhitelist.length) {
     body.credentials = {
       ...(remoteAccount.credentials && typeof remoteAccount.credentials === "object" ? remoteAccount.credentials : {}),
@@ -4814,7 +4833,7 @@ async function buildSub2ApiAccountUpdate(localAccount, accountConfig, remoteAcco
   const localExtra = normalizeSub2ApiExtra(localAccount?.extra);
   const mergedExtra = { ...remoteExtra, ...localExtra };
   if (targetPlanType) mergedExtra.plan_type = targetPlanType;
-  const extra = buildSub2ApiAccountExtra(mergedExtra, accountConfig);
+  const extra = buildSub2ApiAccountExtra(mergedExtra, accountConfig, remoteAccount);
   const accountId = normalizeSub2ApiAccountId(remoteAccount?.id || localAccount?.id);
   const accountName = renderSub2ApiAccountName(accountConfig.accountNameTemplate, {
     ...localAccount,
@@ -5306,6 +5325,7 @@ function normalizeSub2ApiUsage(account, fallbackFetchedAt = null) {
     || normalizeSub2ApiUsageDate(account?.usageUpdatedAt);
   const updatedAt = remoteUpdatedAt || fallbackFetchedAt;
   const creditsRaw = extra.codex_credits_snapshot?.credits;
+  const resetCredits = normalizeResetCredits(extra.codex_reset_credit_snapshot, { cached: true });
   const credits = creditsRaw && typeof creditsRaw === "object"
     ? {
         hasCredits: typeof creditsRaw.has_credits === "boolean" ? creditsRaw.has_credits : null,
@@ -5314,8 +5334,8 @@ function normalizeSub2ApiUsage(account, fallbackFetchedAt = null) {
         overageLimitReached: typeof creditsRaw.overage_limit_reached === "boolean" ? creditsRaw.overage_limit_reached : null,
       }
     : null;
-  if (!primary && !secondary && !credits) return null;
-  const limitReached = [primary, secondary].some((window) => window?.usedPercent !== null && window.usedPercent >= 100)
+  if (!primary && !secondary && !credits && !resetCredits) return null;
+  const limitReached = [primary, secondary].some((window) => window?.usedPercent != null && window.usedPercent >= 100)
     ? true
     : [primary, secondary].some(Boolean) ? false : null;
   return {
@@ -5328,6 +5348,9 @@ function normalizeSub2ApiUsage(account, fallbackFetchedAt = null) {
     primary,
     secondary,
     credits,
+    resetCredits,
+    resetCreditsObserved: Object.hasOwn(extra, "codex_reset_credit_snapshot"),
+    resetCreditsFetchedAt: fallbackFetchedAt || updatedAt,
   };
 }
 
@@ -5353,6 +5376,10 @@ function publicSub2ApiUsage(usage) {
     primary: publicSub2ApiUsageWindow(usage.primary),
     secondary: publicSub2ApiUsageWindow(usage.secondary),
     credits: usage.credits ? { ...usage.credits } : null,
+    resetCredits: usage.resetCredits ? normalizeResetCredits({
+      available_count: usage.resetCredits.availableCount,
+      credits: usage.resetCredits.credits.map((credit) => ({ expires_at: credit.expiresAt })),
+    }, { cached: usage.resetCredits.credits.length > 0 }) : null,
   };
 }
 
@@ -5374,6 +5401,9 @@ function mergeSub2ApiUsage(current, next) {
   const primary = preferNext ? (next.primary || current.primary) : (current.primary || next.primary);
   const secondary = preferNext ? (next.secondary || current.secondary) : (current.secondary || next.secondary);
   const credits = preferNext ? (next.credits || current.credits) : (current.credits || next.credits);
+  const preferNextReset = next.resetCreditsObserved === true && (current.resetCreditsObserved !== true
+    || (Date.parse(next.resetCreditsFetchedAt || next.fetchedAt || "") || 0) >= (Date.parse(current.resetCreditsFetchedAt || current.fetchedAt || "") || 0));
+  const resetCredits = preferNextReset ? next.resetCredits : (current.resetCredits ?? next.resetCredits ?? null);
   return {
     ...current,
     ...next,
@@ -5385,6 +5415,9 @@ function mergeSub2ApiUsage(current, next) {
     primary,
     secondary,
     credits,
+    resetCredits,
+    resetCreditsObserved: preferNextReset ? next.resetCreditsObserved : current.resetCreditsObserved,
+    resetCreditsFetchedAt: preferNextReset ? next.resetCreditsFetchedAt : current.resetCreditsFetchedAt,
   };
 }
 
@@ -6152,7 +6185,7 @@ async function performSub2ApiAutoRepairSuccess(job) {
       if (accountConfig.modelWhitelist.length) {
         credentials.model_mapping = Object.fromEntries(accountConfig.modelWhitelist.map((model) => [model, model]));
       }
-      const extra = buildSub2ApiAccountExtra(remoteAccount.extra, accountConfig);
+      const extra = buildSub2ApiAccountExtra(remoteAccount.extra, accountConfig, remoteAccount);
       const accountName = renderSub2ApiAccountName(accountConfig.accountNameTemplate, {
         ...localAccount,
         id: remoteAccount.id,
@@ -6403,6 +6436,7 @@ async function getAccountUsage(job, forceRefresh = false) {
     primary: null,
     secondary: null,
     credits: null,
+    resetCredits: null,
   };
 }
 
@@ -6410,20 +6444,22 @@ async function refreshSub2ApiAccountUsage(config, accountIds) {
   if (!config?.baseUrl || !config?.adminApiKey) return null;
   const ids = [...new Set(accountIds.map((value) => normalizeSub2ApiAccountId(value)).filter(Boolean))].slice(0, 8);
   if (!ids.length) return null;
-  const responses = await Promise.allSettled(ids.map((accountId) => requestSub2Api(
-    config,
-    `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/usage?source=active&force=true`,
-  )));
+  const responses = await Promise.allSettled(ids.flatMap((accountId) => [
+    requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/usage?source=active&force=true`).then((payload) => normalizeSub2ApiUsagePayload(payload)),
+    // This is Sub2API's read/refresh endpoint, not the reset/consume action.
+    requestSub2Api(config, `/api/v1/admin/openai/accounts/${encodeURIComponent(accountId)}/quota/refresh`, { method: "POST" }).then((payload) => normalizeSub2ApiUsagePayload(payload, { resetCreditsRefreshed: true })),
+  ]));
   const usages = responses
     .filter((result) => result.status === "fulfilled")
-    .map((result) => normalizeSub2ApiUsagePayload(result.value))
+    .map((result) => result.value)
     .filter(Boolean);
   if (!usages.length) return null;
   return usages.reduce((current, next) => mergeSub2ApiUsage(current, next), null);
 }
 
-function normalizeSub2ApiUsagePayload(payload) {
-  const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+function normalizeSub2ApiUsagePayload(payload, { resetCreditsRefreshed = false } = {}) {
+  const envelope = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+  const data = envelope?.usage && typeof envelope.usage === "object" ? envelope.usage : envelope;
   if (!data || typeof data !== "object") return null;
   const rateLimit = data.rate_limit && typeof data.rate_limit === "object" ? data.rate_limit : {};
   const primary = normalizeSub2ApiResponseWindow(
@@ -6436,8 +6472,10 @@ function normalizeSub2ApiUsagePayload(payload) {
   );
   const snapshotTimestamp = normalizeSub2ApiUsageDate(data.updated_at ?? data.updatedAt ?? data.fetched_at ?? data.fetchedAt);
   const fetchedAt = snapshotTimestamp || new Date().toISOString();
-  if (!primary && !secondary) return null;
-  const inferredLimitReached = [primary, secondary].some((window) => window?.usedPercent !== null && window.usedPercent >= 100);
+  const credits = normalizeSub2ApiCredits(data.credits);
+  const resetCredits = normalizeResetCredits(data.rate_limit_reset_credits);
+  if (!primary && !secondary && !credits && !resetCredits && !resetCreditsRefreshed) return null;
+  const inferredLimitReached = [primary, secondary].some((window) => window?.usedPercent != null && window.usedPercent >= 100);
   const limitReached = typeof data.limit_reached === "boolean"
     ? data.limit_reached
     : typeof rateLimit.limit_reached === "boolean"
@@ -6457,11 +6495,14 @@ function normalizeSub2ApiUsagePayload(payload) {
     fetchedAt,
     snapshotTimestamp,
     planType: null,
-    allowed: explicitAllowed ?? !limitReached,
-    limitReached,
+    allowed: explicitAllowed ?? (primary || secondary ? !limitReached : null),
+    limitReached: primary || secondary ? limitReached : null,
     primary,
     secondary,
-    credits: normalizeSub2ApiCredits(data.credits),
+    credits,
+    resetCredits,
+    resetCreditsObserved: resetCreditsRefreshed || Object.hasOwn(data, "rate_limit_reset_credits"),
+    resetCreditsFetchedAt: new Date().toISOString(),
   };
 }
 

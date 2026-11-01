@@ -669,6 +669,9 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 
 .usage-heading { white-space: nowrap; }
+.usage-reset-credits { color: var(--subtle); font-size: 10px; }
+.usage-reset-credits strong { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+.sub2api-auto-reset-toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 .usage-cell-column { width: 240px; min-width: 240px; overflow: hidden; }
 .account-usage { min-width: 0; display: grid; gap: 5px; color: #55635d; font-size: 10px; line-height: 1.25; }
 .account-usage.restricted { color: var(--danger); }

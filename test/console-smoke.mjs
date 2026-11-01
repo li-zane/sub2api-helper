@@ -1393,7 +1393,7 @@ try {
         profiles: [
           { id: "default", name: "默认方案", groupIds: ["8"], codexFingerprintMode: "device", wsMode: "passthrough" },
           { id: "free-plan", name: "Free 方案", groupIds: ["71"], codexFingerprintMode: "off", wsMode: "off" },
-          { id: "business-plan", name: "Business 方案", groupIds: ["7"], codexFingerprintMode: "full", wsMode: "http_bridge" },
+          { id: "business-plan", name: "Business 方案", groupIds: ["7"], codexFingerprintMode: "full", wsMode: "http_bridge", autoResetCreditEnabled: true },
         ],
         activeProfileId: "default",
         planTypeBindings: {
@@ -1412,6 +1412,7 @@ try {
   assert.equal(batchUploadCount - mixedUploadStart, 1, "已存在账号应 PUT 更新，新账号才走 batch");
   const mixedBatches = uploadedBatches.slice(-1);
   assert.deepEqual(mixedBatches.map((batch) => batch[0].group_ids), [[7]]);
+  assert.equal(mixedBatches[0][0].extra.auto_reset_credit_enabled, true, "new accounts inherit the bound profile's automatic reset-card switch");
 
   const sourceResponse = await fetch(`${baseUrl}/api/jobs/export-source`, {
     method: "POST",
@@ -1886,6 +1887,7 @@ try {
     existing_setting: "preserved",
     codex_fingerprint_mode: "full",
     privacy_mode: "training_off",
+    auto_reset_credit_enabled: false,
     openai_oauth_responses_websockets_v2_mode: "http_bridge",
     openai_oauth_responses_websockets_v2_enabled: true,
   });

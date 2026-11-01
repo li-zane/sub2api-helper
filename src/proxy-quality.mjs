@@ -3,20 +3,16 @@ import { isIP } from "node:net";
 import { performance } from "node:perf_hooks";
 import { TlsFingerprintTransport, proxySupportsSessionRotation, rotateProxySession } from "./tls-transport.mjs";
 
-const DEFAULT_EXIT_URL = "https://api.ipify.org?format=json";
-const DEFAULT_REPUTATION_URL = "https://proxycheck.io/v2/";
+const DEFAULT_EXIT_URL = "https://my.ippure.com/v1/info";
 const REQUEST_TIMEOUT_MS = 8_000;
-const REPUTATION_TTL_MS = 10 * 60_000;
 
 // Separate transports keep diagnostics independent from account login sessions.
 export class ProxyQualityService {
-  constructor({ exitUrl = DEFAULT_EXIT_URL, reputationUrl = DEFAULT_REPUTATION_URL, profile = "chrome146", timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  constructor({ exitUrl = DEFAULT_EXIT_URL, profile = "chrome146", timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
     this.exitUrl = exitUrl;
-    this.reputationUrl = reputationUrl;
     this.profile = profile === "auto" ? "chrome146" : profile;
     this.timeoutMs = Math.max(100, Math.min(REQUEST_TIMEOUT_MS, Number(timeoutMs) || REQUEST_TIMEOUT_MS));
     this.running = new Map();
-    this.reputations = new Map();
     this.closed = false;
   }
 
@@ -46,6 +42,7 @@ export class ProxyQualityService {
     const stop = () => { void transport.close(); };
     signal.addEventListener("abort", stop, { once: true });
     const samples = [];
+    const reports = new Map();
     const sessionRotation = rotateSession ? (proxySupportsSessionRotation(proxyUrl) ? "rotated" : "unsupported") : "fixed";
     const checkProxyUrl = sessionRotation === "rotated" ? rotateProxySession(proxyUrl) : proxyUrl;
     try {
@@ -62,6 +59,14 @@ export class ProxyQualityService {
           const ip = normalizeIp(data.ip);
           if (!ip) throw new Error("INVALID_IP");
           samples.push({ ok: true, ip, latencyMs: Math.max(1, Math.round(performance.now() - start)) });
+          const report = normalizeReputation(data);
+          // IPPure reports the caller's IP: obtain both the exit and its score
+          // through the selected proxy, never a direct reputation lookup.
+          if (report.riskScore !== null || !reports.get(ip)?.available) reports.set(ip, {
+            ...report, checkedAt: new Date().toISOString(), source: "ippure.com",
+            available: report.riskScore !== null,
+            error: report.riskScore === null ? "IPPure 未返回有效风险分，纯净度未知" : null,
+          });
         } catch {
           samples.push({ ok: false, error: "出口检测失败，请检查代理连接、认证或检测服务" });
         }
@@ -75,7 +80,7 @@ export class ProxyQualityService {
       signal.throwIfAborted();
       const successful = samples.filter(sample => sample.ok);
       const ips = [...new Set(successful.map(sample => sample.ip))];
-      const exits = await Promise.all(ips.map(async ip => ({ ip, ...await this.lookupReputation(ip, signal) })));
+      const exits = ips.map(ip => ({ ip, ...reports.get(ip) }));
       const latencies = successful.map(sample => sample.latencyMs);
       return {
         checkedAt: new Date().toISOString(),
@@ -95,30 +100,6 @@ export class ProxyQualityService {
     }
   }
 
-  async lookupReputation(ip, signal) {
-    const cached = this.reputations.get(ip);
-    if (cached?.expiresAt > Date.now()) return cached.value;
-    const checkedAt = new Date().toISOString();
-    let value;
-    try {
-      const url = new URL(encodeURIComponent(ip), this.reputationUrl);
-      url.search = new URLSearchParams({ vpn: "1", asn: "1", risk: "1" }).toString();
-      const response = await fetch(url, { redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]), headers: { accept: "application/json" } });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      const entry = data[ip] || Object.entries(data).find(([key]) => normalizeIp(key) === ip)?.[1];
-      if (data.status !== "ok" || !entry || typeof entry !== "object") throw new Error("NO_REPUTATION");
-      value = { ...normalizeReputation(entry), checkedAt, source: "proxycheck.io", available: true, error: null };
-    } catch {
-      value = { ...normalizeReputation({}), checkedAt, source: "proxycheck.io", available: false, error: "信誉库暂未返回有效数据，纯净度未知" };
-    }
-    if (!signal.aborted) {
-      if (this.reputations.size >= 256) this.reputations.delete(this.reputations.keys().next().value);
-      this.reputations.set(ip, { value, expiresAt: Date.now() + (value.available ? REPUTATION_TTL_MS : 30_000) });
-    }
-    return value;
-  }
-
   async close() {
     this.closed = true;
     for (const operation of this.running.values()) operation.controller.abort();
@@ -136,24 +117,25 @@ function normalizeIp(value) {
 function text(value) { return typeof value === "string" ? value.trim().slice(0, 180) : null; }
 
 export function normalizeReputation(entry) {
-  const rawRisk = entry.risk;
+  const rawRisk = entry.fraudScore;
   const risk = typeof rawRisk === "number" || (typeof rawRisk === "string" && /^\d+(?:\.\d+)?$/.test(rawRisk)) ? Number(rawRisk) : NaN;
   const riskScore = Number.isFinite(risk) && risk >= 0 && risk <= 100 ? risk : null;
-  const type = text(entry.type);
-  const classified = /^(business|residential|hosting|mobile|vpn|tor|socks|http|compromised|data.?cent)/i.test(type || "");
+  const residential = typeof entry.isResidential === "boolean" ? entry.isResidential : null;
   return {
     riskScore,
     riskLevel: riskScore === null ? "unknown" : riskScore <= 33 ? "low" : riskScore <= 66 ? "medium" : "high",
-    proxy: entry.proxy === "yes" ? true : entry.proxy === "no" ? false : null,
-    vpn: classified ? /vpn/i.test(type) : null,
-    tor: classified ? /\btor\b/i.test(type) : null,
-    hosting: /hosting|datacen(?:ter|tre)|data cent(?:er|re)/i.test(type || "") ? true : /residential|mobile/i.test(type || "") ? false : null,
-    networkType: type,
+    proxy: null,
+    vpn: null,
+    tor: null,
+    hosting: null,
+    residential,
+    broadcast: typeof entry.isBroadcast === "boolean" ? entry.isBroadcast : null,
+    networkType: residential === true ? "住宅 IP" : residential === false ? "非住宅 IP" : null,
     country: text(entry.country),
-    countryCode: text(entry.isocode),
+    countryCode: text(entry.countryCode),
     region: text(entry.region),
     city: text(entry.city),
-    provider: text(entry.provider) || text(entry.organisation),
-    asn: text(entry.asn),
+    provider: text(entry.asOrganization),
+    asn: Number.isSafeInteger(entry.asn) && entry.asn > 0 ? `AS${entry.asn}` : null,
   };
 }
