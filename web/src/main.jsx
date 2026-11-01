@@ -43,6 +43,7 @@ import "./styles.css";
 import { logoutAccountSessions, proxySwitchSelectionState } from "./account-session-actions.mjs";
 import { OverloadDetection } from "./overload-detection.jsx";
 import { ProxyQualityPanel } from "./proxy-quality.jsx";
+import { FingerprintSettingsButton, FingerprintDefaultsFields, ModelFingerprintCell } from "./model-fingerprint.jsx";
 
 const POLL_INTERVAL_MS = 900;
 const SUB2API_PIPELINE_TIMEOUT_MS = 15 * 60_000;
@@ -1606,6 +1607,7 @@ function App() {
           <span className="summary-pill" title="进行中任务数 / 同时运行任务数上限"><i className="status-dot active" />进行中 <strong>{stats.active}{taskSettings ? ` / ${taskSettings.maxActiveJobs}` : ""}</strong></span>
           <span className="summary-pill"><i className="status-dot queued" />排队中 <strong>{stats.queued || 0}</strong></span>
           <span className="summary-pill"><i className="status-dot complete" />已完成 <strong>{stats.completed}</strong></span>
+          {features.modelFingerprint && <FingerprintSettingsButton token={token} planTypes={availablePlanTypes} />}
           {features.taskSettings && (
             <button ref={taskSettingsButtonRef} type="button" className="secondary-button" onClick={openTaskSettings} disabled={!token || taskSettingsOpening}>
               {taskSettingsOpening ? <LoaderCircle className="spin" size={16} /> : <Settings2 size={16} />}任务设置
@@ -2056,6 +2058,7 @@ function App() {
                 <th>最近操作时间</th>
                 <th className="bound-ip-heading">绑定 IP</th>
                 <th className="overload-heading">过载检测</th>
+                <th className="fingerprint-heading">降智检测</th>
                 <th className="actions-heading">操作</th>
               </tr>
             </thead>
@@ -2108,7 +2111,7 @@ function App() {
                   />
                   {expandedJobId === job.id && (
                     <tr className="log-row">
-                      <td colSpan="14"><JobLogs token={token} jobId={job.id} /></td>
+                      <td colSpan="15"><JobLogs token={token} jobId={job.id} /></td>
                     </tr>
                   )}
                 </React.Fragment>
@@ -2879,7 +2882,7 @@ function App() {
 function EmptyState({ filtered = false }) {
   return (
     <tr>
-      <td colSpan="14">
+      <td colSpan="15">
         <div className="empty-state">
           <div className="empty-state-icon"><Mail size={24} /></div>
           <h3>{filtered ? "没有匹配账号" : "暂无授权任务"}</h3>
@@ -3360,6 +3363,7 @@ function JobRow({ job, token, expanded, onToggleLogs, onError, selected, onToggl
       </td>
       <BoundProxyCell job={job} />
       <td className="overload-cell"><OverloadDetection job={job} token={token} onError={onError} /></td>
+      <td className="fingerprint-cell"><ModelFingerprintCell job={job} token={token} onError={onError} /></td>
       <td className="actions-cell">
         <div className="row-actions">
           {credentialsAvailable && (
@@ -3452,6 +3456,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
+  const [fingerprintDefaults, setFingerprintDefaults] = useState(() => settings.modelFingerprint || { models: [], intervalMinutes: 360, minProbability: 0.8 });
   const [accountProxyMode, setAccountProxyMode] = useState(() => ["sub2api", "plan"].includes(settings.accountProxyMode) ? settings.accountProxyMode : "global");
   const [codexAuthMode, setCodexAuthMode] = useState(() => settings.codexAuthMode || "local");
   const [autoRows, setAutoRows] = useState(() => taskAutoActionRows(settings.autoActions));
@@ -3518,7 +3523,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown }),
+        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, modelFingerprint: fingerprintDefaults }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -3594,6 +3599,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           </div>
           <p className="task-settings-help">最近 {overloadRule.windowMinutes || "—"} 分钟内过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟。恢复后重新计数，服务重启后继续计时。</p>
         </section>
+        <section className="task-auto-settings"><h3>降智检测默认规则</h3><FingerprintDefaultsFields value={fingerprintDefaults} onChange={setFingerprintDefaults} disabled={saving} /><p className="task-settings-help">PlanType 默认开关和条件分组在主界面的“降智检测设置”中管理；账号可独立覆盖模型与间隔。</p></section>
         <p id="task-settings-description" className="task-settings-help">可设置 {settings.min}–{settings.max} 条，默认 {settings.default} 条。超过上限的任务自动排队。并发越高，服务器和代理的负载越大。</p>
         <p className="task-settings-help">调高后立即启动排队任务；调低后等待当前任务完成，再按新上限调度。服务重启后保留此设置。</p>
         <section className="task-auto-settings" aria-labelledby="task-auto-settings-title">

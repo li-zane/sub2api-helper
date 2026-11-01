@@ -1,0 +1,70 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { ModelFingerprintService, normalizeFingerprintSettings, normalizeFingerprintOverride, fingerprintVerdict, aggregateFingerprint } from "../src/model-fingerprint.mjs";
+const directory = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-fingerprint-"));
+const makeAnalysis = (prediction = "gpt-5.5", probability = 0.95, decision = "scored") => ({ prediction, prediction_name: prediction, probability, decision, used_outputs: 3, probability_status: "reference_calibrated", evidence: { insufficient: true }, results: ["gpt-5.5", "gpt-5.4"].map(model => ({ model, display_name: model, probability: model === prediction ? probability : 1 - probability })) });
+assert.equal(fingerprintVerdict(makeAnalysis(), "gpt-5.5", .8), "match", "SDK identity caveat is not mistaken for missing calibration");
+assert.equal(fingerprintVerdict(makeAnalysis("gpt-5.4"), "gpt-5.5", .8), "mismatch");
+assert.equal(fingerprintVerdict(makeAnalysis("gpt-5.4", .6), "gpt-5.5", .8), "unknown");
+assert.equal(fingerprintVerdict(makeAnalysis(), "absent-from-bank", .8), "unknown");
+assert.equal(fingerprintVerdict({ ...makeAnalysis(), used_outputs: 2 }, "gpt-5.5", .8), "unknown");
+assert.equal(aggregateFingerprint([{ status: "match" }, { status: "error" }]), "unknown");
+assert.equal(aggregateFingerprint([{ status: "match" }, { status: "mismatch" }]), "mismatch");
+for (const intervalMinutes of [0, 4, 43201, true, ""]) assert.throws(() => normalizeFingerprintSettings({ intervalMinutes }));
+assert.throws(() => normalizeFingerprintSettings({ models: ["a", "a"] }));
+assert.throws(() => normalizeFingerprintOverride({ enabled: "yes" }));
+let time = Date.now(), backend = "fixture", phase = "match", calls = 0, writes = 0, failPut = false;
+let release;
+const account = { id: 1, type: "oauth", status: "active", schedulable: true, group_ids: ["10", "99"] };
+const settings = { models: ["gpt-5.5"], intervalMinutes: 5, minProbability: .8, planDefaults: { free: true }, groupPolicies: { default: { 10: "default", 20: "verified" } } };
+const options = {
+  filePath: path.join(directory, "state.json"), now: () => time,
+  getContext: () => ({ config: { baseUrl: "https://fixture", adminApiKey: "private" }, backend, profiles: [{ id: "default", groupIds: ["10", "20"] }], jobs: [{ email: "a@example.test", planType: "free" }] }),
+  listTargets: async () => [{ id: 1, email: "a@example.test", profileId: "default" }], getAccount: async () => structuredClone(account),
+  sample: async (_config, _account, _model, _prompt, signal) => { calls++; if (phase === "held") await new Promise(resolve => { release = resolve; signal.addEventListener("abort", resolve, { once: true }); }); signal.throwIfAborted(); if (phase === "error") throw new Error("private-token"); return "1, 20, 42"; },
+  detectorLoader: async () => ({ builtAt: "fixture-build", analyze: () => makeAnalysis(phase === "mismatch" ? "gpt-5.4" : "gpt-5.5", phase === "unknown" ? .5 : .95) }),
+  challenges: () => Array.from({ length: 3 }, () => ({ prompt: "fixture challenge", expected_count: 3 })),
+  updateGroups: async (_config, _id, ids) => { if (failPut) throw new Error("upstream private-token"); account.group_ids = ids; writes++; },
+};
+const service = new ModelFingerprintService(options);
+try {
+  await service.load(); assert.equal(service.snapshot("a@example.test", "free").enabled, false);
+  await service.saveSettings(settings);
+  assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["10", "20", "99"]), ["10", "99"]);
+  let state = await service.run("a@example.test", "free", { manual: true });
+  assert.equal(state.result.status, "match"); assert.equal(calls, 3); assert.deepEqual(account.group_ids.sort(), ["10", "20", "99"]);
+  assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["10", "20"], { ...account, credentials: {} }), ["10", "20"], "redacted admin DTO still uses identity/version/routing to admit matching evidence");
+  phase = "mismatch"; state = await service.run("a@example.test", "free", { manual: true });
+  assert.equal(state.result.status, "mismatch"); assert.deepEqual(account.group_ids.sort(), ["10", "99"]);
+  phase = "unknown"; account.group_ids.push("20"); const oldWrites = writes;
+  state = await service.run("a@example.test", "free", { manual: true }); assert.equal(state.result.status, "unknown"); assert.equal(writes, oldWrites, "uncertain result does not mutate existing groups");
+  assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["10", "20", "99"], account), ["10", "20", "99"], "existing conditional groups survive unknown evidence");
+  assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["10", "20", "99"]), ["10", "99"], "new admissions still require current matching evidence");
+  phase = "error"; state = await service.run("a@example.test", "free", { manual: true }); assert.equal(state.result.status, "unknown"); assert(!JSON.stringify(state).includes("private-token"));
+  await service.saveOverride("a@example.test", { enabled: false, models: ["gpt-5.4"], intervalMinutes: 10 });
+  assert.equal(service.snapshot("a@example.test", "free").enabled, false); assert.equal(service.snapshot("a@example.test", "free").models[0].model, "gpt-5.4");
+  const restored = new ModelFingerprintService(options); await restored.load(); assert.equal(restored.snapshot("a@example.test", "free").intervalMinutes, 10); assert.equal(restored.snapshot("a@example.test", "free").enabled, false); await restored.stop();
+  await service.saveOverride("a@example.test", {}); assert.equal(service.snapshot("a@example.test", "free").enabled, true);
+  phase = "match"; account.group_ids = ["10", "99"]; failPut = true;
+  state = await service.run("a@example.test", "free", { manual: true }); assert(state.groupSyncError); const beforeRetry = calls;
+  failPut = false; service.stopped = false; await service.tick(); service.stopped = true; assert.equal(calls, beforeRetry, "group retry does not resample model"); assert(account.group_ids.includes("20"));
+  assert(service.filterGroups("a@example.test", "free", "default", ["20"], account).includes("20"));
+  account.credentials = { access_token: "new-identity", _token_version: 2 }; account.group_ids = ["10", "99"];
+  assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["20"], account), [], "previous pass cannot admit changed account credentials");
+  backend = "other"; assert.equal(service.snapshot("a@example.test", "free").result, null, "backend switch invalidates evidence"); backend = "fixture";
+  phase = "held"; const pending = service.run("a@example.test", "free", { manual: true });
+  while (!release) await new Promise(r => setTimeout(r, 5));
+  const beforeCancel = writes; await service.saveOverride("a@example.test", { enabled: false }); release(); await pending; assert.equal(writes, beforeCancel, "cancelled work never changes groups");
+  phase = "match"; failPut = true; await service.run("a@example.test", "free", { manual: true });
+  const disabledCalls = calls; failPut = false; service.stopped = false; await service.tick(); service.stopped = true;
+  assert.equal(calls, disabledCalls, "disabled account retries pending manual group sync without new inference");
+  const order = [];
+  await Promise.all([service.saveOverride("a@example.test", { enabled: true, intervalMinutes: 15 }).then(() => order.push(1)), service.saveOverride("a@example.test", { enabled: false, intervalMinutes: 20 }).then(() => order.push(2))]);
+  assert.deepEqual(order, [1, 2]); assert.equal(service.snapshot("a@example.test", "free").intervalMinutes, 20);
+  const slow = new ModelFingerprintService({ ...options, filePath: path.join(directory, "slow.json"), detectorLoader: () => new Promise(() => {}) });
+  await slow.saveSettings(settings); const slowRun = slow.run("a@example.test", "free", { manual: true });
+  await new Promise(r => setTimeout(r, 20)); await slow.stop(); await slowRun;
+  console.log("PASS: model fingerprint calibrated matching/unknown states, three-sample strictness, inherited/independent settings, persistence, backend isolation, conditional groups, retry without model calls and cancellation");
+} finally { await service.stop(); await fs.rm(directory, { recursive: true, force: true }); }

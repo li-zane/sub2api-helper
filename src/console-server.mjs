@@ -32,6 +32,8 @@ import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
 import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
+import { ModelFingerprintService, normalizeFingerprintSettings } from "./model-fingerprint.mjs";
+import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4399;
@@ -253,6 +255,32 @@ const overloadCooldown = new OverloadCooldown({
   },
 });
 
+const fingerprintAccountReader = createFingerprintAccountReader(requestSub2Api);
+async function readFingerprintAccount(config, id) {
+  const account = await fingerprintAccountReader(config, id);
+  return { ...account, group_ids: sub2ApiAccountGroupIds(account) };
+}
+const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprintAccount, getProxies: listSub2ApiProxies,
+  testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
+const modelFingerprint = new ModelFingerprintService({
+  filePath: path.join(OUTPUT_ROOT, "model-fingerprint.json"),
+  getContext: () => ({ config: sub2ApiSettingsConfig, backend: sub2ApiSettingsConfig ? monitorBackendIdentity(sub2ApiSettingsConfig) : null,
+    profiles: [...sub2ApiProfiles.values()].map(p => ({ id: p.id, name: p.name, groupIds: p.groupIds || [], planTypes: Object.keys(sub2ApiPlanTypeBindings).filter(t => sub2ApiPlanTypeBindings[t] === p.id) })),
+    routing: JSON.stringify({ bindings: sub2ApiPlanTypeBindings, profiles: [...sub2ApiProfiles.values()].map(p => [p.id, p.groupIds]) }),
+    jobs: listUniqueJobs().filter(j => !j.deleted && !isActive(j.status)).map(j => ({ email: j.email, planType: getJobPlanType(j) || "unknown" })) }),
+  listTargets: async config => {
+    const listing = await listSub2ApiAccounts(config, { withMeta: true });
+    if (!listing.complete) throw new Error("Sub2API 账号列表不完整");
+    return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a)).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
+  },
+  getAccount: readFingerprintAccount, sample: fingerprintSampler,
+  updateGroups: async (config, id, ids) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ group_ids: ids.map(Number) }) }),
+  onChange: invalidateSub2ApiAccountStatusCache,
+});
+function fingerprintGroupIds(config, account, groups, currentAccount = null) {
+  return modelFingerprint.filterGroups(sub2ApiAccountEmail(account), extractPlanTypeFromAccount(account, { preferJwt: false }) || "unknown", config.profileId || "default", groups, currentAccount);
+}
+
 const hostArg = process.argv.find((item) => item.startsWith("--host="));
 const hostIndex = process.argv.indexOf("--host");
 const requestedHost = String(
@@ -283,6 +311,7 @@ await loadSub2ApiSettingsConfiguration();
 await loadSub2ApiMonitorConfiguration();
 await overloadMonitor.load();
 await overloadCooldown.load();
+await modelFingerprint.load();
 await syncCompletedOutputs(true);
 for (const job of jobs.values()) {
   if (job.poolRefreshAction) {
@@ -296,6 +325,7 @@ scheduleQueuedJobs();
 scheduleSub2ApiMonitor();
 overloadMonitor.start();
 overloadCooldown.start();
+modelFingerprint.start();
 
 const vite = await createViteServer({
   root: WEB_ROOT,
@@ -408,6 +438,7 @@ async function handleApi(req, res, requestUrl) {
         overloadDetection: true,
         proxyQuality: true,
         overloadAutoCooldown: true,
+        modelFingerprint: true,
       },
     });
     return;
@@ -421,6 +452,34 @@ async function handleApi(req, res, requestUrl) {
   if (req.method === "GET" && requestUrl.pathname === "/api/task-settings") {
     sendJson(res, 200, { settings: publicTaskSettings() });
     return;
+  }
+
+  if (requestUrl.pathname === "/api/model-fingerprint/settings") {
+    if (req.method === "POST") {
+      const body = await readJson(req);
+      await modelFingerprint.saveSettings(body.settings || body);
+    } else if (req.method !== "GET") throw httpError(405, "Method not allowed");
+    let groups = [];
+    if (sub2ApiSettingsConfig?.baseUrl && sub2ApiSettingsConfig?.adminApiKey) {
+      try { groups = (await listSub2ApiTargetGroups(sub2ApiSettingsConfig)).map(g => ({ id: String(g.id), name: String(g.name || g.id) })); } catch {}
+    }
+    sendJson(res, 200, { ...modelFingerprint.publicSettings(), groups }); return;
+  }
+  if (req.method === "GET" && requestUrl.pathname === "/api/model-fingerprint/reference") {
+    sendJson(res, 200, await modelFingerprint.referenceInfo()); return;
+  }
+  const fingerprintMatch = /^\/api\/jobs\/([a-f0-9-]+)\/model-fingerprint(?:\/(check))?$/.exec(requestUrl.pathname);
+  if (fingerprintMatch && req.method === "POST") {
+    const job = jobs.get(fingerprintMatch[1]);
+    if (!job || job.deleted) throw httpError(404, "账号不存在");
+    const planType = getJobPlanType(job) || "unknown";
+    if (fingerprintMatch[2]) {
+      if (isActive(job.status)) throw httpError(409, "账号任务正在执行，请完成后再检测");
+      void modelFingerprint.run(job.email, planType, { manual: true }).catch(() => {});
+      sendJson(res, 202, { job: publicJob(job) }); return;
+    }
+    else await modelFingerprint.saveOverride(job.email, await readJson(req));
+    sendJson(res, 200, { job: publicJob(job) }); return;
   }
 
   if (req.method === "POST" && requestUrl.pathname === "/api/proxy-quality/check") {
@@ -3368,7 +3427,7 @@ async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2
       extra,
       status: "active",
       schedulable: !overloadCooldown.isPaused(sub2ApiAccountEmail(account)),
-      group_ids: accountConfig.groupIds.length ? accountConfig.groupIds : (account.group_ids || []),
+      group_ids: fingerprintGroupIds(accountConfig, account, accountConfig.groupIds.length ? accountConfig.groupIds : (account.group_ids || [])),
       ...proxyFields,
       ...(accountConfig.concurrency !== null ? { concurrency: accountConfig.concurrency } : {}),
       ...(accountConfig.loadFactor !== null ? { load_factor: accountConfig.loadFactor } : {}),
@@ -3886,6 +3945,7 @@ function publicTaskSettings(includeProxy = true) {
     codexAuthMode,
     accountProxyCooldownMinutes,
     overloadAutoCooldown: { ...overloadAutoCooldownSettings },
+    modelFingerprint: modelFingerprint.settings,
     allowDirectFallback,
     min: 1,
     max: MAX_ACTIVE_JOBS_LIMIT,
@@ -3916,6 +3976,8 @@ async function loadTaskSettings() {
 
 async function saveTaskSettings(body) {
   const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  if (Object.hasOwn(source, "modelFingerprint") && (!source.modelFingerprint || typeof source.modelFingerprint !== "object" || Array.isArray(source.modelFingerprint))) throw httpError(400, "降智检测默认规则必须为对象");
+  const nextFingerprint = Object.hasOwn(source, "modelFingerprint") ? normalizeFingerprintSettings({ ...modelFingerprint.settings, models: source.modelFingerprint.models, intervalMinutes: source.modelFingerprint.intervalMinutes, minProbability: source.modelFingerprint.minProbability }) : null;
   let nextCodexAuthMode = codexAuthMode;
   if (Object.hasOwn(source, "codexAuthMode")) {
     try { nextCodexAuthMode = normalizeCodexAuthMode(source.codexAuthMode); }
@@ -3968,7 +4030,12 @@ async function saveTaskSettings(body) {
         accountProxyCooldownMinutes: effectiveCooldownMinutes,
         overloadAutoCooldown: effectiveOverloadAutoCooldown,
       }, null, 2)}\n`, { mode: 0o600 });
+      const previousSettingsBytes = nextFingerprint ? await fs.readFile(TASK_SETTINGS_PATH).catch(error => { if (error.code === "ENOENT") return null; throw error; }) : null;
       await fs.rename(tempPath, TASK_SETTINGS_PATH);
+      if (nextFingerprint) {
+        try { await modelFingerprint.saveSettings(nextFingerprint); }
+        catch (error) { if (previousSettingsBytes) await fs.writeFile(TASK_SETTINGS_PATH, previousSettingsBytes, { mode: 0o600 }); else await fs.rm(TASK_SETTINGS_PATH, { force: true }); throw error; }
+      }
     } finally {
       await fs.rm(tempPath, { force: true }).catch(() => {});
     }
@@ -4678,7 +4745,7 @@ function unsyncableSub2ApiProfileFields(accountConfig, fields) {
 async function buildSub2ApiProfileSyncUpdate(remoteAccount, accountConfig, fields) {
   const changed = new Set(fields);
   const body = {};
-  if (changed.has("groupIds")) body.group_ids = accountConfig.groupIds;
+  if (changed.has("groupIds")) body.group_ids = fingerprintGroupIds(accountConfig, remoteAccount, accountConfig.groupIds, remoteAccount);
   if (changed.has("proxyId")) Object.assign(body, await sub2ApiProxyFieldsForAccount(accountConfig, sub2ApiAccountEmail(remoteAccount), remoteAccount));
   if (changed.has("concurrency")) body.concurrency = accountConfig.concurrency;
   if (changed.has("loadFactor")) body.load_factor = accountConfig.loadFactor;
@@ -4803,7 +4870,7 @@ async function updateSub2ApiAccountFromProfile(globalConfig, remoteAccount, prof
   if (!accountId) return false;
   const accountConfig = await resolveSub2ApiWriteConfig(profileConfig(profile, globalConfig));
   const body = {};
-  if (Array.isArray(accountConfig.groupIds) && accountConfig.groupIds.length) body.group_ids = accountConfig.groupIds;
+  if (Array.isArray(accountConfig.groupIds) && accountConfig.groupIds.length) body.group_ids = fingerprintGroupIds(accountConfig, remoteAccount, accountConfig.groupIds, remoteAccount);
   Object.assign(body, await sub2ApiProxyFieldsForAccount(accountConfig, sub2ApiAccountEmail(remoteAccount), remoteAccount));
   if (accountConfig.concurrency !== null) body.concurrency = accountConfig.concurrency;
   if (accountConfig.loadFactor !== null) body.load_factor = accountConfig.loadFactor;
@@ -4873,7 +4940,7 @@ async function buildSub2ApiAccountUpdate(localAccount, accountConfig, remoteAcco
     ...(targetPlanType ? { plan_type: targetPlanType } : {}),
     ...(accountName ? { name: accountName } : {}),
     ...(accountConfig.groupIds.length
-      ? { group_ids: accountConfig.groupIds }
+      ? { group_ids: fingerprintGroupIds(accountConfig, localAccount, accountConfig.groupIds, remoteAccount) }
       : { group_ids: sub2ApiAccountGroupIds(remoteAccount) }),
     ...await sub2ApiProxyFieldsForAccount(accountConfig, sub2ApiAccountEmail(localAccount), remoteAccount),
     ...(accountConfig.concurrency !== null ? { concurrency: accountConfig.concurrency } : {}),
@@ -6223,7 +6290,7 @@ async function performSub2ApiAutoRepairSuccess(job) {
         extra,
         ...(job.remarkSyncPending ? { notes: job.remark || "" } : {}),
         ...(accountName ? { name: accountName } : {}),
-        ...(accountConfig.groupIds.length ? { group_ids: accountConfig.groupIds } : {}),
+        ...(accountConfig.groupIds.length ? { group_ids: fingerprintGroupIds(accountConfig, profileAccount, accountConfig.groupIds, remoteAccount) } : {}),
         ...await sub2ApiProxyFieldsForAccount(accountConfig, job.email, remoteAccount),
         ...(accountConfig.concurrency !== null ? { concurrency: accountConfig.concurrency } : {}),
         ...(accountConfig.loadFactor !== null ? { load_factor: accountConfig.loadFactor } : {}),
@@ -6371,6 +6438,7 @@ function publicJob(job) {
     sub2apiUsage: publicSub2ApiUsage(sub2ApiStatus.usage),
     overloadDetection: overloadMonitor.snapshot(job.email),
     overloadAutoCooldown: overloadCooldown.snapshot(job.email),
+    modelFingerprint: modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown"),
     lastError: job.lastError,
     canDownload: Boolean(job.resultSaved),
     poolOnly: Boolean(job.poolOnly),
@@ -7005,6 +7073,7 @@ async function deleteJobsByEmail(email) {
   const sub2api = await deleteSub2ApiAccountsByEmail(email);
   await overloadMonitor.remove(email);
   await overloadCooldown.remove(email);
+  await modelFingerprint.remove(email);
   const matching = [...jobs.values()].filter((job) => job.email.toLowerCase() === email);
   const directories = new Set();
   matching.forEach((job) => {
@@ -8721,6 +8790,7 @@ async function shutdown() {
     await Promise.allSettled([
       overloadMonitor.stop(),
       overloadCooldown.stop(),
+      modelFingerprint.stop(),
       proxyQualityService.close(),
       sub2ApiMonitorPromise,
       taskSettingsWritePromise,

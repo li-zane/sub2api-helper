@@ -221,6 +221,37 @@ button:focus-visible, a:focus-visible, select:focus-visible { outline: 2px solid
 .proxy-quality-flags { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .proxy-quality-source, .proxy-quality-time { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .proxy-quality-error { margin: 6px 0; color: var(--danger); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.fingerprint-heading, .fingerprint-cell { min-width: 205px; width: 205px; }
+.fingerprint-cell-body { display: grid; gap: 5px; min-width: 0; font-size: 11px; }
+.fingerprint-cell-body > small { color: var(--muted); max-width: 210px; overflow-wrap: anywhere; }
+.fingerprint-cell-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fingerprint-status { font-weight: 650; color: var(--muted); }
+.fingerprint-status.match { color: var(--green); }
+.fingerprint-status.mismatch { color: var(--danger); }
+.fingerprint-check-button { justify-self: start; border: 0; background: transparent; padding: 2px 0; color: var(--green); font-size: 11px; cursor: pointer; }
+.fingerprint-check-button:disabled { color: var(--muted); cursor: default; }
+.fingerprint-dialog { width: min(720px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); padding: 22px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); color: var(--ink); background: #fff; }
+.fingerprint-dialog::backdrop { background: #23342c66; backdrop-filter: blur(3px); }
+.fingerprint-form, .fingerprint-defaults { display: grid; gap: 14px; min-width: 0; }
+.fingerprint-form { margin-top: 16px; }
+.fingerprint-two-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.fingerprint-defaults .settings-field input, .fingerprint-defaults textarea, .fingerprint-form > label input, .fingerprint-form > label textarea, .fingerprint-form select, .fingerprint-add-plan input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-muted); color: var(--ink); font: inherit; box-sizing: border-box; }
+.fingerprint-form textarea, .fingerprint-defaults textarea { resize: vertical; font-weight: 400; line-height: 1.5; }
+.fingerprint-dialog .fingerprint-form { flex: 0 0 auto; }
+.fingerprint-dialog .fingerprint-form textarea { min-height: 88px; height: 100px; }
+.fingerprint-dialog .dialog-header h2 { white-space: normal; overflow-wrap: anywhere; min-width: 0; flex: 1; }
+.fingerprint-form .fingerprint-checkbox input { width: 16px; height: 16px; flex: 0 0 16px; padding: 0; }
+.fingerprint-defaults .settings-field:first-child { grid-column: auto; }
+.fingerprint-two-fields .settings-field:first-child { grid-column: auto; }
+.fingerprint-section { border-top: 1px solid var(--line); padding-top: 14px; display: grid; gap: 10px; }
+.fingerprint-section h3 { margin: 0; font-size: 14px; }
+.fingerprint-plan-list { display: flex; gap: 12px 20px; flex-wrap: wrap; }
+.fingerprint-plan-list label, .fingerprint-checkbox { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.fingerprint-add-plan { display: flex; gap: 8px; }
+.fingerprint-profile { margin: 0; padding: 12px; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.fingerprint-profile legend { font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+.fingerprint-group-rule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(140px, 1fr); gap: 12px; align-items: center; margin-top: 8px; font-size: 12px; }
+.fingerprint-reference { display: block; color: var(--muted); overflow-wrap: anywhere; }
 .proxy-quality-sampling.unknown { color: var(--muted); }
 .provider-field {
   width: 100%;
