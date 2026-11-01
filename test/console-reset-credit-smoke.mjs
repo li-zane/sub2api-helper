@@ -54,7 +54,7 @@ const slot = http.createServer(); await new Promise(r => slot.listen(0, "127.0.0
 const port = slot.address().port; await new Promise(r => slot.close(r));
 const base = `http://127.0.0.1:${port}`;
 const config = { baseUrl: `http://127.0.0.1:${pool.address().port}`, adminApiKey: "fixture-key", groupIds: [] };
-let profiles = [{ id: "default", name: "Free", autoResetCreditEnabled: false }, { id: "paid", name: "Plus", autoResetCreditEnabled: true }];
+let profiles = [{ id: "default", name: "Free", autoResetCreditEnabled: false }, { id: "paid", name: "Plus", autoResetCreditEnabled: true, autoResetCredit5hThresholdPercent: 90, autoResetCredit7dThresholdPercent: 95 }];
 const body = () => ({ config, profiles, activeProfileId: "default", planTypeBindings: { free: "default", plus: "paid" } });
 async function start() {
   child = spawn(process.execPath, ["src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], {
@@ -72,6 +72,9 @@ try {
   await start();
   let result = await post("/api/sub2api/settings", body()); assert.equal(result.status, 200);
   assert.equal(result.data.profiles.find(p => p.id === "paid").autoResetCreditEnabled, true);
+  assert.equal(result.data.profiles.find(p => p.id === "paid").autoResetCredit5hThresholdPercent, 90, "5h threshold is stored per profile");
+  assert.equal(result.data.profiles.find(p => p.id === "paid").autoResetCredit7dThresholdPercent, 95);
+  assert.equal(result.data.profiles.find(p => p.id === "default").autoResetCredit5hThresholdPercent, 100, "legacy profile defaults to 100%");
   await get("/api/sub2api/account-status?refresh=1");
   let page = await get("/api/jobs"); const free = page.jobs.find(j => j.email === records[0].email);
   assert(free?.canDownload);
@@ -83,20 +86,48 @@ try {
   const puts = calls.slice(before).filter(c => c.method === "PUT"); assert.equal(puts.length, 1);
   assert.equal(puts[0].path, "/api/v1/admin/accounts/101");
   assert.equal(puts[0].body.extra.auto_reset_credit_enabled, true);
-  assert.equal(puts[0].body.extra.auto_reset_credit_5h_threshold, 0.75);
-  assert.equal(puts[0].body.extra.auto_reset_credit_7d_threshold, 0.9);
+  assert.equal(puts[0].body.extra.auto_reset_credit_5h_threshold, 1);
+  assert.equal(puts[0].body.extra.auto_reset_credit_7d_threshold, 1);
   assert.equal(puts[0].body.extra.keep, "unchanged");
   assert.equal(puts[0].body.extra.codex_fingerprint_mode, "full", "toggling cards leaves unrelated per-account settings intact");
   assert(!Object.hasOwn(puts[0].body.extra, "codex_auto_reset_credit_state"));
   assert(!Object.hasOwn(puts[0].body, "credentials"));
+  profiles[0].autoResetCredit5hThresholdPercent = 75.5;
+  profiles[0].autoResetCredit7dThresholdPercent = 92;
+  const thresholdStart = calls.length;
+  result = await post("/api/sub2api/settings", body()); assert.equal(result.status, 200);
+  const thresholdPuts = calls.slice(thresholdStart).filter(c => c.method === "PUT");
+  assert.equal(thresholdPuts.length, 1, "threshold-only edits synchronize only the matching PlanType");
+  assert.equal(thresholdPuts[0].body.extra.auto_reset_credit_enabled, true);
+  assert.equal(thresholdPuts[0].body.extra.auto_reset_credit_5h_threshold, 0.755);
+  assert.equal(thresholdPuts[0].body.extra.auto_reset_credit_7d_threshold, 0.92);
+  assert.equal(thresholdPuts[0].body.extra.keep, "unchanged");
+  assert.equal(thresholdPuts[0].body.extra.codex_fingerprint_mode, "full");
+  profiles[0].codexFingerprintMode = "device";
+  await post("/api/sub2api/settings", body());
+  assert.equal(records[0].extra.auto_reset_credit_5h_threshold, 0.755, "unrelated profile edits retain thresholds");
   profiles[0].autoResetCreditEnabled = false; await post("/api/sub2api/settings", body());
   assert.equal(records[0].extra.auto_reset_credit_enabled, false);
+  assert.equal(records[0].extra.auto_reset_credit_5h_threshold, 0.755, "disabling preserves the saved threshold");
   await stop(); await start(); result = { data: await get("/api/sub2api/settings") };
   assert.equal(result.data.profiles.find(p => p.id === "default").autoResetCreditEnabled, false);
   assert.equal(result.data.profiles.find(p => p.id === "paid").autoResetCreditEnabled, true);
+  assert.equal(result.data.profiles.find(p => p.id === "default").autoResetCredit5hThresholdPercent, 75.5);
+  assert.equal(result.data.profiles.find(p => p.id === "paid").autoResetCredit7dThresholdPercent, 95);
   // Older clients omitting this field preserve the configured value.
-  profiles = profiles.map(({ autoResetCreditEnabled, ...p }) => p); await post("/api/sub2api/settings", body());
+  profiles = profiles.map(({ autoResetCreditEnabled, autoResetCredit5hThresholdPercent, autoResetCredit7dThresholdPercent, ...p }) => p); await post("/api/sub2api/settings", body());
   assert.equal((await get("/api/sub2api/settings")).profiles.find(p => p.id === "paid").autoResetCreditEnabled, true);
+  assert.equal((await get("/api/sub2api/settings")).profiles.find(p => p.id === "default").autoResetCredit5hThresholdPercent, 75.5);
+  const putCount = calls.filter(c => c.method === "PUT").length;
+  for (const invalid of [0, 0.01, 100.1, "", "nope", true]) {
+    assert.equal((await post("/api/sub2api/settings", { config: { ...config, autoResetCredit5hThresholdPercent: invalid } })).status, 400);
+  }
+  assert.equal(calls.filter(c => c.method === "PUT").length, putCount, "invalid thresholds never reach upstream accounts");
+  profiles[0].autoResetCredit5hThresholdPercent = 0.1;
+  profiles[0].autoResetCredit7dThresholdPercent = 100;
+  await post("/api/sub2api/settings", body());
+  assert.equal(records[0].extra.auto_reset_credit_5h_threshold, 0.001);
+  assert.equal(records[0].extra.auto_reset_credit_7d_threshold, 1);
   assert.equal((await post("/api/sub2api/settings", { config: { ...config, autoResetCreditEnabled: "true" } })).status, 400);
   let usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
   assert.equal(usage.resetCredits.availableCount, 4, "explicit refresh reads Sub2API quota endpoint");
@@ -109,7 +140,7 @@ try {
   quotaAvailable = false; usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
   assert.equal(usage.primary.usedPercent, 37, "older backend without reset-card endpoint retains ordinary usage");
   assert(!calls.some(c => c.path.includes("reset-quota") || c.path.includes("redeem")), "view and refresh never call consume endpoints");
-  console.log("PASS: per-profile Sub2API auto-reset switch on/off, targeted PUT, threshold preservation, restart/legacy persistence, cached/live card counts, zero/unknown, endpoint failure and no card redemption");
+  console.log("PASS: per-profile 5h/7d thresholds, percentage-to-ratio sync, threshold-only PUT, on/off persistence, validation boundaries, legacy/restart retention, card counts and no redemption");
   if (process.argv.includes("--serve")) {
     records[0].extra.codex_reset_credit_snapshot = { available_count: 2, credits: [{ expires_at: future }, { expires_at: future }] };
     quotaAvailable = true; liveCount = 4;

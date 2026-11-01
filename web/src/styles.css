@@ -1359,6 +1359,9 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 .sub2api-config-grid .settings-field > input:focus,
 .sub2api-config-grid .settings-field > select:focus { border-color: var(--green); box-shadow: var(--ring); }
+.settings-field > .sub2api-reset-thresholds { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; height: auto; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; }
+.settings-field > .sub2api-reset-thresholds:focus-within { box-shadow: none; }
+.sub2api-reset-thresholds > .settings-field:first-child { grid-column: auto; }
 .settings-field-hint { color: var(--muted); font-size: 11px; font-weight: 500; line-height: 1.45; }
 .sub2api-config-grid .sub2api-monitor-toggle {
   min-height: 52px;

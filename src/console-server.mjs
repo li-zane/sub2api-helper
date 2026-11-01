@@ -101,6 +101,8 @@ const SUB2API_PROFILE_FIELDS = [
   "modelWhitelist",
   "codexFingerprintMode",
   "autoResetCreditEnabled",
+  "autoResetCredit5hThresholdPercent",
+  "autoResetCredit7dThresholdPercent",
   "wsMode",
 ];
 const SUB2API_TARGET_GROUP_PLATFORMS = ["openai", "composite"];
@@ -3524,7 +3526,16 @@ function normalizeSub2ApiConfig(value, options = {}) {
   const importDatePriority = normalizeImportDatePriority(config.importDatePriority ?? stored.importDatePriority);
   const autoResetCreditEnabled = config.autoResetCreditEnabled ?? stored.autoResetCreditEnabled ?? false;
   if (typeof autoResetCreditEnabled !== "boolean") throw httpError(400, "自动使用重置卡开关必须是布尔值");
-  return { baseUrl, adminApiKey, groupIds, proxyId, concurrency, loadFactor, priority, importDatePriority, accountNameTemplate, modelWhitelist, codexFingerprintMode, autoResetCreditEnabled, wsMode, profileId: String(config.profileId || stored.profileId || "default") };
+  const autoResetCredit5hThresholdPercent = normalizeAutoResetCreditThreshold(config.autoResetCredit5hThresholdPercent ?? stored.autoResetCredit5hThresholdPercent ?? 100, "5h");
+  const autoResetCredit7dThresholdPercent = normalizeAutoResetCreditThreshold(config.autoResetCredit7dThresholdPercent ?? stored.autoResetCredit7dThresholdPercent ?? 100, "7d");
+  return { baseUrl, adminApiKey, groupIds, proxyId, concurrency, loadFactor, priority, importDatePriority, accountNameTemplate, modelWhitelist, codexFingerprintMode, autoResetCreditEnabled, autoResetCredit5hThresholdPercent, autoResetCredit7dThresholdPercent, wsMode, profileId: String(config.profileId || stored.profileId || "default") };
+}
+
+function normalizeAutoResetCreditThreshold(value, label) {
+  const validType = typeof value === "number" || (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim()));
+  const number = validType ? Number(value) : NaN;
+  if (!Number.isFinite(number) || number < 0.1 || number > 100) throw httpError(400, `${label} 自动用重置卡阈值必须为 0.1–100%`);
+  return number;
 }
 
 function normalizeImportDatePriority(value) {
@@ -3803,7 +3814,11 @@ function buildSub2ApiAccountExtra(value, config, account = {}) {
   // workspace switches, and credential repairs use the same privacy state.
   extra.privacy_mode = "training_off";
   extra.codex_fingerprint_mode = config.codexFingerprintMode;
-  if (account.parent_account_id == null) extra.auto_reset_credit_enabled = config.autoResetCreditEnabled === true;
+  if (account.parent_account_id == null) {
+    extra.auto_reset_credit_enabled = config.autoResetCreditEnabled === true;
+    extra.auto_reset_credit_5h_threshold = config.autoResetCredit5hThresholdPercent / 100;
+    extra.auto_reset_credit_7d_threshold = config.autoResetCredit7dThresholdPercent / 100;
+  }
   else for (const key of ["auto_reset_credit_enabled", "auto_reset_credit_5h_threshold", "auto_reset_credit_7d_threshold"]) delete extra[key];
   delete extra.codex_auto_reset_credit_state;
   extra.openai_oauth_responses_websockets_v2_mode = config.wsMode;
@@ -4066,6 +4081,8 @@ function serializeSub2ApiConfig(config) {
     modelWhitelist: config.modelWhitelist,
     codexFingerprintMode: config.codexFingerprintMode,
     autoResetCreditEnabled: config.autoResetCreditEnabled,
+    autoResetCredit5hThresholdPercent: config.autoResetCredit5hThresholdPercent,
+    autoResetCredit7dThresholdPercent: config.autoResetCredit7dThresholdPercent,
     wsMode: config.wsMode,
     profileId: config.profileId || "default",
   };
@@ -4478,6 +4495,8 @@ const SUB2API_PROFILE_FIELD_LABELS = {
   modelWhitelist: "模型白名单",
   codexFingerprintMode: "Codex 指纹模式",
   autoResetCreditEnabled: "自动使用重置卡",
+  autoResetCredit5hThresholdPercent: "5h 自动用卡阈值",
+  autoResetCredit7dThresholdPercent: "7d 自动用卡阈值",
   wsMode: "WS mode",
 };
 const SUB2API_PROFILE_SYNC_CONCURRENCY = 4;
@@ -4668,15 +4687,22 @@ async function buildSub2ApiProfileSyncUpdate(remoteAccount, accountConfig, field
     const accountName = renderSub2ApiAccountName(accountConfig.accountNameTemplate, remoteAccount);
     if (accountName) body.name = accountName;
   }
-  if (changed.has("codexFingerprintMode") || changed.has("wsMode") || changed.has("autoResetCreditEnabled")) {
+  const resetCreditChanged = ["autoResetCreditEnabled", "autoResetCredit5hThresholdPercent", "autoResetCredit7dThresholdPercent"].some((field) => changed.has(field));
+  if (changed.has("codexFingerprintMode") || changed.has("wsMode") || resetCreditChanged) {
     const originalExtra = normalizeSub2ApiExtra(remoteAccount.extra);
     body.extra = changed.has("codexFingerprintMode") || changed.has("wsMode")
       ? buildSub2ApiAccountExtra(originalExtra, accountConfig)
-      : { ...originalExtra, auto_reset_credit_enabled: accountConfig.autoResetCreditEnabled === true };
+      : { ...originalExtra };
     delete body.extra.codex_auto_reset_credit_state;
-    if (!changed.has("autoResetCreditEnabled")) {
-      if (Object.hasOwn(originalExtra, "auto_reset_credit_enabled")) body.extra.auto_reset_credit_enabled = originalExtra.auto_reset_credit_enabled;
-      else delete body.extra.auto_reset_credit_enabled;
+    if (resetCreditChanged) {
+      body.extra.auto_reset_credit_enabled = accountConfig.autoResetCreditEnabled === true;
+      body.extra.auto_reset_credit_5h_threshold = accountConfig.autoResetCredit5hThresholdPercent / 100;
+      body.extra.auto_reset_credit_7d_threshold = accountConfig.autoResetCredit7dThresholdPercent / 100;
+    } else {
+      for (const key of ["auto_reset_credit_enabled", "auto_reset_credit_5h_threshold", "auto_reset_credit_7d_threshold"]) {
+        if (Object.hasOwn(originalExtra, key)) body.extra[key] = originalExtra[key];
+        else delete body.extra[key];
+      }
     }
     if (remoteAccount.parent_account_id != null) {
       for (const key of ["auto_reset_credit_enabled", "auto_reset_credit_5h_threshold", "auto_reset_credit_7d_threshold"]) delete body.extra[key];

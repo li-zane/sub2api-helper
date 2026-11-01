@@ -767,6 +767,13 @@ function App() {
       return;
     }
     for (const profile of sub2apiSettingsDraft.profiles) {
+      for (const [field, label] of [["autoResetCredit5hThresholdPercent", "5h"], ["autoResetCredit7dThresholdPercent", "7d"]]) {
+        const value = String(profile[field] ?? "").trim();
+        if (!/^\d+(?:\.\d+)?$/.test(value) || Number(value) < 0.1 || Number(value) > 100) {
+          setSub2apiSettingsError(`方案“${profile.name}”的 ${label} 自动用重置卡阈值必须为 0.1–100%`);
+          return;
+        }
+      }
       const rule = profile.importDatePriority;
       if (!/^\d+$/.test(String(rule.min)) || !/^\d+$/.test(String(rule.max)) || Number(rule.min) > Number(rule.max) || Number(rule.max) > 10000) {
         setSub2apiSettingsError(`方案“${profile.name}”的日期优先级范围必须为 0–10000 的整数，且下限不能大于上限`);
@@ -2591,7 +2598,23 @@ function App() {
                   <span className="status-toggle-track"><span className="status-toggle-thumb" /></span>
                   <span>{sub2apiSettingsDraft.autoResetCreditEnabled ? "已开启" : "已关闭"}</span>
                 </button>
-                <small>沿用 Sub2API 的自动用卡机制；未设置阈值时按 5h / 7d 用量达到 100% 触发，已有阈值保持不变。保存后同步至该方案绑定的账号。</small>
+                <div className="sub2api-reset-thresholds">
+                  <label className="settings-field">
+                    <span>5h 用量阈值（%）</span>
+                    <input type="number" min="0.1" max="100" step="0.1" inputMode="decimal"
+                      disabled={!sub2apiSettingsDraft.autoResetCreditEnabled}
+                      value={sub2apiSettingsDraft.autoResetCredit5hThresholdPercent}
+                      onChange={(event) => updateSub2ApiDraftProfile({ autoResetCredit5hThresholdPercent: event.target.value })} />
+                  </label>
+                  <label className="settings-field">
+                    <span>7d 用量阈值（%）</span>
+                    <input type="number" min="0.1" max="100" step="0.1" inputMode="decimal"
+                      disabled={!sub2apiSettingsDraft.autoResetCreditEnabled}
+                      value={sub2apiSettingsDraft.autoResetCredit7dThresholdPercent}
+                      onChange={(event) => updateSub2ApiDraftProfile({ autoResetCredit7dThresholdPercent: event.target.value })} />
+                  </label>
+                </div>
+                <small>任一用量窗口达到所设百分比时，由 Sub2API 自动使用可用重置卡。范围 0.1–100%；关闭时保留阈值。保存后，开关与两个阈值一起同步至该方案绑定的账号。</small>
               </div>
               <label className="settings-field wide-settings-field">
                 <span>WS mode</span>
@@ -4988,6 +5011,8 @@ function normalizeSub2ApiSettings(value) {
       ? stored.codexFingerprintMode
       : "session",
     autoResetCreditEnabled: stored.autoResetCreditEnabled === true,
+    autoResetCredit5hThresholdPercent: String(stored.autoResetCredit5hThresholdPercent ?? 100),
+    autoResetCredit7dThresholdPercent: String(stored.autoResetCredit7dThresholdPercent ?? 100),
     wsMode: SUB2API_WS_MODES.has(wsMode) ? wsMode : "off",
   };
   const rawProfiles = Array.isArray(stored.profiles) ? stored.profiles : [];
@@ -5036,6 +5061,8 @@ function normalizeSub2ApiProfile(value, index = 0, fallback = {}) {
       ? stored.codexFingerprintMode
       : fallbackProfile.codexFingerprintMode || "session",
     autoResetCreditEnabled: stored.autoResetCreditEnabled ?? fallbackProfile.autoResetCreditEnabled ?? false,
+    autoResetCredit5hThresholdPercent: String(stored.autoResetCredit5hThresholdPercent ?? fallbackProfile.autoResetCredit5hThresholdPercent ?? 100),
+    autoResetCredit7dThresholdPercent: String(stored.autoResetCredit7dThresholdPercent ?? fallbackProfile.autoResetCredit7dThresholdPercent ?? 100),
     wsMode: SUB2API_WS_MODES.has(wsMode) ? wsMode : "off",
   };
 }

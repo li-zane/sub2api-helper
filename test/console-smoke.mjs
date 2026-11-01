@@ -1888,6 +1888,8 @@ try {
     codex_fingerprint_mode: "full",
     privacy_mode: "training_off",
     auto_reset_credit_enabled: false,
+    auto_reset_credit_5h_threshold: 1,
+    auto_reset_credit_7d_threshold: 1,
     openai_oauth_responses_websockets_v2_mode: "http_bridge",
     openai_oauth_responses_websockets_v2_enabled: true,
   });
