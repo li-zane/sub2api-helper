@@ -520,6 +520,8 @@ function App() {
   const canReauthorizeSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && selectedJobs.every((job) => job.canRegenerate || job.canRetry);
   const forceReloginSelectedCount = selectedJobs.filter((job) => job.canForceRelogin).length;
+  const webLoginSelectedCount = selectedJobs.filter((job) => job.canLoginWeb).length;
+  const canLoginWebSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size && webLoginSelectedCount > 0;
   const canForceReloginSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && forceReloginSelectedCount > 0;
   const canLogoutSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
@@ -1481,6 +1483,21 @@ function App() {
     }
   }
 
+  async function loginWebSelected() {
+    if (!canLoginWebSelected || batchAction) return;
+    setBatchAction("web-login");
+    try {
+      const data = await apiFetch(token, "/api/jobs/web-login-batch", {
+        method: "POST", body: JSON.stringify({ ids: [...selectedJobIds] }),
+      });
+      const failed = data.failed || [];
+      setUploadNotice(`已加入 Web 登录队列 ${data.started} 个账号${data.skipped ? `，跳过 ${data.skipped} 个运行中账号` : ""}${failed.length ? `，失败 ${failed.length} 个` : ""}`);
+      setSelectedJobIds(new Set(failed.map(item => item.id)));
+      setError(failed.length ? failed.map(item => `${item.email}：${item.error}`).join("；") : "");
+    } catch (requestError) { setError(requestError.message); }
+    finally { setBatchAction(""); }
+  }
+
   async function forceReloginSelected() {
     if (!canForceReloginSelected || batchAction) return;
     const skipped = selectedJobIds.size - forceReloginSelectedCount;
@@ -1902,6 +1919,12 @@ function App() {
                 {batchAction === "reauthorize" ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}
                 批量重新授权
               </button>
+              {features.webLogin && (
+                <button type="button" className="secondary-button bulk-button" onClick={loginWebSelected}
+                  disabled={!canLoginWebSelected || Boolean(batchAction)} title="仅登录 Web，与授权共用任务并发池，不执行 Codex 授权或号池上传">
+                  {batchAction === "web-login" ? <LoaderCircle className="spin" size={16} /> : <Globe2 size={16} />}一键登录 Web
+                </button>
+              )}
               {features.forceRelogin && (
                 <button type="button" className="relogin-button bulk-button" onClick={forceReloginSelected} disabled={!canForceReloginSelected || Boolean(batchAction)}>
                   {batchAction === "relogin" ? <LoaderCircle className="spin" size={16} /> : <LogIn size={16} />}
@@ -2092,6 +2115,7 @@ function App() {
                     totpSetupAvailable={Boolean(features.totpSetup)}
                     passwordAddAvailable={Boolean(features.passwordAdd)}
                     forceReloginAvailable={Boolean(features.forceRelogin)}
+                    webLoginAvailable={Boolean(features.webLogin)}
                     accountProxyUrl={accountProxyUrl}
                     planTypeMapping={planTypeMapping}
                     accountUsage={accountUsageByJobId[job.id]}
@@ -2995,7 +3019,7 @@ function OperationDetailDialog({ detail, onClose }) {
   );
 }
 
-function JobRow({ job, token, expanded, onToggleLogs, onError, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, forceReloginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
+function JobRow({ job, token, expanded, onToggleLogs, onError, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, forceReloginAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
   const [value, setValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [priorityValue, setPriorityValue] = useState(() => job.sub2apiPriority === null || job.sub2apiPriority === undefined ? "" : String(job.sub2apiPriority));
@@ -3081,6 +3105,15 @@ function JobRow({ job, token, expanded, onToggleLogs, onError, selected, onToggl
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function loginWeb() {
+    setSubmitting(true);
+    try {
+      await apiFetch(token, `/api/jobs/${job.id}/web-login`, { method: "POST", body: JSON.stringify({}) });
+      onError("");
+    } catch (requestError) { onError(requestError.message); }
+    finally { setSubmitting(false); }
   }
 
   async function setupTotp() {
@@ -3371,12 +3404,18 @@ function JobRow({ job, token, expanded, onToggleLogs, onError, selected, onToggl
               <KeyRound size={17} />
             </button>
           )}
-          {sessionsAvailable && job.canDownload && (
+          {webLoginAvailable && (
+            <button type="button" className="secondary-button icon-only-action" onClick={loginWeb}
+              disabled={submitting || !job.canLoginWeb} title={job.webLoginError || "登录 Web（不执行 Codex 授权，与授权共用任务并发池）"} aria-label="登录 Web">
+              {submitting ? <LoaderCircle className="spin" size={16} /> : <Globe2 size={16} />}
+            </button>
+          )}
+          {sessionsAvailable && (job.canDownload || job.webSessionAvailable) && (
             <button type="button" className="icon-button" onClick={onOpenSessions} disabled={submitting} title="查看已登录设备和会话">
               <MonitorSmartphone size={17} />
             </button>
           )}
-          {workspacesAvailable && job.canDownload && (
+          {workspacesAvailable && (job.canDownload || job.webSessionAvailable) && (
             <button type="button" className="icon-button" onClick={onOpenWorkspaces} disabled={submitting} title="查看并切换工作空间">
               <BriefcaseBusiness size={17} />
             </button>
@@ -4746,6 +4785,7 @@ function operationLabel(type) {
     initial_authorization: "首次授权",
     reauthorize: "重新授权",
     relogin: "重新登录并授权",
+    web_login: "Web 登录",
     automatic_relogin: "号池自动重登并授权",
     resume: "继续中断流程",
     setup_2fa: "设置 2FA",

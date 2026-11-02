@@ -68,6 +68,22 @@ try {
   assert.equal(exported.type, "sub2api-data");
   assert.equal(exported.accounts?.[0]?.credentials?.email, "mfa-test@example.com");
 
+  const oauthBeforeWeb = await fs.readFile(outputPath, "utf8");
+  const webOnly = await runNode([
+    path.join(projectRoot, "src", "protocol-login.mjs"), "--email", "mfa-test@example.com",
+    "--chatgpt-base", baseUrl, "--auth-base", baseUrl, "--output-mode", "web", "--sub2api-out", outputPath,
+    "--checkpoint", path.join(tempRoot, "web-login-checkpoint.json"),
+  ], { CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "JBSWY3DPEHPK3PXP" });
+  assert.equal(webOnly.code, 0, processFailure(webOnly));
+  assert.match(webOnly.output, /Saved web session:/);
+  assert.doesNotMatch(webOnly.output, /Start Codex OAuth|Saved sub2api import|Saved session data/);
+  assert.equal(await fs.readFile(outputPath, "utf8"), oauthBeforeWeb);
+  const webState = JSON.parse(await fs.readFile(path.join(tempRoot, "web-session.json"), "utf8"));
+  assert.match(webState.accessToken, /^web\./);
+  const stateAfterWeb = await fetch(`${baseUrl}/__test/state`).then(response => response.json());
+  assert.equal(stateAfterWeb.oauthAuthorizationCount, state.oauthAuthorizationCount, "Web login never visits the Codex authorization endpoint");
+  assert.equal(stateAfterWeb.workspaceSelectionCount, state.workspaceSelectionCount + 1);
+
   const emailLogin = await runNode([
     path.join(projectRoot, "src", "protocol-login.mjs"),
     "--email", "email-mfa@example.com",
@@ -88,7 +104,7 @@ try {
 
   const stateAfterEmailLogin = await fetch(`${baseUrl}/__test/state`).then((response) => response.json());
   assert.equal(stateAfterEmailLogin.chatgptWorkspaceSelected, true);
-  assert.equal(stateAfterEmailLogin.workspaceSelectionCount, 4);
+  assert.equal(stateAfterEmailLogin.workspaceSelectionCount, 5);
 
   const emailExport = JSON.parse(await fs.readFile(emailOutputPath, "utf8"));
   assert.equal(emailExport.accounts?.[0]?.credentials?.email, "email-mfa@example.com");
@@ -114,7 +130,7 @@ try {
   const stateAfterSkipWorkspace = await fetch(`${baseUrl}/__test/state`).then((response) => response.json());
   assert.equal(stateAfterSkipWorkspace.chatgptLoginComplete, true);
   assert.equal(stateAfterSkipWorkspace.chatgptWorkspaceSelected, false);
-  assert.equal(stateAfterSkipWorkspace.workspaceSelectionCount, 5);
+  assert.equal(stateAfterSkipWorkspace.workspaceSelectionCount, 6);
 
   const skipExport = JSON.parse(await fs.readFile(skipOutputPath, "utf8"));
   assert.equal(skipExport.accounts?.[0]?.credentials?.email, "skip-workspace@example.com");
@@ -139,7 +155,7 @@ try {
 
   const stateAfterDirectCallback = await fetch(`${baseUrl}/__test/state`).then((response) => response.json());
   assert.equal(stateAfterDirectCallback.chatgptWorkspaceSelected, true);
-  assert.equal(stateAfterDirectCallback.workspaceSelectionCount, 6);
+  assert.equal(stateAfterDirectCallback.workspaceSelectionCount, 7);
 
   const directExport = JSON.parse(await fs.readFile(directOutputPath, "utf8"));
   assert.equal(directExport.accounts?.[0]?.credentials?.email, "direct-codex-callback@example.com");

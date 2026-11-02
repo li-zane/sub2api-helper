@@ -351,9 +351,10 @@ async function run() {
   const chatgptBase = trimSlash(args.chatgptBase || process.env.CHATGPT_BASE || DEFAULT_CHATGPT_BASE);
   const authBase = trimSlash(args.authBase || process.env.AUTH_BASE || DEFAULT_AUTH_BASE);
   const outputMode = args.outputMode || "both";
-  if (!["both", "session", "sub2api"].includes(outputMode)) {
-    throw new Error("--output-mode must be one of: both, session, sub2api");
+  if (!["both", "session", "sub2api", "web"].includes(outputMode)) {
+    throw new Error("--output-mode must be one of: both, session, sub2api, web");
   }
+  if (outputMode === "web") { args.webOnly = true; codexAuthMode = "local"; sub2ApiOAuth = null; }
   const outPath = path.resolve(args.out || DEFAULT_OUT);
   const sub2apiOutPath = path.resolve(args.sub2apiOut || DEFAULT_SUB2API_OUT);
   const webSessionPath = process.env.TOSUB2_WEB_SESSION_PATH || path.join(path.dirname(sub2apiOutPath), "web-session.json");
@@ -709,7 +710,7 @@ async function run() {
       });
       await saveCheckpoint("email_verified", {});
       console.log("[checkpoint] Saved verified email login state.");
-      await saveProtocolWebSession(webSessionPath, client, web);
+      if (outputMode !== "web") await saveProtocolWebSession(webSessionPath, client, web);
 
       if (!args.webOnly) {
         console.log("[2/5] Start Codex OAuth flow");
@@ -735,8 +736,18 @@ async function run() {
     }
 
     // The web login survives checkpoint cleanup and is separate from the Codex export.
-    await saveProtocolWebSession(webSessionPath, client, web);
-    if (outputMode !== "sub2api") {
+    let webCredentials = {};
+    if (outputMode === "web") {
+      const { data: session } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
+      const sessionEmail = String(session?.user?.email || "").trim().toLowerCase();
+      if (sessionEmail && sessionEmail !== email.trim().toLowerCase()) throw new Error("WEB_LOGIN_ACCOUNT_MISMATCH: Web 会话与当前账号不匹配");
+      const accessToken = session?.accessToken || session?.access_token;
+      if (!accessToken) throw new Error("WEB_LOGIN_SESSION_MISSING: Web 会话尚未建立，请重新登录");
+      webCredentials = { accessToken, expiresAt: session.expires || null };
+    }
+    await saveProtocolWebSession(webSessionPath, client, web, webCredentials);
+    console.log(`[ok] Saved web session: ${webSessionPath}`);
+    if (!["sub2api", "web"].includes(outputMode)) {
       await writeJsonAtomic(outPath, {
         generated_at: new Date().toISOString(),
         chatgpt_base: chatgptBase,
@@ -2820,7 +2831,7 @@ Options:
   --password-add-result <file>    Private add-password result. Default: ${DEFAULT_PASSWORD_ADD_RESULT}
   --out <file>                    Output JSON path. Default: ${DEFAULT_OUT}
   --sub2api-out <file>            sub2api import JSON path. Default: ${DEFAULT_SUB2API_OUT}
-  --output-mode <mode>            both, session, or sub2api. Default: both
+  --output-mode <mode>            both, session, sub2api, or web (Web login only). Default: both
   --no-sub2api-export             Do not exchange OAuth code or write sub2api import JSON.
   --refresh-sub2api <file>        Refresh an existing sub2api OAuth file without email login.
   --checkpoint <file>             Save resumable login state after email verification.

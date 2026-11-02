@@ -33,10 +33,10 @@ export async function writeAccountWebSession(file, session) {
   } finally { await fs.rm(temporary, { force: true }); }
 }
 
-export async function saveProtocolWebSession(file, client, web) {
+export async function saveProtocolWebSession(file, client, web, credentials = {}) {
   if (!client.browserIdentity) return;
   await writeAccountWebSession(file, {
     email: client.browserIdentity.email, identity: client.browserIdentity,
-    cookies: client.jar.toJSON(), web, accessToken: null, expiresAt: null,
+    cookies: client.jar.toJSON(), web, accessToken: credentials.accessToken || null, expiresAt: credentials.expiresAt || null,
   });
 }

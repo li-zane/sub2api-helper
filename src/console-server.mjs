@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { createServer as createViteServer } from "vite";
 import { createCredentialStore } from "./credential-store.mjs";
+import { readAccountWebSession, webSessionPathForJob } from "./account-web-session.mjs";
 import {
   listAccountSessions,
   revokeAccountSession,
@@ -428,6 +429,7 @@ async function handleApi(req, res, requestUrl) {
         totpReplace: true,
         passwordAdd: true,
         forceRelogin: true,
+        webLogin: true,
         accountSessions: true,
         accountWorkspaces: true,
         accountUsage: true,
@@ -706,6 +708,20 @@ async function handleApi(req, res, requestUrl) {
       else await retryJob(job, body);
     })));
     sendJson(res, 200, { jobs: selected.map(publicJob), started: selected.length });
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/jobs/web-login-batch") {
+    const body = await readJson(req);
+    const selected = resolveSelectedJobs(body.ids);
+    const outcomes = await Promise.all(selected.map((job) => withEmailJobLock(job.email, async () => {
+      if (!canLoginWeb(job)) return { skipped: true };
+      try { await startWebLogin(job); return { job }; }
+      catch (error) { return { id: job.id, email: job.email, error: String(error.message || error).slice(0, 320) }; }
+    })));
+    const started = outcomes.filter(item => item.job).map(item => item.job);
+    sendJson(res, 200, { jobs: started.map(publicJob), started: started.length,
+      skipped: outcomes.filter(item => item.skipped).length, failed: outcomes.filter(item => item.error) });
     return;
   }
 
@@ -1112,7 +1128,7 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
-  const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|retry|regenerate|relogin|setup-2fa|replace-2fa|add-password|credentials|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
+  const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|retry|regenerate|relogin|web-login|setup-2fa|replace-2fa|add-password|credentials|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
   if (!match) {
     sendJson(res, 404, { error: "Not found" });
     return;
@@ -1144,7 +1160,7 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
   if (req.method === "GET" && action === "workspaces") {
-    if (!job.resultSaved) throw httpError(409, "账号授权尚未完成，暂时无法读取工作空间");
+    if (!job.resultSaved && !job.webSessionAvailable) throw httpError(409, "请先登录 Web，再读取工作空间");
     try {
       await refreshJobProxyBinding(job);
       sendJson(res, 200, { workspaces: await listAccountWorkspaces(job) });
@@ -1158,7 +1174,7 @@ async function handleApi(req, res, requestUrl) {
     const workspaceId = normalizeSub2ApiAccountId(body?.workspaceId);
     if (!workspaceId) throw httpError(400, "工作空间 ID 无效");
     await withEmailJobLock(job.email, async () => {
-      if (!job.resultSaved || !canForceRelogin(job)) {
+      if ((!job.resultSaved && !job.webSessionAvailable) || !canForceRelogin(job)) {
         throw httpError(409, "当前账号不能切换工作空间，请等待当前操作完成");
       }
       const available = await listAccountWorkspaces(job);
@@ -1178,7 +1194,7 @@ async function handleApi(req, res, requestUrl) {
       // a second account for the same email and leave the pool out of sync.
       let sub2api = null;
       try {
-        sub2api = await synchronizeSub2ApiWorkspaceAccount(job);
+        sub2api = job.resultSaved ? await synchronizeSub2ApiWorkspaceAccount(job) : { configured: false, matched: 0, updated: 0 };
         if (sub2api?.updated) {
           appendJobLog(job, `[workspace] 已同步更新 Sub2API 号池中的 ${sub2api.updated} 条账号记录。\n`);
           touch(job);
@@ -1245,6 +1261,12 @@ async function handleApi(req, res, requestUrl) {
   if (req.method === "POST" && action === "regenerate") {
     const body = await readJson(req);
     await withEmailJobLock(job.email, () => regenerateJob(job, body));
+    sendJson(res, 200, { job: publicJob(job) });
+    return;
+  }
+  if (req.method === "POST" && action === "web-login") {
+    await readJson(req);
+    await withEmailJobLock(job.email, () => startWebLogin(job));
     sendJson(res, 200, { job: publicJob(job) });
     return;
   }
@@ -1600,11 +1622,13 @@ async function prepareAndLaunchJob(job, mode, queueRunId) {
       ? { codexAuthMode, phasedProxy: true, loginProxyUrl: globalProxyUrl }
       : ["full", "refresh"].includes(mode) ? await codexOAuthSettingsForJob(job)
         : { codexAuthMode: "local", ...(accountProxyMode === "plan" && !hasBinding ? { phasedProxy: true, loginProxyUrl: globalProxyUrl } : {}) };
-    if (["full", "totp_setup", "password_add"].includes(mode) && job.mailApiUrl) await loadMailboxBaseline(job);
+    if (["full", "web_login", "totp_setup", "password_add"].includes(mode) && job.mailApiUrl) await loadMailboxBaseline(job);
     if (!isActive(job.status) || job.status === "queued" || job.queueRunId !== queueRunId) return;
     launchJob(job, { mode, ...oauthSettings });
   } catch (error) {
-    if (mode === "totp_setup") {
+    if (mode === "web_login") {
+      await finishWebLogin(job, 1, null, `准备 Web 登录失败：${error.message}`);
+    } else if (mode === "totp_setup") {
       await restoreTotpSetupFailure(job, `准备 2FA 设置失败：${error.message}`);
     } else if (mode === "password_add") {
       restorePasswordAddFailure(job, `准备添加密码失败：${error.message}`);
@@ -1647,7 +1671,10 @@ function launchJob(job, options = {}) {
   job.runId = runId;
   job.runMode = mode;
   job.mailOtpRequestedAt = null;
-  const args = mode === "refresh"
+  const args = mode === "web_login"
+    ? [PROTOCOL_SCRIPT, "--email", job.email, "--web-only", "--output-mode", "web",
+      "--sub2api-out", job.outputPath, "--checkpoint", webLoginCheckpointPath(job), "--verbose"]
+    : mode === "refresh"
     ? [
         PROTOCOL_SCRIPT,
         "--refresh-sub2api",
@@ -1750,7 +1777,8 @@ function launchJob(job, options = {}) {
   child.on("error", (error) => {
     void withEmailJobLock(job.email, async () => {
       if (job.runId !== runId) return;
-      if (mode === "totp_setup") await restoreTotpSetupFailure(job, `无法启动 2FA 设置进程：${error.message}`);
+      if (mode === "web_login") await finishWebLogin(job, 1, null, `无法启动 Web 登录进程：${error.message}`);
+      else if (mode === "totp_setup") await restoreTotpSetupFailure(job, `无法启动 2FA 设置进程：${error.message}`);
       else if (mode === "password_add") restorePasswordAddFailure(job, `无法启动添加密码进程：${error.message}`);
       else failJob(job, `无法启动登录进程：${error.message}`);
       if (job.poolRefreshAction) {
@@ -1772,6 +1800,10 @@ async function handleChildClose(job, { code, signal, mode, runId }) {
   if (job.runId !== runId) return;
   stopMailPolling(job);
   job.child = null;
+  if (mode === "web_login") {
+    await finishWebLogin(job, code, signal);
+    return;
+  }
   if (mode === "totp_setup") {
     await finishTotpSetup(job, code, signal);
     if (job.poolRefreshAction && job.status === "completed" && job.resultSaved) await synchronizePoolRefresh(job);
@@ -1825,6 +1857,10 @@ async function handleChildClose(job, { code, signal, mode, runId }) {
 }
 
 function handleChildCloseFailure(job, mode, runId, error) {
+  if (mode === "web_login") {
+    if (job.runId === runId) void finishWebLogin(job, 1, null, `Web 登录收尾失败：${error.message}`);
+    return;
+  }
   if (job.runId !== runId && !(["totp_setup", "password_add"].includes(mode) && job.runId === null)) return;
   const message = `收尾处理失败：${error.message}`;
   if (mode === "totp_setup") {
@@ -1856,6 +1892,7 @@ function handleChildCloseFailure(job, mode, runId, error) {
 }
 
 async function retryJob(job, options = {}) {
+  if (job.webLoginPreviousState) throw httpError(409, "Web 登录仍在运行，请等待完成或取消后再授权");
   if (!["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status)) {
     throw httpError(409, "当前任务不需要重新授权");
   }
@@ -1910,6 +1947,7 @@ async function retryJob(job, options = {}) {
 }
 
 async function regenerateJob(job, options = {}) {
+  if (job.webLoginPreviousState) throw httpError(409, "Web 登录仍在运行，请等待完成或取消后再授权");
   if (job.status !== "completed" || !job.resultSaved) {
     throw httpError(409, "只能为已经完成的任务重新生成授权");
   }
@@ -1938,6 +1976,90 @@ async function regenerateJob(job, options = {}) {
   beginPoolRefresh(job, "reauthorize");
   appendJobLog(job, `\n[refresh] 第 ${job.attempt} 次生成：优先使用已有刷新令牌。\n`);
   enqueueJob(job, "refresh", "正在使用已有刷新令牌直接生成新授权");
+}
+
+function webLoginCheckpointPath(job) {
+  return path.join(path.dirname(job.outputPath), "web-login-checkpoint.json");
+}
+
+async function startWebLogin(job) {
+  if (!canLoginWeb(job)) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
+  await reloadMissingJobCredentials(job);
+  if (!canLoginWeb(job)) throw httpError(409, "账号当前不能登录 Web");
+  const preserved = ["status", "prompt", "lastError", "completedAt", "startedAt", "attempt", "loginCheckpointAvailable",
+    "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount"];
+  job.webLoginPreviousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
+  job.webLoginError = null;
+  job.webLoginResultSaved = false;
+  job.lastError = null;
+  job.parserTail = "";
+  job.securityCheckRequired = false;
+  job.restartRequired = false;
+  job.proxyRiskRetryCount = 0;
+  job.proxyConnectionFailureCount = 0;
+  job.proxyRiskRestarting = false;
+  job.proxyFallbackAttempted = false;
+  job.proxyFallbackActive = false;
+  job.directTlsFallbackAttempted = false;
+  job.proxySessionAttemptIds?.clear();
+  job.proxyAttemptParserTail = "";
+  await removePrivateFile(webLoginCheckpointPath(job));
+  recordJobOperation(job, "web_login");
+  appendJobLog(job, "\n[web-login] 仅登录 ChatGPT Web；不执行 Codex 授权、刷新或号池上传。\n");
+  enqueueJob(job, "web_login", "正在登录 ChatGPT Web");
+  await saveJobMetadata(job);
+}
+
+async function finishWebLogin(job, code, signal, message = null) {
+  stopMailPolling(job);
+  let success = code === 0 && job.webLoginResultSaved;
+  if (success) {
+    try { await readAccountWebSession(job); }
+    catch (error) { success = false; message = error.message; }
+  }
+  const failure = message || job.lastError || (signal ? `Web 登录被 ${signal} 中断` : `Web 登录未完成，退出代码 ${code ?? "未知"}`);
+  const previous = job.webLoginPreviousState;
+  if (previous) Object.assign(job, previous);
+  job.webLoginError = success ? null : failure;
+  if (success) {
+    job.webLoginCompletedAt = new Date().toISOString();
+    job.webSessionAvailable = true;
+  }
+  job.prompt = success ? "Web 登录成功，登录态已保存；原 Codex 授权保持不变" : `Web 登录未完成：${failure}`;
+  job.webLoginPreviousState = null;
+  job.webLoginResultSaved = false;
+  job.runMode = null;
+  job.runId = null;
+  job.queueRunId = null;
+  job.queuedMode = null;
+  job.queuedAt = null;
+  job.child = null;
+  await removePrivateFile(webLoginCheckpointPath(job));
+  appendJobLog(job, success ? "[web-login] Web 登录态已保存，未执行 Codex 授权或更新号池。\n" : `[web-login] ${failure}\n`);
+  touch(job);
+  await saveJobMetadata(job);
+  scheduleQueuedJobs();
+}
+
+function restoreWebLoginState(job, metadata) {
+  job.webLoginCompletedAt = metadata.web_login_completed_at || null;
+  job.webLoginError = metadata.web_login_error || null;
+  const previous = metadata.web_login_previous_state;
+  if (!previous || !isTerminalStatus(previous.status)) return;
+  if (metadata.queued_mode === "web_login" && ["queued", "starting"].includes(metadata.status)) {
+    job.webLoginPreviousState = previous;
+    job.status = "queued";
+    job.queuedMode = "web_login";
+    job.queuedAt = metadata.queued_at || new Date().toISOString();
+    job.queuedStartPrompt = "正在登录 ChatGPT Web";
+    job.prompt = "服务重启后已恢复 Web 登录队列";
+  } else {
+    Object.assign(job, previous);
+    job.webLoginPreviousState = null;
+    job.webLoginError = "Web 登录因服务重启中断，请重新点击登录 Web";
+    job.prompt = job.webLoginError;
+    job.queuedMode = null;
+  }
 }
 
 async function forceReloginJob(job, options = {}, context = {}) {
@@ -2440,9 +2562,9 @@ function consumeOutput(job, rawText) {
   const mailRequestMarkers = [...scan.matchAll(/\[email-otp-requested-at\]\s+(\S+)/g)];
   const latestMailRequestAt = Date.parse(mailRequestMarkers.at(-1)?.[1] || "");
   if (Number.isFinite(latestMailRequestAt)) job.mailOtpRequestedAt = latestMailRequestAt;
-  if (scan.includes("[checkpoint] Saved verified email login state.")
+  if (job.runMode !== "web_login" && (scan.includes("[checkpoint] Saved verified email login state.")
     || scan.includes("[checkpoint] Updated verified login state after adding the password.")
-    || scan.includes("[checkpoint] Updated verified login state after setting 2FA.")) {
+    || scan.includes("[checkpoint] Updated verified login state after setting 2FA."))) {
     job.loginCheckpointAvailable = true;
   }
 
@@ -2643,13 +2765,22 @@ function consumeOutput(job, rawText) {
     job.runResultSaved = true;
     setStage(job, "finalizing", "导入文件已生成，正在收尾");
   }
+  if (scan.includes("[ok] Saved web session:")) {
+    job.webSessionAvailable = true;
+    if (job.runMode === "web_login") {
+      job.webLoginResultSaved = true;
+      setStage(job, "finalizing", "Web 登录成功，正在保存会话");
+    }
+  }
   if (scan.includes("[ok] Account password added and saved securely")) {
     setStage(job, "finalizing", "密码已添加，正在安全保存新密码");
   }
   const errorMatches = [...scan.matchAll(/\[error\]\s*([^\r\n]+)/g)];
   if (errorMatches.length) {
     const errorMessage = extractResponseMessage(errorMatches.at(-1)[1]);
-    if (job.runMode === "totp_setup") {
+    if (job.runMode === "web_login") {
+      job.lastError = errorMessage;
+    } else if (job.runMode === "totp_setup") {
       job.totpSetupError = errorMessage;
     } else if (job.runMode === "password_add") {
       job.passwordAddError = errorMessage;
@@ -3254,6 +3385,13 @@ async function submitJobInput(job, body, options = {}) {
 
 async function cancelJob(job) {
   if (!isActive(job.status)) return;
+  if (job.webLoginPreviousState && (job.runMode === "web_login" || job.queuedMode === "web_login")) {
+    job.runId = null;
+    job.child?.kill("SIGTERM");
+    job.child = null;
+    await finishWebLogin(job, 1, "SIGTERM", "Web 登录已取消");
+    return;
+  }
   if (job.runMode === "totp_setup" || job.queuedMode === "totp_setup") {
     stopMailPolling(job);
     job.runId = crypto.randomUUID();
@@ -6476,6 +6614,11 @@ function publicJob(job) {
     canResume: job.status === "resume_available",
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
+    canLoginWeb: canLoginWeb(job),
+    webSessionAvailable: Boolean(job.webSessionAvailable),
+    webLoginPending: Boolean(job.webLoginPreviousState),
+    webLoginCompletedAt: job.webLoginCompletedAt || null,
+    webLoginError: job.webLoginError || null,
     canLogoutAllSessions: canLogoutAllSessions(job),
     canSetupTotp: canSetupTotp(job),
     canReplaceTotp: canReplaceTotp(job),
@@ -6733,6 +6876,7 @@ function publicSelectionJob(job) {
     canRetry: ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
+    canLoginWeb: canLoginWeb(job),
     canLogoutAllSessions: canLogoutAllSessions(job),
     canSwitchProxy: jobCanSwitchProxy(job),
     canSetupTotp: canSetupTotp(job),
@@ -6742,11 +6886,16 @@ function publicSelectionJob(job) {
 }
 
 function canLogoutAllSessions(job) {
-  return Boolean(job.resultSaved) && canForceRelogin(job);
+  return Boolean(job.resultSaved || job.webSessionAvailable) && canForceRelogin(job);
+}
+
+function canLoginWeb(job) {
+  return canForceRelogin(job) && !job.poolRefreshAction && !job.autoRepairOperation
+    && !["queued", "running"].includes(job.autoTaskStatus);
 }
 
 function canForceRelogin(job) {
-  return ["completed", "failed", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available"].includes(job.status);
+  return !job.webLoginPreviousState && ["completed", "failed", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available"].includes(job.status);
 }
 
 function canSetupTotp(job) {
@@ -6805,16 +6954,19 @@ function beginAuthorizationAutomationAttempt(job, source) {
 }
 
 function markAuthorizationRequirement(job, field) {
+  if (job.runMode === "web_login") return;
   if (!job.authAutomationAttempt?.requirements || !Object.hasOwn(job.authAutomationAttempt.requirements, field)) return;
   job.authAutomationAttempt.requirements[field] = true;
 }
 
 function markAuthorizationAutomatic(job, field) {
+  if (job.runMode === "web_login") return;
   if (!job.authAutomationAttempt?.automatic || !Object.hasOwn(job.authAutomationAttempt.automatic, field)) return;
   job.authAutomationAttempt.automatic[field] = true;
 }
 
 function markAuthorizationManual(job, field) {
+  if (job.runMode === "web_login") return;
   if (!job.authAutomationAttempt?.manual || !Object.hasOwn(job.authAutomationAttempt.manual, field)) return;
   job.authAutomationAttempt.manual[field] = true;
 }
@@ -7225,6 +7377,8 @@ async function syncCompletedOutputs(force = false) {
           ...newSmsState(),
         });
         const restored = jobs.get(entry.name);
+        restoreWebLoginState(restored, metadata);
+        restored.webSessionAvailable = await fileExists(webSessionPathForJob(restored));
         if (restored.poolRefreshAction) {
           schedulePoolRefresh(restored, restored.poolRefreshAction === "cooldown" && restored.poolRefreshDueAt
             ? Math.max(0, Date.parse(restored.poolRefreshDueAt) - Date.now())
@@ -7430,7 +7584,7 @@ async function syncCompletedOutputs(force = false) {
           attempt: Math.max(1, Number(metadata.attempt || 1)),
           runId: null,
           runMode: null,
-          queuedMode: restoredStatus === "queued" && metadata.queued_mode === "refresh" ? "refresh" : "full",
+          queuedMode: restoredStatus === "queued" && ["refresh", "web_login"].includes(metadata.queued_mode) ? metadata.queued_mode : "full",
           queuedAt: restoredStatus === "queued" ? metadata.queued_at || restoredAt : null,
           queuedStartPrompt: metadata.queued_mode === "refresh"
             ? "正在使用已有刷新令牌直接生成新授权"
@@ -7449,6 +7603,11 @@ async function syncCompletedOutputs(force = false) {
           securityCheckRequired: Boolean(metadata.security_check_required),
           ...newSmsState(),
         });
+      }
+      const restored = jobs.get(entry.name);
+      if (restored) {
+        restoreWebLoginState(restored, metadata);
+        restored.webSessionAvailable = await fileExists(webSessionPathForJob(restored));
       }
     }));
   })().finally(() => {
@@ -8452,6 +8611,9 @@ async function saveJobMetadata(job) {
         created_at: job.createdAt,
         last_operation_at: job.lastOperationAt || job.createdAt,
         last_operation_type: job.lastOperationType || "initial_authorization",
+        web_login_previous_state: job.webLoginPreviousState || null,
+        web_login_completed_at: job.webLoginCompletedAt || null,
+        web_login_error: job.webLoginError || null,
         login_mode: job.loginMode || null,
         mail_api_url: job.mailApiUrl || null,
         mail_request_body: job.mailRequestBody || null,

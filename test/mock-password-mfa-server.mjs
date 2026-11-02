@@ -18,6 +18,7 @@ let chatgptLoginComplete = false;
 let workspaceSelectionCount = 0;
 let selectedEmail = "mfa-test@example.com";
 let oauthCallback = "";
+let oauthAuthorizationCount = 0;
 let totpEnabled = false;
 let passwordVerifySentinelCount = 0;
 let replacementTotpEnabled = true;
@@ -44,12 +45,17 @@ const server = http.createServer(async (req, res) => {
     return sendText(res, 200, "ok");
   }
   if (req.method === "GET" && url.pathname === "/api/auth/providers") return sendJson(res, 200, {});
+  if (req.method === "GET" && url.pathname === "/api/auth/session") {
+    const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url");
+    return sendJson(res, 200, chatgptLoginComplete ? { accessToken: `web.${payload}.signature`, user: { email: selectedEmail } } : {});
+  }
   if (req.method === "GET" && url.pathname === "/api/auth/csrf") return sendJson(res, 200, { csrfToken: "mock-csrf" });
   if (req.method === "GET" && url.pathname === "/__test/state") {
     return sendJson(res, 200, {
       chatgptLoginComplete,
       chatgptWorkspaceSelected,
       workspaceSelectionCount,
+      oauthAuthorizationCount,
       passwordVerifySentinelCount,
       replacementTotpEnabled,
       replacementRequestLog,
@@ -209,6 +215,7 @@ const server = http.createServer(async (req, res) => {
     return redirect(res, `${base}/`);
   }
   if (req.method === "GET" && url.pathname === "/oauth/authorize") {
+    oauthAuthorizationCount++;
     const callback = new URL(url.searchParams.get("redirect_uri"));
     callback.searchParams.set("state", url.searchParams.get("state"));
     callback.searchParams.set("code", "mock-code");

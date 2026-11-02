@@ -47,33 +47,37 @@ export async function switchAccountWorkspace(job, workspaceId) {
   const targetId = normalizeIdentifier(workspaceId);
   if (!targetId) throw new Error("WORKSPACE_TARGET_INVALID: 工作空间 ID 无效");
   const listingResponse = await requestWithWebSession(job, "GET", "/accounts/check/v4-2023-04-27");
-  const bundle = await readOAuthBundle(job);
+  let bundle = null;
+  try { await fs.access(job.outputPath); bundle = await readOAuthBundle(job); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
   const listing = normalizeAccountWorkspaces(listingResponse.data, listingResponse.session.web?.workspaceId);
   const target = listing.workspaces.find((workspace) => workspace.id === targetId);
   if (!target || !isAccountWorkspaceAvailable(target)) {
     throw new Error(`WORKSPACE_TARGET_UNAVAILABLE: ${accountWorkspaceAvailabilityLabel(target)}`);
   }
 
-  const account = Array.isArray(bundle.data?.accounts) ? bundle.data.accounts[0] : null;
-  if (!account || typeof account !== "object") throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: 授权文件缺少账号数据");
-  const credentials = account.credentials && typeof account.credentials === "object" ? account.credentials : {};
-  const extra = account.extra && typeof account.extra === "object" ? account.extra : {};
-  credentials.chatgpt_account_id = target.id;
-  credentials.account_id = target.id;
-  credentials.plan_type = target.planType || null;
-  account.credentials = credentials;
-  account.account_id = target.id;
-  account.extra = {
-    ...extra,
-    account_id: target.id,
-    chatgpt_account_id: target.id,
-    workspace_id: target.id,
-    workspace_name: target.name,
-    workspace_structure: target.structure,
-    plan_type: target.planType || null,
-  };
-  account.plan_type = target.planType || null;
-  await writeOAuthBundle(bundle);
+  const account = Array.isArray(bundle?.data?.accounts) ? bundle.data.accounts[0] : null;
+  if (bundle) {
+    if (!account || typeof account !== "object") throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: 授权文件缺少账号数据");
+    const credentials = account.credentials && typeof account.credentials === "object" ? account.credentials : {};
+    const extra = account.extra && typeof account.extra === "object" ? account.extra : {};
+    credentials.chatgpt_account_id = target.id;
+    credentials.account_id = target.id;
+    credentials.plan_type = target.planType || null;
+    account.credentials = credentials;
+    account.account_id = target.id;
+    account.extra = {
+      ...extra,
+      account_id: target.id,
+      chatgpt_account_id: target.id,
+      workspace_id: target.id,
+      workspace_name: target.name,
+      workspace_structure: target.structure,
+      plan_type: target.planType || null,
+    };
+    account.plan_type = target.planType || null;
+    await writeOAuthBundle(bundle);
+  }
   listingResponse.session.web = { ...listingResponse.session.web, workspaceId: target.id };
   await writeAccountWebSession(webSessionPathForJob(job), listingResponse.session);
   return {
