@@ -1,5 +1,30 @@
 import { TlsFingerprintTransport } from "./tls-transport.mjs";
 
+const FAILURE_MESSAGES = {
+  AUTH: "模型凭据失效或无权限，请刷新授权", QUOTA: "账号额度已用尽或受到请求频率限制",
+  OVERLOADED: "模型上游过载", UPSTREAM: "模型上游服务异常", HTTP: "模型接口拒绝请求",
+  TIMEOUT: "模型请求超时", NETWORK: "代理或网络连接失败", INCOMPLETE: "模型流式响应中断或未完成",
+  EMPTY: "模型未返回可评分文本", ACCOUNT_PAUSED: "账号已暂停或状态异常，本轮跳过",
+  ACCOUNT_MISSING: "账号尚未加入 Sub2API 号池", CREDENTIALS: "账号缺少可用模型凭据",
+  PROXY: "账号绑定的代理不可用", REFERENCE: "指纹参考库加载失败或超时", UNKNOWN: "检测未完成，请检查账号配置及网络",
+};
+function failure(code, { httpStatus = null, retryable = false, upstreamCode = null } = {}) {
+  return Object.assign(new Error(FAILURE_MESSAGES[code]), { fingerprintFailure: true, code, httpStatus, retryable, upstreamCode });
+}
+export function fingerprintFailure(error) {
+  if (error?.fingerprintFailure && Object.hasOwn(FAILURE_MESSAGES, error.code)) return { code: error.code, message: FAILURE_MESSAGES[error.code], httpStatus: error.httpStatus ?? null, retryable: error.retryable === true, upstreamCode: error.upstreamCode ?? null };
+  const message = String(error?.message || "");
+  const code = /timed?\s*out|timeout|超时/i.test(message) ? "TIMEOUT" : /代理/.test(message) ? "PROXY" : /connect|curl|tls|socket|network|fetch failed|econn|enotfound/i.test(message) ? "NETWORK" : /已暂停|状态异常/.test(message) ? "ACCOUNT_PAUSED" : /尚未加入/.test(message) ? "ACCOUNT_MISSING" : /凭据/.test(message) ? "CREDENTIALS" : /参考库/.test(message) ? "REFERENCE" : "UNKNOWN";
+  return { code, message: FAILURE_MESSAGES[code], httpStatus: null, retryable: ["TIMEOUT", "NETWORK"].includes(code), upstreamCode: null };
+}
+function upstreamFailure(event, httpStatus = null) {
+  const error = event?.error || event?.response?.error || {};
+  const raw = `${error.code || ""} ${error.type || ""} ${error.message || ""}`;
+  const upstreamCode = ["usage_limit_reached", "rate_limit_exceeded", "insufficient_quota", "server_error", "server_is_overloaded", "overloaded", "service_unavailable_error", "invalid_api_key", "token_expired", "model_not_found"].find(code => error.code === code || error.type === code) || null;
+  const code = /overload/i.test(raw) ? "OVERLOADED" : /usage.limit|rate.limit|quota|limit.*reached/i.test(raw) || httpStatus === 429 ? "QUOTA" : /expired|invalid.*token|unauthoriz/i.test(raw) || [401, 403].includes(httpStatus) ? "AUTH" : httpStatus >= 500 ? "UPSTREAM" : httpStatus ? "HTTP" : "INCOMPLETE";
+  return failure(code, { httpStatus, upstreamCode, retryable: ["OVERLOADED", "UPSTREAM", "INCOMPLETE"].includes(code) });
+}
+
 function proxyUrl(proxy) {
   if (!proxy) throw new Error("账号绑定的代理未能导出");
   if (proxy.url || proxy.proxy_url) return proxy.url || proxy.proxy_url;
@@ -38,7 +63,7 @@ export function createFingerprintAccountReader(request) {
 }
 
 export function extractFingerprintReply(text) {
-  let deltas = "", completed = null, failed = false, streaming = false;
+  let deltas = "", completed = null, streaming = false;
   for (const line of text.split(/\r?\n/)) {
     if (!line.startsWith("data:")) continue;
     streaming = true;
@@ -46,14 +71,14 @@ export function extractFingerprintReply(text) {
     if (event.type === "response.output_text.delta") deltas += event.delta || "";
     if (event.choices?.[0]?.delta?.content) deltas += event.choices[0].delta.content;
     if (event.type === "response.completed") completed = event.response;
-    if (["response.failed", "response.incomplete", "error"].includes(event.type)) failed = true;
+    if (["response.failed", "response.incomplete", "error"].includes(event.type)) throw upstreamFailure(event);
   }
-  if (failed || streaming && !completed) throw new Error("模型响应未完成");
+  if (streaming && !completed) throw failure("INCOMPLETE", { retryable: true });
   if (deltas) return deltas;
   if (!completed) { try { completed = JSON.parse(text); } catch {} }
-  if (completed?.error || completed?.status && completed.status !== "completed") throw new Error("模型响应未完成");
+  if (completed?.error || completed?.status && completed.status !== "completed") throw upstreamFailure(completed);
   const output = completed?.output?.flatMap(item => (item.content || []).filter(p => p.type === "output_text").map(p => p.text || "")).join("") || completed?.choices?.[0]?.message?.content;
-  if (typeof output !== "string" || !output.trim()) throw new Error("模型未返回可评分文本");
+  if (typeof output !== "string" || !output.trim()) throw failure("EMPTY");
   return output;
 }
 
@@ -88,10 +113,18 @@ export function createFingerprintSampler({ getAccount, getProxies, transportFact
     signal.addEventListener("abort", abort, { once: true });
     try {
       signal.throwIfAborted(); await transport.configure(proxyUrl, { force: true });
-      const response = await transport.request("POST", url, { timeoutMs: 120000, headers, body: JSON.stringify(body) });
+      const response = await transport.request("POST", url, { timeoutMs: 180000, headers, body: JSON.stringify(body) });
       signal.throwIfAborted();
-      if (!response.ok) throw new Error(`模型请求 HTTP ${response.status}`);
-      return extractFingerprintReply(await response.text());
+      const text = await response.text();
+      if (!response.ok) {
+        let event; try { event = JSON.parse(text); } catch {}
+        throw upstreamFailure(event, response.status);
+      }
+      try { return extractFingerprintReply(text); }
+      catch (error) {
+        if (error.fingerprintFailure && error.httpStatus == null) error.httpStatus = response.status;
+        throw error;
+      }
     } finally { signal.removeEventListener("abort", abort); await transport.close(); }
   };
 }

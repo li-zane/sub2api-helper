@@ -64,8 +64,11 @@ function AttributionModels({ models }) {
     <div><strong>{r.model}</strong><span className={`fingerprint-status ${r.status}`}>{TITLES[r.status] || "证据不足"}</span></div>
     <p>期望：{r.expected} · 归因：{r.predictionName || r.prediction || "未知"}{r.probability != null ? ` · ${(r.probability * 100).toFixed(2)}%` : ""}</p>
     {(r.reason || r.error) && <p className="task-settings-help">{r.reason || r.error}</p>}
+    {r.failure && <small>错误分类：{r.failure.code}{r.failure.httpStatus ? ` · HTTP ${r.failure.httpStatus}` : ""}{r.failure.upstreamCode ? ` · ${r.failure.upstreamCode}` : ""}</small>}
+    {r.sampleFailures?.length > 0 && <details><summary>采样请求记录（{r.sampleFailures.length} 次异常）</summary><ul>{r.sampleFailures.map((f, i) => <li key={i}>第 {f.sample} 份样本 · 第 {f.attempt} 次请求：{f.message}{f.httpStatus ? `（HTTP ${f.httpStatus}）` : ""}{f.upstreamCode ? ` · ${f.upstreamCode}` : ""}</li>)}</ul></details>}
     {r.expectedReference?.combined && <p className="task-settings-help">合并参考类：{r.expectedReference.name}；该库不区分类内单个模型。</p>}
-    <small>远端账号 ID：{r.accountId || "—"} · 有效样本：{r.usedOutputs ?? 0}/3 · 参考库：{r.referenceBuiltAt || "—"}</small>
+    <small>远端账号 ID：{r.accountId || "—"} · {r.status === "error" ? `采样完成：${r.completedSamples ?? 0}/3` : `有效样本：${r.usedOutputs ?? 0}/3`} · 参考库：{r.referenceBuiltAt || "—"}</small>
+    {r.samples?.length > 0 && <p className="task-settings-help">样本数字数（实际 / 期望）：{r.samples.map(s => `${s.count} / ${s.expected}`).join("；")}</p>}
     {r.candidates?.length > 0 && <details><summary>查看候选归因</summary><ol>{r.candidates.map(c => <li key={c.model}>{c.name || c.model}：{c.probability == null ? "—" : `${(c.probability * 100).toFixed(2)}%`}</li>)}</ol></details>}
   </div>)}</div>;
 }

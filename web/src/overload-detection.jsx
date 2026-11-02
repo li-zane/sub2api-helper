@@ -84,7 +84,7 @@ export function OverloadDetection({ job, token, onError }) {
       </div>
       <div className="overload-chart-status">
       <div className="overload-chart">
-        <svg viewBox="0 0 164 56" role="group" aria-label="过去六个完整小时的过载与请求数量，两条线独立缩放">
+        <svg viewBox="0 0 164 56" role="group" aria-label="最近六个完整的 15 分钟区间的过载与请求数量，两条线独立缩放">
           <line className="overload-zero" x1="14" x2="156" y1="44" y2="44" />
           <text className="overload-zero-label" x="1" y="48">0</text>
           {overloadSegments.map((values, index) => <polyline key={index} className="overload-line" points={values} />)}

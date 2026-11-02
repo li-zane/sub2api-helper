@@ -15,6 +15,7 @@ assert.equal(fingerprintVerdict(combined, "gpt-6.1-sol", .8), "match", "slash-co
 assert.equal(fingerprintVerdict({ ...combined, prediction: "gpt-5.6-luna", prediction_name: "gpt-5.6-luna" }, "gpt-6.1-sol", .8), "mismatch", "known combined alias with another high-probability attribution is mismatch, not unknown");
 for (const maxConcurrentAccounts of [0, 17, true, 1.5]) assert.throws(() => normalizeFingerprintSettings({ maxConcurrentAccounts }));
 assert.equal(aggregateFingerprint([{ status: "match" }, { status: "error" }]), "unknown");
+assert.equal(aggregateFingerprint([{ status: "error" }]), "error");
 assert.equal(aggregateFingerprint([{ status: "match" }, { status: "mismatch" }]), "mismatch");
 for (const intervalMinutes of [0, 4, 43201, true, ""]) assert.throws(() => normalizeFingerprintSettings({ intervalMinutes }));
 assert.throws(() => normalizeFingerprintSettings({ models: ["a", "a"] }));
@@ -46,7 +47,7 @@ try {
   state = await service.run("a@example.test", "free", { manual: true }); assert.equal(state.result.status, "unknown"); assert.equal(writes, oldWrites, "uncertain result does not mutate existing groups");
   assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["10", "20", "99"], account), ["10", "20", "99"], "existing conditional groups survive unknown evidence");
   assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["10", "20", "99"]), ["10", "99"], "new admissions still require current matching evidence");
-  phase = "error"; state = await service.run("a@example.test", "free", { manual: true }); assert.equal(state.result.status, "unknown"); assert(!JSON.stringify(state).includes("private-token"));
+  phase = "error"; state = await service.run("a@example.test", "free", { manual: true }); assert.equal(state.result.status, "error"); assert.equal(state.result.models[0].failure.code, "UNKNOWN"); assert.equal(writes, oldWrites, "failed requests leave existing conditional groups unchanged"); assert(!JSON.stringify(state).includes("private-token"));
   await service.saveOverride("a@example.test", { enabled: false, models: ["gpt-5.4"], intervalMinutes: 10 });
   assert.equal(service.snapshot("a@example.test", "free").enabled, false); assert.equal(service.snapshot("a@example.test", "free").models[0].model, "gpt-5.4");
   const restored = new ModelFingerprintService(options); await restored.load(); assert.equal(restored.snapshot("a@example.test", "free").intervalMinutes, 10); assert.equal(restored.snapshot("a@example.test", "free").enabled, false); await restored.stop();
@@ -91,6 +92,26 @@ try {
   await parallel.saveSettings({ ...settings, maxConcurrentAccounts: 3 }); await wait(() => started.length === 3); assert.equal(peak, 3);
   for (const resolve of releases.values()) resolve(); await Promise.all(runs); assert(jobs.every(j => parallel.snapshot(j.email, "free").result?.status === "match"));
   await parallel.stop();
+  let retryCalls = 0, retryWrites = 0;
+  const retryService = new ModelFingerprintService({ ...options, filePath: path.join(directory, "retry.json"),
+    getAccount: async () => ({ id: 1, type: "oauth", status: "active", group_ids: ["10","20"] }),
+    sample: async () => { retryCalls++; if (retryCalls === 2) throw Object.assign(new Error("private-token"), { fingerprintFailure: true, code: "UPSTREAM", httpStatus: 503, retryable: true }); return "1, 20, 42"; },
+    updateGroups: async () => { retryWrites++; }, detectorLoader: async () => ({ builtAt: "fixture", analyze: () => makeAnalysis() }) });
+  await retryService.saveSettings(settings);
+  const retried = await retryService.run("a@example.test", "free", { manual: true });
+  assert.equal(retryCalls,4,"only the failed second sample is retried, not the successful first sample");
+  assert.equal(retried.result.status,"match"); assert.equal(retried.result.models[0].sampleFailures[0].sample,2); assert.equal(retried.result.models[0].sampleFailures[0].httpStatus,503);
+  retryService.sample = async () => { retryCalls++; throw Object.assign(new Error("secret upstream"),{fingerprintFailure:true,code:"QUOTA",httpStatus:429,retryable:false}); };
+  const beforeQuota = retryCalls;
+  const quota = await retryService.run("a@example.test", "free", { manual: true });
+  assert.equal(retryCalls,beforeQuota+1,"quota failures are never retried"); assert.equal(quota.result.status,"error"); assert.equal(retryWrites,0,"failed sampling never changes conditional groups");
+  retryService.sample = async () => { retryCalls++; throw Object.assign(new Error("secret upstream"),{fingerprintFailure:true,code:"UPSTREAM",httpStatus:503,retryable:true}); };
+  const beforeBound = retryCalls;
+  await retryService.run("a@example.test", "free", { manual: true }); assert.equal(retryCalls,beforeBound+2,"transient retries stop after the second attempt");
+  retryService.getAccount = async () => ({id:1,status:"paused"}); time+=1000;
+  await assert.rejects(retryService.run("a@example.test", "free", {manual:true}),/暂停/);
+  const skipped = retryService.history("a@example.test","free").records[0]; assert.equal(skipped.failure.code,"ACCOUNT_PAUSED"); assert(skipped.error.includes("暂停"),"outer-stage failure details persist in history");
+  await retryService.stop();
   console.log("PASS: combined reference aliases, bounded account concurrency, deduplicated queue, live concurrency increase and persistent rolling one-hour attribution history");
   console.log("PASS: model fingerprint calibrated matching/unknown states, three-sample strictness, inherited/independent settings, persistence, backend isolation, conditional groups, retry without model calls and cancellation");
 } finally { await service.stop(); await fs.rm(directory, { recursive: true, force: true }); }

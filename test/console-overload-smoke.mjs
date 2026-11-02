@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { HOUR_MS, OVERLOAD_MESSAGE } from "../src/overload-monitor.mjs";
+import { OVERLOAD_INTERVAL_MS, OVERLOAD_MESSAGE } from "../src/overload-monitor.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-overload-http-"));
@@ -30,7 +30,7 @@ const remote = http.createServer(async (req, res) => {
     const page = Number(url.searchParams.get("page"));
     const items = accountId === 7 ? requestCounts.flatMap((count, index) => Array.from({ length: count }, (_, number) => ({
       request_id: `request-${index}-${number}`, account_id: accountId, kind: number % 2 ? "success" : "error",
-      created_at: new Date(start + index * HOUR_MS + 10_000 + number).toISOString(),
+      created_at: new Date(start + index * OVERLOAD_INTERVAL_MS + 10_000 + number).toISOString(),
     }))) : [];
     return res.end(JSON.stringify({ data: { items: items.slice((page - 1) * 100, page * 100), total: items.length } }));
   }
@@ -40,7 +40,7 @@ const remote = http.createServer(async (req, res) => {
     const start = Date.parse(url.searchParams.get("start_time"));
     const items = accountId === 7 ? counts.flatMap((count, index) => Array.from({ length: count }, (_, number) => ({
       id: index * 100 + number + 1, account_id: accountId, status_code: 503,
-      message: OVERLOAD_MESSAGE, created_at: new Date(start + index * HOUR_MS + 10_000 + number).toISOString(),
+      message: OVERLOAD_MESSAGE, created_at: new Date(start + index * OVERLOAD_INTERVAL_MS + 10_000 + number).toISOString(),
     }))) : [];
     return res.end(JSON.stringify({ data: { items, total: items.length, page: 1, page_size: 500, pages: 1 } }));
   }
@@ -124,7 +124,7 @@ try {
   assert.equal((await job(ids[1])).overloadDetection.enabled, false);
   assert(logRequests.every((url) => ["7", "8"].includes(url.searchParams.get("account_id"))), "each remote account for this email is included");
   assert(logRequests.every((url) => url.searchParams.get("status_codes") === "503"));
-  assert.equal(new Date(entry.overloadDetection.points.at(-1).end).getMinutes(), 0);
+  assert.equal(new Date(entry.overloadDetection.points.at(-1).end).getMinutes() % 15, 0);
   await toggle(false);
   assert.equal((await job()).overloadDetection.enabled, false);
   const saved = JSON.parse(await fs.readFile(path.join(output, "overload-monitor.json"), "utf8"));

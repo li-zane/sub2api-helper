@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { generateChallenges, loadDetector, parseNumbers } from "lmfpd-sdk";
+import { setTimeout as delay } from "node:timers/promises";
+import { fingerprintFailure } from "./model-fingerprint-request.mjs";
 
 const invalid = message => Object.assign(new Error(message), { status: 400 });
 export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, planDefaults: {}, groupPolicies: {} });
@@ -55,6 +57,7 @@ function referenceLabels(id, name) {
 }
 export function fingerprintEvaluation(analysis, expected, threshold) {
   const unknown = reason => ({ status: "unknown", reason });
+  if (Number.isInteger(analysis?.used_outputs) && analysis.used_outputs !== 3) return unknown(`仅获得 ${analysis.used_outputs}/3 份有效检测样本，请查看各样本的实际数字数与期望数量`);
   if (analysis?.decision !== "scored") return unknown("响应不具备可评分的数字指纹");
   if (analysis.used_outputs !== 3) return unknown("未获得三份有效检测样本");
   if (analysis.probability_status !== "reference_calibrated" || !Number.isFinite(analysis.probability)) return unknown("参考库未提供可校准的归因概率");
@@ -67,6 +70,7 @@ export function fingerprintEvaluation(analysis, expected, threshold) {
 }
 export const fingerprintVerdict = (analysis, expected, threshold) => fingerprintEvaluation(analysis, expected, threshold).status;
 export function aggregateFingerprint(results) {
+  if (results.length && results.every(item => item.status === "error")) return "error";
   if (!results.length || results.some(item => item.status === "unknown" || item.status === "error")) return "unknown";
   return results.some(item => item.status === "mismatch") ? "mismatch" : "match";
 }
@@ -139,7 +143,7 @@ export class ModelFingerprintService {
     if (entry?.result && !records.some(r => r.checkedAt === entry.result.checkedAt)) records.push(this.historyRecord(entry.result));
     return records.filter(r => Date.parse(r.checkedAt) >= cutoff && Date.parse(r.checkedAt) <= this.now()).sort((a, b) => Date.parse(b.checkedAt) - Date.parse(a.checkedAt)).slice(0, 200);
   }
-  historyRecord(result) { return { checkedAt: result.checkedAt, status: result.status, models: result.models, durationMs: result.durationMs ?? null, source: result.source || "legacy", legacy: !result.models?.every(m => m.probabilityStatus || m.status === "error") }; }
+  historyRecord(result) { return { checkedAt: result.checkedAt, status: result.status, models: result.models, error: result.error || null, failure: result.failure || null, durationMs: result.durationMs ?? null, source: result.source || "legacy", legacy: !result.models?.every(m => m.probabilityStatus || m.status === "error") }; }
   recordResult(entry, result) { entry.history = this.recentHistory(entry); entry.result = result; entry.history = this.recentHistory(entry); }
   history(email, planType) {
     const state = this.snapshot(email, planType);
@@ -232,17 +236,28 @@ export class ModelFingerprintService {
         if (account.status && account.status !== "active" || account.schedulable === false) throw new Error("账号已暂停或状态异常，本轮跳过");
         for (const model of config.models) {
           controller.signal.throwIfAborted();
-          const outputs = [];
+          const outputs = [], sampleFailures = [];
           try {
             for (const challenge of this.challenges(3)) {
-              const text = await this.sample(context.config, account, model.model, challenge.prompt, controller.signal);
-              outputs.push({ text, expected_count: challenge.expected_count });
+              for (let attempt = 1; attempt <= 2; attempt++) {
+                try {
+                  const text = await this.sample(context.config, account, model.model, challenge.prompt, controller.signal);
+                  outputs.push({ text, expected_count: challenge.expected_count }); break;
+                } catch (error) {
+                  controller.signal.throwIfAborted();
+                  const detail = fingerprintFailure(error);
+                  sampleFailures.push({ sample: outputs.length + 1, attempt, ...detail });
+                  if (!detail.retryable || attempt === 2) throw error;
+                  await delay(1000, undefined, { signal: controller.signal });
+                }
+              }
             }
             const analysis = detector.analyze(outputs, { strict: true });
-            results.push({ accountId: String(target.id), model: model.model, expected: model.expected, ...fingerprintEvaluation(analysis, model.expected, config.minProbability), prediction: analysis.prediction || null, predictionName: analysis.prediction_name || null, probability: analysis.probability ?? null, probabilityStatus: analysis.probability_status, decision: analysis.decision, usedOutputs: analysis.used_outputs, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })), candidates: analysis.results.slice(0, 5).map(r => ({ model: r.model, name: r.display_name, probability: r.probability })), referenceBuiltAt: detector.builtAt });
+            results.push({ accountId: String(target.id), model: model.model, expected: model.expected, ...fingerprintEvaluation(analysis, model.expected, config.minProbability), prediction: analysis.prediction || null, predictionName: analysis.prediction_name || null, probability: analysis.probability ?? null, probabilityStatus: analysis.probability_status, decision: analysis.decision, usedOutputs: analysis.used_outputs, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })), candidates: analysis.results.slice(0, 5).map(r => ({ model: r.model, name: r.display_name, probability: r.probability })), referenceBuiltAt: detector.builtAt, sampleFailures });
           } catch (error) {
             controller.signal.throwIfAborted();
-            results.push({ accountId: String(target.id), ...model, status: "error", error: "模型请求失败或响应不完整，请检查账号、模型和代理" });
+            const detail = fingerprintFailure(error);
+            results.push({ accountId: String(target.id), ...model, status: "error", error: detail.message, failure: detail, sampleFailures, completedSamples: outputs.length, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })) });
           }
         }
       }
@@ -263,8 +278,9 @@ export class ModelFingerprintService {
       if (!controller.signal.aborted && revision === this.revision) {
         await this.mutate(async () => {
           if (controller.signal.aborted || revision !== this.revision || this.accounts.get(email) !== entry) return;
-          entry.lastError = [400, 409].includes(error.status) ? error.message : "检测未完成：请检查参考库、账号、模型和网络";
-          this.recordResult(entry, { signature, backend, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source: manual ? "manual" : "scheduled", status: "unknown", models: [], error: entry.lastError });
+          const detail = fingerprintFailure(error);
+          entry.lastError = detail.message;
+          this.recordResult(entry, { signature, backend, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source: manual ? "manual" : "scheduled", status: "error", models: [], error: entry.lastError, failure: detail });
           await this.persist();
         });
       }
@@ -277,7 +293,7 @@ export class ModelFingerprintService {
   }
   async reconcileLocked(email, planType, targets, revision) {
     const entry = this.accounts.get(email), state = this.snapshot(email, planType), context = this.getContext();
-    if (!state.result || state.result.status === "unknown" || !entry.groupSyncPending) return;
+    if (!["match", "mismatch"].includes(state.result?.status) || !entry.groupSyncPending) return;
     try {
       for (const target of targets) {
         const account = await this.getAccount(context.config, target.id);
@@ -305,7 +321,7 @@ export class ModelFingerprintService {
       if (this.stopped) break;
       if (this.inFlight.has(label(job.email))) continue;
       const state = this.snapshot(job.email, job.planType), entry = this.accounts.get(label(job.email));
-      if (entry?.groupSyncPending && state.result && state.result.status !== "unknown") {
+      if (entry?.groupSyncPending && ["match", "mismatch"].includes(state.result?.status)) {
         const targets = (await this.listTargets(context.config)).filter(t => label(t.email) === label(job.email));
         await this.reconcile(label(job.email), job.planType, targets);
       }

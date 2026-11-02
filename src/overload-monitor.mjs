@@ -2,15 +2,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 export const OVERLOAD_MESSAGE = "Our servers are currently overloaded. Please try again later.";
-export const HOUR_MS = 60 * 60_000;
-const HOURS = 6;
+export const OVERLOAD_INTERVAL_MS = 15 * 60_000;
+const POINT_COUNT = 6;
 
-// Only completed, half-open hours are shown: at 03:00 the last point is [02:00, 03:00).
-export function completedHours(now = Date.now()) {
-  const end = Math.floor(now / HOUR_MS) * HOUR_MS;
-  return Array.from({ length: HOURS }, (_, index) => ({
-    start: new Date(end - (HOURS - index) * HOUR_MS).toISOString(),
-    end: new Date(end - (HOURS - index - 1) * HOUR_MS).toISOString(),
+// Six completed, half-open quarters: at 03:15 the last point is [03:00, 03:15).
+export function completedIntervals(now = Date.now()) {
+  const end = Math.floor(now / OVERLOAD_INTERVAL_MS) * OVERLOAD_INTERVAL_MS;
+  return Array.from({ length: POINT_COUNT }, (_, index) => ({
+    start: new Date(end - (POINT_COUNT - index) * OVERLOAD_INTERVAL_MS).toISOString(),
+    end: new Date(end - (POINT_COUNT - index - 1) * OVERLOAD_INTERVAL_MS).toISOString(),
     count: null,
   }));
 }
@@ -27,8 +27,8 @@ function isOverload(row) {
 
 // The split upstream list includes recovered failures, so successful failovers still count.
 // The legacy endpoint is used only when the split endpoint does not exist.
-export async function collectOverloadHours(options) {
-  return collectOverloadCounts({ ...options, points: completedHours(options.now) });
+export async function collectOverloadIntervals(options) {
+  return collectOverloadCounts({ ...options, points: completedIntervals(options.now) });
 }
 
 export async function collectOverloadWindow({ start, end, ...options }) {
@@ -100,12 +100,12 @@ async function collectOverloadCounts({ config, accountIds, request, points, isEn
 }
 
 // Count request-level success + failure records, not upstream retry/error attempts.
-// Bin timestamps locally so an inclusive upstream end_time never leaks the next hour.
-export async function collectRequestHours({ config, accountIds, request, now = Date.now(), isEnabled = () => true }) {
-  const points = completedHours(now);
+// Bin timestamps locally so an inclusive upstream end_time never leaks the next interval.
+export async function collectRequestIntervals({ config, accountIds, request, now = Date.now(), isEnabled = () => true }) {
+  const points = completedIntervals(now);
   const start = Date.parse(points[0].start);
   const end = Date.parse(points.at(-1).end);
-  const counts = Array(HOURS).fill(0);
+  const counts = Array(POINT_COUNT).fill(0);
   const seen = new Set();
   for (const accountId of new Set(accountIds.map(String))) {
     let expectedTotal = null;
@@ -139,7 +139,7 @@ export async function collectRequestHours({ config, accountIds, request, now = D
           if (seen.has(key)) continue;
           seen.add(key);
         }
-        counts[Math.floor((timestamp - start) / HOUR_MS)] += 1;
+        counts[Math.floor((timestamp - start) / OVERLOAD_INTERVAL_MS)] += 1;
       }
       if (received >= total) break;
       if (!data.items.length) throw new Error("请求日志分页不完整");
@@ -167,7 +167,7 @@ export class OverloadMonitor {
       this.backend = data.backend || null;
       for (const [email, entry] of Object.entries(data.accounts)) {
         if (entry && typeof entry.enabled === "boolean") this.accounts.set(email, {
-          enabled: entry.enabled, points: Array.isArray(entry.points) ? entry.points.slice(-HOURS) : [],
+          enabled: entry.enabled, points: Array.isArray(entry.points) ? entry.points.slice(-POINT_COUNT) : [],
           revision: Number.isSafeInteger(entry.revision) && entry.revision >= 0 ? entry.revision : 0,
           updatedAt: entry.updatedAt || null, lastError: entry.lastError || null, requestError: entry.requestError || null,
         });
@@ -190,11 +190,11 @@ export class OverloadMonitor {
   snapshot(email) {
     const configured = Boolean(this.syncBackend());
     const entry = this.accounts.get(email.toLowerCase());
-    const stored = new Map((entry?.points || []).map((point) => [point.start, point]));
+    const stored = new Map((entry?.points || []).filter(point => Date.parse(point.end) - Date.parse(point.start) === OVERLOAD_INTERVAL_MS).map((point) => [point.start, point]));
     return {
       configured, enabled: entry?.enabled === true, revision: entry?.revision || 0, updatedAt: entry?.updatedAt || null,
       lastError: entry?.lastError || null, requestError: entry?.requestError || null,
-      points: completedHours(this.now()).map((point) => ({ ...point,
+      points: completedIntervals(this.now()).map((point) => ({ ...point,
         count: stored.get(point.start)?.count ?? null, requestCount: stored.get(point.start)?.requestCount ?? null,
       })),
     };
@@ -249,15 +249,15 @@ export class OverloadMonitor {
   refresh() {
     if (this.running) return this.running;
     this.clearTimer(this.timer);
-    const startedHour = Math.floor(this.now() / HOUR_MS);
+    const startedInterval = Math.floor(this.now() / OVERLOAD_INTERVAL_MS);
     this.running = this.run().finally(() => {
       this.running = null;
       if (this.stopped) return;
-      if (Math.floor(this.now() / HOUR_MS) !== startedHour) this.rerun = true;
+      if (Math.floor(this.now() / OVERLOAD_INTERVAL_MS) !== startedInterval) this.rerun = true;
       if (this.rerun) { this.trigger(); return; }
-      const nextHour = HOUR_MS - (this.now() % HOUR_MS);
+      const nextInterval = OVERLOAD_INTERVAL_MS - (this.now() % OVERLOAD_INTERVAL_MS);
       const failed = [...this.accounts.values()].some((entry) => entry.enabled && (entry.lastError || entry.requestError));
-      this.timer = this.setTimer(() => this.trigger(), failed ? Math.min(60_000, nextHour) : nextHour);
+      this.timer = this.setTimer(() => this.trigger(), failed ? Math.min(60_000, nextInterval) : nextInterval);
       this.timer.unref?.();
     });
     return this.running;
@@ -290,10 +290,10 @@ export class OverloadMonitor {
           const accountIds = mapping.get(email) || [];
           if (!accountIds.length) throw new Error("该账号尚未加入 Sub2API 号池");
           const options = { config, accountIds, request: this.request, now, isEnabled };
-          const [overloads, requests] = await Promise.allSettled([collectOverloadHours(options), collectRequestHours(options)]);
+          const [overloads, requests] = await Promise.allSettled([collectOverloadIntervals(options), collectRequestIntervals(options)]);
           if (!isEnabled()) continue;
-          const previous = new Map((entry.points || []).map((point) => [point.start, point]));
-          const points = completedHours(now).map((point, index) => ({ ...point,
+          const previous = new Map((entry.points || []).filter(point => Date.parse(point.end) - Date.parse(point.start) === OVERLOAD_INTERVAL_MS).map((point) => [point.start, point]));
+          const points = completedIntervals(now).map((point, index) => ({ ...point,
             count: overloads.status === "fulfilled" ? overloads.value?.[index].count ?? null : previous.get(point.start)?.count ?? null,
             requestCount: requests.status === "fulfilled" ? requests.value?.[index].requestCount ?? null : previous.get(point.start)?.requestCount ?? null,
           }));
