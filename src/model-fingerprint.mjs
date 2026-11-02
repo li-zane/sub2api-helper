@@ -113,11 +113,11 @@ export class ModelFingerprintService {
       const data = JSON.parse(await fs.readFile(this.filePath, "utf8"));
       if (data.version !== 1) throw new Error("版本无效");
       this.settings = normalizeFingerprintSettings(data.settings);
-      for (const [email, entry] of Object.entries(data.accounts || {})) this.accounts.set(email, { ...entry, override: normalizeFingerprintOverride(entry.override), history: this.recentHistory(entry), phase: "idle" });
+      for (const [email, entry] of Object.entries(data.accounts || {})) this.accounts.set(email, { ...entry, override: normalizeFingerprintOverride(entry.override), recentResults: this.latestRounds(entry), history: this.recentHistory(entry), phase: "idle" });
     } catch (error) { if (error.code !== "ENOENT") throw new Error(`模型指纹配置读取失败：${error.message}`); }
   }
   persist() {
-    for (const entry of this.accounts.values()) entry.history = this.recentHistory(entry);
+    for (const entry of this.accounts.values()) { entry.recentResults = this.latestRounds(entry); entry.history = this.recentHistory(entry); }
     const text = JSON.stringify({ version: 1, settings: this.settings, accounts: Object.fromEntries(this.accounts) }, null, 2);
     const operation = this.writePromise.catch(() => {}).then(async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
@@ -136,7 +136,14 @@ export class ModelFingerprintService {
     const entry = this.accounts.get(label(email));
     const current = entry?.result?.signature === this.signature(email, planType);
     const config = this.effective(email, planType), queued = this.queued.has(email);
-    return { ...config, override: entry?.override || { enabled: null, models: null, intervalMinutes: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? entry?.result || null : null, previousResult: !current ? entry?.result || null : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncError: entry?.groupSyncError || null };
+    return { ...config, override: entry?.override || { enabled: null, models: null, intervalMinutes: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status }) => ({ checkedAt, status })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? entry?.result || null : null, previousResult: !current ? entry?.result || null : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncError: entry?.groupSyncError || null };
+  }
+  latestRounds(entry) {
+    const records = new Map();
+    for (const record of [...(entry?.recentResults || []), ...(entry?.history || []), ...(entry?.result ? [this.historyRecord(entry.result)] : [])]) {
+      if (Number.isFinite(Date.parse(record.checkedAt)) && Date.parse(record.checkedAt) <= this.now()) records.set(record.checkedAt, record);
+    }
+    return [...records.values()].sort((a, b) => Date.parse(b.checkedAt) - Date.parse(a.checkedAt)).slice(0, 6);
   }
   recentHistory(entry) {
     const cutoff = this.now() - HISTORY_WINDOW_MS, records = [...(entry?.history || [])];
@@ -144,10 +151,11 @@ export class ModelFingerprintService {
     return records.filter(r => Date.parse(r.checkedAt) >= cutoff && Date.parse(r.checkedAt) <= this.now()).sort((a, b) => Date.parse(b.checkedAt) - Date.parse(a.checkedAt)).slice(0, 200);
   }
   historyRecord(result) { return { checkedAt: result.checkedAt, status: result.status, models: result.models, error: result.error || null, failure: result.failure || null, durationMs: result.durationMs ?? null, source: result.source || "legacy", legacy: !result.models?.every(m => m.probabilityStatus || m.status === "error") }; }
-  recordResult(entry, result) { entry.history = this.recentHistory(entry); entry.result = result; entry.history = this.recentHistory(entry); }
+  recordResult(entry, result) { entry.recentResults = this.latestRounds(entry); entry.history = this.recentHistory(entry); entry.result = result; entry.recentResults = this.latestRounds(entry); entry.history = this.recentHistory(entry); }
   history(email, planType) {
     const state = this.snapshot(email, planType);
-    return { since: new Date(this.now() - HISTORY_WINDOW_MS).toISOString(), until: new Date(this.now()).toISOString(), records: this.recentHistory(this.accounts.get(label(email))), phase: state.phase, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, lastError: state.lastError };
+    const records = this.latestRounds(this.accounts.get(label(email)));
+    return { since: records.at(-1)?.checkedAt || new Date(this.now()).toISOString(), until: new Date(this.now()).toISOString(), records, phase: state.phase, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, lastError: state.lastError };
   }
   saveSettings(raw) {
     const next = normalizeFingerprintSettings(raw);

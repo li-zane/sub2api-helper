@@ -81,12 +81,12 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
     void load(); const timer = setInterval(load, 5000); return () => { stopped = true; clearInterval(timer); };
   }, [job.id, token, refresh]);
   const time = value => new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
-  return <Dialog title={`${job.email} 最近一小时归因结果`} onClose={onClose}><div className="fingerprint-form fingerprint-history">
-    <div className="fingerprint-history-toolbar"><span>最近 60 分钟完成的检测 · 每 5 秒刷新</span><button className="secondary-button" type="button" onClick={() => setRefresh(v => v + 1)}>刷新记录</button></div>
+  return <Dialog title={`${job.email} 最近 6 轮归因结果`} onClose={onClose}><div className="fingerprint-form fingerprint-history">
+    <div className="fingerprint-history-toolbar"><button className="secondary-button" type="button" onClick={() => setRefresh(v => v + 1)}>刷新记录</button></div>
     {data && <><p className="task-settings-help">{time(data.since)} — {time(data.until)}（北京时间）<br />{data.phase === "running" ? "当前正在检测，完成后会自动显示。" : data.phase === "queued" ? `正在排队，前方 ${Math.max(0, data.queuePosition - 1)} 个账号。` : data.enabled ? "自动检测已开启。" : "自动检测已关闭，已有记录仍可查看。"}</p>
       {!data.models.length && <p className="proxy-quality-error">尚未配置检测模型，请先在“降智检测设置”或账号独立设置中添加。</p>}
       {data.lastError && <p role="alert" className="proxy-quality-error">{data.lastError}</p>}
-      {!data.records.length ? <p className="fingerprint-history-empty">最近一小时暂无完成的检测记录；点击“立即检测”可生成新记录。</p> : data.records.map((record, index) => <section key={`${record.checkedAt}-${index}`} className="fingerprint-history-record">
+      {!data.records.length ? <p className="fingerprint-history-empty">暂无检测记录。</p> : data.records.map((record, index) => <section key={`${record.checkedAt}-${index}`} className="fingerprint-history-record">
         <div className="fingerprint-history-heading"><strong>{time(record.checkedAt)}</strong><span className={`fingerprint-status ${record.status}`}>{TITLES[record.status] || "证据不足"}</span></div>
         <p className="task-settings-help">{record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "升级前的最近结果"}{record.durationMs != null ? ` · 耗时 ${(record.durationMs / 1000).toFixed(1)} 秒` : ""}</p>
         {record.legacy && <p className="task-settings-help">旧版记录按当时结论保留，不回填或修改分组；新检测将使用修正后的参考类匹配。</p>}
@@ -105,14 +105,22 @@ export function ModelFingerprintCell({ job, token, onError }) {
   }
   function open() { setDraft({ ...state.override, text: toText(state.override.models ?? state.models), customModels: state.override.models !== null, customInterval: state.override.intervalMinutes !== null, interval: state.override.intervalMinutes ?? state.intervalMinutes }); setError(""); setEditing(true); }
   const result = state.result;
+  const recent = (state.recentResults || (result || state.previousResult ? [result || state.previousResult] : [])).slice(0, 6).reverse();
+  const rounds = [...Array(6 - recent.length).fill(null), ...recent];
+  const checking = state.phase === "running" || state.phase === "queued";
   return <div className="fingerprint-cell-body">
-    <div className="fingerprint-cell-actions"><button type="button" role="switch" aria-checked={state.enabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${state.enabled ? "on" : ""}`} disabled={!token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span><span>{state.enabled ? "开启" : "关闭"}</span></button><button type="button" className="icon-button" aria-label={`${job.email} 独立降智检测设置`} onClick={open}><Settings2 size={14} /></button></div>
-    <button type="button" className={`fingerprint-status fingerprint-history-link ${result?.status || "unknown"}`} aria-label={`${job.email} 查看最近一小时归因结果`} title="点击查看最近一小时的检测时间、模型归因、概率和候选结果" onClick={() => setShowHistory(true)}>{state.phase === "running" ? "检测中…" : state.phase === "queued" ? `排队中（第 ${state.queuePosition} 个）` : !state.models.length ? "待配置模型" : result ? TITLES[result.status] : state.previousResult ? "配置已变更，待复检" : "尚未检测"}<span className="fingerprint-history-caption">最近一小时 · {state.historyCountLastHour || 0} 轮 ›</span></button>
-    <small>{state.override.enabled == null ? "继承 PlanType" : "账号独立开关"} · {state.intervalMinutes} 分钟</small>
-    {result && <small title={result.models.map(r => `${r.model} → ${r.predictionName || r.prediction || "未知"} (${r.probability == null ? "—" : `${Math.round(r.probability * 100)}%`})`).join("\n")}>{result.models.map(r => `${r.model}：${TITLES[r.status]}`).join("；")}</small>}
-    {result && <small>{new Date(result.checkedAt).toLocaleString("zh-CN")}</small>}
-    {(state.lastError || state.groupSyncError) && <small className="proxy-quality-error">{state.lastError || state.groupSyncError}</small>}
-    <button type="button" className="fingerprint-check-button" disabled={!token || busy || state.phase === "running" || state.phase === "queued" || !state.models.length || !job.sub2apiInPool} onClick={() => update({}, true)}>立即检测</button>
+    <div className="fingerprint-cell-actions">
+      <button type="button" role="switch" aria-checked={state.enabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${state.enabled ? "on" : ""}`} disabled={!token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
+      <button type="button" className="fingerprint-check-button" disabled={!token || busy || checking || !state.models.length || !job.sub2apiInPool} onClick={() => update({}, true)}>{state.phase === "running" ? "检测中…" : state.phase === "queued" ? "排队中…" : "立即检测"}</button>
+      <button type="button" className="icon-button" aria-label={`${job.email} 独立降智检测设置`} onClick={open}><Settings2 size={14} /></button>
+    </div>
+    <div className="fingerprint-rounds" role="group" aria-label={`${job.email} 最近 6 轮检测结果`}>
+      {rounds.map((round, index) => {
+        const status = !round ? "empty" : round.status === "match" ? "match" : round.status === "mismatch" ? "mismatch" : "error";
+        const label = !round ? "暂无检测记录" : `${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${new Date(round.checkedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`;
+        return <button key={round?.checkedAt || `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
+      })}
+    </div>
     {showHistory && <FingerprintHistoryDialog job={job} token={token} onClose={() => setShowHistory(false)} />}
     {editing && <Dialog title={`${job.email} 降智检测`} onClose={() => setEditing(false)}><form className="fingerprint-form" onSubmit={e => { e.preventDefault(); update({ enabled: draft.enabled, models: draft.customModels ? fromText(draft.text) : null, intervalMinutes: draft.customInterval ? draft.interval : null }); }}>
       <label className="settings-field"><span>账号检测开关</span><select aria-label="账号检测开关" value={draft.enabled == null ? "inherit" : String(draft.enabled)} onChange={e => setDraft({ ...draft, enabled: e.target.value === "inherit" ? null : e.target.value === "true" })}><option value="inherit">继承 PlanType</option><option value="true">独立开启</option><option value="false">独立关闭</option></select></label>

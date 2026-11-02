@@ -222,9 +222,17 @@ button:focus-visible, a:focus-visible, select:focus-visible { outline: 2px solid
 .proxy-quality-source, .proxy-quality-time { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .proxy-quality-error { margin: 6px 0; color: var(--danger); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .fingerprint-heading, .fingerprint-cell { min-width: 205px; width: 205px; }
-.fingerprint-cell-body { display: grid; gap: 5px; min-width: 0; font-size: 11px; }
+.fingerprint-cell-body { display: grid; gap: 8px; min-width: 0; font-size: 11px; }
 .fingerprint-cell-body > small { color: var(--muted); max-width: 210px; overflow-wrap: anywhere; }
-.fingerprint-cell-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fingerprint-cell-actions { display: flex; align-items: center; gap: 8px; }
+.fingerprint-cell-actions > .icon-button { margin-left: auto; }
+.fingerprint-rounds { --fingerprint-failed: #eab308; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
+.fingerprint-round { height: 24px; padding: 0; border: 0; border-radius: 4px; background: var(--line); cursor: pointer; }
+.fingerprint-round.match { background: var(--green); }
+.fingerprint-round.mismatch { background: var(--danger); }
+.fingerprint-round.error { background: var(--fingerprint-failed); }
+.fingerprint-round:hover { filter: brightness(.9); }
+.fingerprint-round:focus-visible, .fingerprint-check-button:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
 .fingerprint-status { font-weight: 650; color: var(--muted); }
 .fingerprint-status.match { color: var(--green); }
 .fingerprint-status.mismatch { color: var(--danger); }

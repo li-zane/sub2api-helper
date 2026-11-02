@@ -71,13 +71,25 @@ try {
   const slow = new ModelFingerprintService({ ...options, filePath: path.join(directory, "slow.json"), detectorLoader: () => new Promise(() => {}) });
   await slow.saveSettings(settings); const slowRun = slow.run("a@example.test", "free", { manual: true });
   await new Promise(r => setTimeout(r, 20)); await slow.stop(); await slowRun;
-  // A rolling history survives restart and excludes records beyond the hour.
+  // Recent rounds survive both restarts and gaps longer than the old one-hour window.
   phase = "match"; await service.saveOverride("a@example.test", {});
   time += 1000; await service.run("a@example.test", "free", { manual: true });
   time += 1000; phase = "mismatch"; await service.run("a@example.test", "free", { manual: true });
   const recent = service.history("a@example.test", "free"); assert(recent.records.length >= 2); assert.equal(recent.records[0].status, "mismatch"); assert.equal(recent.records[0].models[0].probabilityStatus, "reference_calibrated");
   const historyRestored = new ModelFingerprintService(options); await historyRestored.load(); assert.equal(historyRestored.history("a@example.test", "free").records.length, recent.records.length); await historyRestored.stop();
-  time += 3600001; assert.equal(service.history("a@example.test", "free").records.length, 0);
+  time += 3600001; assert.equal(service.history("a@example.test", "free").records.length, recent.records.length);
+  const sixRounds = { override: normalizeFingerprintOverride({}) };
+  service.accounts.set("six@example.test", sixRounds);
+  for (let i = 0; i < 9; i++) {
+    time += 7_200_000;
+    service.recordResult(sixRounds, { checkedAt: new Date(time).toISOString(), status: ["match", "mismatch", "error"][i % 3], models: [] });
+  }
+  await service.persist();
+  assert.deepEqual(service.snapshot("six@example.test").recentResults.map(r => r.status), ["error", "mismatch", "match", "error", "mismatch", "match"]);
+  const sixRestored = new ModelFingerprintService(options); await sixRestored.load();
+  assert.equal(sixRestored.history("six@example.test").records.length, 6);
+  assert.deepEqual(sixRestored.snapshot("six@example.test").recentResults, service.snapshot("six@example.test").recentResults);
+  await sixRestored.stop();
   // Three accounts queued behind a limit of two; raising it drains without abort.
   let concurrent = 0, peak = 0, started = [], releases = new Map();
   const jobs = [1, 2, 3].map(id => ({ email: `parallel${id}@example.test`, planType: "free" }));
@@ -112,6 +124,6 @@ try {
   await assert.rejects(retryService.run("a@example.test", "free", {manual:true}),/暂停/);
   const skipped = retryService.history("a@example.test","free").records[0]; assert.equal(skipped.failure.code,"ACCOUNT_PAUSED"); assert(skipped.error.includes("暂停"),"outer-stage failure details persist in history");
   await retryService.stop();
-  console.log("PASS: combined reference aliases, bounded account concurrency, deduplicated queue, live concurrency increase and persistent rolling one-hour attribution history");
+  console.log("PASS: combined reference aliases, bounded account concurrency, deduplicated queue, live concurrency increase and six-round history across restarts and multi-hour gaps");
   console.log("PASS: model fingerprint calibrated matching/unknown states, three-sample strictness, inherited/independent settings, persistence, backend isolation, conditional groups, retry without model calls and cancellation");
 } finally { await service.stop(); await fs.rm(directory, { recursive: true, force: true }); }
