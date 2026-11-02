@@ -83,7 +83,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
   const time = value => new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
   return <Dialog title={`${job.email} 最近 6 轮归因结果`} onClose={onClose}><div className="fingerprint-form fingerprint-history">
     <div className="fingerprint-history-toolbar"><button className="secondary-button" type="button" onClick={() => setRefresh(v => v + 1)}>刷新记录</button></div>
-    {data && <><p className="task-settings-help">{time(data.since)} — {time(data.until)}（北京时间）<br />{data.phase === "running" ? "当前正在检测，完成后会自动显示。" : data.phase === "queued" ? `正在排队，前方 ${Math.max(0, data.queuePosition - 1)} 个账号。` : data.enabled ? "自动检测已开启。" : "自动检测已关闭，已有记录仍可查看。"}</p>
+    {data && <>
       {!data.models.length && <p className="proxy-quality-error">尚未配置检测模型，请先在“降智检测设置”或账号独立设置中添加。</p>}
       {data.lastError && <p role="alert" className="proxy-quality-error">{data.lastError}</p>}
       {!data.records.length ? <p className="fingerprint-history-empty">暂无检测记录。</p> : data.records.map((record, index) => <section key={`${record.checkedAt}-${index}`} className="fingerprint-history-record">
