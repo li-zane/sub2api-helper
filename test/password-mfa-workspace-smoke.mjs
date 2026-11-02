@@ -76,13 +76,25 @@ try {
   ], { CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "JBSWY3DPEHPK3PXP" });
   assert.equal(webOnly.code, 0, processFailure(webOnly));
   assert.match(webOnly.output, /Saved web session:/);
+  assert.match(webOnly.output, /Reused saved Web session/);
+  assert.doesNotMatch(webOnly.output, /Password accepted|2FA verification accepted/);
   assert.doesNotMatch(webOnly.output, /Start Codex OAuth|Saved sub2api import|Saved session data/);
   assert.equal(await fs.readFile(outputPath, "utf8"), oauthBeforeWeb);
-  const webState = JSON.parse(await fs.readFile(path.join(tempRoot, "web-session.json"), "utf8"));
+  const webState = JSON.parse(await fs.readFile(path.join(tempRoot, "mfa-test@example.com-web-session.json"), "utf8"));
   assert.match(webState.accessToken, /^web\./);
   const stateAfterWeb = await fetch(`${baseUrl}/__test/state`).then(response => response.json());
   assert.equal(stateAfterWeb.oauthAuthorizationCount, state.oauthAuthorizationCount, "Web login never visits the Codex authorization endpoint");
-  assert.equal(stateAfterWeb.workspaceSelectionCount, state.workspaceSelectionCount + 1);
+  assert.equal(stateAfterWeb.workspaceSelectionCount, state.workspaceSelectionCount);
+
+  const reusedCodex = await runNode([
+    path.join(projectRoot, "src", "protocol-login.mjs"), "--email", "mfa-test@example.com",
+    "--chatgpt-base", baseUrl, "--auth-base", baseUrl, "--output-mode", "sub2api", "--sub2api-out", outputPath,
+    "--checkpoint", checkpointPath,
+  ], { CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "JBSWY3DPEHPK3PXP" });
+  assert.equal(reusedCodex.code, 0, processFailure(reusedCodex));
+  assert.match(reusedCodex.output, /Reused saved Web session/);
+  assert.match(reusedCodex.output, /Start Codex OAuth flow/);
+  assert.doesNotMatch(reusedCodex.output, /Password accepted|2FA verification accepted/);
 
   const emailLogin = await runNode([
     path.join(projectRoot, "src", "protocol-login.mjs"),
@@ -279,6 +291,7 @@ async function runNode(args, extraEnv, inputSteps = []) {
     env: {
       ...process.env,
       NODE_ENV: "test",
+      TOSUB2_WEB_SESSION_PATH: path.join(tempRoot, `${args[args.indexOf("--email") + 1] || "fixture"}-web-session.json`),
       TOSUB2_TEST_SENTINEL_TOKEN: "mock-password-verify-challenge",
       TOSUB2_TEST_SENTINEL_SO_TOKEN: "mock-so-token",
       ...extraEnv,

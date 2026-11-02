@@ -172,10 +172,12 @@ try {
 }
 function tokens(access, refresh) { return { access_token: access, refresh_token: refresh, email, chatgpt_account_id: "pool-account", chatgpt_user_id: "pool-user", client_id: "pool-client", expires_at: 1900000000, plan_type: "plus" }; }
 async function authorize(id, failure = false) {
-  await waitFor(async () => ["email_otp", "failed"].includes((await jobFor(id)).status));
-  assert.equal((await jobFor(id)).status, "email_otp", JSON.stringify(await jobFor(id)));
-  let response = await post(`/api/jobs/${id}/input`, { action: "email_otp", value: "123456" });
-  assert.equal(response.status, 200, JSON.stringify(response.body));
+  await waitFor(async () => ["email_otp", "phone", "failed"].includes((await jobFor(id)).status));
+  let response;
+  if ((await jobFor(id)).status === "email_otp") {
+    response = await post(`/api/jobs/${id}/input`, { action: "email_otp", value: "123456" });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+  }
   await waitFor(async () => ["phone", "failed"].includes((await jobFor(id)).status));
   assert.equal((await jobFor(id)).status, "phone", JSON.stringify(await jobFor(id)));
   response = await post(`/api/jobs/${id}/input`, { action: "phone", value: "+60123456789" });

@@ -21,6 +21,7 @@ const mockServer = spawn(process.execPath, [
   windowsHide: true,
 });
 
+let isolatedSession = 0;
 let serverLogs = "";
 mockServer.stdout.setEncoding("utf8");
 mockServer.stderr.setEncoding("utf8");
@@ -379,6 +380,7 @@ async function runNode(args, inputSteps = [], extraEnv = {}) {
     env: {
       ...process.env,
       NODE_ENV: "test",
+      TOSUB2_WEB_SESSION_PATH: path.join(tempRoot, `isolated-web-${++isolatedSession}.json`),
       TOSUB2_TEST_SENTINEL_TOKEN: "mock-sentinel-challenge",
       TOSUB2_TEST_SENTINEL_SO_TOKEN: "mock-so-token",
       CHATGPT_SAME_PROXY_RISK_RETRY_DELAY_MS: "0",

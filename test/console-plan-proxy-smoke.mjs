@@ -181,6 +181,9 @@ process.disconnect(); process.stdin.destroy();
   assert.equal(saved.accountProxyMode, "plan");
   assert.equal((await job(ids[0])).assignedProxyId, preservedId);
   assert.equal((await (await fetch(`${base}/api/sub2api/settings`, { headers })).json()).profiles.find((item) => item.id === "default").proxyId, "direct");
+  // Profile edits are passive; relogin now applies the current plan, not a historical one.
+  profiles[0].proxyId = "balanced"; profiles[1].proxyId = "direct"; profiles[2].proxyId = "3";
+  await settings();
   assert.equal((await post("/api/jobs/relogin-batch", { ids: [ids[0]] })).status, 200);
   await waitFor(async () => (await job(ids[0])).status === "email_otp");
   await post(`/api/jobs/${ids[0]}/input`, { action: "email_otp", value: "123456" });
@@ -214,8 +217,9 @@ process.disconnect(); process.stdin.destroy();
     await waitFor(async () => (await job(id)).status === "completed" && !(await job(id)).poolRefreshAction);
     const repeated = (await trace()).findLast((item) => item.email === email && item.phase === "login");
     assert.equal(repeated.fixed, "1");
-    assert.equal(repeated.proxy, email.startsWith("free") ? "" : "http://b.invalid:8080/");
+    assert.equal(repeated.proxy, email.startsWith("free") ? (profiles[1].proxyId === "1" ? "http://a.invalid:8080/" : "http://b.invalid:8080/") : "http://b.invalid:8080/", "relogin applies the current fixed PlanType target");
   }
+  profiles[1].proxyId = "balanced"; await settings();
   const beforeFailure = (await trace()).length;
   preservedProxy.status = "expired";
   await post(`/api/jobs/${ids[0]}/relogin`, {});
@@ -282,6 +286,7 @@ process.disconnect(); process.stdin.destroy();
   assert.equal((await job(ids[0])).assignedProxyId, null, "explicit direct binding survives restart and ordinary relogin");
   assert.equal((await trace()).findLast((item) => item.phase === "login" && item.email === "plus-a@example.test").proxy, "");
   assert.equal(profiles[1].proxyId, "direct", "manual switch leaves the Free plan unchanged");
+  profiles[2].proxyId = "1"; await settings();
   const fixedSwitch = await post("/api/jobs/switch-proxy-batch", { ids: [ids[3]] });
   assert.equal(fixedSwitch.body.started, 1);
   await waitFor(async () => (await job(ids[3])).status === "email_otp");
@@ -295,7 +300,7 @@ process.disconnect(); process.stdin.destroy();
   await post(`/api/jobs/${ids[1]}/input`, { action: "email_otp", value: "123456" });
   await waitFor(async () => (await job(ids[1])).status === "completed" && !(await job(ids[1])).poolRefreshAction);
   assert.notEqual((await job(ids[1])).boundIps[0], balancedBefore, "balanced manual switch still chooses a different exit IP");
-  console.log("PASS: first-login PlanType binding; later web login/OAuth reuse fixed IP after restart; direct/pinned bindings survive profile edits; missing/changed IP stops without reassignment");
+  console.log("PASS: first-login PlanType binding; later web login/OAuth reuse fixed IP after restart; matching balanced bindings stay stable; missing/changed IP stops without reassignment");
   console.log("PASS: manual Free switch clears historical proxy to direct, pool proxy_id=0, fixed-plan target, balanced different exit, failed-logout atomicity and restart persistence");
   if (process.argv.includes("--serve")) {
     await fs.writeFile(planOverrides, JSON.stringify({ "plus-b@example.test": "free" }));

@@ -23,7 +23,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && url.pathname === "/api/auth/providers") return sendJson(res, 200, {});
   if (req.method === "GET" && url.pathname === "/api/auth/csrf") return sendJson(res, 200, { csrfToken: "mock-csrf" });
-  if (req.method === "GET" && url.pathname === "/api/auth/session") return sendJson(res, 200, { accessToken: "mock-web-token", account: { id: "workspace-personal" } });
+  if (req.method === "GET" && url.pathname === "/api/auth/session") return sendJson(res, 200, { accessToken: "mock-web-token", user: { email: lastLoginHint }, account: { id: "workspace-personal" } });
   if (req.method === "GET" && url.pathname === "/backend-api/accounts/check/v4-2023-04-27") return sendJson(res, 200, {
     default_account: "workspace-personal",
     accounts: { "workspace-personal": { account: { account_id: "workspace-personal", plan_type: "plus" } } },

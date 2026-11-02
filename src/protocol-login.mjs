@@ -12,7 +12,7 @@ import {
 } from "./tls-transport.mjs";
 import { normalizeCodexAuthMode, generateSub2ApiOAuth, exchangeSub2ApiOAuth, refreshSub2ApiOAuth, sub2ApiOAuthIdentity } from "./sub2api-oauth.mjs";
 import { getAccountBrowserIdentity } from "./account-browser-identity.mjs";
-import { saveProtocolWebSession } from "./account-web-session.mjs";
+import { readAccountWebSession, saveProtocolWebSession } from "./account-web-session.mjs";
 
 const DEFAULT_CHATGPT_BASE = "https://chatgpt.com";
 const DEFAULT_AUTH_BASE = "https://auth.openai.com";
@@ -619,6 +619,7 @@ async function run() {
       debugAuth: Boolean(args.debugAuth),
     };
     let checkpoint = null;
+    let reauthenticationClient = null;
 
     async function selectCodexProxy() {
       if (process.env.TOSUB2_PHASED_PROXY !== "1") return;
@@ -682,19 +683,22 @@ async function run() {
 
     let freshLoginRestartCount = 0;
     while (!checkpoint && !codex) {
-      client = new ProtocolClient({ verbose: args.verbose, transport });
       email = email || (await ask(rl, "Email: "));
       if (!email) throw new Error("Email is required");
-
-      console.log("[1/5] Start ChatGPT web login");
-      web = await loginChatgptWeb(client, {
-        chatgptBase,
-        authBase,
-        email,
-        rl,
-        password: process.env.CHATGPT_LOGIN_PASSWORD || "",
-        totpSecret: process.env.CHATGPT_TOTP_SECRET || "",
-      });
+      const previous = freshLoginRestartCount === 0
+        ? await reuseSavedWebLogin({ file: webSessionPath, email, transport, chatgptBase, verbose: args.verbose }) : null;
+      client = previous?.client || reauthenticationClient || new ProtocolClient({ verbose: args.verbose, transport });
+      if (previous?.reused) {
+        web = previous.web;
+        console.log("[web-session] Reused saved Web session; account login skipped.");
+      } else {
+        console.log("[1/5] Start ChatGPT web login");
+        web = await loginChatgptWeb(client, {
+          chatgptBase, authBase, email, rl,
+          password: process.env.CHATGPT_LOGIN_PASSWORD || "",
+          totpSecret: process.env.CHATGPT_TOTP_SECRET || "",
+        });
+      }
       console.log(
         client.jar.has("__Secure-next-auth.session-token")
           ? "[ok] ChatGPT web session cookie received"
@@ -723,6 +727,7 @@ async function run() {
           await removeProtocolCheckpoint(checkpointPath);
           if (freshLoginRestartCount >= 1) throw error;
           freshLoginRestartCount += 1;
+          reauthenticationClient = client;
           console.log("[auth-expired] Newly verified login state was rejected; restarting email login once.");
           client = null;
           web = null;
@@ -1256,6 +1261,33 @@ async function askSetupTotpOtp(rl) {
     if (/^\d{6}$/.test(value)) return value;
     console.log("[warn] 2FA setup OTP should be exactly 6 digits.");
   }
+}
+
+async function reuseSavedWebLogin({ file, email, transport, chatgptBase, verbose = false }) {
+  try { await fs.access(file); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  const saved = await readAccountWebSession({ email, webSessionPath: file });
+  const identity = await getAccountBrowserIdentity(email, { root: transport?.accountIdentityRoot });
+  if (JSON.stringify(saved.identity) !== JSON.stringify(identity)) throw new Error("WEB_LOGIN_IDENTITY_MISMATCH: 保存的会话与账号固定浏览器身份不匹配");
+  const client = new ProtocolClient({ verbose, transport, jar: CookieJar.fromJSON(saved.cookies), browserIdentity: identity });
+  const result = await client.request("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/`, timeoutMs: 30_000 });
+  if (result.res.status === 401) {
+    console.log("[web-session] Saved Web session expired; continuing login with the same browser cookies.");
+    return { client, reused: false };
+  }
+  assertOk(result, "Verify saved Web session");
+  let data;
+  try { data = JSON.parse(result.text); } catch { throw new Error("WEB_LOGIN_SESSION_INVALID: Web 会话校验响应无效，请稍后重试"); }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("WEB_LOGIN_SESSION_INVALID: Web 会话校验响应无效，请稍后重试");
+  const token = data.accessToken || data.access_token;
+  if (data.user?.email && String(data.user.email).trim().toLowerCase() !== email.trim().toLowerCase()) throw new Error("WEB_LOGIN_ACCOUNT_MISMATCH: Web 会话与当前账号不匹配");
+  if (!token) {
+    console.log("[web-session] Saved Web session expired; continuing login with the same browser cookies.");
+    return { client, reused: false };
+  }
+  if (typeof token !== "string") throw new Error("WEB_LOGIN_SESSION_INVALID: Web 会话校验响应无效，请稍后重试");
+  if (String(data.user?.email || "").trim().toLowerCase() !== email.trim().toLowerCase()) throw new Error("WEB_LOGIN_ACCOUNT_MISMATCH: Web 会话与当前账号不匹配");
+  return { client, reused: true, web: { ...saved.web, deviceId: identity.deviceId } };
 }
 
 async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password, totpSecret }) {
@@ -2875,7 +2907,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 });
 
 export {
-  CookieJar, ProtocolClient, browserRequestContext, loginChatgptWeb, runCodexOauth, resumeCodexOauth,
+  CookieJar, ProtocolClient, browserRequestContext, loginChatgptWeb, reuseSavedWebLogin, runCodexOauth, resumeCodexOauth,
   validateCodexCallback, exchangeOAuthCode, refreshOAuthToken,
   buildSub2apiOauthExport, refreshSub2apiOauthExport,
   DEFAULT_CODEX_CLIENT_ID, DEFAULT_CODEX_REDIRECT_URI, CODEX_OAUTH_SCOPE,

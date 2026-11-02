@@ -1635,9 +1635,14 @@ function scheduleQueuedJobs() {
 
 async function prepareAndLaunchJob(job, mode, queueRunId) {
   try {
-    const hasBinding = accountProxyMode === "plan" && hasPlanProxyBinding(job);
+    let hasBinding = accountProxyMode === "plan" && hasPlanProxyBinding(job);
     if (accountProxyMode === "plan") {
-      if (hasBinding) await restorePlanProxyBinding(job);
+      const knownPlanType = normalizePlanType(getJobPlanType(job));
+      if (knownPlanType) {
+        await preparePlanCodexProxy(job, knownPlanType, job.workspaceAccountId, { reapply: true });
+        hasBinding = true;
+        appendJobLog(job, `[proxy-plan] 已在登录前应用 PlanType ${knownPlanType} 的当前 IP 方案。\n`);
+      } else if (hasBinding) await restorePlanProxyBinding(job);
       else if (mode !== "refresh" && !globalProxyUrl) throw httpError(409, "请先在代理 IP 配置中保存首次网页登录使用的动态代理");
       job.runProxyFixed = hasBinding;
     } else await refreshJobProxyBinding(job);
@@ -6064,7 +6069,7 @@ function publicBoundProxies(proxyIds, job = null) {
   });
 }
 
-// Resolve the saved binding before each login; never silently change its exit IP.
+// Queue preparation applies the current plan; provider settings reuse that frozen route.
 async function codexOAuthSettingsForJob(job) {
   const selectedMode = codexAuthMode;
   if (accountProxyMode === "plan") {
@@ -6156,10 +6161,10 @@ async function saveJobProxyBinding(job, proxy) {
   await saveJobMetadata(job);
 }
 
-// Called only after the web session has identified its current workspace/PlanType.
+// Resolve a discovered plan, or reapply a known plan before any relogin request.
 // The dynamic login proxy never becomes the pool binding.
-async function preparePlanCodexProxy(job, rawPlanType, workspaceId) {
-  if (hasPlanProxyBinding(job)) {
+async function preparePlanCodexProxy(job, rawPlanType, workspaceId, { reapply = false } = {}) {
+  if (hasPlanProxyBinding(job) && !reapply) {
     await restorePlanProxyBinding(job);
     return planCodexProxyRoute(job, workspaceId);
   }
@@ -6167,13 +6172,22 @@ async function preparePlanCodexProxy(job, rawPlanType, workspaceId) {
   if (!planType) throw httpError(409, "网页登录后未识别到 PlanType，已停止授权，请重试");
   const config = sub2ApiSettingsConfig;
   if (!config?.baseUrl || !config?.adminApiKey) throw httpError(409, "请先配置 Sub2API 后端和管理员 API Key");
-  const accountConfig = await resolveSub2ApiWriteConfig(jobSub2ApiProxyConfig(job, planType));
+  const accountConfig = reapply ? jobSub2ApiProxyConfig(job, planType)
+    : await resolveSub2ApiWriteConfig(jobSub2ApiProxyConfig(job, planType));
   let proxy = null;
   if (accountConfig.proxyId === SUB2API_PROXY_BALANCED) {
+    if (hasPlanProxyBinding(job) && job.assignedProxyId) {
+      await restorePlanProxyBinding(job);
+      return planCodexProxyRoute(job, workspaceId);
+    }
     proxy = (await assignSub2ApiProxies([job])).get(job.id);
   } else {
     let proxyId = normalizeStoredProxyId(accountConfig.proxyId);
     if (!accountConfig.proxyId) {
+      if (hasPlanProxyBinding(job)) {
+        await restorePlanProxyBinding(job);
+        return planCodexProxyRoute(job, workspaceId);
+      }
       const listing = await listSub2ApiAccounts(config, { withMeta: true });
       if (!listing.complete) throw httpError(409, "Sub2API 账号列表不完整，已停止授权代理选择");
       const remote = listing.accounts.find((account) => sub2ApiAccountEmail(account) === job.email.toLowerCase());
@@ -6182,6 +6196,7 @@ async function preparePlanCodexProxy(job, rawPlanType, workspaceId) {
     if (proxyId) {
       proxy = (await listSub2ApiProxies(config)).find((item) => item.id === proxyId);
       if (!proxy?.url || isSub2ApiProxyExpired(proxy)) throw httpError(409, "授权代理已失效，请检查当前 PlanType 的 Sub2API 方案");
+      if (normalizeStoredProxyId(job.assignedProxyId) === proxy.id) assertBoundProxyIp(job, proxy);
     }
   }
   job.planType = planType;
