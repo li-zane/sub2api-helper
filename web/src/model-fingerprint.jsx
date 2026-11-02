@@ -85,6 +85,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
     <div className="fingerprint-history-toolbar"><button className="secondary-button" type="button" onClick={() => setRefresh(v => v + 1)}>刷新记录</button></div>
     {data && <>
       {!data.models.length && <p className="proxy-quality-error">尚未配置检测模型，请先在“降智检测设置”或账号独立设置中添加。</p>}
+      {data.groupSyncError && <p role="alert" className="proxy-quality-error">号池分组同步：{data.groupSyncError}</p>}
       {data.lastError && <p role="alert" className="proxy-quality-error">{data.lastError}</p>}
       {!data.records.length ? <p className="fingerprint-history-empty">暂无检测记录。</p> : data.records.map((record, index) => <section key={`${record.checkedAt}-${index}`} className="fingerprint-history-record">
         <div className="fingerprint-history-heading"><strong>{time(record.checkedAt)}</strong><span className={`fingerprint-status ${record.status}`}>{TITLES[record.status] || "证据不足"}</span></div>

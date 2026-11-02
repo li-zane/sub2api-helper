@@ -155,7 +155,7 @@ export class ModelFingerprintService {
   history(email, planType) {
     const state = this.snapshot(email, planType);
     const records = this.latestRounds(this.accounts.get(label(email)));
-    return { since: records.at(-1)?.checkedAt || new Date(this.now()).toISOString(), until: new Date(this.now()).toISOString(), records, phase: state.phase, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, lastError: state.lastError };
+    return { since: records.at(-1)?.checkedAt || new Date(this.now()).toISOString(), until: new Date(this.now()).toISOString(), records, phase: state.phase, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, lastError: state.lastError, groupSyncError: state.groupSyncError, groupSyncPending: Boolean(this.accounts.get(label(email))?.groupSyncPending) };
   }
   saveSettings(raw) {
     const next = normalizeFingerprintSettings(raw);

@@ -76,6 +76,11 @@ try {
   const activeA = await waitFor(async () => { for (const id of ids.slice(0, 2)) if ((await job(id)).status === "email_otp") return id; });
   const activeB = ids.slice(0, 2).find(id => id !== activeA);
   assert.equal((await job(activeB)).status, "queued", "Web and authorization share the same single slot");
+  const attempts = batch.data.jobs.map(j => ({ id: j.id, attemptId: j.webLoginAttemptId }));
+  const progressBefore = await request("/api/jobs/web-login-progress", { attempts });
+  assert.equal(progressBefore.status, 200);
+  assert(progressBefore.data.progress.some(p => p.phase === "input"));
+  assert(progressBefore.data.progress.some(p => p.phase === "queued"));
   await release(activeA); await waitJob(activeA, j => !j.webLoginPending && j.webLoginCompletedAt);
   await waitJob(activeB, j => j.status === "email_otp");
   const webA = await job(activeA);
@@ -83,7 +88,11 @@ try {
   assert.equal(webA.canDownload, true); assert.equal(webA.webSessionAvailable, true);
   assert.equal((await request(`/api/jobs/${activeA}/workspaces`)).status, 200);
   assert.equal((await request(`/api/jobs/${activeA}/sessions`)).data.sessions.devices[0].appSessions[0], "ChatGPT Web");
+  const progressAfter = await request("/api/jobs/web-login-progress", { attempts });
+  assert.equal(progressAfter.data.progress.find(p => p.id === activeA).phase, "success");
   const mixed = await request("/api/jobs/web-login-batch", { ids: [activeA, activeB] });
+  assert.equal((await request("/api/jobs/web-login-progress", { attempts })).data.progress.find(p => p.id === activeA).phase, "failed", "later attempt does not replace prior batch success");
+  assert.equal(mixed.data.skippedJobs[0].id, activeB);
   assert.equal(mixed.data.started, 1); assert.equal(mixed.data.skipped, 1);
   assert.equal((await request(`/api/jobs/${activeA}/cancel`, {})).status, 200);
   await waitJob(activeA, j => !j.webLoginPending && j.webLoginError?.includes("取消"));

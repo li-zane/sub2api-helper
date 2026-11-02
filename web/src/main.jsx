@@ -43,8 +43,11 @@ import "./styles.css";
 import { logoutAccountSessions, proxySwitchSelectionState } from "./account-session-actions.mjs";
 import { OverloadDetection } from "./overload-detection.jsx";
 import { ProxyQualityPanel } from "./proxy-quality.jsx";
+import { WebLoginBatch } from "./web-login-batch.jsx";
 import { FingerprintSettingsButton, ModelFingerprintCell } from "./model-fingerprint.jsx";
 
+const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效" };
+const BATCH_KEY = "tosub2.web-login-batch";
 const POLL_INTERVAL_MS = 900;
 const SUB2API_PIPELINE_TIMEOUT_MS = 15 * 60_000;
 const LUBAN_API_KEY_STORAGE_KEY = "chatgpt-onboarding.luban-api-key";
@@ -135,6 +138,9 @@ function App() {
   const [batchText, setBatchText] = useState("");
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchError, setBatchError] = useState("");
+  const [webSessionFilter, setWebSessionFilter] = useState("");
+  const [webBatch, setWebBatch] = useState(() => { try { const b = JSON.parse(sessionStorage.getItem(BATCH_KEY)); return b && Array.isArray(b.attempts) && Array.isArray(b.failed) && Array.isArray(b.skipped) ? b : null; } catch { return null; } });
+  useEffect(() => { if (webBatch) sessionStorage.setItem(BATCH_KEY, JSON.stringify(webBatch)); else sessionStorage.removeItem(BATCH_KEY); }, [webBatch]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterText, setFilterText] = useState("");
   const [filterError, setFilterError] = useState("");
@@ -355,6 +361,7 @@ function App() {
     const poll = async () => {
       try {
         const filters = {
+          webSession: webSessionFilter || undefined,
           accountType: accountTypeFilter || undefined,
           status: statusFilter || undefined,
           planType: planTypeFilter || undefined,
@@ -368,6 +375,7 @@ function App() {
             })
           : await apiFetch(token, `/api/jobs?${new URLSearchParams({
               page: String(page),
+              ...(filters.webSession ? { webSession: filters.webSession } : {}),
               ...(filters.accountType ? { accountType: filters.accountType } : {}),
               ...(filters.status ? { status: filters.status } : {}),
               ...(filters.planType ? { planType: filters.planType } : {}),
@@ -418,7 +426,7 @@ function App() {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [token, page, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter]);
+  }, [token, page, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter, webSessionFilter]);
 
   useEffect(() => {
     if (!token || !features.sub2apiMonitor) return undefined;
@@ -1292,6 +1300,7 @@ function App() {
 
   function clearEmailFilter() {
     setEmailFilter([]);
+    setWebSessionFilter("");
     setAccountTypeFilter("");
     setFilterText("");
     setPlanTypeFilter("");
@@ -1483,17 +1492,17 @@ function App() {
     }
   }
 
-  async function loginWebSelected() {
-    if (!canLoginWebSelected || batchAction) return;
+  async function loginWebSelected(ids = [...selectedJobIds]) {
+    if (!Array.isArray(ids) || !ids.length || batchAction) return;
     setBatchAction("web-login");
     try {
       const data = await apiFetch(token, "/api/jobs/web-login-batch", {
-        method: "POST", body: JSON.stringify({ ids: [...selectedJobIds] }),
+        method: "POST", body: JSON.stringify({ ids }),
       });
-      const failed = data.failed || [];
-      setUploadNotice(`已加入 Web 登录队列 ${data.started} 个账号${data.skipped ? `，跳过 ${data.skipped} 个运行中账号` : ""}${failed.length ? `，失败 ${failed.length} 个` : ""}`);
-      setSelectedJobIds(new Set(failed.map(item => item.id)));
-      setError(failed.length ? failed.map(item => `${item.email}：${item.error}`).join("；") : "");
+      const failed = data.failed || [], skipped = data.skippedJobs || [];
+      setWebBatch({ attempts: data.jobs.map(job => ({ id: job.id, attemptId: job.webLoginAttemptId })), failed, skipped });
+      setSelectedJobIds(new Set([...failed, ...skipped].map(item => item.id)));
+      setError("");
     } catch (requestError) { setError(requestError.message); }
     finally { setBatchAction(""); }
   }
@@ -1675,6 +1684,9 @@ function App() {
               <Filter size={17} />
               {emailFilter.length ? `筛选 ${emailFilter.length}` : "筛选账号"}
             </button>
+            <select className="web-state-filter" aria-label="筛选 Web 登录态" value={webSessionFilter} onChange={e => applyColumnFilter(setWebSessionFilter, e.target.value)}>
+              <option value="">全部 Web 状态</option>{Object.entries(WEB_STATES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
             {emailFilter.length > 0 && (
               <button className="selection-text-button clear-filter-button" type="button" onClick={clearEmailFilter}>
                 清除筛选
@@ -1851,6 +1863,7 @@ function App() {
             <button type="button" onClick={() => setError("")} title="关闭"><X size={16} /></button>
           </div>
         )}
+        {webBatch && <WebLoginBatch token={token} batch={webBatch} onRetry={loginWebSelected} onClose={() => setWebBatch(null)} busy={Boolean(batchAction)} />}
         {uploadNotice && (
           <div className="global-success" role="status">
             {batchAction ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}
@@ -1920,7 +1933,7 @@ function App() {
                 批量重新授权
               </button>
               {features.webLogin && (
-                <button type="button" className="secondary-button bulk-button" onClick={loginWebSelected}
+                <button type="button" className="secondary-button bulk-button" onClick={() => loginWebSelected()}
                   disabled={!canLoginWebSelected || Boolean(batchAction)} title="仅登录 Web，与授权共用任务并发池，不执行 Codex 授权或号池上传">
                   {batchAction === "web-login" ? <LoaderCircle className="spin" size={16} /> : <Globe2 size={16} />}一键登录 Web
                 </button>
@@ -3219,6 +3232,7 @@ function JobRow({ job, token, expanded, onToggleLogs, onError, selected, onToggl
             <div className="account-meta">
               <span className="account-id">{shortId(job.id)}</span>
               <LoginMethodBadge job={job} />
+              <span className={`web-session-state ${job.webSessionStatus || "absent"}`} title={job.webSessionVerifiedAt ? `最近验证：${formatDateTime(job.webSessionVerifiedAt)}` : "读取工作区或设备后验证；不自动登录"}>{WEB_STATES[job.webSessionStatus || "absent"]}</span>
             </div>
             {remarksAvailable && (
               <button type="button" className="account-remark-button" onClick={onOpenRemark} title={job.remark || "添加备注"} aria-label={`编辑 ${job.email} 的备注`}>
@@ -3406,7 +3420,7 @@ function JobRow({ job, token, expanded, onToggleLogs, onError, selected, onToggl
           )}
           {webLoginAvailable && (
             <button type="button" className="secondary-button icon-only-action" onClick={loginWeb}
-              disabled={submitting || !job.canLoginWeb} title={job.webLoginError || "登录 Web（不执行 Codex 授权，与授权共用任务并发池）"} aria-label="登录 Web">
+              disabled={submitting || !job.canLoginWeb} title={job.webLoginError || `${WEB_STATES[job.webSessionStatus || "absent"]}：登录 Web（不执行 Codex 授权，与授权共用任务并发池）`} aria-label="登录 Web">
               {submitting ? <LoaderCircle className="spin" size={16} /> : <Globe2 size={16} />}
             </button>
           )}

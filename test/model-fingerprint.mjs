@@ -53,8 +53,8 @@ try {
   const restored = new ModelFingerprintService(options); await restored.load(); assert.equal(restored.snapshot("a@example.test", "free").intervalMinutes, 10); assert.equal(restored.snapshot("a@example.test", "free").enabled, false); await restored.stop();
   await service.saveOverride("a@example.test", {}); assert.equal(service.snapshot("a@example.test", "free").enabled, true);
   phase = "match"; account.group_ids = ["10", "99"]; failPut = true;
-  state = await service.run("a@example.test", "free", { manual: true }); assert(state.groupSyncError); const beforeRetry = calls;
-  failPut = false; service.stopped = false; await service.tick(); service.stopped = true; assert.equal(calls, beforeRetry, "group retry does not resample model"); assert(account.group_ids.includes("20"));
+  state = await service.run("a@example.test", "free", { manual: true }); assert(state.groupSyncError); assert.equal(service.history("a@example.test", "free").groupSyncError, state.groupSyncError); assert.equal(service.history("a@example.test", "free").groupSyncPending, true); const beforeRetry = calls;
+  failPut = false; service.stopped = false; await service.tick(); service.stopped = true; assert.equal(calls, beforeRetry, "group retry does not resample model"); assert(account.group_ids.includes("20")); assert.equal(service.history("a@example.test", "free").groupSyncError, null);
   assert(service.filterGroups("a@example.test", "free", "default", ["20"], account).includes("20"));
   account.credentials = { access_token: "new-identity", _token_version: 2 }; account.group_ids = ["10", "99"];
   assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["20"], account), [], "previous pass cannot admit changed account credentials");

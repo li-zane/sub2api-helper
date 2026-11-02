@@ -72,6 +72,15 @@ try {
   assert.equal(upstreamCalls[0].headers["chatgpt-account-id"], "acct-logout-test");
   assert.match(upstreamCalls[0].headers.authorization, /^Bearer web\./);
   assert.deepEqual(JSON.parse(upstreamCalls[0].body), {});
+  const after = (await (await fetch(`${baseUrl}/api/jobs`, { headers })).json()).jobs.find(j => j.id === accountId);
+  assert.equal(after.webSessionAvailable, false);
+  assert.equal(after.webSessionStatus, "absent");
+  assert.equal(after.canLogoutAllSessions, false);
+  await assert.rejects(fs.access(path.join(accountDir, "web-session.json")), { code: "ENOENT" });
+  const filtered = await (await fetch(`${baseUrl}/api/jobs?webSession=absent`, { headers })).json();
+  assert(filtered.jobs.some(j => j.id === accountId));
+  const absentWorkspaces = await fetch(`${baseUrl}/api/jobs/${accountId}/workspaces`, { headers });
+  assert.equal(absentWorkspaces.status, 409);
   const created = await (await fetch(`${baseUrl}/api/jobs`, { method: "POST", headers, body: JSON.stringify({ email: "running@example.test" }) })).json();
   assert.equal(created.job.canLogoutAllSessions, false);
   const runningResult = await fetch(`${baseUrl}/api/jobs/${created.job.id}/sessions/logout-all`, { method: "POST", headers });

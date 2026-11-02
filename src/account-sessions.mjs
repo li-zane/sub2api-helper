@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { isIP } from "node:net";
 import { CookieJar, ProtocolClient } from "./protocol-login.mjs";
-import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob } from "./account-web-session.mjs";
+import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, setWebSessionState } from "./account-web-session.mjs";
 
 import {
   TlsFingerprintTransport,
@@ -474,13 +474,24 @@ async function performWebRequest(job, method, endpoint, jsonBody) {
     let response = await send();
     if (response.res.status === 401) { await refreshWebToken(); response = await send(); }
     const data = parse(response);
-    if (!response.res.ok) throw providerError(response.res.status, data);
+    if (!response.res.ok) {
+      if (response.res.status === 401) throw new Error("SESSION_TOKEN_EXPIRED: Web 登录态已失效，请重新登录 Web");
+      throw providerError(response.res.status, data);
+    }
+    session.validation = { status: "valid", verifiedAt: new Date().toISOString() };
+    setWebSessionState(job, "valid", session.validation.verifiedAt);
     loggedOut = method === "POST" && endpoint === "/accounts/logout_all";
     return { data, status: response.res.status, session };
+  } catch (error) {
+    if (/SESSION_TOKEN_EXPIRED|Web 会话返回了其他账号/.test(error.message)) {
+      session.validation = { status: "expired", verifiedAt: session.validation?.verifiedAt || null };
+      setWebSessionState(job, "expired", session.validation.verifiedAt);
+    }
+    throw error;
   } finally {
     session.cookies = client.jar.toJSON();
     try {
-      if (loggedOut) await fs.rm(webSessionPathForJob(job), { force: true });
+      if (loggedOut) { await fs.rm(webSessionPathForJob(job), { force: true }); setWebSessionState(job, "absent"); }
       else await writeAccountWebSession(webSessionPathForJob(job), session);
     }
     finally { if (transport) await transport.close(); }

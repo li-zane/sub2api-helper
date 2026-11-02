@@ -1684,3 +1684,15 @@ tbody tr:last-child td { border-bottom: 0; }
   .add-form .secondary-button:last-of-type { grid-column: 1 / -1; }
   .workspace-dialog .dialog-header > div:first-child { align-items: flex-start; flex-direction: column; gap: 2px; }
 }
+
+.web-session-state { font-size: 11px; color: var(--text-muted, #64748b); }
+.web-session-state.valid { color: #168348; }
+.web-session-state.expired { color: #c43838; }
+.web-login-batch { border: 1px solid var(--border-color, #d4dae3); border-radius: 10px; padding: 12px; margin: 12px 0; background: var(--surface, #fff); }
+.web-login-batch-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.web-login-batch-heading strong { flex: 1; min-width: 220px; font-size: 13px; }
+.web-login-batch details { margin-top: 10px; font-size: 12px; }
+.web-login-batch ul { max-height: 220px; overflow: auto; overflow-wrap: anywhere; padding-left: 20px; }
+
+.web-state-filter { font: inherit; font-size: 12px; color: inherit; background: #fff; border: 1px solid #cbd5d1; border-radius: 8px; min-height: 38px; padding: 0 10px; }
+@media (max-width: 640px) { .web-state-filter { width: 100%; } }

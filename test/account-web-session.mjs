@@ -77,6 +77,7 @@ await fs.writeFile(outputPath, oauth);
 const job = { email, outputPath };
 try {
   await assert.rejects(listAccountSessions(job), /尚未保存 Web 登录态/);
+  assert.equal(job.webSessionStatus, "absent");
   assert.equal(management.length, 0, "legacy accounts do not fall back to Codex");
   for (let i = 0; i < 2; i++) {
     const client = new ProtocolClient({ jar: new CookieJar() });
@@ -87,6 +88,7 @@ try {
   assert(signins.every(s => s.device === identity.deviceId && s.headers["user-agent"] === identity.browser.userAgent));
   const devices = await listAccountSessions(job);
   assert.deepEqual(devices.devices[0].appSessions, ["ChatGPT Web"]);
+  assert.equal(job.webSessionStatus, "valid");
   assert.equal(authReads, 1);
   const workspaces = await listAccountWorkspaces(job);
   assert.equal(workspaces.workspaces.length, 2);
@@ -102,8 +104,12 @@ try {
   await assert.rejects(listAccountSessions(job), /其他账号/);
   wrongEmail = false; expired = true;
   await assert.rejects(listAccountSessions(job), /Web 登录态已失效/);
+  assert.equal(job.webSessionStatus, "expired");
+  assert.equal((await readAccountWebSession(job)).validation.status, "expired", "invalid state survives reload");
   expired = false;
   await revokeAllAccountSessions(job);
+  assert.equal(job.webSessionStatus, "absent");
+  assert.equal(job.webSessionAvailable, false);
   await assert.rejects(fs.access(webPath), { code: "ENOENT" });
   assert.deepEqual(await getAccountBrowserIdentity(email), identity, "logout retains the account's browser identity");
   assert.equal(await fs.readFile(outputPath, "utf8"), oauth, "web requests never change Codex credentials");

@@ -7,10 +7,9 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import react from "@vitejs/plugin-react";
-import { createServer as createViteServer } from "vite";
+import { createStaticFrontend } from "./static-frontend.mjs";
 import { createCredentialStore } from "./credential-store.mjs";
-import { readAccountWebSession, webSessionPathForJob } from "./account-web-session.mjs";
+import { readAccountWebSession, webSessionPathForJob, inspectAccountWebSession } from "./account-web-session.mjs";
 import {
   listAccountSessions,
   revokeAccountSession,
@@ -328,7 +327,10 @@ overloadMonitor.start();
 overloadCooldown.start();
 modelFingerprint.start();
 
-const vite = await createViteServer({
+const production = process.env.NODE_ENV === "production";
+const vite = production ? null : await (async () => {
+  const [{ createServer }, { default: react }] = await Promise.all([import("vite"), import("@vitejs/plugin-react")]);
+  return createServer({
   root: WEB_ROOT,
   configFile: false,
   cacheDir: path.join(OUTPUT_ROOT, ".vite"),
@@ -339,6 +341,8 @@ const vite = await createViteServer({
     hmr: { port: hmrPort, clientPort: hmrPort },
   },
 });
+})();
+const staticFrontend = production ? await createStaticFrontend(path.join(WEB_ROOT, "dist")) : null;
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -348,6 +352,7 @@ const server = http.createServer(async (req, res) => {
       await handleApi(req, res, requestUrl);
       return;
     }
+    if (staticFrontend) { await staticFrontend(req, res); return; }
     vite.middlewares(req, res, (error) => {
       if (error) sendJson(res, 500, { error: error.message || "Page rendering failed" });
     });
@@ -553,6 +558,7 @@ async function handleApi(req, res, requestUrl) {
       planType: requestUrl.searchParams.get("planType"),
       sub2apiPool: requestUrl.searchParams.get("sub2apiPool"),
       sub2apiEnabled: requestUrl.searchParams.get("sub2apiEnabled"),
+      webSession: requestUrl.searchParams.get("webSession"),
     }));
     return;
   }
@@ -711,17 +717,31 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
+  if (req.method === "POST" && requestUrl.pathname === "/api/jobs/web-login-progress") {
+    const body = await readJson(req);
+    if (!Array.isArray(body.attempts) || body.attempts.length > 10000 || body.attempts.some(p => !p || typeof p.id !== "string" || typeof p.attemptId !== "string")) throw httpError(400, "登录批次无效");
+    const progress = body.attempts.map(({ id, attemptId }) => {
+      const job = jobs.get(id);
+      if (!job || job.deleted) return { id, phase: "failed", error: "账号已删除" };
+      if (job.webLoginAttemptId !== attemptId) return { id, email: job.email, phase: "failed", error: "已被后续登录任务替代" };
+      const pending = Boolean(job.webLoginPreviousState);
+      return { id, email: job.email, phase: pending ? (job.status === "queued" ? "queued" : ["email_otp", "mfa_otp", "password"].includes(job.status) ? "input" : "running")
+        : job.webLoginError ? "failed" : "success", error: job.webLoginError || null, prompt: job.prompt };
+    });
+    sendJson(res, 200, { progress }); return;
+  }
+
   if (req.method === "POST" && requestUrl.pathname === "/api/jobs/web-login-batch") {
     const body = await readJson(req);
     const selected = resolveSelectedJobs(body.ids);
     const outcomes = await Promise.all(selected.map((job) => withEmailJobLock(job.email, async () => {
-      if (!canLoginWeb(job)) return { skipped: true };
+      if (!canLoginWeb(job)) return { skipped: true, id: job.id, email: job.email };
       try { await startWebLogin(job); return { job }; }
       catch (error) { return { id: job.id, email: job.email, error: String(error.message || error).slice(0, 320) }; }
     })));
     const started = outcomes.filter(item => item.job).map(item => item.job);
     sendJson(res, 200, { jobs: started.map(publicJob), started: started.length,
-      skipped: outcomes.filter(item => item.skipped).length, failed: outcomes.filter(item => item.error) });
+      skipped: outcomes.filter(item => item.skipped).length, skippedJobs: outcomes.filter(item => item.skipped), failed: outcomes.filter(item => item.error) });
     return;
   }
 
@@ -1351,6 +1371,7 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
     if (filters.sub2apiPool || filters.sub2apiEnabled) throw error;
   }
   const allJobs = listUniqueJobs();
+  await Promise.all(allJobs.map(inspectAccountWebSession));
   const planTypes = [...new Set(allJobs.map((job) => getJobPlanType(job)).filter(Boolean))].sort();
   const planTypeUnknown = allJobs.some((job) => !getJobPlanType(job));
   const sub2apiPools = [...new Set(allJobs.map((job) => getSub2ApiPoolFilterValue(job)))];
@@ -1370,7 +1391,8 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
     selection: visibleJobs.map(publicSelectionJob),
     pagination: { page, pageSize: PAGE_SIZE, total, totalPages, totalAll: allJobs.length },
     filter: {
-      active: Boolean(emailSet || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled),
+      active: Boolean(emailSet || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession),
+      webSession: filters.webSession || "",
       accountType: filters.accountType || "",
       requested: emailFilter?.length || 0,
       matched: total,
@@ -1405,6 +1427,7 @@ function normalizeJobFilters(value) {
   const allowedPoolValues = new Set(["added", "error", "not_added", "unknown"]);
   const allowedEnabledValues = new Set(["enabled", "disabled", "unknown"]);
   return {
+    webSession: ["absent", "saved", "valid", "expired"].includes(source.webSession) ? source.webSession : null,
     accountType: ["password_totp", "pool_only"].includes(accountTypeValue) ? accountTypeValue : null,
     status: JOB_STATUS_FILTER_VALUES.includes(statusValue) ? statusValue : null,
     planType: planTypeValue || null,
@@ -1414,6 +1437,7 @@ function normalizeJobFilters(value) {
 }
 
 function matchesJobFilters(job, filters) {
+  if (filters.webSession && (job.webSessionStatus || "absent") !== filters.webSession) return false;
   if (filters.accountType === "pool_only" && !job.poolOnly) return false;
   if (filters.accountType === "password_totp"
     && (job.poolOnly || job.loginMode !== "password" || !hasJobTotpKey(job))) return false;
@@ -1990,6 +2014,7 @@ async function startWebLogin(job) {
     "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount"];
   job.webLoginPreviousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
   job.webLoginError = null;
+  job.webLoginAttemptId = crypto.randomUUID();
   job.webLoginResultSaved = false;
   job.lastError = null;
   job.parserTail = "";
@@ -2042,6 +2067,7 @@ async function finishWebLogin(job, code, signal, message = null) {
 }
 
 function restoreWebLoginState(job, metadata) {
+  job.webLoginAttemptId = metadata.web_login_attempt_id || null;
   job.webLoginCompletedAt = metadata.web_login_completed_at || null;
   job.webLoginError = metadata.web_login_error || null;
   const previous = metadata.web_login_previous_state;
@@ -6616,6 +6642,9 @@ function publicJob(job) {
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
     webSessionAvailable: Boolean(job.webSessionAvailable),
+    webSessionStatus: job.webSessionStatus || "absent",
+    webSessionVerifiedAt: job.webSessionVerifiedAt || null,
+    webLoginAttemptId: job.webLoginAttemptId || null,
     webLoginPending: Boolean(job.webLoginPreviousState),
     webLoginCompletedAt: job.webLoginCompletedAt || null,
     webLoginError: job.webLoginError || null,
@@ -6877,6 +6906,7 @@ function publicSelectionJob(job) {
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
+    webSessionStatus: job.webSessionStatus || "absent",
     canLogoutAllSessions: canLogoutAllSessions(job),
     canSwitchProxy: jobCanSwitchProxy(job),
     canSetupTotp: canSetupTotp(job),
@@ -6886,7 +6916,7 @@ function publicSelectionJob(job) {
 }
 
 function canLogoutAllSessions(job) {
-  return Boolean(job.resultSaved || job.webSessionAvailable) && canForceRelogin(job);
+  return Boolean(job.webSessionAvailable || (job.resultSaved && !job.webSessionStatus)) && canForceRelogin(job);
 }
 
 function canLoginWeb(job) {
@@ -8614,6 +8644,7 @@ async function saveJobMetadata(job) {
         web_login_previous_state: job.webLoginPreviousState || null,
         web_login_completed_at: job.webLoginCompletedAt || null,
         web_login_error: job.webLoginError || null,
+        web_login_attempt_id: job.webLoginAttemptId || null,
         login_mode: job.loginMode || null,
         mail_api_url: job.mailApiUrl || null,
         mail_request_body: job.mailRequestBody || null,
@@ -8978,7 +9009,7 @@ async function shutdown() {
       ...childWaits,
       ...[...jobs.values()].map((job) => job.metadataWritePromise).filter(Boolean),
     ]);
-    await vite.close();
+    await vite?.close();
     await closeHttpServer(server);
   })();
   return shutdownPromise;
