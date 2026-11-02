@@ -1,3 +1,4 @@
+import { seedWebSession } from "./account-web-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -14,6 +15,8 @@ await fs.writeFile(outputPath, JSON.stringify({
     extra: { client_id: "mock-client" },
   }],
 }));
+
+await seedWebSession(outputPath);
 
 const requests = [];
 const server = http.createServer(async (req, res) => {
@@ -86,7 +89,6 @@ try {
   assert.equal(listed.devices[1].lastSignedInIp, "2001:db8::42", "each device keeps its own IPv6 address");
   assert(!JSON.stringify(listed).includes("mock-refresh"), "session display omits credentials");
   await revokeAccountSession(job, { sessionId: "us_remote" });
-  await revokeAllAccountSessions(job);
   const usage = await fetchAccountUsage(job);
   assert.equal(usage.planType, "pro");
   assert.equal(usage.allowed, true);
@@ -105,8 +107,9 @@ try {
     secondary: null,
     credits: null,
   });
+  await revokeAllAccountSessions(job);
   assert.equal(requests.length, 5);
-  assert.ok(requests.every((request) => request.authorization?.startsWith("Bearer header.")));
+  assert.ok(requests.every((request) => request.authorization?.startsWith("Bearer web.")));
   assert.ok(requests.every((request) => request.accountId === "acct-test"));
   console.log("account session HTTP smoke passed");
 } finally {

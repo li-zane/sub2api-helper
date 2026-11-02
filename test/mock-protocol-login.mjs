@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { seedWebSession } from "./account-web-fixture.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const rl = readline.createInterface({ input, output });
@@ -316,6 +317,7 @@ async function writeCompleted(outputPath, email, tokenPrefix = "test") {
     proxies: [],
     accounts: [account],
   }, null, 2)}\n`);
+  if (tokenPrefix !== "refreshed") await seedWebSession(outputPath);
   console.log(`[ok] Saved sub2api import: ${outputPath}`);
 }
 

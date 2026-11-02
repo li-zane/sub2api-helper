@@ -1697,6 +1697,8 @@ function launchJob(job, options = {}) {
     env: {
       ...process.env,
       CHATGPT_LOGIN_PASSWORD: job.password || "",
+      TOSUB2_BROWSER_IDENTITY_ROOT: path.join(OUTPUT_ROOT, "browser-identities"),
+      TOSUB2_WEB_SESSION_PATH: path.join(path.dirname(job.outputPath), "web-session.json"),
       CHATGPT_TOTP_SECRET: job.totpSecret || "",
       CHATGPT_NEW_PASSWORD: mode === "password_add" ? job.pendingNewPassword || "" : "",
       CHATGPT_PROXY_URL: job.proxyFallbackActive ? "" : ((options.phasedProxy ? options.loginProxyUrl : job.proxyUrl) || ""),

@@ -73,6 +73,7 @@ const profiles = [
 try {
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(wrapper, `import fs from "node:fs/promises";
+import { seedWebSession } from ${JSON.stringify(new URL("./account-web-fixture.mjs", import.meta.url).href)};
 const email = process.argv[process.argv.indexOf("--email") + 1];
 const output = process.argv[process.argv.indexOf("--sub2api-out") + 1];
 await fs.appendFile(${JSON.stringify(tracePath)}, JSON.stringify({ phase: "login", email, proxy: process.env.CHATGPT_PROXY_URL, fixed: process.env.CHATGPT_PROXY_FIXED }) + "\\n");
@@ -88,6 +89,7 @@ const route = process.env.TOSUB2_PHASED_PROXY === "1" ? await new Promise((resol
 }) : { proxyUrl: process.env.CHATGPT_PROXY_URL || null, sub2ApiOAuth: { proxyId: Number(process.env.TOSUB2_OAUTH_PROXY_ID) || null } };
 await fs.appendFile(${JSON.stringify(tracePath)}, JSON.stringify({ phase: "codex", email, route }) + "\\n");
 await fs.writeFile(output, JSON.stringify({ type: "sub2api-data", accounts: [{ platform: "openai", type: "oauth", credentials: { email, plan_type: planType, access_token: "fixture", refresh_token: "fixture" }, extra: { email, plan_type: planType } }] }));
+await seedWebSession(output);
 console.log("[ok] Saved sub2api import: " + output);
 process.disconnect(); process.stdin.destroy();
 `);

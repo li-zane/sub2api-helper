@@ -1,3 +1,4 @@
+import { seedWebSession } from "./account-web-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -31,6 +32,8 @@ await fs.writeFile(path.join(accountDir, "sub2api-import-oauth.json"), JSON.stri
 }));
 const portListener = http.createServer();
 await new Promise((resolve) => portListener.listen(0, "127.0.0.1", resolve));
+await seedWebSession(path.join(accountDir, "sub2api-import-oauth.json"));
+
 const port = portListener.address().port;
 await new Promise((resolve) => portListener.close(resolve));
 const baseUrl = `http://127.0.0.1:${port}`;
@@ -67,7 +70,7 @@ try {
   assert.equal(upstreamCalls[0].method, "POST");
   assert.equal(upstreamCalls[0].url, "/backend-api/accounts/logout_all");
   assert.equal(upstreamCalls[0].headers["chatgpt-account-id"], "acct-logout-test");
-  assert.match(upstreamCalls[0].headers.authorization, /^Bearer header\./);
+  assert.match(upstreamCalls[0].headers.authorization, /^Bearer web\./);
   assert.deepEqual(JSON.parse(upstreamCalls[0].body), {});
   const created = await (await fetch(`${baseUrl}/api/jobs`, { method: "POST", headers, body: JSON.stringify({ email: "running@example.test" }) })).json();
   assert.equal(created.job.canLogoutAllSessions, false);

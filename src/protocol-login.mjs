@@ -11,6 +11,8 @@ import {
   TlsFingerprintTransport,
 } from "./tls-transport.mjs";
 import { normalizeCodexAuthMode, generateSub2ApiOAuth, exchangeSub2ApiOAuth, refreshSub2ApiOAuth, sub2ApiOAuthIdentity } from "./sub2api-oauth.mjs";
+import { getAccountBrowserIdentity } from "./account-browser-identity.mjs";
+import { saveProtocolWebSession } from "./account-web-session.mjs";
 
 const DEFAULT_CHATGPT_BASE = "https://chatgpt.com";
 const DEFAULT_AUTH_BASE = "https://auth.openai.com";
@@ -60,6 +62,7 @@ function userAgentForTransport(transport) {
 }
 
 function browserIdentityForTransport(transport) {
+  if (transport?.accountBrowserIdentity) return transport.accountBrowserIdentity.browser;
   return browserIdentityForTlsProfile(transport?.identityProfile || transport?.profile || "chrome146");
 }
 
@@ -190,6 +193,7 @@ class ProtocolClient {
     this.verbose = Boolean(options.verbose);
     this.debugAuth = Boolean(options.debugAuth);
     this.transport = options.transport || null;
+    this.browserIdentity = options.browserIdentity || this.transport?.accountBrowserIdentity || null;
     this.documentUrl = null;
   }
 
@@ -200,11 +204,28 @@ class ProtocolClient {
 
   async request(method, url, options = {}) {
     const targetUrl = new URL(url);
+    if (this.browserIdentity) {
+      for (const cookie of this.jar.cookies) if (cookie.name === "oai-did") cookie.value = this.browserIdentity.deviceId;
+      if (!this.jar.value("oai-did", url)) this.jar.merge([{
+        name: "oai-did", value: this.browserIdentity.deviceId, domain: targetUrl.hostname,
+        path: "/", hostOnly: true, secure: targetUrl.protocol === "https:",
+      }]);
+    }
     const headers = new Headers(options.headers || {});
     for (const [name, value] of Object.entries(browserHeadersForTransport(this.transport))) {
       headers.set(name, value);
     }
     if (options.userAgent) headers.set("user-agent", options.userAgent);
+    if (this.browserIdentity) {
+      const browser = this.browserIdentity.browser;
+      headers.set("user-agent", browser.userAgent);
+      headers.set("accept-language", browser.acceptLanguage);
+      headers.set("sec-ch-ua", browser.secChUa);
+      headers.set("sec-ch-ua-mobile", browser.secChUaMobile);
+      headers.set("sec-ch-ua-platform", browser.secChUaPlatform);
+      headers.set("oai-device-id", this.browserIdentity.deviceId);
+      headers.set("oai-session-id", this.browserIdentity.sessionId);
+    }
 
     if (!headers.has("accept")) {
       headers.set("accept", options.accept || "application/json, text/plain, */*");
@@ -335,19 +356,28 @@ async function run() {
   }
   const outPath = path.resolve(args.out || DEFAULT_OUT);
   const sub2apiOutPath = path.resolve(args.sub2apiOut || DEFAULT_SUB2API_OUT);
+  const webSessionPath = process.env.TOSUB2_WEB_SESSION_PATH || path.join(path.dirname(sub2apiOutPath), "web-session.json");
+  const browserIdentityRoot = process.env.TOSUB2_BROWSER_IDENTITY_ROOT || path.join(path.dirname(sub2apiOutPath), "browser-identities");
+  const accountBrowserIdentity = args.email && !args.refreshSub2api
+    ? await getAccountBrowserIdentity(args.email, { root: browserIdentityRoot, profile: args.tlsProfile || process.env.TOSUB2_BROWSER_TLS_PROFILE }) : null;
   let proxyTemplate = normalizeProxyUrl(args.proxy || process.env.CHATGPT_PROXY_URL);
   let planProxyBound = false;
   const transport = new TlsFingerprintTransport({
     enabled: shouldUseTlsTransport({ chatgptBase, authBase, nativeHttp: args.nativeHttp }),
     profile:
+      accountBrowserIdentity?.tlsProfile
+      ||
       args.tlsProfile
       || process.env.TOSUB2_TLS_PROFILE
       || "chrome146",
     verbose: Boolean(args.verbose),
+    pinnedProfile: Boolean(accountBrowserIdentity),
     maxProxySessionAttempts: process.env.CHATGPT_PROXY_MAX_ATTEMPTS || 10,
     rotateProxySessions: process.env.CHATGPT_PROXY_FIXED !== "1",
     sameProxyRiskRetryDelayMs: process.env.CHATGPT_SAME_PROXY_RISK_RETRY_DELAY_MS,
   });
+  transport.accountBrowserIdentity = accountBrowserIdentity;
+  transport.accountIdentityRoot = browserIdentityRoot;
   async function prepareLoginProxy(url) {
     if (planProxyBound) transport.rotateProxySessions = false;
     if (process.env.TOSUB2_PHASED_PROXY === "1" && process.connected) process.send({ type: "web-proxy-phase", fixed: planProxyBound });
@@ -467,6 +497,7 @@ async function run() {
           await saveCheckpoint("email_verified", {});
           console.log("[checkpoint] Updated verified login state after adding the password.");
         }
+        await saveProtocolWebSession(webSessionPath, client, web);
       } finally {
         rl.close();
       }
@@ -556,6 +587,7 @@ async function run() {
           await saveCheckpoint("email_verified", {});
           console.log("[checkpoint] Updated verified login state after setting 2FA.");
         }
+        await saveProtocolWebSession(webSessionPath, client, web);
       } finally {
         rl.close();
       }
@@ -677,6 +709,7 @@ async function run() {
       });
       await saveCheckpoint("email_verified", {});
       console.log("[checkpoint] Saved verified email login state.");
+      await saveProtocolWebSession(webSessionPath, client, web);
 
       if (!args.webOnly) {
         console.log("[2/5] Start Codex OAuth flow");
@@ -701,6 +734,8 @@ async function run() {
       break;
     }
 
+    // The web login survives checkpoint cleanup and is separate from the Codex export.
+    await saveProtocolWebSession(webSessionPath, client, web);
     if (outputMode !== "sub2api") {
       await writeJsonAtomic(outPath, {
         generated_at: new Date().toISOString(),
@@ -1213,6 +1248,15 @@ async function askSetupTotpOtp(rl) {
 }
 
 async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password, totpSecret }) {
+  if (!client.browserIdentity) {
+    client.browserIdentity = await getAccountBrowserIdentity(email, { root: client.transport?.accountIdentityRoot });
+    if (client.transport) {
+      client.transport.accountBrowserIdentity = client.browserIdentity;
+      client.transport.pinnedProfile = true;
+      client.transport.profile = client.browserIdentity.tlsProfile;
+      await client.transport.configure(client.transport.configuredProxy || null, { force: true });
+    }
+  }
   await client.follow(`${chatgptBase}/`, { referer: `${chatgptBase}/` });
   await client.getJson("GET", `${chatgptBase}/api/auth/providers`, {
     referer: `${chatgptBase}/`,
@@ -1226,7 +1270,7 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
     throw new Error("Missing __Host-next-auth.csrf-token cookie; open the ChatGPT home page first or retry.");
   }
 
-  const deviceId = client.jar.value("oai-did", `${chatgptBase}/`) || crypto.randomUUID();
+  const deviceId = client.browserIdentity.deviceId;
   const authSessionLoggingId = crypto.randomUUID();
   const signinUrl =
     `${chatgptBase}/api/auth/signin/openai?` +
@@ -2820,7 +2864,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 });
 
 export {
-  CookieJar, ProtocolClient, browserRequestContext, runCodexOauth, resumeCodexOauth,
+  CookieJar, ProtocolClient, browserRequestContext, loginChatgptWeb, runCodexOauth, resumeCodexOauth,
   validateCodexCallback, exchangeOAuthCode, refreshOAuthToken,
   buildSub2apiOauthExport, refreshSub2apiOauthExport,
   DEFAULT_CODEX_CLIENT_ID, DEFAULT_CODEX_REDIRECT_URI, CODEX_OAUTH_SCOPE,

@@ -55,8 +55,10 @@ export class TlsFingerprintTransport {
     sameProxyRiskRetryDelayMs = DEFAULT_SAME_PROXY_RISK_RETRY_DELAY_MS,
     cloudflareSolver = true,
     cloudflareSolverTimeoutMs = DEFAULT_CLOUDFLARE_SOLVER_TIMEOUT_MS,
+    pinnedProfile = false,
   } = {}) {
     this.enabled = Boolean(enabled);
+    this.pinnedProfile = Boolean(pinnedProfile);
     this.profile = profile || DEFAULT_PROFILE;
     this.identityProfile = this.profile;
     this.verbose = Boolean(verbose);
@@ -87,6 +89,7 @@ export class TlsFingerprintTransport {
     if (!force && this.configuredProxy === (proxy || null) && this.configuredProfile === this.profile) return;
     const result = await this.send({
       operation: "configure",
+      allowFallback: !this.pinnedProfile,
       proxy: proxy || null,
       impersonate: this.profile,
       verifyTls: shouldVerifyTlsForProxy(proxy),

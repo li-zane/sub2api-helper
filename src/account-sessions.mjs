@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { isIP } from "node:net";
+import { CookieJar, ProtocolClient } from "./protocol-login.mjs";
+import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob } from "./account-web-session.mjs";
 
 import {
-  browserIdentityForTlsProfile,
   TlsFingerprintTransport,
 } from "./tls-transport.mjs";
 
@@ -22,11 +23,11 @@ const MAX_USAGE_WINDOW_SECONDS = 31_536_000;
 const MAX_WORKSPACES = 100;
 
 /**
- * Read the official ChatGPT usage endpoint through the same OAuth transport
+ * Read the official ChatGPT usage endpoint through the same Web session
  * used by the session manager. Only the normalized public shape is returned.
  */
 export async function fetchAccountUsage(job) {
-  const result = await requestWithOAuth(job, "GET", "/wham/usage");
+  const result = await requestWithWebSession(job, "GET", "/wham/usage");
   return {
     ...normalizeAccountUsage(result.data),
     fetchedAt: new Date().toISOString(),
@@ -34,21 +35,20 @@ export async function fetchAccountUsage(job) {
 }
 
 /**
- * List every ChatGPT account/workspace authorized by the saved OAuth token.
+ * List every ChatGPT account/workspace available to the saved Web session.
  * The response intentionally omits access/refresh tokens and other credentials.
  */
 export async function listAccountWorkspaces(job) {
-  const result = await requestWithOAuth(job, "GET", "/wham/accounts/check");
-  const bundle = await readOAuthBundle(job);
-  return normalizeAccountWorkspaces(result.data, bundle.accountId);
+  const result = await requestWithWebSession(job, "GET", "/accounts/check/v4-2023-04-27");
+  return normalizeAccountWorkspaces(result.data, result.session.web?.workspaceId);
 }
 
 export async function switchAccountWorkspace(job, workspaceId) {
   const targetId = normalizeIdentifier(workspaceId);
   if (!targetId) throw new Error("WORKSPACE_TARGET_INVALID: 工作空间 ID 无效");
-  const listingResponse = await requestWithOAuth(job, "GET", "/wham/accounts/check");
+  const listingResponse = await requestWithWebSession(job, "GET", "/accounts/check/v4-2023-04-27");
   const bundle = await readOAuthBundle(job);
-  const listing = normalizeAccountWorkspaces(listingResponse.data, bundle.accountId);
+  const listing = normalizeAccountWorkspaces(listingResponse.data, listingResponse.session.web?.workspaceId);
   const target = listing.workspaces.find((workspace) => workspace.id === targetId);
   if (!target || !isAccountWorkspaceAvailable(target)) {
     throw new Error(`WORKSPACE_TARGET_UNAVAILABLE: ${accountWorkspaceAvailabilityLabel(target)}`);
@@ -74,6 +74,8 @@ export async function switchAccountWorkspace(job, workspaceId) {
   };
   account.plan_type = target.planType || null;
   await writeOAuthBundle(bundle);
+  listingResponse.session.web = { ...listingResponse.session.web, workspaceId: target.id };
+  await writeAccountWebSession(webSessionPathForJob(job), listingResponse.session);
   return {
     currentWorkspaceId: target.id,
     workspace: target,
@@ -87,7 +89,7 @@ export async function switchAccountWorkspace(job, workspaceId) {
 
 export function normalizeAccountWorkspaces(payload, currentAccountId = "") {
   const source = isRecord(payload) ? payload : {};
-  const defaultAccountId = normalizeIdentifier(source.default_account_id ?? source.defaultAccountId);
+  const defaultAccountId = normalizeIdentifier(source.default_account_id ?? source.defaultAccountId ?? source.default_account);
   const requestedAccountId = normalizeIdentifier(currentAccountId);
   const responseSelectedAccountId = normalizeIdentifier(
     source.current_account_id
@@ -95,7 +97,10 @@ export function normalizeAccountWorkspaces(payload, currentAccountId = "") {
       ?? source.selected_account_id
       ?? source.selectedAccountId,
   );
-  const accounts = Array.isArray(source.accounts) ? source.accounts : [];
+  const rawAccounts = Array.isArray(source.accounts) ? source.accounts
+    : isRecord(source.accounts) ? Object.entries(source.accounts).map(([id, value]) => ({ ...value, id: value?.id || id })) : [];
+  const accounts = rawAccounts.map((entry) => ({ ...entry, ...(isRecord(entry?.account) ? entry.account : {}),
+    id: entry?.account?.account_id || entry?.account?.id || entry?.account_id || entry?.id }));
   const accountIds = new Set(accounts.map((account) => normalizeIdentifier(account?.id ?? account?.account_id ?? account?.accountId)).filter(Boolean));
   const selectedAccountId = responseSelectedAccountId && accountIds.has(responseSelectedAccountId)
     ? responseSelectedAccountId
@@ -313,7 +318,7 @@ export function normalizeAccountUsage(payload) {
 }
 
 export async function listAccountSessions(job) {
-  const result = await requestWithOAuth(job, "GET", "/accounts/sessions?include_trusted_devices=true");
+  const result = await requestWithWebSession(job, "GET", "/accounts/sessions?include_trusted_devices=true");
   return {
     showSessionManager: result.data?.show_session_manager !== false,
     devices: normalizeSessionDevices(result.data),
@@ -340,12 +345,12 @@ export async function revokeAccountSession(job, input = {}) {
 
   const endpoint = deviceIdHash ? "/accounts/trusted_devices/revoke" : "/accounts/sessions/revoke";
   const body = deviceIdHash ? { device_id_hash: deviceIdHash } : { session_id: sessionId };
-  await requestWithOAuth(job, "POST", endpoint, body);
+  await requestWithWebSession(job, "POST", endpoint, body);
   return { ok: true, target: publicSessionDevice(target) };
 }
 
 export async function revokeAllAccountSessions(job) {
-  await requestWithOAuth(job, "POST", "/accounts/logout_all", {});
+  await requestWithWebSession(job, "POST", "/accounts/logout_all", {});
   return { ok: true };
 }
 
@@ -412,99 +417,69 @@ function publicSessionDevice(device) {
   };
 }
 
-async function requestWithOAuth(job, method, endpoint, jsonBody = undefined) {
-  const bundle = await readOAuthBundle(job);
+const webSessionRequests = new Map();
+
+async function requestWithWebSession(job, method, endpoint, jsonBody = undefined) {
+  const key = webSessionPathForJob(job);
+  const previous = webSessionRequests.get(key) || Promise.resolve();
+  const pending = previous.catch(() => {}).then(() => performWebRequest(job, method, endpoint, jsonBody));
+  webSessionRequests.set(key, pending);
+  try { return await pending; }
+  finally { if (webSessionRequests.get(key) === pending) webSessionRequests.delete(key); }
+}
+
+async function performWebRequest(job, method, endpoint, jsonBody) {
+  const session = await readAccountWebSession(job);
+  const chatgptBase = String(process.env.CHATGPT_BASE || DEFAULT_CHATGPT_BASE).replace(/\/$/, "");
   const transport = process.env.NODE_ENV !== "production" && process.env.TOSUB2_SESSION_NATIVE_HTTP === "1"
-    ? null
-    : new TlsFingerprintTransport({
-      enabled: true,
-      profile: String(process.env.TOSUB2_TLS_PROFILE || DEFAULT_TLS_PROFILE).trim() || DEFAULT_TLS_PROFILE,
+    ? null : new TlsFingerprintTransport({
+      enabled: true, profile: session.identity.tlsProfile, pinnedProfile: true,
       maxProxySessionAttempts: process.env.CHATGPT_PROXY_MAX_ATTEMPTS || 10,
       rotateProxySessions: !job?.fixedProxy,
       sameProxyRiskRetryDelayMs: process.env.CHATGPT_SAME_PROXY_RISK_RETRY_DELAY_MS,
     });
-  try {
-    await configureTransport(transport, job, bundle.chatgptBase);
-    let accessToken = await ensureAccessToken(bundle, transport);
-    let response = await sendRequest(
-      transport,
-      bundle.chatgptBase,
-      accessToken,
-      method,
-      endpoint,
-      jsonBody,
-      bundle.accountId,
-    );
-    if (response.status === 401 && bundle.refreshToken) {
-      accessToken = await refreshAccessToken(bundle, transport);
-      response = await sendRequest(
-        transport,
-        bundle.chatgptBase,
-        accessToken,
-        method,
-        endpoint,
-        jsonBody,
-        bundle.accountId,
-      );
+  const client = new ProtocolClient({ jar: CookieJar.fromJSON(session.cookies), transport, browserIdentity: session.identity });
+  let loggedOut = false;
+  const parse = (response) => { try { return JSON.parse(response.text); } catch { return {}; } };
+  async function refreshWebToken() {
+    session.accessToken = null;
+    const response = await client.request("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
+    const data = parse(response);
+    const email = String(data.user?.email || "").trim().toLowerCase();
+    if (email && email !== session.email) throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: Web 会话返回了其他账号，请重新登录");
+    const token = data.accessToken || data.access_token;
+    if (!response.res.ok || typeof token !== "string" || !token) {
+      throw new Error("SESSION_TOKEN_EXPIRED: Web 登录态已失效，请为此账号重新登录");
     }
-    const data = await parseResponse(response);
-    if (!response.ok) throw providerError(response.status, data);
-    return { data, status: response.status };
-  } finally {
-    if (transport) await transport.close();
+    session.accessToken = token;
+    session.expiresAt = data.expires || null;
   }
-}
-
-async function configureTransport(transport, job, chatgptBase) {
-  if (!transport) return;
-  const proxy = String(job?.proxyUrl || "").trim();
-  if (proxy) {
-    await transport.prepareProxy(proxy, `${chatgptBase}/`);
-  } else {
-    await transport.configure(null, { force: true });
+  async function send() {
+    const headers = { authorization: `Bearer ${session.accessToken}`, accept: "application/json",
+      "x-requested-with": "XMLHttpRequest", priority: "u=1, i" };
+    if (session.web?.workspaceId) headers["chatgpt-account-id"] = session.web.workspaceId;
+    return client.request(method, `${chatgptBase}/backend-api${endpoint}`, {
+      headers, referer: `${chatgptBase}/`, origin: chatgptBase,
+      ...(jsonBody === undefined ? {} : { json: jsonBody }), timeoutMs: REQUEST_TIMEOUT_MS,
+    });
   }
-}
-
-async function sendRequest(transport, chatgptBase, accessToken, method, endpoint, jsonBody, accountId = "") {
-  const identity = browserIdentityForTlsProfile(transport?.identityProfile || transport?.profile || DEFAULT_TLS_PROFILE);
-  const deviceId = crypto.randomUUID();
-  const sessionId = crypto.randomUUID();
-  const headers = {
-    authorization: `Bearer ${accessToken}`,
-    accept: "application/json",
-    "accept-language": identity.acceptLanguage,
-    "user-agent": identity.userAgent,
-    origin: chatgptBase,
-    referer: `${chatgptBase}/`,
-    "oai-device-id": deviceId,
-    "oai-session-id": sessionId,
-    "x-requested-with": "XMLHttpRequest",
-    "sec-fetch-site": "same-origin",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-dest": "empty",
-    priority: "u=1, i",
-  };
-  if (accountId) headers["chatgpt-account-id"] = accountId;
-  const options = {
-    method,
-    headers,
-    timeoutMs: REQUEST_TIMEOUT_MS,
-    retryRiskControl: true,
-  };
-  if (jsonBody !== undefined) {
-    headers["content-type"] = "application/json";
-    options.body = JSON.stringify(jsonBody);
-  }
-  return transport ? transport.fetch(`${chatgptBase}/backend-api${endpoint}`, options) : fetch(`${chatgptBase}/backend-api${endpoint}`, options);
-}
-
-async function parseResponse(response) {
-  const text = await response.text();
-  if (!text) return {};
   try {
-    return JSON.parse(text);
-  } catch {
-    return { error: "Provider returned a non-JSON response" };
+    // Use the account's saved transport profile; unsupported profiles must never silently change its browser.
+    if (transport) await transport.configure(job?.proxyUrl || null, { force: true });
+    if (!session.accessToken || !tokenExpiresAfter(session.accessToken, TOKEN_REFRESH_SKEW_SECONDS)) await refreshWebToken();
+    let response = await send();
+    if (response.res.status === 401) { await refreshWebToken(); response = await send(); }
+    const data = parse(response);
+    if (!response.res.ok) throw providerError(response.res.status, data);
+    loggedOut = method === "POST" && endpoint === "/accounts/logout_all";
+    return { data, status: response.res.status, session };
+  } finally {
+    session.cookies = client.jar.toJSON();
+    try {
+      if (loggedOut) await fs.rm(webSessionPathForJob(job), { force: true });
+      else await writeAccountWebSession(webSessionPathForJob(job), session);
+    }
+    finally { if (transport) await transport.close(); }
   }
 }
 
@@ -554,61 +529,6 @@ async function readOAuthBundle(job) {
     authBase: String(process.env.AUTH_BASE || DEFAULT_AUTH_BASE).replace(/\/$/, ""),
     outputPath: job.outputPath,
   };
-}
-
-async function ensureAccessToken(bundle, transport) {
-  if (bundle.accessToken && tokenExpiresAfter(bundle.accessToken, TOKEN_REFRESH_SKEW_SECONDS)) {
-    return bundle.accessToken;
-  }
-  if (!bundle.refreshToken) throw new Error("SESSION_TOKEN_EXPIRED: 访问令牌已过期且没有刷新令牌");
-  return refreshAccessToken(bundle, transport);
-}
-
-async function refreshAccessToken(bundle, transport) {
-  const identity = browserIdentityForTlsProfile(transport?.identityProfile || transport?.profile || DEFAULT_TLS_PROFILE);
-  const response = transport
-    ? await transport.fetch(`${bundle.authBase}/oauth/token`, {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/x-www-form-urlencoded",
-        "user-agent": identity.userAgent,
-        "accept-language": identity.acceptLanguage,
-      },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: bundle.clientId,
-        refresh_token: bundle.refreshToken,
-      }),
-      timeoutMs: REQUEST_TIMEOUT_MS,
-      retryRiskControl: true,
-    })
-    : await fetch(`${bundle.authBase}/oauth/token`, {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/x-www-form-urlencoded",
-      "user-agent": identity.userAgent,
-      "accept-language": identity.acceptLanguage,
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      client_id: bundle.clientId,
-      refresh_token: bundle.refreshToken,
-    }),
-    timeoutMs: REQUEST_TIMEOUT_MS,
-    });
-  const data = await parseResponse(response);
-  if (!response.ok || !data?.access_token) {
-    throw new Error(`SESSION_TOKEN_REFRESH_FAILED: OAuth 刷新失败（HTTP ${response.status}）`);
-  }
-  bundle.credentials.access_token = String(data.access_token);
-  if (data.refresh_token) bundle.credentials.refresh_token = String(data.refresh_token);
-  if (data.id_token) bundle.credentials.id_token = String(data.id_token);
-  await writeOAuthBundle(bundle);
-  bundle.accessToken = bundle.credentials.access_token;
-  bundle.refreshToken = bundle.credentials.refresh_token || bundle.refreshToken;
-  return bundle.accessToken;
 }
 
 async function writeOAuthBundle(bundle) {

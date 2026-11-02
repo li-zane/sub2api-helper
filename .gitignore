@@ -11,6 +11,8 @@ tmp/
 chatgpt-protocol-session.json
 sub2api-import*.json
 login-checkpoint.json
+web-session.json
+browser-identities/
 job-meta.json
 
 # Runtime state and credentials stay outside the Git working tree.

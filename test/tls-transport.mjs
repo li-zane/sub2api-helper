@@ -338,6 +338,13 @@ worker = module.Worker()
 worker.configure(None, "chrome146")
 assert worker.impersonate == "chrome145", worker.impersonate
 assert FakeRequests.attempts[:2] == ["chrome146", "chrome145"], FakeRequests.attempts
+FakeRequests.attempts = []
+try:
+    worker.configure(None, "chrome146", allow_fallback=False)
+    raise AssertionError("pinned profile unexpectedly fell back")
+except RuntimeError:
+    pass
+assert FakeRequests.attempts == ["chrome146"], FakeRequests.attempts
 `;
   const result = spawnSync(python.command, [...python.args, "-c", script, workerPath], {
     encoding: "utf8",
@@ -356,6 +363,12 @@ assert FakeRequests.attempts[:2] == ["chrome146", "chrome145"], FakeRequests.att
   await transport.configure(null);
   assert.equal(transport.profile, "chrome145");
   assert.equal(transport.configuredProfile, "chrome145");
+  const pinned = new TlsFingerprintTransport({ enabled: true, profile: "chrome142", pinnedProfile: true });
+  pinned.send = async (message) => {
+    assert.equal(message.allowFallback, false);
+    return { profile: "chrome142" };
+  };
+  await pinned.configure(null);
 }
 
 function testCloudflareWorkerSessionReuse() {

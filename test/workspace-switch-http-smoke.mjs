@@ -1,3 +1,4 @@
+import { seedWebSession } from "./account-web-fixture.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -53,9 +54,11 @@ await fs.writeFile(metadataPath, `${JSON.stringify({
   last_operation_type: "initial_authorization",
 }, null, 2)}\n`);
 
+await seedWebSession(outputPath);
+
 const officialApi = http.createServer((req, res) => {
   res.setHeader("content-type", "application/json");
-  if (req.method === "GET" && req.url === "/backend-api/wham/accounts/check") {
+  if (req.method === "GET" && req.url === "/backend-api/accounts/check/v4-2023-04-27") {
     res.end(JSON.stringify({
       default_account_id: organizationId,
       accounts: [

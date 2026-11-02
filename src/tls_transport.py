@@ -50,6 +50,7 @@ class Worker:
         self.fallback_profiles = ("chrome146", "chrome145", "chrome142", "chrome136")
 
     def configure(self, proxy, impersonate, allow_fallback=True, verify_tls=True):
+        self.allow_profile_fallback = allow_fallback
         if IMPORT_ERROR:
             raise RuntimeError(
                 "Python curl_cffi is unavailable. Run: python -m pip install -r requirements.txt "
@@ -225,6 +226,8 @@ class Worker:
             )
         except Exception as error:
             if not self._is_unsupported_impersonate(error):
+                raise
+            if not getattr(self, "allow_profile_fallback", True):
                 raise
 
             original_profile = self.impersonate
@@ -419,6 +422,7 @@ def main():
                 worker.configure(
                     message.get("proxy"),
                     message.get("impersonate"),
+                    allow_fallback=message.get("allowFallback", True),
                     verify_tls=message.get("verifyTls", True),
                 )
                 result = {
