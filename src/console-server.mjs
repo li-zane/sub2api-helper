@@ -553,6 +553,8 @@ async function handleApi(req, res, requestUrl) {
   if (req.method === "GET" && requestUrl.pathname === "/api/jobs") {
     const requestedPage = Math.max(1, Number.parseInt(requestUrl.searchParams.get("page") || "1", 10) || 1);
     await sendJobsPage(res, requestedPage, null, normalizeJobFilters({
+      search: requestUrl.searchParams.get("search"),
+      lockedOnly: requestUrl.searchParams.get("lockedOnly"),
       accountType: requestUrl.searchParams.get("accountType"),
       status: requestUrl.searchParams.get("status"),
       planType: requestUrl.searchParams.get("planType"),
@@ -1391,7 +1393,9 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
     selection: visibleJobs.map(publicSelectionJob),
     pagination: { page, pageSize: PAGE_SIZE, total, totalPages, totalAll: allJobs.length },
     filter: {
-      active: Boolean(emailSet || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession),
+      active: Boolean(emailSet || filters.search || filters.lockedOnly || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession),
+      search: filters.search || "",
+      lockedOnly: Boolean(filters.lockedOnly),
       webSession: filters.webSession || "",
       accountType: filters.accountType || "",
       requested: emailFilter?.length || 0,
@@ -1419,6 +1423,8 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
 
 function normalizeJobFilters(value) {
   const source = value && typeof value === "object" ? value : {};
+  const search = String(source.search || "").trim();
+  const lockedOnly = source.lockedOnly === true || source.lockedOnly === "true";
   const accountTypeValue = String(source.accountType || "").trim().toLowerCase();
   const statusValue = String(source.status || "").trim().toLowerCase();
   const planTypeValue = String(source.planType || "").trim();
@@ -1427,6 +1433,8 @@ function normalizeJobFilters(value) {
   const allowedPoolValues = new Set(["added", "error", "not_added", "unknown"]);
   const allowedEnabledValues = new Set(["enabled", "disabled", "unknown"]);
   return {
+    search: search || null,
+    lockedOnly,
     webSession: ["absent", "saved", "valid", "expired"].includes(source.webSession) ? source.webSession : null,
     accountType: ["password_totp", "pool_only"].includes(accountTypeValue) ? accountTypeValue : null,
     status: JOB_STATUS_FILTER_VALUES.includes(statusValue) ? statusValue : null,
@@ -1437,6 +1445,20 @@ function normalizeJobFilters(value) {
 }
 
 function matchesJobFilters(job, filters) {
+  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
+  if (filters.lockedOnly) {
+    const isLocked = job.status === "banned" || Boolean(job.autoRepairBlocked);
+    if (!isLocked) return false;
+  }
+  if (filters.search) {
+    const q = filters.search.toLowerCase();
+    const emailMatch = String(job.email || "").toLowerCase().includes(q);
+    const remarkMatch = String(job.remark || "").toLowerCase().includes(q);
+    const planMatch = String(getJobPlanType(job) || "").toLowerCase().includes(q)
+      || String(sub2ApiStatus.planType || "").toLowerCase().includes(q);
+    const proxyMatch = job.assignedProxyId ? String(job.assignedProxyId).includes(q) : false;
+    if (!emailMatch && !remarkMatch && !planMatch && !proxyMatch) return false;
+  }
   if (filters.webSession && (job.webSessionStatus || "absent") !== filters.webSession) return false;
   if (filters.accountType === "pool_only" && !job.poolOnly) return false;
   if (filters.accountType === "password_totp"
@@ -1446,7 +1468,6 @@ function matchesJobFilters(job, filters) {
     const actualPlanType = getJobPlanType(job) || "__unknown__";
     if (actualPlanType !== filters.planType) return false;
   }
-  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
   if (filters.sub2apiPool && getSub2ApiPoolFilterValue(job, sub2ApiStatus) !== filters.sub2apiPool) return false;
   if (filters.sub2apiEnabled === "enabled" && sub2ApiStatus.enabled !== true) return false;
   if (filters.sub2apiEnabled === "disabled" && sub2ApiStatus.enabled !== false) return false;

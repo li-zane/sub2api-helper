@@ -1,0 +1,123 @@
+async (page) => {
+  const results = [];
+  const check = (ok, message) => { if (!ok) throw new Error(message); };
+  const test = async (name, action) => {
+    try { await action(); results.push({ name, passed: true }); }
+    catch (error) { results.push({ name, passed: false, error: error.message }); }
+  };
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+  const search = page.getByRole("textbox", { name: "搜索账号", exact: true });
+  const row = () => page.locator("tr.job-row").filter({ has: page.getByRole("checkbox", { name: "选择 review-1@example.test", exact: true }) });
+
+  await test("Web-state-filter", async () => {
+    const filter = page.getByRole("combobox", { name: "筛选 Web 登录态", exact: true });
+    check(await filter.count() === 1, "Web state control missing");
+    const inactiveColor = await filter.evaluate(element => getComputedStyle(element).color);
+    await filter.selectOption("valid");
+    await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 0);
+    check(await page.getByRole("heading", { name: "没有匹配账号" }).count() === 1, "filtered empty state missing");
+    const activeColor = await filter.evaluate(element => getComputedStyle(element).color);
+    await filter.selectOption("");
+    await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+    check(activeColor !== inactiveColor, "Web filter active styling does not follow its selected value");
+  });
+
+  await test("exact-email-list-filter", async () => {
+    const button = page.getByRole("button", { name: "邮箱列表筛选", exact: true });
+    check(await button.count() === 1, "email-list control missing");
+    await button.click();
+    await page.getByRole("textbox", { name: "每行一个邮箱（最多 500 个）" }).fill("review-1@example.test\nreview-2@example.test");
+    await page.getByRole("button", { name: "应用邮箱筛选", exact: true }).click();
+    await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 2);
+    await page.getByRole("button", { name: "清除全部筛选", exact: true }).click();
+    await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+  });
+
+  await test("effective-plan-search", async () => {
+    await search.fill("business");
+    await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length <= 1);
+    check(await row().count() === 1, "visible business plan not searchable");
+  });
+  await search.fill("");
+  await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+
+  await test("HelpTip-keyboard", async () => {
+    const help = page.getByRole("button", { name: "查看控制台说明", exact: true });
+    check(await help.evaluate(e => e.tabIndex >= 0), "help removed from Tab order");
+    await help.focus();
+    await page.waitForFunction(() => !!document.querySelector('[role="tooltip"]'));
+    check(await help.evaluate(e => !!document.getElementById(e.getAttribute("aria-describedby"))), "tooltip not associated with trigger");
+    await page.keyboard.press("Escape");
+    check(await page.getByRole("tooltip").count() === 0, "Escape does not dismiss help");
+  });
+
+  await test("proxy-modal-focus-and-Escape", async () => {
+    const trigger = page.getByRole("region", { name: "代理 IP 配置", exact: true }).getByRole("button", { name: "配置", exact: true });
+    await trigger.click();
+    const modal = page.getByRole("dialog", { name: "代理 IP 配置与检测", exact: true });
+    try {
+      check(await modal.evaluate(e => e.contains(document.activeElement)), "focus stays behind proxy modal");
+      for (let i = 0; i < 15; i++) {
+        await page.keyboard.press("Tab");
+        check(await modal.evaluate(e => e.contains(document.activeElement)), "Tab escaped modal");
+      }
+      await modal.getByRole("button", { name: "关闭代理 IP 配置", exact: true }).focus();
+      await page.keyboard.press("Escape");
+      check(await modal.count() === 0, "Escape does not close proxy modal");
+      check(await trigger.evaluate(e => document.activeElement === e), "focus not restored to trigger");
+    } finally {
+      if (await modal.count()) await modal.getByRole("button").filter({ hasText: /^关闭$/ }).first().click().catch(async () => { await modal.locator(".dialog-header .icon-button").last().click(); });
+    }
+  });
+
+  await test("log-modal-focus-and-Escape", async () => {
+    const trigger = row().getByRole("button", { name: "查看协议日志", exact: true });
+    await trigger.click();
+    const modal = page.getByRole("dialog", { name: "协议日志", exact: true });
+    try {
+      check(await modal.evaluate(e => e.contains(document.activeElement)), "focus stays behind log modal");
+      await page.keyboard.press("Escape");
+      check(await modal.count() === 0, "Escape does not close log modal");
+      check(await trigger.evaluate(e => document.activeElement === e), "log focus not restored");
+    } finally {
+      if (await modal.count()) await modal.locator(".dialog-header .icon-button").last().click();
+    }
+  });
+
+  await test("batch-row-mutual-exclusion", async () => {
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    await page.route("**/api/jobs/reauthorize-batch", async route => { await pending; await route.fulfill({ json: {} }); });
+    try {
+      await row().getByRole("checkbox").check();
+      await page.locator(".bulk-actions").getByRole("button", { name: "重新授权", exact: true }).click();
+      await page.waitForSelector(".workflow-busy");
+      for (const name of ["重新授权", "重新登录并授权", "设置 2FA", "添加密码", "登录 Web", "查看或修改账号凭据"]) {
+        check(await row().getByRole("button", { name, exact: true }).isDisabled(), name + " enabled while batch busy");
+      }
+      check(await row().getByRole("button", { name: "查看协议日志", exact: true }).isEnabled(), "read-only logs unnecessarily disabled");
+    } finally {
+      release();
+      await page.waitForFunction(() => !document.querySelector(".workflow-busy"));
+      await page.unroute("**/api/jobs/reauthorize-batch");
+    }
+  });
+
+  await test("mobile-action-column", async () => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    check(await row().locator(".actions-cell").evaluate(e => getComputedStyle(e).position === "static"), "sticky actions obscure mobile table");
+    check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "document horizontally overflows");
+  });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  await test("search-empty-state", async () => {
+    await search.fill("definitely-no-match-987");
+    await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 0);
+    check(await page.getByRole("heading", { name: "没有匹配账号", exact: true }).count() === 1, "no-results presented as empty database");
+    check(!await page.locator(".empty-state").innerText().then(text => text.includes("输入邮箱地址")), "obsolete add-email instruction");
+  });
+  await search.fill("");
+  await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+  return { passed: results.filter(r => r.passed).length, total: results.length, results };
+}
