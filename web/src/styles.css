@@ -1700,14 +1700,15 @@ select {
 
 /* Account Column */
 .account-column {
-  width: 220px;
-  min-width: 220px;
+  width: 180px;
+  min-width: 180px;
 }
 
 .account-cell {
   display: flex;
   align-items: flex-start;
   min-width: 0;
+  max-width: 180px;
 }
 
 .account-details {
