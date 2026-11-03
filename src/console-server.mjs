@@ -892,6 +892,9 @@ async function handleApi(req, res, requestUrl) {
     const countedEmails = new Set();
     let directAccountCount = 0;
     for (const account of listing.accounts) {
+      // Filter before email deduplication: an API Key with the same email must
+      // not hide an OAuth account or contribute to either IP/direct counts.
+      if (account.platform !== "openai" || account.type !== "oauth") continue;
       const email = sub2ApiAccountEmail(account);
       if (email && countedEmails.has(email)) continue;
       if (email) countedEmails.add(email);
@@ -906,8 +909,10 @@ async function handleApi(req, res, requestUrl) {
     }
     if (["sub2api", "plan"].includes(accountProxyMode)) {
       for (const job of listUniqueJobs()) {
-        if (countedEmails.has(job.email.toLowerCase())) continue;
-        if (accountProxyMode === "plan" && hasPlanProxyBinding(job) && !job.assignedProxyId) directAccountCount += 1;
+        // A login/canceled task is not an OAuth account until it has saved an
+        // authorization result. Pool OAuth records were already counted above.
+        if (!job.resultSaved || countedEmails.has(job.email.toLowerCase())) continue;
+        if (!normalizeStoredProxyId(job.assignedProxyId)) directAccountCount += 1;
         const proxy = proxiesById.get(normalizeStoredProxyId(job.assignedProxyId));
         if (!proxy) continue;
         const ip = proxyIpKey(proxy);

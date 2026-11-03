@@ -58,6 +58,12 @@ async (page) => {
     const modal = page.getByRole("dialog", { name: "代理 IP 配置与检测", exact: true });
     try {
       check(await modal.evaluate(e => e.contains(document.activeElement)), "focus stays behind proxy modal");
+      check(await modal.getByRole("button", { name: "关闭代理 IP 配置", exact: true }).evaluate(e => e === document.activeElement), "proxy modal initially focuses the help trigger instead of the close button");
+      check(await modal.getByRole("tooltip").count() === 0, "proxy help opens automatically on dialog entry");
+      await modal.getByRole("button", { name: "查看代理 IP 配置说明", exact: true }).focus();
+      await page.waitForFunction(() => !!document.querySelector('dialog [role="tooltip"]'));
+      await page.keyboard.press("Escape");
+      check(await modal.getByRole("tooltip").count() === 0 && await modal.count() === 1, "Escape must dismiss help before closing the dialog");
       for (let i = 0; i < 15; i++) {
         await page.keyboard.press("Tab");
         check(await modal.evaluate(e => e.contains(document.activeElement)), "Tab escaped modal");
@@ -119,5 +125,33 @@ async (page) => {
   });
   await search.fill("");
   await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+
+  await test("proxy-distribution-scope", async () => {
+    const routes = ["**/api/account-proxy-settings", "**/api/sub2api/settings", "**/api/sub2api/options", "**/api/sub2api/monitor"];
+    const poolSettings = { configured: true, hasAdminApiKey: true, config: { baseUrl: "https://pool.example.test", groupIds: [] }, enabled: false };
+    await page.route(routes[0], route => route.fulfill({ json: { settings: { mode: "plan", proxyUrl: "", allowDirectFallback: false } } }));
+    await page.route(routes[1], route => route.fulfill({ json: poolSettings }));
+    await page.route(routes[2], route => route.fulfill({ json: { groups: [], proxies: [{ id: 1, name: "测试出口", ipAddress: "198.51.100.10", accountCount: 7 }], directAccountCount: 3 } }));
+    await page.route(routes[3], route => route.fulfill({ json: poolSettings }));
+    try {
+      await page.reload();
+      const trigger = page.getByRole("region", { name: "代理 IP 配置", exact: true }).getByRole("button", { name: "配置", exact: true });
+      await trigger.click();
+      const modal = page.getByRole("dialog", { name: "代理 IP 配置与检测", exact: true });
+      await modal.getByText("未分配代理 · 3 个 OAuth 账号", { exact: true }).waitFor();
+      check(await modal.getByText("测试出口 · 198.51.100.10 · 7 个 OAuth 账号", { exact: true }).count() === 1, "per-IP count does not identify its OAuth-only scope");
+      const scope = await modal.locator(".proxy-distribution-scope").innerText();
+      check(scope.includes("仅统计 OAuth 账号") && scope.includes("不含 API Key") && scope.includes("未完成授权") && scope.includes("不代表实时直连流量"), "proxy distribution scope remains ambiguous");
+      check(await modal.getByRole("tooltip").count() === 0, "proxy help opens automatically in PlanType mode");
+      await page.keyboard.press("Escape");
+      check(await modal.count() === 0, "first Escape should close the untouched proxy modal");
+      await trigger.click();
+      check(await modal.getByRole("tooltip").count() === 0, "proxy help opens on repeated dialog entry");
+      await modal.getByRole("button", { name: "关闭代理 IP 配置", exact: true }).click();
+    } finally {
+      for (const route of routes) await page.unroute(route);
+      await page.reload();
+    }
+  });
   return { passed: results.filter(r => r.passed).length, total: results.length, results };
 }

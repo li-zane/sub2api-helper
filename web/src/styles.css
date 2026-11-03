@@ -3141,6 +3141,14 @@ dialog.batch-dialog::backdrop {
   align-items: center;
 }
 
+.proxy-distribution-scope {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .account-proxy-field {
   width: 100%;
 }

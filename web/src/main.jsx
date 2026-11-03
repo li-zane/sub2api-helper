@@ -1920,10 +1920,11 @@ function App() {
                 {["sub2api", "plan"].includes(accountProxyMode) && (
                   <div>
                     {accountProxyDistribution.length
-                      ? `已读取 ${accountProxyDistribution.length} 个代理节点 / ${proxyDistributionByIp(accountProxyDistribution).length} 个出口 IP（直连 ${accountProxyDirectCount} 个账号）`
+                      ? `已读取 ${accountProxyDistribution.length} 个代理节点 / ${proxyDistributionByIp(accountProxyDistribution).length} 个出口 IP（未分配代理 ${accountProxyDirectCount} 个 OAuth 账号）`
                       : "请点击“配置”读取 Sub2API 代理以启用账号级分配"}
                   </div>
                 )}
+                {["sub2api", "plan"].includes(accountProxyMode) && <div>仅统计 OAuth 账号：号池 OpenAI OAuth 账号与本地已授权账号，按邮箱去重；不含 API Key 和未完成授权的任务，并非实时连接数。</div>}
               </HelpTip>
             </div>
             <div className="provider-card-actions">
@@ -2474,7 +2475,7 @@ function App() {
                   <ExternalLink size={13} aria-hidden="true" />
                   获取代理 IP
                 </a>
-                <button type="button" className="icon-button" autoFocus onClick={() => setProxySettingsOpen(false)} disabled={proxySettingsSaving} title="关闭" aria-label="关闭代理 IP 配置">
+                <button type="button" className="icon-button" autoFocus data-dialog-initial-focus onClick={() => setProxySettingsOpen(false)} disabled={proxySettingsSaving} title="关闭" aria-label="关闭代理 IP 配置">
                   <X size={18} />
                 </button>
               </div>
@@ -2523,9 +2524,10 @@ function App() {
                   {(accountProxyDistribution.length > 0 || accountProxyDirectCount > 0) && (
                     <div className="proxy-distribution" aria-label="代理 IP 账号分配">
                       {proxyDistributionByIp(accountProxyDistribution).map((proxy) => (
-                        <span key={proxy.ipAddress}>{proxy.names.join("、")} · {proxy.ipAddress} · {proxy.accountCount} 个账号</span>
+                        <span key={proxy.ipAddress}>{proxy.names.join("、")} · {proxy.ipAddress} · {proxy.accountCount} 个 OAuth 账号</span>
                       ))}
-                      <span>直连 · {accountProxyDirectCount} 个账号</span>
+                      <span>未分配代理 · {accountProxyDirectCount} 个 OAuth 账号</span>
+                      <p className="proxy-distribution-scope">仅统计 OAuth 账号：号池 OpenAI OAuth 账号与本地已授权账号，按邮箱去重；不含 API Key 和未完成授权的任务。未分配代理是配置状态，不代表实时直连流量。</p>
                     </div>
                   )}
                 </div>
