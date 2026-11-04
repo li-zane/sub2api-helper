@@ -4215,6 +4215,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
+  const [webMonitor, setWebMonitor] = useState(() => ({ enabled: settings.webSessionMonitor?.enabled === true, autoRelogin: settings.webSessionMonitor?.autoRelogin !== false, intervalMinutes: String(settings.webSessionMonitor?.intervalMinutes || 15), retryMinutes: String(settings.webSessionMonitor?.retryMinutes || 60) }));
   const [accountProxyMode, setAccountProxyMode] = useState(() => ["sub2api", "plan"].includes(settings.accountProxyMode) ? settings.accountProxyMode : "global");
   const [codexAuthMode, setCodexAuthMode] = useState(() => settings.codexAuthMode || "local");
   const [autoRows, setAutoRows] = useState(() => taskAutoActionRows(settings.autoActions));
@@ -4276,12 +4277,18 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       seen.add(key);
     }
     const autoActions = Object.fromEntries(configuredRows.map((row) => [row.planType, row.actions]));
+    const webSessionMonitor = { ...webMonitor, intervalMinutes: Number(webMonitor.intervalMinutes), retryMinutes: Number(webMonitor.retryMinutes) };
+    if (!Number.isInteger(webSessionMonitor.intervalMinutes) || webSessionMonitor.intervalMinutes < 1 || webSessionMonitor.intervalMinutes > 1440
+      || !Number.isInteger(webSessionMonitor.retryMinutes) || webSessionMonitor.retryMinutes < 15 || webSessionMonitor.retryMinutes > 1440) {
+      setError("WebSession 检测间隔需为 1–1440 分钟，重登重试间隔需为 15–1440 分钟");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown }),
+        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4373,6 +4380,19 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             </select>
           </label>
         </div>
+        <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">
+          <div className="section-title-row">
+            <h3 id="web-session-monitor-title">WebSession 定时巡检</h3>
+            <HelpTip label="WebSession 定时巡检说明">由服务端执行，关闭页面后仍运行。使用原设备身份和账号代理检查会话、设备与空间；确认会话失效或空间/PlanType 变化后，通过共享登录队列重新登录授权，并应用新方案、同步号池。网络、403 或上游故障只记录失败，不当作掉线。仅检查已有 Web 登录态的账号；主动登出后不自动补登。</HelpTip>
+          </div>
+          <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.enabled} disabled={saving} onChange={e => setWebMonitor(v => ({ ...v, enabled: e.target.checked }))} /><span>启用 WebSession 定时检测</span></label>
+          <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.autoRelogin} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, autoRelogin: e.target.checked }))} /><span>确认失效或空间变化后自动重登并授权</span></label>
+          <div className="overload-rule-fields">
+            <label className="settings-field" htmlFor="web-session-check-interval"><span>检测间隔（分钟）</span><input id="web-session-check-interval" type="number" min="1" max="1440" value={webMonitor.intervalMinutes} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, intervalMinutes: e.target.value }))} /></label>
+            <label className="settings-field" htmlFor="web-session-retry-interval"><span>重登重试间隔（分钟）</span><input id="web-session-retry-interval" type="number" min="15" max="1440" value={webMonitor.retryMinutes} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, retryMinutes: e.target.value }))} /></label>
+          </div>
+          <div className="task-auto-empty">默认关闭；默认每 15 分钟检测，60 分钟内最多自动重登一次。需要验证码时保留在现有任务队列中等待处理。</div>
+        </section>
         <section className="task-auto-settings overload-cooldown-settings" aria-labelledby="overload-auto-cooldown-title">
           <div className="section-title-row">
             <h3 id="overload-auto-cooldown-title">过载自动冷却</h3>
@@ -4436,7 +4456,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
-          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
+          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>

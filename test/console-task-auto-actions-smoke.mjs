@@ -62,6 +62,7 @@ try {
     codexAuthMode: "local",
     accountProxyCooldownMinutes: 60,
     overloadAutoCooldown: { windowMinutes: 15, threshold: 10, cooldownMinutes: 60 },
+    webSessionMonitor: { enabled: false, intervalMinutes: 15, autoRelogin: true, retryMinutes: 60 },
     autoActions: {
       self_serve_business_prolite: ["upload", "rotate-logout-reauthorize-upload"],
       SELF_SERVE_PRO: ["upload", "enable-overload-detection", "enable-overload-cooldown"],

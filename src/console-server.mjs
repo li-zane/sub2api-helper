@@ -15,6 +15,7 @@ import {
   revokeAccountSession,
   revokeAllAccountSessions,
   listAccountWorkspaces,
+  probeAccountWebSession,
   switchAccountWorkspace,
   accountWorkspaceAvailabilityLabel,
   isAccountWorkspaceAvailable,
@@ -34,6 +35,7 @@ import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService, normalizeFingerprintSettings } from "./model-fingerprint.mjs";
 import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
+import { WebSessionMonitor, normalizeWebSessionMonitor, DEFAULT_WEB_SESSION_MONITOR } from "./web-session-monitor.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4399;
@@ -215,6 +217,43 @@ const sub2ApiMonitorState = {
   planTypesBackend: null,
 };
 
+let webSessionMonitorSettings = { ...DEFAULT_WEB_SESSION_MONITOR };
+const webSessionMonitor = new WebSessionMonitor({
+  filePath: path.join(OUTPUT_ROOT, "web-session-monitor.json"),
+  getSettings: () => webSessionMonitorSettings,
+  listJobs: () => listUniqueJobs(),
+  isBusy: job => shuttingDown || !canLoginWeb(job) || job.autoRepairBlocked || ["canceled", "banned"].includes(job.status),
+  hasSession: job => fileExists(webSessionPathForJob(job)),
+  probe: async job => {
+    const snapshot = await probeAccountWebSession(job);
+    if (!job.resultSaved && snapshot.planType) {
+      job.workspacePlanType = snapshot.planType;
+      if (snapshot.repairReason === "plan_changed") snapshot.repairReason = null;
+      await saveJobMetadata(job);
+    }
+    if (job.resultSaved && !snapshot.repairReason && accountProxyMode === "plan" && snapshot.planType) {
+      const target = jobSub2ApiProxyConfig(job, snapshot.planType)?.proxyId;
+      const fixedId = normalizeStoredProxyId(target);
+      if ((target === SUB2API_PROXY_DIRECT && (job.assignedProxyId || job.proxyUrl))
+        || (fixedId && fixedId !== normalizeStoredProxyId(job.assignedProxyId))
+        || (target === SUB2API_PROXY_BALANCED && !normalizeStoredProxyId(job.assignedProxyId))) snapshot.repairReason = "binding_changed";
+    }
+    return snapshot;
+  },
+  lock: (job, fn) => withEmailJobLock(job.email, fn),
+  repair: async job => {
+    const webOnly = !job.resultSaved;
+    if (webOnly) {
+      job.webSessionMonitorRepair = true;
+      await startWebLogin(job);
+    } else await forceReloginJob(job, {}, { webSessionMonitorRepair: true, poolRefreshAction: "relogin" });
+    appendJobLog(job, webOnly ? "[web-session-monitor] 已确认 Web 登录态或空间失效，进入共享 Web 登录队列；不创建 Codex 授权。\n"
+      : "[web-session-monitor] 已确认 Web 会话或空间/PlanType 变化，进入共享登录队列；完成后更新授权与号池绑定。\n");
+    await saveJobMetadata(job);
+    return true;
+  },
+});
+
 const overloadMonitor = new OverloadMonitor({
   filePath: path.join(OUTPUT_ROOT, "overload-monitor.json"),
   getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
@@ -313,6 +352,7 @@ await overloadMonitor.load();
 await overloadCooldown.load();
 await modelFingerprint.load();
 await syncCompletedOutputs(true);
+await webSessionMonitor.load();
 for (const job of jobs.values()) {
   if (job.poolRefreshAction) {
     schedulePoolRefresh(job, job.poolRefreshAction === "cooldown" && job.poolRefreshDueAt
@@ -326,6 +366,7 @@ scheduleSub2ApiMonitor();
 overloadMonitor.start();
 overloadCooldown.start();
 modelFingerprint.start();
+webSessionMonitor.start();
 
 const production = process.env.NODE_ENV === "production";
 const vite = production ? null : await (async () => {
@@ -536,6 +577,18 @@ async function handleApi(req, res, requestUrl) {
       throw httpError(405, "Method not allowed");
     }
     sendJson(res, 200, { settings: { proxyUrl: globalProxyUrl || "", allowDirectFallback, mode: accountProxyMode } });
+    return;
+  }
+
+  if (req.method === "GET" && requestUrl.pathname === "/api/web-session-monitor") {
+    sendJson(res, 200, webSessionMonitor.snapshot());
+    return;
+  }
+  if (req.method === "POST" && requestUrl.pathname === "/api/web-session-monitor/check") {
+    await readJson(req);
+    if (!webSessionMonitorSettings.enabled) throw httpError(409, "请先启用并保存 WebSession 定时巡检");
+    await webSessionMonitor.run({ force: true });
+    sendJson(res, 200, webSessionMonitor.snapshot());
     return;
   }
 
@@ -1664,7 +1717,9 @@ async function prepareAndLaunchJob(job, mode, queueRunId) {
     let hasBinding = accountProxyMode === "plan" && hasPlanProxyBinding(job);
     if (accountProxyMode === "plan") {
       const knownPlanType = normalizePlanType(getJobPlanType(job));
-      if (knownPlanType) {
+      if (job.webSessionMonitorRepair && hasBinding) {
+        await restorePlanProxyBinding(job);
+      } else if (knownPlanType) {
         await preparePlanCodexProxy(job, knownPlanType, job.workspaceAccountId, { reapply: true });
         hasBinding = true;
         appendJobLog(job, `[proxy-plan] 已在登录前应用 PlanType ${knownPlanType} 的当前 IP 方案。\n`);
@@ -1673,8 +1728,8 @@ async function prepareAndLaunchJob(job, mode, queueRunId) {
       job.runProxyFixed = hasBinding;
     } else await refreshJobProxyBinding(job);
     if (!job.proxyFallbackActive && accountProxyMode !== "plan") job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
-    const oauthSettings = accountProxyMode === "plan" && !hasBinding && mode === "full"
-      ? { codexAuthMode, phasedProxy: true, loginProxyUrl: globalProxyUrl }
+    const oauthSettings = accountProxyMode === "plan" && mode === "full" && (!hasBinding || job.webSessionMonitorRepair)
+      ? { codexAuthMode, phasedProxy: true, loginProxyUrl: hasBinding ? job.proxyUrl : globalProxyUrl }
       : ["full", "refresh"].includes(mode) ? await codexOAuthSettingsForJob(job)
         : { codexAuthMode: "local", ...(accountProxyMode === "plan" && !hasBinding ? { phasedProxy: true, loginProxyUrl: globalProxyUrl } : {}) };
     if (["full", "web_login", "totp_setup", "password_add"].includes(mode) && job.mailApiUrl) await loadMailboxBaseline(job);
@@ -1786,6 +1841,7 @@ function launchJob(job, options = {}) {
       CHATGPT_PROXY_URL: job.proxyFallbackActive ? "" : ((options.phasedProxy ? options.loginProxyUrl : job.proxyUrl) || ""),
       CHATGPT_PROXY_FIXED: job.runProxyFixed ? "1" : "0",
       TOSUB2_PHASED_PROXY: options.phasedProxy ? "1" : "0",
+      TOSUB2_WEB_MONITOR_REPAIR: job.webSessionMonitorRepair ? "1" : "0",
       TOSUB2_CODEX_AUTH_MODE: options.codexAuthMode || "local",
       TOSUB2_OAUTH_BASE_URL: options.sub2ApiOAuth?.baseUrl || "",
       TOSUB2_OAUTH_ADMIN_KEY: options.sub2ApiOAuth?.adminApiKey || "",
@@ -1809,7 +1865,7 @@ function launchJob(job, options = {}) {
       try {
         if (job.proxyPhaseSelecting) throw httpError(409, "授权代理正在选择中");
         job.proxyPhaseSelecting = true;
-        const route = await preparePlanCodexProxy(job, message.planType, message.workspaceId);
+        const route = await preparePlanCodexProxy(job, message.planType, message.workspaceId, { reapply: job.webSessionMonitorRepair === true });
         if (job.runId !== runId || job.child !== child || !isActive(job.status)) return;
         job.runProxyFixed = true;
         child.send({ type: "codex-proxy-response", id: message.id, route });
@@ -1877,6 +1933,11 @@ async function handleChildClose(job, { code, signal, mode, runId }) {
   }
   if (!isTerminalStatus(job.status) && code === 0 && job.runResultSaved && (await fileExists(job.outputPath))) {
     job.planType = await readPlanTypeFromOutput(job.outputPath);
+    if (job.webSessionMonitorRepair) {
+      job.workspacePlanType = job.planType || null;
+      job.webSessionMonitorRepair = false;
+      await webSessionMonitor.repairFinished(job.email);
+    }
     if (mode === "full") completeAuthorizationAutomationAttempt(job);
     job.loginCheckpointAvailable = false;
     job.status = "completed";
@@ -2084,6 +2145,10 @@ async function finishWebLogin(job, code, signal, message = null) {
   job.prompt = success ? "Web 登录成功，登录态已保存；原 Codex 授权保持不变" : `Web 登录未完成：${failure}`;
   job.webLoginPreviousState = null;
   job.webLoginResultSaved = false;
+  if (job.webSessionMonitorRepair) {
+    job.webSessionMonitorRepair = false;
+    await webSessionMonitor.repairFinished(job.email);
+  }
   job.runMode = null;
   job.runId = null;
   job.queueRunId = null;
@@ -2098,6 +2163,7 @@ async function finishWebLogin(job, code, signal, message = null) {
 }
 
 function restoreWebLoginState(job, metadata) {
+  job.webSessionMonitorRepair = metadata.web_session_monitor_repair === true;
   job.webLoginAttemptId = metadata.web_login_attempt_id || null;
   job.webLoginCompletedAt = metadata.web_login_completed_at || null;
   job.webLoginError = metadata.web_login_error || null;
@@ -2124,6 +2190,7 @@ async function forceReloginJob(job, options = {}, context = {}) {
     throw httpError(409, "当前任务正在进行中，不能重新登录");
   }
   await reloadMissingJobCredentials(job);
+  job.webSessionMonitorRepair = context.webSessionMonitorRepair === true;
   job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
   if (!canForceRelogin(job)) {
     throw httpError(409, "当前任务正在进行中，不能重新登录");
@@ -4148,6 +4215,7 @@ function publicTaskSettings(includeProxy = true) {
     codexAuthMode,
     accountProxyCooldownMinutes,
     overloadAutoCooldown: { ...overloadAutoCooldownSettings },
+    webSessionMonitor: { ...webSessionMonitorSettings },
     modelFingerprint: modelFingerprint.settings,
     allowDirectFallback,
     min: 1,
@@ -4169,6 +4237,7 @@ async function loadTaskSettings() {
     codexAuthMode = normalizeCodexAuthMode(saved.codexAuthMode);
     accountProxyCooldownMinutes = normalizeCooldownMinutes(saved.accountProxyCooldownMinutes);
     overloadAutoCooldownSettings = normalizeOverloadCooldown(saved.overloadAutoCooldown);
+    webSessionMonitorSettings = normalizeWebSessionMonitor(saved.webSessionMonitor);
   } catch (error) {
     if (error?.code !== "ENOENT") {
       throw new Error(`任务设置读取失败：${error.message}`);
@@ -4179,6 +4248,11 @@ async function loadTaskSettings() {
 
 async function saveTaskSettings(body) {
   const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  let nextWebSessionMonitor = webSessionMonitorSettings;
+  if (Object.hasOwn(source, "webSessionMonitor")) {
+    try { nextWebSessionMonitor = normalizeWebSessionMonitor(source.webSessionMonitor); }
+    catch (error) { throw httpError(400, error.message); }
+  }
   if (Object.hasOwn(source, "modelFingerprint") && (!source.modelFingerprint || typeof source.modelFingerprint !== "object" || Array.isArray(source.modelFingerprint))) throw httpError(400, "降智检测默认规则必须为对象");
   const nextFingerprint = Object.hasOwn(source, "modelFingerprint") ? normalizeFingerprintSettings({ ...modelFingerprint.settings, models: source.modelFingerprint.models, intervalMinutes: source.modelFingerprint.intervalMinutes, minProbability: source.modelFingerprint.minProbability }) : null;
   let nextCodexAuthMode = codexAuthMode;
@@ -4220,6 +4294,7 @@ async function saveTaskSettings(body) {
     const effectiveCodexAuthMode = Object.hasOwn(source, "codexAuthMode") ? nextCodexAuthMode : codexAuthMode;
     const effectiveCooldownMinutes = Object.hasOwn(source, "accountProxyCooldownMinutes") ? nextCooldownMinutes : accountProxyCooldownMinutes;
     const effectiveOverloadAutoCooldown = Object.hasOwn(source, "overloadAutoCooldown") ? nextOverloadAutoCooldown : overloadAutoCooldownSettings;
+    const effectiveWebSessionMonitor = Object.hasOwn(source, "webSessionMonitor") ? nextWebSessionMonitor : webSessionMonitorSettings;
     const tempPath = `${TASK_SETTINGS_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
       await fs.writeFile(tempPath, `${JSON.stringify({
@@ -4232,6 +4307,7 @@ async function saveTaskSettings(body) {
         codexAuthMode: effectiveCodexAuthMode,
         accountProxyCooldownMinutes: effectiveCooldownMinutes,
         overloadAutoCooldown: effectiveOverloadAutoCooldown,
+        webSessionMonitor: effectiveWebSessionMonitor,
       }, null, 2)}\n`, { mode: 0o600 });
       const previousSettingsBytes = nextFingerprint ? await fs.readFile(TASK_SETTINGS_PATH).catch(error => { if (error.code === "ENOENT") return null; throw error; }) : null;
       await fs.rename(tempPath, TASK_SETTINGS_PATH);
@@ -4250,6 +4326,8 @@ async function saveTaskSettings(body) {
     codexAuthMode = effectiveCodexAuthMode;
     accountProxyCooldownMinutes = effectiveCooldownMinutes;
     overloadAutoCooldownSettings = effectiveOverloadAutoCooldown;
+    webSessionMonitorSettings = effectiveWebSessionMonitor;
+    webSessionMonitor.trigger(Object.hasOwn(source, "webSessionMonitor"));
     overloadCooldown.trigger();
     // Reducing the limit leaves running jobs alone; they drain before new work
     // starts. Increasing it immediately makes extra slots available.
@@ -6999,6 +7077,10 @@ function failJob(job, message) {
   job.status = permanentAccountFailure ? "banned" : "failed";
   job.prompt = permanentAccountFailure ? "账号已封禁，号池监控已永久跳过" : "流程失败";
   job.lastError = message;
+  if (job.webSessionMonitorRepair) {
+    job.webSessionMonitorRepair = false;
+    void webSessionMonitor.repairFinished(job.email).catch(() => {});
+  }
   if (permanentAccountFailure) markAutoRepairBlocked(job, message);
   touch(job);
   void saveJobMetadata(job).catch(() => {});
@@ -8686,6 +8768,7 @@ async function saveJobMetadata(job) {
         web_login_completed_at: job.webLoginCompletedAt || null,
         web_login_error: job.webLoginError || null,
         web_login_attempt_id: job.webLoginAttemptId || null,
+        web_session_monitor_repair: job.webSessionMonitorRepair === true,
         login_mode: job.loginMode || null,
         mail_api_url: job.mailApiUrl || null,
         mail_request_body: job.mailRequestBody || null,
@@ -8740,7 +8823,16 @@ async function saveJobMetadata(job) {
       };
       const tempPath = `${metadataPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
       await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-      await fs.rename(tempPath, metadataPath);
+      try {
+        for (let attempt = 0; ; attempt += 1) {
+          try { await fs.rename(tempPath, metadataPath); break; }
+          catch (error) {
+            // Windows scanners/readers can briefly hold the destination open.
+            if (process.platform !== "win32" || attempt >= 4 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+            await delay(25 * 2 ** attempt);
+          }
+        }
+      } finally { await fs.rm(tempPath, { force: true }); }
     });
   return job.metadataWritePromise;
 }
@@ -9033,6 +9125,7 @@ async function shutdown() {
       overloadMonitor.stop(),
       overloadCooldown.stop(),
       modelFingerprint.stop(),
+      webSessionMonitor.stop(),
       proxyQualityService.close(),
       sub2ApiMonitorPromise,
       taskSettingsWritePromise,

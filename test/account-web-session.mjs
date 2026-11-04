@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { getAccountBrowserIdentity } from "../src/account-browser-identity.mjs";
 import { CookieJar, ProtocolClient, loginChatgptWeb } from "../src/protocol-login.mjs";
 import { readAccountWebSession, saveProtocolWebSession, writeAccountWebSession } from "../src/account-web-session.mjs";
-import { listAccountSessions, listAccountWorkspaces, revokeAllAccountSessions } from "../src/account-sessions.mjs";
+import { listAccountSessions, listAccountWorkspaces, probeAccountWebSession, revokeAllAccountSessions } from "../src/account-sessions.mjs";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-web-session-"));
 process.env.TOSUB2_BROWSER_IDENTITY_ROOT = path.join(root, "identities");
@@ -29,6 +29,8 @@ let force401 = false;
 let expired = false;
 let wrongEmail = false;
 let authReads = 0;
+let authStatus = 200;
+let teamUnavailable = false;
 const management = [];
 const signins = [];
 const server = http.createServer(async (req, res) => {
@@ -48,6 +50,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/auth/session") {
     authReads++;
     assert.match(req.headers.cookie, /__Secure-next-auth.session-token=web-cookie/);
+    if (authStatus !== 200) { res.statusCode = authStatus; return res.end(JSON.stringify({ message: "temporary upstream failure" })); }
     return res.end(JSON.stringify(expired ? {} : { accessToken: jwt, user: { email: wrongEmail ? "other@example.test" : email } }));
   }
   management.push({ url: url.pathname, headers: req.headers });
@@ -62,7 +65,7 @@ const server = http.createServer(async (req, res) => {
   ] }));
   if (url.pathname.endsWith("/accounts/check/v4-2023-04-27")) return res.end(JSON.stringify({ default_account: "a", accounts: {
     a: { account: { account_id: "a", name: "Personal", plan_type: "plus", structure: "personal" } },
-    b: { account: { account_id: "b", name: "Team", plan_type: "business" } },
+    b: { account: { account_id: "b", name: "Team", plan_type: "business", is_deactivated: teamUnavailable } },
   } }));
   if (url.pathname.endsWith("/accounts/logout_all")) return res.end("{}");
   res.statusCode = 404; res.end("{}");
@@ -97,6 +100,24 @@ try {
   force401 = true;
   await listAccountSessions(job);
   assert.equal(authReads, 2, "401 refreshes through the web cookie session");
+  const readsBeforeProbe = authReads;
+  assert.equal((await probeAccountWebSession(job)).repairReason, null);
+  assert.equal(authReads, readsBeforeProbe + 1, "scheduled probe validates cookies even when the saved access token is still valid");
+  authStatus = 503;
+  await assert.rejects(probeAccountWebSession(job), /SESSION_PROVIDER_ERROR: HTTP 503/);
+  assert.notEqual((await readAccountWebSession(job)).validation.status, "expired", "upstream failure is not session expiry");
+  authStatus = 403;
+  await assert.rejects(probeAccountWebSession(job), /SESSION_PROVIDER_ERROR: HTTP 403/);
+  authStatus = 200;
+  const activeSession = await readAccountWebSession(job);
+  teamUnavailable = true;
+  await writeAccountWebSession(webPath, { ...activeSession, web: { ...activeSession.web, workspaceId: "b" } });
+  const changed = await probeAccountWebSession(job);
+  assert.equal(changed.repairReason, "workspace_unavailable");
+  assert.equal(changed.planType, null, "an inaccessible space does not by itself mean Free");
+  assert(!management.at(-1).headers["chatgpt-account-id"], "listing is independent of the dead selected space");
+  teamUnavailable = false;
+  await writeAccountWebSession(webPath, activeSession);
   await assert.rejects(listAccountSessions({ ...job, email: "other@example.test" }), /浏览器身份文件无效/);
   const snapshot = await readAccountWebSession(job);
   wrongEmail = true;

@@ -15,6 +15,9 @@ assert.equal((await identifyWebPlan(client, { chatgptBase: "http://fixture" })).
 assert.equal((await identifyWebPlan(client, { chatgptBase: "http://fixture", web: { workspaceId: "personal" } })).planType, "free", "another workspace never inherits the token's plan");
 payload.accounts.team.account.is_deactivated = true;
 await assert.rejects(identifyWebPlan(client, { chatgptBase: "http://fixture" }), /WEB_PLAN_UNAVAILABLE/);
+payload.accounts.personal.account.structure = "personal";
+assert.deepEqual(await identifyWebPlan(client, { chatgptBase: "http://fixture", web: { workspaceId: "team" }, allowPersonalFallback: true }), { planType: "free", workspaceId: "personal" }, "monitor repair may use the single verified available personal space, never a stale business JWT");
+await assert.rejects(identifyWebPlan(client, { chatgptBase: "http://fixture", web: { workspaceId: "team" } }), /WEB_PLAN_UNAVAILABLE/, "manual flows do not silently change workspace");
 payload = { accounts: [{ id: "only", plan_type: "plus" }] };
 assert.equal((await identifyWebPlan(client, { chatgptBase: "http://fixture" })).planType, "plus");
 await assert.rejects(identifyWebPlan(client, { chatgptBase: "http://fixture", web: { workspaceId: "missing" } }), /WEB_PLAN_UNAVAILABLE/);

@@ -38,9 +38,34 @@ export async function fetchAccountUsage(job) {
  * List every ChatGPT account/workspace available to the saved Web session.
  * The response intentionally omits access/refresh tokens and other credentials.
  */
-export async function listAccountWorkspaces(job) {
-  const result = await requestWithWebSession(job, "GET", "/accounts/check/v4-2023-04-27");
+export async function listAccountWorkspaces(job, { forceWebRefresh = false } = {}) {
+  const result = await requestWithWebSession(job, "GET", "/accounts/check/v4-2023-04-27", undefined, { forceWebRefresh });
   return normalizeAccountWorkspaces(result.data, result.session.web?.workspaceId);
+}
+
+// A live check, unlike inspectAccountWebSession(), which only reads a file.
+// Confirm workspace loss from a successful account listing, never from 403/5xx.
+export async function probeAccountWebSession(job) {
+  const listing = await listAccountWorkspaces(job, { forceWebRefresh: true });
+  const session = await readAccountWebSession(job);
+  const bundle = await readOAuthBundle(job).catch(() => null);
+  const savedId = session.web?.workspaceId || bundle?.accountId || listing.currentWorkspaceId;
+  const selected = listing.workspaces.find(w => w.id === savedId);
+  const available = selected && isAccountWorkspaceAvailable(selected);
+  const devices = available ? (await listAccountSessions(job)).devices.map(d => ({
+    displayName: d.displayName, platform: d.platform, isCurrentDevice: d.isCurrentDevice,
+    lastSignedInTimestamp: d.lastSignedInTimestamp, lastSignedInIp: d.lastSignedInIp,
+  })) : undefined;
+  const previousPlan = job.workspacePlanType || job.planType;
+  const workspaces = listing.workspaces.map(w => ({ id: w.id, name: w.name, structure: w.structure,
+    planType: w.planType, current: w.current, canAccess: w.canAccess, deactivated: w.deactivated,
+    availabilityReason: w.availabilityReason }));
+  return {
+    devices, workspaces, currentWorkspaceId: savedId,
+    planType: available ? selected.planType : null,
+    repairReason: !available ? "workspace_unavailable"
+      : previousPlan && selected.planType && previousPlan !== selected.planType ? "plan_changed" : null,
+  };
 }
 
 export async function switchAccountWorkspace(job, workspaceId) {
@@ -423,16 +448,16 @@ function publicSessionDevice(device) {
 
 const webSessionRequests = new Map();
 
-async function requestWithWebSession(job, method, endpoint, jsonBody = undefined) {
+async function requestWithWebSession(job, method, endpoint, jsonBody = undefined, options = {}) {
   const key = webSessionPathForJob(job);
   const previous = webSessionRequests.get(key) || Promise.resolve();
-  const pending = previous.catch(() => {}).then(() => performWebRequest(job, method, endpoint, jsonBody));
+  const pending = previous.catch(() => {}).then(() => performWebRequest(job, method, endpoint, jsonBody, options));
   webSessionRequests.set(key, pending);
   try { return await pending; }
   finally { if (webSessionRequests.get(key) === pending) webSessionRequests.delete(key); }
 }
 
-async function performWebRequest(job, method, endpoint, jsonBody) {
+async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefresh = false } = {}) {
   const session = await readAccountWebSession(job);
   const chatgptBase = String(process.env.CHATGPT_BASE || DEFAULT_CHATGPT_BASE).replace(/\/$/, "");
   const transport = process.env.NODE_ENV !== "production" && process.env.TOSUB2_SESSION_NATIVE_HTTP === "1"
@@ -447,21 +472,23 @@ async function performWebRequest(job, method, endpoint, jsonBody) {
   const parse = (response) => { try { return JSON.parse(response.text); } catch { return {}; } };
   async function refreshWebToken() {
     session.accessToken = null;
-    const response = await client.request("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
+    const response = await client.request("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/`, timeoutMs: REQUEST_TIMEOUT_MS });
     const data = parse(response);
     const email = String(data.user?.email || "").trim().toLowerCase();
     if (email && email !== session.email) throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: Web 会话返回了其他账号，请重新登录");
     const token = data.accessToken || data.access_token;
-    if (!response.res.ok || typeof token !== "string" || !token) {
+    if (response.res.status === 401 || (response.res.ok && (typeof token !== "string" || !token))) {
       throw new Error("SESSION_TOKEN_EXPIRED: Web 登录态已失效，请为此账号重新登录");
     }
+    if (!response.res.ok) throw providerError(response.res.status, data);
     session.accessToken = token;
     session.expiresAt = data.expires || null;
   }
   async function send() {
     const headers = { authorization: `Bearer ${session.accessToken}`, accept: "application/json",
       "x-requested-with": "XMLHttpRequest", priority: "u=1, i" };
-    if (session.web?.workspaceId) headers["chatgpt-account-id"] = session.web.workspaceId;
+    // Account discovery must still work when the previously selected space died.
+    if (session.web?.workspaceId && endpoint !== "/accounts/check/v4-2023-04-27") headers["chatgpt-account-id"] = session.web.workspaceId;
     return client.request(method, `${chatgptBase}/backend-api${endpoint}`, {
       headers, referer: `${chatgptBase}/`, origin: chatgptBase,
       ...(jsonBody === undefined ? {} : { json: jsonBody }), timeoutMs: REQUEST_TIMEOUT_MS,
@@ -470,7 +497,7 @@ async function performWebRequest(job, method, endpoint, jsonBody) {
   try {
     // Use the account's saved transport profile; unsupported profiles must never silently change its browser.
     if (transport) await transport.configure(job?.proxyUrl || null, { force: true });
-    if (!session.accessToken || !tokenExpiresAfter(session.accessToken, TOKEN_REFRESH_SKEW_SECONDS)) await refreshWebToken();
+    if (forceWebRefresh || !session.accessToken || !tokenExpiresAfter(session.accessToken, TOKEN_REFRESH_SKEW_SECONDS)) await refreshWebToken();
     let response = await send();
     if (response.res.status === 401) { await refreshWebToken(); response = await send(); }
     const data = parse(response);

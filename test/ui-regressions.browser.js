@@ -153,5 +153,17 @@ async (page) => {
       await page.reload();
     }
   });
+  await test("web-session-monitor-settings", async () => {
+    await page.getByRole("button", { name: "任务设置", exact: true }).click();
+    const modal = page.getByRole("dialog", { name: "任务设置", exact: true });
+    const enabled = modal.getByRole("checkbox", { name: "启用 WebSession 定时检测", exact: true });
+    check(!await enabled.isChecked(), "session monitor must default off");
+    const interval = modal.getByLabel("检测间隔（分钟）", { exact: true });
+    check(await interval.isDisabled(), "interval is enabled while monitor is off");
+    await enabled.check();
+    check(await interval.isEnabled() && await interval.inputValue() === "15", "monitor interval defaults/control broken");
+    check(await modal.getByRole("checkbox", { name: "确认失效或空间变化后自动重登并授权", exact: true }).isChecked(), "auto-relogin default missing");
+    await modal.getByRole("button", { name: "取消", exact: true }).click();
+  });
   return { passed: results.filter(r => r.passed).length, total: results.length, results };
 }

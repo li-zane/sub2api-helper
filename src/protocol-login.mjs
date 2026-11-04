@@ -622,8 +622,14 @@ async function run() {
     let reauthenticationClient = null;
 
     async function selectCodexProxy() {
+      const monitorRepair = process.env.TOSUB2_WEB_MONITOR_REPAIR === "1";
+      if (process.env.TOSUB2_PHASED_PROXY !== "1" && !monitorRepair) return;
+      const identity = await identifyWebPlan(client, { chatgptBase, web,
+        allowPersonalFallback: monitorRepair });
+      web = { ...web, workspaceId: identity.workspaceId };
+      codexOptions.currentWorkspaceId = identity.workspaceId || undefined;
+      codexOptions.allowedWorkspaceIds = identity.workspaceId ? [identity.workspaceId] : undefined;
       if (process.env.TOSUB2_PHASED_PROXY !== "1") return;
-      const identity = await identifyWebPlan(client, { chatgptBase, web });
       const route = await requestCodexProxy(identity);
       proxyTemplate = route.proxyUrl || null;
       planProxyBound = true;
@@ -631,8 +637,6 @@ async function run() {
       sub2ApiOAuth = route.sub2ApiOAuth;
       codexOptions.codexAuthMode = codexAuthMode;
       codexOptions.sub2ApiOAuth = sub2ApiOAuth;
-      codexOptions.currentWorkspaceId = identity.workspaceId || undefined;
-      codexOptions.allowedWorkspaceIds = identity.workspaceId ? [identity.workspaceId] : undefined;
       // configure() creates a fresh transport session. ProtocolClient carries
       // the verified cookie jar across the explicit proxy boundary.
       transport.rotateProxySessions = false;
@@ -741,6 +745,10 @@ async function run() {
     }
 
     // The web login survives checkpoint cleanup and is separate from the Codex export.
+    if (args.webOnly && process.env.TOSUB2_WEB_MONITOR_REPAIR === "1") {
+      const identity = await identifyWebPlan(client, { chatgptBase, web, allowPersonalFallback: true });
+      web = { ...web, workspaceId: identity.workspaceId };
+    }
     let webCredentials = {};
     if (outputMode === "web") {
       const { data: session } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
@@ -1706,7 +1714,7 @@ function decodeBase32Secret(value) {
   return Buffer.from(bytes);
 }
 
-export async function identifyWebPlan(client, { chatgptBase, web = null }) {
+export async function identifyWebPlan(client, { chatgptBase, web = null, allowPersonalFallback = false }) {
   const { data: session } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
   const accessToken = session?.accessToken || session?.access_token;
   if (!accessToken) throw new Error("WEB_PLAN_UNAVAILABLE: 网页登录会话未返回访问令牌，请重新登录");
@@ -1723,9 +1731,17 @@ export async function identifyWebPlan(client, { chatgptBase, web = null }) {
   const explicitId = web?.workspaceId || payload?.current_account_id;
   const currentId = explicitId || payload?.default_account_id || payload?.default_account || session?.account?.id
     || tokenAccountId;
-  const selected = accounts.find((account) => (account.account_id || account.id) === currentId)
+  let selected = accounts.find((account) => (account.account_id || account.id) === currentId)
     || (!explicitId && accounts.length === 1 ? accounts[0] : null);
-  if (!selected || selected.can_access_with_session === false || selected.is_deactivated === true) {
+  const usable = a => a && a.can_access_with_session !== false && a.is_deactivated !== true
+    && !a.is_removed && !a.is_deleted && !a.error && !a.access_error && !a.error_code
+    && ![401, 402, 403, 404].includes(Number(a.status_code || a.http_status))
+    && !/^(?:inactive|disabled|deactivated|banned|removed|deleted|suspended)$/i.test(a.status || "");
+  if (allowPersonalFallback && !usable(selected)) {
+    const personal = accounts.filter(a => (a.structure === "personal" || a.kind === "personal") && usable(a));
+    if (personal.length === 1) selected = personal[0];
+  }
+  if (!usable(selected)) {
     throw new Error("WEB_PLAN_UNAVAILABLE: 未确认当前工作空间，已停止按 PlanType 选择代理");
   }
   const workspaceId = selected.account_id || selected.id;
