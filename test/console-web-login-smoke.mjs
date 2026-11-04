@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-web-login-console-"));
 const output = path.join(temp, "output");
 const tracePath = path.join(temp, "trace.jsonl");
-const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"];
+const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"];
 const originals = new Map();
 const upstream = http.createServer((req, res) => {
   assert.match(req.headers.authorization, /^Bearer web\./);
@@ -56,10 +56,10 @@ const metaPath = id => path.join(output, id, "job-meta.json");
 try {
   for (const [i, id] of ids.entries()) {
     const dir = path.join(output, id); await fs.mkdir(dir, { recursive: true });
-    const email = ["web-a@example.test", "web-b@example.test", "web-fail@example.test", "web-only@example.test"][i];
+    const email = ["web-a@example.test", "web-b@example.test", "web-fail@example.test", "web-only@example.test", "web-canceled@example.test"][i];
     const contents = JSON.stringify({ type: "sub2api-data", accounts: [{ credentials: { email, access_token: `original-Codex-${i}`, refresh_token: `original-refresh-${i}` }, extra: {} }] });
     if (i !== 3) { await fs.writeFile(path.join(dir, "sub2api-import-oauth.json"), contents); originals.set(id, contents); }
-    await fs.writeFile(metaPath(id), JSON.stringify({ version: 1, email, status: i === 3 ? "failed" : "completed", result_saved: i !== 3, created_at: new Date().toISOString(), completed_at: "2026-10-01T00:00:00.000Z", last_operation_type: "initial_authorization", last_auth_automated: true }));
+    await fs.writeFile(metaPath(id), JSON.stringify({ version: 1, email, status: i === 3 ? "failed" : i === 4 ? "canceled" : "completed", result_saved: i !== 3, created_at: new Date().toISOString(), completed_at: "2026-10-01T00:00:00.000Z", last_operation_type: "initial_authorization", last_auth_automated: true }));
   }
   await start();
   assert.equal((await request("/api/task-settings", { maxActiveJobs: 1 })).status, 200);
@@ -107,6 +107,14 @@ try {
   assert.equal((await request(`/api/jobs/${ids[3]}/workspaces`)).status, 200);
   assert.equal((await request(`/api/jobs/${ids[3]}/workspaces/switch`, { workspaceId: "fixture-workspace" })).status, 200);
   await assert.rejects(fs.access(path.join(output, ids[3], "sub2api-import-oauth.json")), { code: "ENOENT" });
+  await request(`/api/jobs/${ids[4]}/web-login`, {});
+  await waitJob(ids[4], j => j.status === "email_otp");
+  await release(ids[4]);
+  const canceled = await waitJob(ids[4], j => !j.webLoginPending && j.webLoginCompletedAt);
+  assert.equal(canceled.status, "canceled", "successful Web login must preserve the canceled authorization result even when an older OAuth file exists");
+  assert.equal(canceled.canDownload, true);
+  assert.equal((await request(`/api/jobs/${ids[4]}/sessions`)).status, 200);
+  assert.equal((await job(ids[4])).webSessionStatus, "valid");
   assert.equal((await request("/api/task-settings", { maxActiveJobs: 2 })).status, 200);
   await request("/api/jobs/web-login-batch", { ids: ids.slice(0, 2) });
   await Promise.all(ids.slice(0, 2).map(id => waitJob(id, j => j.status === "email_otp")));
@@ -126,6 +134,7 @@ try {
   await fs.writeFile(metaPath(ids[0]), JSON.stringify(metadata));
   await start();
   const interrupted = await job(ids[0]); assert.equal(interrupted.status, "completed"); assert.match(interrupted.webLoginError, /重启中断/);
+  assert.equal((await job(ids[4])).status, "canceled", "restart must not turn an old OAuth file into a successful authorization");
   for (const [id, contents] of originals) assert.equal(await fs.readFile(path.join(output, id, "sub2api-import-oauth.json"), "utf8"), contents);
   const traces = (await fs.readFile(tracePath, "utf8")).trim().split("\n").map(JSON.parse);
   assert(traces.filter(t => t.web).every(t => t.event !== "start" || (t.mode === "web" && t.authMode === "local" && !t.hasPoolKey)));

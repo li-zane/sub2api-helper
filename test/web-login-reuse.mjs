@@ -44,6 +44,13 @@ try {
   }
   for (mode of ["503", "html", "mismatch"]) await assert.rejects(reuseSavedWebLogin(options));
   assert.equal(await fs.readFile(file, "utf8"), original, "failed probes never overwrite saved session");
+  const beforeExpired = calls;
+  mode = "valid";
+  await writeAccountWebSession(file, { ...JSON.parse(original), validation: { status: "expired" } });
+  const expired = await reuseSavedWebLogin(options);
+  assert.equal(expired.reused, false, "confirmed expiry must not be undone by a cached session endpoint token");
+  assert.equal(calls, beforeExpired, "known-expired sessions go directly to sign-in");
+  assert.equal(expired.client.jar.value("session", options.chatgptBase), "original");
   const beforeMismatch = calls;
   await writeAccountWebSession(file, { ...JSON.parse(original), identity: { ...identity, deviceId: "11111111-1111-4111-8111-111111111111" } });
   await assert.rejects(reuseSavedWebLogin(options), /IDENTITY_MISMATCH/);

@@ -275,6 +275,48 @@ try {
   const replaceRetryResult = JSON.parse(await fs.readFile(replaceFailureResultPath, "utf8"));
   assert.equal(replaceRetryResult.activation_succeeded, true);
   assert.equal(replaceRetryResult.confirmation_succeeded, true);
+  const savedWebPath = path.join(tempRoot, "mfa-test@example.com-web-session.json");
+  const savedWeb = JSON.parse(await fs.readFile(savedWebPath, "utf8"));
+  for (const scenario of [
+    { mode: "sub2api", status: 401, recover: true },
+    { mode: "web", status: 401, recover: true },
+    { mode: "sub2api", status: 401, recover: true, resume: true },
+    { mode: "sub2api", status: 401, recover: false },
+    { mode: "web", status: 401, recover: false },
+    { mode: "sub2api", status: 403, recover: false },
+    { mode: "sub2api", status: 503, recover: false },
+  ]) {
+    // The public session endpoint succeeds while the authenticated endpoint
+    // rejects its revoked token, matching the observed production failure.
+    await fs.writeFile(savedWebPath, JSON.stringify(savedWeb));
+    const fixtureResponse = await fetch(`${baseUrl}/__test/web-token-status`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: scenario.status, recoverOnLogin: scenario.recover, email: "mfa-test@example.com" }) });
+    assert.equal(fixtureResponse.status, 200);
+    const before = await fetch(`${baseUrl}/__test/state`).then(r => r.json());
+    const beforeOAuth = await fs.readFile(outputPath, "utf8");
+    const revokedCheckpoint = path.join(tempRoot, "revoked-checkpoint.json");
+    if (scenario.resume) await fs.writeFile(revokedCheckpoint, JSON.stringify({ version: 1, email: savedWeb.email, stage: "email_verified", cookies: savedWeb.cookies, web: savedWeb.web }));
+    const result = await runNode([
+      path.join(projectRoot, "src", "protocol-login.mjs"), "--email", "mfa-test@example.com",
+      "--chatgpt-base", baseUrl, "--auth-base", baseUrl, "--output-mode", scenario.mode,
+      "--sub2api-out", outputPath, "--checkpoint", revokedCheckpoint,
+      ...(scenario.resume ? ["--resume-checkpoint", revokedCheckpoint] : []),
+    ], { CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "JBSWY3DPEHPK3PXP" });
+    const after = await fetch(`${baseUrl}/__test/state`).then(r => r.json());
+    if (scenario.status === 401) {
+      assert.equal(after.webSignInCount - before.webSignInCount, 1, "revoked Web credentials must perform exactly one real sign-in per rejected session");
+      assert.match(result.output, /Password accepted/);
+      assert.equal(result.code, scenario.recover ? 0 : 1, result.output);
+      if (!scenario.recover) assert.match(result.output, /WEB_LOGIN_TOKEN_REVOKED/);
+    } else {
+      assert.notEqual(result.code, 0);
+      assert.equal(after.webSignInCount, before.webSignInCount, "403/5xx must not trigger account sign-in");
+    }
+    const afterWeb = JSON.parse(await fs.readFile(savedWebPath, "utf8"));
+    assert.deepEqual(afterWeb.identity, savedWeb.identity, "reauthentication preserves the persistent browser identity");
+    if (scenario.mode === "web" || !scenario.recover) assert.equal(await fs.readFile(outputPath, "utf8"), beforeOAuth, "failed and Web-only recovery preserve existing OAuth output");
+    if (scenario.mode === "web") assert.equal(after.oauthAuthorizationCount, before.oauthAuthorizationCount);
+  }
+  console.log("REVOKED_WEB_LOGIN_PASS cached-200/workspace-401 -> real sign-in; Web-only; checkpoint; bounded retry; 403/503 stop; identity/OAuth preserved");
   console.log("password/email OTP + 2FA workspace smoke tests passed");
 } catch (error) {
   error.message = `${error.message}\nMock server output:\n${serverLogs}`;

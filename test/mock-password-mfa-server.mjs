@@ -26,6 +26,9 @@ let replacementCurrentFactorId = replacementOldFactorId;
 let replacementRequestLog = [];
 let replacementSessionEmail = "";
 let replacementEnrollFailureSent = false;
+let workspaceHttpStatus = 200;
+let recoverWorkspaceOnLogin = true;
+let webSignInCount = 0;
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", base);
@@ -45,6 +48,17 @@ const server = http.createServer(async (req, res) => {
     return sendText(res, 200, "ok");
   }
   if (req.method === "GET" && url.pathname === "/api/auth/providers") return sendJson(res, 200, {});
+  if (req.method === "POST" && url.pathname === "/__test/web-token-status") {
+    const input = parseJson(body);
+    workspaceHttpStatus = input.status;
+    recoverWorkspaceOnLogin = input.recoverOnLogin !== false;
+    selectedEmail = input.email || selectedEmail;
+    chatgptLoginComplete = true;
+    return sendJson(res, 200, { ok: true });
+  }
+  if (req.method === "GET" && url.pathname === "/backend-api/accounts/check/v4-2023-04-27" && workspaceHttpStatus !== 200) {
+    return sendJson(res, workspaceHttpStatus, { error: { code: "token_revoked", message: "Encountered invalidated oauth token for user, failing request" } });
+  }
   if (req.method === "GET" && url.pathname === "/backend-api/accounts/check/v4-2023-04-27") return sendJson(res, 200, {
     default_account_id: organizationWorkspaceId,
     accounts: [
@@ -64,11 +78,14 @@ const server = http.createServer(async (req, res) => {
       workspaceSelectionCount,
       oauthAuthorizationCount,
       passwordVerifySentinelCount,
+      webSignInCount,
       replacementTotpEnabled,
       replacementRequestLog,
     });
   }
   if (req.method === "POST" && url.pathname === "/api/auth/signin/openai") {
+    webSignInCount++;
+    if (recoverWorkspaceOnLogin) workspaceHttpStatus = 200;
     chatgptWorkspaceSelected = false;
     chatgptLoginComplete = false;
     selectedEmail = url.searchParams.get("login_hint") || selectedEmail;

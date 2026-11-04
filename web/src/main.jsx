@@ -98,7 +98,7 @@ const JOB_STATUS_LABELS = {
   failed: "失败",
   mfa_failed: "2FA 未通过",
   banned: "封禁",
-  canceled: "已取消",
+  canceled: "授权已取消",
   reauth_required: "待重新授权",
   resume_available: "可继续",
 };
@@ -3936,7 +3936,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
           </div>
         ) : "—"}
       </td>
-      <td><StatusBadge status={job.status} /></td>
+      <td><StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} /></td>
       <td className="step-cell">
         {job.assignedProxyId && <span className="prompt-line">绑定代理 #{job.assignedProxyId}</span>}
         {job.poolRefreshAction && <OperationDetailText
@@ -3947,6 +3947,9 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               : job.poolRefreshReady ? "正在更新号池凭据" : "正在重新登录授权，完成后更新号池凭据"}
           className="prompt-line" onOpen={onOpenOperationDetail} />}
         {job.prompt && <OperationDetailText text={job.prompt} className="prompt-line" onOpen={onOpenOperationDetail} />}
+        {job.status === "canceled" && job.webSessionStatus === "valid" && (
+          <OperationDetailText text="上次 Codex 授权已取消；Web 会话已验证，Web 登录不会改变授权任务结果。" className="prompt-line" onOpen={onOpenOperationDetail} />
+        )}
         {job.lastError && <OperationDetailText text={extractResponseMessage(job.lastError)} className="row-error" onOpen={onOpenOperationDetail} />}
         {job.autoRepairBlocked && (
           <OperationDetailText text={`号池监控已永久跳过：${extractResponseMessage(job.autoRepairBlockedReason || "账号已不可用")}`} className="row-error" onOpen={onOpenOperationDetail} />
@@ -4544,7 +4547,7 @@ function LogDialog({ token, job, onClose }) {
           <div>
             <div className="section-title-row">
               <h2 id="log-dialog-title">协议日志</h2>
-              <StatusBadge status={job.status} />
+              <StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} />
             </div>
             <span>{job.email}</span>
           </div>
@@ -5554,7 +5557,10 @@ function formatWorkspaceRole(role) {
   return map[normalized] || String(role).trim();
 }
 
-function StatusBadge({ status }) {
+function StatusBadge({ status, webSessionStatus = "absent" }) {
+  const description = status === "canceled"
+    ? `上次 Codex 授权任务已取消；${WEB_STATES[webSessionStatus] || "Web 状态未知"}。Web 登录状态与授权任务结果分别记录。`
+    : undefined;
   const config = {
     queued: ["排队中", <LoaderCircle size={14} />],
     starting: ["启动中", <LoaderCircle className="spin" size={14} />],
@@ -5573,11 +5579,11 @@ function StatusBadge({ status }) {
     failed: ["失败", <CircleAlert size={14} />],
     mfa_failed: ["2FA 未通过", <CircleAlert size={14} />],
     banned: ["封禁", <Ban size={14} />],
-    canceled: ["已取消", <Ban size={14} />],
+    canceled: ["授权已取消", <Ban size={14} />],
     reauth_required: ["待重新授权", <RefreshCw size={14} />],
     resume_available: ["可继续", <RotateCcw size={14} />],
   }[status] || [status, null];
-  return <span className={`status-badge ${status}`}>{config[1]}{config[0]}</span>;
+  return <span className={`status-badge ${status}`} title={description} aria-label={description}>{config[1]}{config[0]}</span>;
 }
 
 const usageCreditBalanceFormatter = new Intl.NumberFormat("en-US", {

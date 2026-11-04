@@ -676,6 +676,7 @@ async function run() {
         if (!isExpiredCheckpointError(error)) throw error;
         console.log("[auth-expired] Saved login state expired; restarting email login.");
         await removeProtocolCheckpoint(checkpointPath);
+        reauthenticationClient = client;
         checkpoint = null;
           client = null;
           codex = null;
@@ -688,7 +689,7 @@ async function run() {
     while (!checkpoint && !codex) {
       email = email || (await ask(rl, "Email: "));
       if (!email) throw new Error("Email is required");
-      const previous = freshLoginRestartCount === 0
+      const previous = freshLoginRestartCount === 0 && !reauthenticationClient
         ? await reuseSavedWebLogin({ file: webSessionPath, email, transport, chatgptBase, verbose: args.verbose }) : null;
       client = previous?.client || reauthenticationClient || new ProtocolClient({ verbose: args.verbose, transport });
       if (previous?.reused) {
@@ -719,35 +720,34 @@ async function run() {
       console.log("[checkpoint] Saved verified email login state.");
       if (outputMode !== "web") await saveProtocolWebSession(webSessionPath, client, web);
 
-      if (!args.webOnly) {
-        console.log("[2/5] Start Codex OAuth flow");
-        try {
+      try {
+        if (args.webOnly) {
+          const identity = await identifyWebPlan(client, { chatgptBase, web, allowPersonalFallback: true, preferTeam: true });
+          web = { ...web, workspaceId: identity.workspaceId };
+        } else {
+          console.log("[2/5] Start Codex OAuth flow");
           await selectCodexProxy();
           codex = await runCodexOauth(client, { ...codexOptions, expectedEmail: email, saveCheckpoint });
-        } catch (error) {
-          if (isSecurityCheckRequiredError(error)) throw error;
-          if (!isExpiredCheckpointError(error)) throw error;
-          await removeProtocolCheckpoint(checkpointPath);
-          if (freshLoginRestartCount >= 1) throw error;
-          freshLoginRestartCount += 1;
-          reauthenticationClient = client;
-          console.log("[auth-expired] Newly verified login state was rejected; restarting email login once.");
-          client = null;
-          web = null;
-          codex = null;
-          transport.rotateProxySessions = process.env.CHATGPT_PROXY_FIXED !== "1";
-          await prepareLoginProxy(`${chatgptBase}/`);
-          continue;
         }
+      } catch (error) {
+        if (isSecurityCheckRequiredError(error)) throw error;
+        if (!isExpiredCheckpointError(error)) throw error;
+        await removeProtocolCheckpoint(checkpointPath);
+        if (freshLoginRestartCount >= 1) throw error;
+        freshLoginRestartCount += 1;
+        reauthenticationClient = client;
+        console.log("[auth-expired] Newly verified login state was rejected; restarting email login once.");
+        client = null;
+        web = null;
+        codex = null;
+        transport.rotateProxySessions = process.env.CHATGPT_PROXY_FIXED !== "1";
+        await prepareLoginProxy(`${chatgptBase}/`);
+        continue;
       }
       break;
     }
 
     // The web login survives checkpoint cleanup and is separate from the Codex export.
-    if (args.webOnly) {
-      const identity = await identifyWebPlan(client, { chatgptBase, web, allowPersonalFallback: true, preferTeam: true });
-      web = { ...web, workspaceId: identity.workspaceId };
-    }
     let webCredentials = {};
     if (outputMode === "web") {
       const { data: session } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
@@ -1277,6 +1277,10 @@ async function reuseSavedWebLogin({ file, email, transport, chatgptBase, verbose
   const identity = await getAccountBrowserIdentity(email, { root: transport?.accountIdentityRoot });
   if (JSON.stringify(saved.identity) !== JSON.stringify(identity)) throw new Error("WEB_LOGIN_IDENTITY_MISMATCH: 保存的会话与账号固定浏览器身份不匹配");
   const client = new ProtocolClient({ verbose, transport, jar: CookieJar.fromJSON(saved.cookies), browserIdentity: identity });
+  if (saved.validation?.status === "expired") {
+    console.log("[web-session] Saved Web session was already confirmed expired; continuing login with the same browser cookies.");
+    return { client, reused: false };
+  }
   const result = await client.request("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/`, timeoutMs: 30_000 });
   if (result.res.status === 401) {
     console.log("[web-session] Saved Web session expired; continuing login with the same browser cookies.");
@@ -1737,9 +1741,17 @@ export async function identifyWebPlan(client, { chatgptBase, web = null, allowPe
   let claims = {};
   try { claims = decodeJwtPayload(accessToken); } catch {}
   const tokenAccountId = claims?.["https://api.openai.com/auth"]?.chatgpt_account_id;
-  const { data: payload } = await client.getJson("GET", `${chatgptBase}/backend-api/accounts/check/v4-2023-04-27`, {
-    referer: `${chatgptBase}/`, headers: { authorization: `Bearer ${accessToken}` },
-  });
+  let payload;
+  try {
+    ({ data: payload } = await client.getJson("GET", `${chatgptBase}/backend-api/accounts/check/v4-2023-04-27`, {
+      referer: `${chatgptBase}/`, headers: { authorization: `Bearer ${accessToken}` },
+    }));
+  } catch (error) {
+    // /api/auth/session may keep returning a revoked token with HTTP 200.
+    // A 401 from the authenticated workspace endpoint requires real sign-in.
+    if (error.status === 401) throw new Error("WEB_LOGIN_TOKEN_REVOKED: Web 会话令牌已被拒绝，需要重新登录", { cause: error });
+    throw error;
+  }
   const accounts = uniqueWorkspaceAccounts(payload).filter(a => !client.unavailableLoginWorkspaceIds?.has(a.id));
   const explicitId = web?.workspaceId || payload?.current_account_id;
   const currentId = explicitId || payload?.default_account_id || payload?.default_account || session?.account?.id
@@ -2542,7 +2554,9 @@ function assertOk(result, label) {
   const { res, text } = result;
   if (res.status >= 200 && res.status < 300) return;
   const body = text.replace(/\s+/g, " ").slice(0, 220);
-  throw new Error(`${label} failed with HTTP ${res.status}: ${body}`);
+  const error = new Error(`${label} failed with HTTP ${res.status}: ${body}`);
+  error.status = res.status;
+  throw error;
 }
 
 function isRiskControlResponse(res, text) {
@@ -2697,7 +2711,7 @@ async function removeProtocolCheckpoint(checkpointPath) {
 }
 
 function isExpiredCheckpointError(error) {
-  return /CHECKPOINT_INVALID|SESSION_SELECTION_INVALID|CODEX_AUTH_LOGIN_REQUIRED|TOTP_ACCESS_TOKEN_MISSING|invalid_state|no longer valid|session.+(?:invalid|expired)|expired.+session/i.test(
+  return /WEB_LOGIN_TOKEN_REVOKED|CHECKPOINT_INVALID|SESSION_SELECTION_INVALID|CODEX_AUTH_LOGIN_REQUIRED|TOTP_ACCESS_TOKEN_MISSING|invalid_state|no longer valid|session.+(?:invalid|expired)|expired.+session/i.test(
     String(error?.message || ""),
   );
 }
