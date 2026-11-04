@@ -81,10 +81,11 @@ try {
 
   const server = await fs.readFile(path.join(root, "src/console-server.mjs"), "utf8");
   const admission = server.slice(server.indexOf("function canLoginWeb("), server.indexOf("function canSetupTotp("));
-  const canLoginWeb = vm.runInNewContext(admission + "\ncanLoginWeb;", { accountAutomationBlocked: () => false });
+  const canLoginWeb = vm.runInNewContext(admission + "\ncanLoginWeb;", { accountAutomationBlocked: () => false, webSessionCheckPending: job => job.webSessionCheckPending === true });
   const job = { email: "fixture@example.test", status: "failed", poolRefreshAction: "relogin", poolRefreshError: "WEB_PLAN_UNAVAILABLE", poolRefreshReady: false };
   assert.equal(canLoginWeb(job), false, "manual Web login remains guarded");
   assert.equal(canLoginWeb(job, { maintenance: true }), true, "failed refresh must not block maintenance forever");
+  assert.equal(canLoginWeb({ ...job, webSessionCheckPending: true }, { maintenance: true }), false, "queued manual check must exclude scheduled maintenance");
   for (const patch of [{ child: {} }, { status: "running" }, { poolRefreshReady: true }, { poolRefreshError: null }, { autoTaskStatus: "running" }, { autoRepairOperation: {} }]) assert.equal(canLoginWeb({ ...job, ...patch }, { maintenance: true }), false);
   assert.match(server, /isBusy: job =>[^\n]*canLoginWeb\(job, \{ maintenance: true \}\)/);
   const { WebSessionMonitor } = await load("src/web-session-monitor.mjs");

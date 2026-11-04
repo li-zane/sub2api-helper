@@ -29,8 +29,8 @@ async (page) => {
     await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 1);
     const banned = page.locator("tr.job-row");
     check(await banned.getByText("账号封禁", { exact: true }).isVisible(), "ban must override the ordinary Web state");
-    check(await banned.getByRole("button", { name: "登录 Web", exact: true }).isDisabled(), "known bans must not offer Web login");
-    check((await banned.getByRole("button", { name: "登录 Web", exact: true }).getAttribute("title")).includes("封禁"), "disabled Web login must explain the ban");
+    check(await banned.getByRole("button", { name: "检测 Web 会话", exact: true }).isDisabled(), "known bans must not offer Web login");
+    check((await banned.getByRole("button", { name: "检测 Web 会话", exact: true }).getAttribute("title")).includes("封禁"), "disabled Web login must explain the ban");
     check(await banned.locator(".bound-ip-cell").innerText() === "未绑定", "released ban must not appear as direct or bound");
     let reads = 0;
     const providerReads = /\/api\/jobs\/[^/]+\/(?:sessions|workspaces)$/;
@@ -92,9 +92,33 @@ async (page) => {
       await page.reload();
       await page.waitForFunction(() => [...document.querySelectorAll("tr.job-row")].some(row=>row.innerText.includes("Web 自动重登冷却中")));
       check((await row().innerText()).includes("到期后由巡检调度"),"cooldown must explain scheduling after the earliest retry time");
-      check((await row().innerText()).includes("可手动登录 Web 立即重试"),"manual retry must remain discoverable");
-      check(await row().getByRole("button",{name:"登录 Web",exact:true}).isEnabled(),"cooldown must not block a manual login");
+      check((await row().innerText()).includes("可手动检测 Web 会话，确认失效后立即重登"),"manual retry must remain discoverable");
+      check(await row().getByRole("button",{name:"检测 Web 会话",exact:true}).isEnabled(),"cooldown must not block a manual login");
     } finally { await page.unroute(jobsPattern); await page.reload(); await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20); }
+  });
+
+  await test("plan-and-Web-credential-sync", async () => {
+    let mode="pending_update";
+    const jobsPattern=/\/api\/jobs(?:\?|$)/;
+    await page.route(jobsPattern,async route=>{
+      const response=await route.fetch();const data=await response.json();
+      data.jobs=data.jobs.map(job=>job.email === "review-1@example.test" ? {...job,planType:"free",webSessionStatus:mode==="read_failed"?"unavailable":mode==="pending_update"?"expired":"valid",webSessionReadError:mode==="read_failed"?"EACCES":null,webCredentialSync:{status:mode,reason:mode==="read_failed"?"EACCES":"workspace_mismatch",webPlanType:mode==="pending_update"?"team":"free",planType:"free"}}:job);
+      await route.fulfill({json:data});
+    });
+    try {
+      for(const [state,label] of [["pending_update","Web 凭据待更新"],["refreshing","Web 凭据更新中"],["read_failed","Web 凭据读取失败"],["authorization_pending","Codex 凭据待更新"],["synced",null]]){
+        mode=state;await page.reload();await page.waitForFunction(()=>document.querySelectorAll("tr.job-row").length===20);
+        check(await row().locator(".plan-tag").innerText()==="Free","sync status must not replace the current Free plan");
+        if(label){
+          const note=row().locator(".credential-sync-note");await note.waitFor();check(await note.innerText()===label,"credential sync label missing: "+state);
+          if(state==="pending_update")check((await note.getAttribute("title")).includes("签发时套餐：Team"),"old Web token plan missing from tooltip");
+          if(state==="read_failed"){
+            check((await note.getAttribute("title")).includes("EACCES"),"permission error code missing");
+            check(await row().getByText("Web读取失败",{exact:true}).isVisible(),"permission error still presented as Web expiry");
+          }
+        }else check(await row().locator(".credential-sync-note").count()===0,"resolved sync warning persists");
+      }
+    }finally{await page.unroute(jobsPattern);await page.reload();await page.waitForFunction(()=>document.querySelectorAll("tr.job-row").length===20);}
   });
 
   await test("exact-email-list-filter", async () => {
@@ -173,7 +197,7 @@ async (page) => {
       await row().getByRole("checkbox").check();
       await page.locator(".bulk-actions").getByRole("button", { name: "重新授权", exact: true }).click();
       await page.waitForSelector(".workflow-busy");
-      for (const name of ["重新授权", "重新登录并授权", "设置 2FA", "添加密码", "登录 Web", "查看或修改账号凭据"]) {
+      for (const name of ["重新授权", "重新登录并授权", "设置 2FA", "添加密码", "检测 Web 会话", "查看或修改账号凭据"]) {
         check(await row().getByRole("button", { name, exact: true }).isDisabled(), name + " enabled while batch busy");
       }
       check(await row().getByRole("button", { name: "查看协议日志", exact: true }).isEnabled(), "read-only logs unnecessarily disabled");
@@ -182,6 +206,48 @@ async (page) => {
       await page.waitForFunction(() => !document.querySelector(".workflow-busy"));
       await page.unroute("**/api/jobs/reauthorize-batch");
     }
+  });
+
+  await test("Web-session-check-controls-and-progress", async () => {
+    let single = 0, batches = 0, forced = 0;
+    const id = "11111111-1111-4111-8111-000000000001";
+    const paths = ["**/api/jobs/*/web-session-check", "**/api/jobs/web-session-check-batch", "**/api/jobs/web-session-check-progress", "**/api/jobs/*/web-login"];
+    await page.route(paths[0], route => { single++; return route.fulfill({ json: { job: { id } } }); });
+    await page.route(paths[1], route => { batches++; return route.fulfill({ json: { jobs: [{ id, webSessionCheckAttemptId: "check-"+batches }], failed: [], skippedJobs: [] } }); });
+    await page.route(paths[2], route => route.fulfill({ json: { progress: [{ id, email: "review-1@example.test", phase: batches === 1 ? "failed" : "success", error: batches === 1 ? "HTTP 503" : null, renewed: false }] } }));
+    await page.route(paths[3], route => { forced++; return route.fulfill({ json: {} }); });
+    try {
+      await row().getByRole("button", { name: "检测 Web 会话", exact: true }).click();
+      check(single === 1 && forced === 0, "row control must check before login");
+      await row().getByRole("checkbox").check();
+      await page.locator(".bulk-actions").getByRole("button", { name: "检测 Web 会话", exact: true }).click();
+      const progress = page.getByRole("region", { name: "Web 会话检测批次", exact: true });
+      await progress.getByRole("status").filter({ hasText: "失败 1" }).waitFor();
+      await progress.getByRole("button", { name: "仅重试失败项", exact: true }).click();
+      await progress.getByRole("status").filter({ hasText: "成功 1" }).waitFor();
+      check(batches === 2 && forced === 0, "failed retries must return to session checks");
+      check((await progress.innerText()).includes("检测中"), "check phase must have a visible label");
+      await progress.getByRole("button", { name: "关闭进度", exact: true }).click();
+      await row().getByRole("checkbox").uncheck();
+    } finally { for (const url of paths) await page.unroute(url); }
+  });
+
+  await test("single-Web-check-pending-and-error", async () => {
+    let pending = true;
+    const pattern = /\/api\/jobs(?:\?|$)/;
+    await page.route(pattern, async route => {
+      const response = await route.fetch(), data = await response.json();
+      data.jobs = data.jobs.map(job => job.email === "review-1@example.test" ? { ...job, canLoginWeb: !pending, webSessionCheckPending: pending, webSessionCheckStatus: pending ? "checking" : "failed", webSessionCheckError: pending ? null : "HTTP 503" } : job);
+      await route.fulfill({ json: data });
+    });
+    try {
+      await page.reload();
+      await row().getByText("正在检测 Web 会话并核对套餐与自动化开关", { exact: true }).waitFor();
+      check(await row().getByRole("button", { name: "检测 Web 会话", exact: true }).isDisabled(), "pending check allows duplicate submission");
+      pending = false; await page.reload();
+      await row().getByText("Web 会话检测失败：HTTP 503", { exact: true }).waitFor();
+      check(await row().getByRole("button", { name: "检测 Web 会话", exact: true }).isEnabled(), "failed check cannot retry");
+    } finally { await page.unroute(pattern); await page.reload(); await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20); }
   });
 
   await test("mobile-action-column", async () => {

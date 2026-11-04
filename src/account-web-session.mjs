@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { validateAccountBrowserIdentity } from "./account-browser-identity.mjs";
+import { webTokenWorkspaceId } from "./workspace-accounts.mjs";
 
 export function webSessionPathForJob(job) {
   if (!job?.outputPath && !job?.webSessionPath) throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: 缺少账号会话目录");
@@ -9,10 +10,16 @@ export function webSessionPathForJob(job) {
 }
 
 export async function readAccountWebSession(job) {
+  job.webSessionReadError = null;
+  job.webSessionContext = null;
   let session;
   try { session = JSON.parse(await fs.readFile(webSessionPathForJob(job), "utf8")); }
   catch (error) {
-    if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+      job.webSessionReadError = /^(?:EACCES|EPERM|EIO)$/.test(error.code || "") ? error.code : "READ_FAILED";
+      setWebSessionState(job, "unavailable");
+      throw error;
+    }
     setWebSessionState(job, error.code === "ENOENT" ? "absent" : "expired");
     throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: 尚未保存 Web 登录态，请为此账号重新登录一次");
   }
@@ -23,6 +30,12 @@ export async function readAccountWebSession(job) {
   try { validateAccountBrowserIdentity(session.identity, job.email || session.email); }
   catch (error) { setWebSessionState(job, "expired"); throw error; }
   if (session.email !== session.identity.email) { setWebSessionState(job, "expired"); throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: Web 登录态与账号不匹配"); }
+  job.webSessionContext = {
+    workspaceId: session.web?.workspaceId || null,
+    tokenWorkspaceId: webTokenWorkspaceId(session.accessToken) || null,
+    tokenPlanType: tokenPlanType(session.accessToken),
+    reason: session.validation?.reason || null,
+  };
   const verified = Date.parse(session.validation?.verifiedAt);
   setWebSessionState(job, session.validation?.status === "expired" ? "expired"
     : Number.isFinite(verified) && Date.now() - verified < 15 * 60_000 ? "valid" : "saved", session.validation?.verifiedAt);
@@ -58,4 +71,45 @@ export function setWebSessionState(job, status, verifiedAt = null) {
 export async function inspectAccountWebSession(job) {
   try { await readAccountWebSession(job); }
   catch { if (!job.webSessionStatus) setWebSessionState(job, "expired"); }
+  job.authorizationContext = null;
+  if (job.resultSaved && job.outputPath) {
+    try {
+      const data = JSON.parse(await fs.readFile(job.outputPath, "utf8"));
+      const account = data.accounts?.[0], credentials = account?.credentials || {};
+      job.authorizationContext = {
+        workspaceId: webTokenWorkspaceId(credentials.access_token) || credentials.chatgpt_account_id || credentials.account_id || account?.extra?.chatgpt_account_id || null,
+        planType: tokenPlanType(credentials.access_token) || credentials.plan_type || account?.extra?.plan_type || null,
+      };
+    } catch { /* A missing export must not hide the Web session's own status. */ }
+  }
+}
+
+function tokenPlanType(token) {
+  try {
+    const value = JSON.parse(Buffer.from(String(token).split(".")[1], "base64url").toString("utf8"));
+    const plan = String(value?.["https://api.openai.com/auth"]?.chatgpt_plan_type || "").trim().toLowerCase();
+    return /^[a-z0-9_-]{1,64}$/.test(plan) ? plan : null;
+  } catch { return null; }
+}
+
+// Local evidence only: token claims describe their issued context, not whether
+// that workspace is still usable. Live checks remain the monitor's job.
+export function publicWebCredentialSync(job, planType, { blocked = false } = {}) {
+  const context = job.webSessionContext;
+  const result = { status: "unverified", reason: null, webPlanType: context?.tokenPlanType || null, planType: planType || null };
+  const state = (status, reason) => ({ ...result, status, reason });
+  if (blocked) return state("blocked", "account_banned");
+  if (job.webSessionReadError) return state("read_failed", job.webSessionReadError);
+  if (job.webLoginPreviousState) return state("refreshing", null);
+  if (job.webSessionStatus === "absent") return state("absent", null);
+  if (job.webSessionStatus === "expired") return state("pending_update", context?.reason || "session_expired");
+  if (!context) return result;
+  if (context.workspaceId && context.tokenWorkspaceId && context.workspaceId !== context.tokenWorkspaceId) return state("pending_update", "workspace_mismatch");
+  const authorized = job.authorizationContext;
+  if (job.webSessionStatus === "valid" && context.tokenWorkspaceId && authorized?.workspaceId && context.tokenWorkspaceId !== authorized.workspaceId) return state("authorization_pending", "workspace_changed");
+  if (job.webSessionStatus === "valid" && authorized?.planType && context.tokenPlanType && authorized.planType !== context.tokenPlanType) return state("authorization_pending", "plan_changed");
+  if (context.tokenPlanType && planType && context.tokenPlanType !== planType) return state("pending_update", "plan_mismatch");
+  if (job.resultSaved && !authorized?.workspaceId) return result;
+  if (job.webSessionStatus === "valid" && context.tokenWorkspaceId && context.tokenPlanType) return state("synced", null);
+  return result;
 }

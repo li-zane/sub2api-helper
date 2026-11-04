@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { seedWebSession } from "./account-web-fixture.mjs";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-ui-filters-"));
 const fixture = [
@@ -62,7 +63,16 @@ try {
   const response = await fetch(base + "/api/jobs/query", { method: "POST", headers, body: JSON.stringify({ emails: [fixture[0].email, fixture[1].email], search: "business", webSession: "absent" }) });
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).jobs.map(job => job.email), [fixture[0].email]);
-  console.log("PASS: UI filters use effective workspace plan, case-insensitive search, remarks, Web state, locked state, active metadata and exact-email intersections");
+  assert.equal((await get("?webSession=unavailable")).pagination.total,0,"unavailable is a supported Web state filter, not an ignored value");
+  const token=`web.${Buffer.from(JSON.stringify({exp:Math.floor(Date.now()/1000)+3600,"https://api.openai.com/auth":{chatgpt_account_id:"old-team",chatgpt_plan_type:"team"}})).toString("base64url")}.signature`;
+  const accountDir=path.join(root,"11111111-1111-4111-8111-000000000002");
+  const session=await seedWebSession(path.join(accountDir,"sub2api-import-oauth.json"),{accessToken:token});
+  session.web.workspaceId="personal";session.validation={status:"valid",verifiedAt:new Date().toISOString()};
+  await fs.writeFile(path.join(accountDir,"web-session.json"),JSON.stringify({...session,version:1}));
+  const pending=(await get("?search=free@example.test")).jobs[0];
+  assert.equal(pending.planType,"free");assert.equal(pending.webCredentialSync.status,"pending_update");assert.equal(pending.webCredentialSync.webPlanType,"team",JSON.stringify({web:pending.webSessionStatus,sync:pending.webCredentialSync,read:pending.webSessionReadError}));
+  assert(!JSON.stringify(pending).includes(token),"sync API never returns raw Web token");
+  console.log("PASS: UI filters use effective workspace plan, case-insensitive search, remarks, Web state including read failures, locked state, active metadata, exact-email intersections and Free/old-Team credential sync");
 } finally {
   if (child.exitCode === null) child.kill("SIGTERM");
   await exited;

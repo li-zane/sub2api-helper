@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { createStaticFrontend } from "./static-frontend.mjs";
 import { createCredentialStore } from "./credential-store.mjs";
-import { readAccountWebSession, webSessionPathForJob, inspectAccountWebSession } from "./account-web-session.mjs";
+import { readAccountWebSession, webSessionPathForJob, inspectAccountWebSession, publicWebCredentialSync } from "./account-web-session.mjs";
 import {
   listAccountSessions,
   revokeAccountSession,
@@ -183,6 +183,9 @@ let accountProxyAssignmentPromise = Promise.resolve();
 const accountProxyReservations = new Map();
 const poolRefreshTimers = new Map();
 const poolRefreshOperations = new Set();
+const manualWebSessionChecks = new Map();
+const manualWebSessionCheckOperations = new Set();
+let drainingWebSessionChecks = false;
 let shutdownPromise = null;
 let sub2ApiSettingsConfig = null;
 let sub2ApiMonitorConfig = null;
@@ -220,6 +223,8 @@ const sub2ApiMonitorState = {
   planTypesBackend: null,
 };
 
+const importDayFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" });
+
 let webSessionMonitorSettings = { ...DEFAULT_WEB_SESSION_MONITOR };
 const webSessionMonitor = new WebSessionMonitor({
   filePath: path.join(OUTPUT_ROOT, "web-session-monitor.json"),
@@ -238,6 +243,7 @@ const webSessionMonitor = new WebSessionMonitor({
       }
       throw error;
     }
+    await reconcilePlanAutomations(job, snapshot.planType);
     if (!job.resultSaved && snapshot.planType) {
       job.workspacePlanType = snapshot.planType;
       if (snapshot.repairReason === "plan_changed") snapshot.repairReason = null;
@@ -803,6 +809,30 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
+  if (req.method === "POST" && requestUrl.pathname === "/api/jobs/web-session-check-progress") {
+    const body = await readJson(req);
+    if (!Array.isArray(body.attempts) || body.attempts.length > 10000 || body.attempts.some(p => !p || typeof p.id !== "string" || typeof p.attemptId !== "string")) throw httpError(400, "检测批次无效");
+    const progress = body.attempts.map(({ id, attemptId }) => {
+      const task = manualWebSessionChecks.get(id), job = jobs.get(id);
+      if (!task || task.attemptId !== attemptId || !job || job.deleted) return { id, phase: "failed", error: "检测已被替代或服务已重启，请重新检测" };
+      const phase = task.phase === "relogin" ? (job.status === "queued" ? "queued" : ["email_otp", "mfa_otp", "password"].includes(job.status) ? "input" : "running") : task.phase;
+      return { id, email: job.email, phase, error: task.error || null, renewed: task.renewed === true };
+    });
+    sendJson(res, 200, { progress }); return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/jobs/web-session-check-batch") {
+    const body = await readJson(req);
+    const selected = resolveSelectedJobs(body.ids), started = [], skippedJobs = [];
+    for (const job of selected) {
+      if (!canLoginWeb(job)) { skippedJobs.push({ id: job.id, email: job.email }); continue; }
+      enqueueWebSessionCheck(job);
+      started.push(job);
+    }
+    sendJson(res, 200, { jobs: started.map(publicJob), started: started.length, skipped: skippedJobs.length, skippedJobs, failed: [] });
+    return;
+  }
+
   if (req.method === "POST" && requestUrl.pathname === "/api/jobs/web-login-progress") {
     const body = await readJson(req);
     if (!Array.isArray(body.attempts) || body.attempts.length > 10000 || body.attempts.some(p => !p || typeof p.id !== "string" || typeof p.attemptId !== "string")) throw httpError(400, "登录批次无效");
@@ -1243,7 +1273,7 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
-  const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|retry|regenerate|relogin|web-login|setup-2fa|replace-2fa|add-password|credentials|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
+  const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|retry|regenerate|relogin|web-login|web-session-check|setup-2fa|replace-2fa|add-password|credentials|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
   if (!match) {
     sendJson(res, 404, { error: "Not found" });
     return;
@@ -1377,6 +1407,13 @@ async function handleApi(req, res, requestUrl) {
   if (req.method === "POST" && action === "regenerate") {
     const body = await readJson(req);
     await withEmailJobLock(job.email, () => regenerateJob(job, body));
+    sendJson(res, 200, { job: publicJob(job) });
+    return;
+  }
+  if (req.method === "POST" && action === "web-session-check") {
+    await readJson(req);
+    if (!canLoginWeb(job)) throw httpError(409, "账号正在运行、已封禁或已有 Web 检测任务");
+    enqueueWebSessionCheck(job);
     sendJson(res, 200, { job: publicJob(job) });
     return;
   }
@@ -1530,7 +1567,7 @@ function normalizeJobFilters(value) {
   return {
     search: search || null,
     lockedOnly,
-    webSession: ["absent", "saved", "valid", "expired", "banned"].includes(source.webSession) ? source.webSession : null,
+    webSession: ["absent", "saved", "valid", "expired", "unavailable", "banned"].includes(source.webSession) ? source.webSession : null,
     accountType: ["password_totp", "pool_only"].includes(accountTypeValue) ? accountTypeValue : null,
     status: JOB_STATUS_FILTER_VALUES.includes(statusValue) ? statusValue : null,
     planType: planTypeValue || null,
@@ -1747,6 +1784,7 @@ function scheduleQueuedJobs() {
     availableSlots -= 1;
     if (availableSlots <= 0) break;
   }
+  drainWebSessionChecks();
 }
 
 async function withWebSessionCheckSlot(_job, operation) {
@@ -2153,6 +2191,77 @@ function webLoginCheckpointPath(job) {
   return path.join(path.dirname(job.outputPath), "web-login-checkpoint.json");
 }
 
+function webSessionCheckPending(job) {
+  return ["queued", "checking", "relogin"].includes(manualWebSessionChecks.get(job.id)?.phase);
+}
+
+function enqueueWebSessionCheck(job) {
+  manualWebSessionChecks.set(job.id, { attemptId: crypto.randomUUID(), phase: "queued", renewed: false, error: null });
+  scheduleQueuedJobs();
+}
+
+function drainWebSessionChecks() {
+  if (drainingWebSessionChecks || shuttingDown) return;
+  drainingWebSessionChecks = true;
+  try {
+    for (const [id, task] of manualWebSessionChecks) {
+      if (task.phase !== "queued") continue;
+      const job = jobs.get(id);
+      if (!job || job.deleted || !canLoginWeb(job, { checking: true })) { task.phase = "failed"; task.error = "账号状态已变化，本次检测已跳过"; continue; }
+      // withSlot reserves synchronously; retries keep this same shared slot.
+      const operation = withWebSessionCheckSlot(job, () => {
+        task.phase = "checking";
+        touch(job);
+        return withEmailJobLock(job.email, async () => {
+          if (!canLoginWeb(job, { checking: true })) throw new Error("账号状态已变化，请稍后重试");
+          try {
+            const snapshot = await webSessionMonitor.probeWithRetries(job, {}, { isInterrupted: () => shuttingDown || accountAutomationBlocked(job.email) });
+            if (["web_workspace_unavailable", "workspace_unavailable"].includes(snapshot.repairReason)) throw new Error("SESSION_WORKSPACE_UNAVAILABLE: Web 会话绑定空间已不可用");
+            task.phase = "success";
+            task.error = null;
+            job.webLoginError = null;
+            appendJobLog(job, `[web-session-check] 会话有效，已核对套餐与自动化开关${snapshot.repairReason ? "；授权或绑定差异交由巡检继续处理" : ""}。\n`);
+            await saveJobMetadata(job);
+          } catch (error) {
+            const invalid = /^SESSION_(?:TOKEN_EXPIRED|CREDENTIALS_UNAVAILABLE|WORKSPACE_UNAVAILABLE):/.test(error.message || "");
+            if (!invalid || task.renewed || accountAutomationBlocked(job.email)) throw error;
+            // Clear pending admission while starting exactly one Web-only renewal.
+            task.phase = "success";
+            await startWebLogin(job);
+            task.renewed = true;
+            task.loginAttemptId = job.webLoginAttemptId;
+            task.phase = "relogin";
+          }
+        });
+      }).catch(error => { task.phase = "failed"; task.error = sessionApiError(error, job).message; touch(job); });
+      manualWebSessionCheckOperations.add(operation);
+      void operation.finally(() => manualWebSessionCheckOperations.delete(operation));
+    }
+  } finally { drainingWebSessionChecks = false; }
+}
+
+async function reconcilePlanAutomations(job, planType) {
+  const plan = normalizePlanType(planType);
+  if (!plan || accountAutomationBlocked(job.email)) return;
+  const previousPlan = normalizePlanType(job.planAutomationPlanType || getJobPlanType(job));
+  job.planAutomationPlanType = previousPlan;
+  const changed = previousPlan !== plan;
+  job.workspacePlanType = plan;
+  // Re-evaluate ongoing switches only. One-shot uploads/2FA rotations stay one-shot.
+  const actions = taskAutoActionsForPlanType(plan);
+  for (const [action, service] of [["enable-overload-detection", overloadMonitor], ["enable-overload-cooldown", overloadCooldown]]) {
+    const governed = Object.values(taskAutoActions).some(values => values.includes(action));
+    if (!governed) continue;
+    const allowed = actions.includes(action), state = service.snapshot(job.email);
+    if ((!allowed && state.enabled) || (changed && allowed && !state.enabled && state.configured)) await service.setEnabled(job.email, allowed);
+  }
+  // Inherited fingerprint settings immediately use the live plan; explicit account
+  // overrides keep their documented meaning. Abort work carrying an old plan.
+  if (changed) modelFingerprint.invalidateAccount(job.email);
+  job.planAutomationPlanType = plan;
+  await saveJobMetadata(job);
+}
+
 async function startWebLogin(job, { maintenance = false } = {}) {
   if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新登录并授权");
   if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
@@ -2219,6 +2328,11 @@ async function finishWebLogin(job, code, signal, message = null) {
   job.child = null;
   await removePrivateFile(webLoginCheckpointPath(job));
   appendJobLog(job, success ? "[web-login] Web 登录态已保存，未执行 Codex 授权或更新号池。\n" : `[web-login] ${failure}\n`);
+  const check = manualWebSessionChecks.get(job.id);
+  if (check?.phase === "relogin" && check.loginAttemptId === job.webLoginAttemptId) {
+    check.phase = success ? "queued" : "failed";
+    check.error = success ? null : failure;
+  }
   touch(job);
   await saveJobMetadata(job);
   scheduleQueuedJobs();
@@ -3944,7 +4058,6 @@ function normalizeImportDatePriority(value) {
   return { enabled: value.enabled, min, max };
 }
 
-const importDayFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" });
 function accountImportDay(account) {
   const remoteTimestamp = account.created_at ? Date.parse(account.created_at) : Number.NaN;
   if (Number.isFinite(remoteTimestamp)) return importDayFormatter.format(new Date(remoteTimestamp));
@@ -6837,9 +6950,15 @@ function publicJob(job) {
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
+    webSessionCheckAttemptId: manualWebSessionChecks.get(job.id)?.attemptId || null,
+    webSessionCheckPending: webSessionCheckPending(job),
+    webSessionCheckStatus: manualWebSessionChecks.get(job.id)?.phase || null,
+    webSessionCheckError: manualWebSessionChecks.get(job.id)?.error || null,
     webSessionAvailable: Boolean(job.webSessionAvailable),
     webSessionStatus: blocked ? "banned" : job.webSessionStatus || "absent",
     webSessionVerifiedAt: job.webSessionVerifiedAt || null,
+    webCredentialSync: publicWebCredentialSync(job, getJobPlanType(job), { blocked }),
+    webSessionReadError: job.webSessionReadError || null,
     webLoginAttemptId: job.webLoginAttemptId || null,
     webLoginPending: Boolean(job.webLoginPreviousState),
     webLoginCompletedAt: job.webLoginCompletedAt || null,
@@ -7106,6 +7225,10 @@ function publicSelectionJob(job) {
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
+    webSessionCheckAttemptId: manualWebSessionChecks.get(job.id)?.attemptId || null,
+    webSessionCheckPending: webSessionCheckPending(job),
+    webSessionCheckStatus: manualWebSessionChecks.get(job.id)?.phase || null,
+    webSessionCheckError: manualWebSessionChecks.get(job.id)?.error || null,
     webSessionStatus: accountAutomationBlocked(job.email) ? "banned" : job.webSessionStatus || "absent",
     canLogoutAllSessions: canLogoutAllSessions(job),
     canSwitchProxy: jobCanSwitchProxy(job),
@@ -7119,12 +7242,12 @@ function canLogoutAllSessions(job) {
   return !accountAutomationBlocked(job.email) && Boolean(job.webSessionAvailable || (job.resultSaved && !job.webSessionStatus)) && canForceRelogin(job);
 }
 
-function canLoginWeb(job, { maintenance = false } = {}) {
+function canLoginWeb(job, { maintenance = false, checking = false } = {}) {
   // A failed, finished refresh is not a running operation. Keep manual controls
   // unchanged, but let maintenance re-check it under the existing retry cooldown.
   const failedRefresh = maintenance && !job.child && !job.poolRefreshReady && Boolean(job.poolRefreshError)
     && ["failed", "mfa_failed", "reauth_required", "resume_available"].includes(job.status);
-  return !accountAutomationBlocked(job.email) && canForceRelogin(job) && (!job.poolRefreshAction || failedRefresh) && !job.autoRepairOperation
+  return (checking || !webSessionCheckPending(job)) && !accountAutomationBlocked(job.email) && canForceRelogin(job) && (!job.poolRefreshAction || failedRefresh) && !job.autoRepairOperation
     && !["queued", "running"].includes(job.autoTaskStatus);
 }
 
@@ -7744,6 +7867,7 @@ async function syncCompletedOutputs(force = false) {
           ...restoredRemarkState(metadata),
           planType: extractPlanTypeFromAccount(account) || normalizePlanType(metadata.plan_type),
           workspacePlanType: normalizePlanType(metadata.workspace_plan_type),
+          planAutomationPlanType: normalizePlanType(metadata.plan_automation_plan_type),
           loginMode: metadata.login_mode === "password" || storedCredentials.password ? "password" : (mailApiUrl ? "email_otp" : metadata.login_mode || "manual"),
           password: storedCredentials.password,
           totpSecret: storedCredentials.totpSecret,
@@ -7862,6 +7986,7 @@ async function syncCompletedOutputs(force = false) {
           ...restoredRemarkState(metadata),
           planType: normalizePlanType(metadata.plan_type),
           workspacePlanType: normalizePlanType(metadata.workspace_plan_type),
+          planAutomationPlanType: normalizePlanType(metadata.plan_automation_plan_type),
           loginMode: metadata.login_mode === "password" || storedCredentials.password ? "password" : (mailApiUrl ? "email_otp" : metadata.login_mode || "manual"),
           password: storedCredentials.password,
           totpSecret: storedCredentials.totpSecret,
@@ -7969,6 +8094,7 @@ async function syncCompletedOutputs(force = false) {
           remark: typeof metadata.remark === "string" ? metadata.remark : "",
           ...restoredRemarkState(metadata),
           workspacePlanType: normalizePlanType(metadata.workspace_plan_type),
+          planAutomationPlanType: normalizePlanType(metadata.plan_automation_plan_type),
           loginMode: metadata.login_mode === "password" || storedCredentials.password ? "password" : (mailApiUrl ? "email_otp" : metadata.login_mode || "manual"),
           password: storedCredentials.password,
           totpSecret: storedCredentials.totpSecret,
@@ -8810,7 +8936,7 @@ function canReplaceTotp(job) {
 
 async function queueConfiguredTaskActions(job) {
   if ((!job.autoTaskEligible && job.lastOperationType !== "initial_authorization") || !job.resultSaved || job.autoTaskStatus !== "idle") return;
-  const actions = taskAutoActionsForPlanType(job.planType || job.workspacePlanType);
+  const actions = taskAutoActionsForPlanType(getJobPlanType(job));
   job.autoTaskEligible = false;
   if (!actions.length) return;
   job.autoTaskActions = actions;
@@ -8859,10 +8985,14 @@ async function runConfiguredTaskActions(job) {
       } else if (action === "rotate-logout-reauthorize-upload") {
         await runConfiguredRotateAndUploadAction(job);
       } else if (action === "enable-overload-detection") {
-        await withEmailJobLock(job.email, () => overloadMonitor.setEnabled(job.email, true));
+        await withEmailJobLock(job.email, () => {
+          if (taskAutoActionsForPlanType(getJobPlanType(job)).includes(action)) return overloadMonitor.setEnabled(job.email, true);
+        });
         overloadMonitor.trigger();
       } else if (action === "enable-overload-cooldown") {
-        await withEmailJobLock(job.email, () => overloadCooldown.setEnabled(job.email, true));
+        await withEmailJobLock(job.email, () => {
+          if (taskAutoActionsForPlanType(getJobPlanType(job)).includes(action)) return overloadCooldown.setEnabled(job.email, true);
+        });
       }
       job.autoTaskIndex = index + 1;
       touch(job);
@@ -9020,6 +9150,7 @@ async function saveJobMetadata(job) {
         pool_only: Boolean(job.poolOnly),
         plan_type: job.planType || null,
         workspace_plan_type: job.workspacePlanType || null,
+        plan_automation_plan_type: job.planAutomationPlanType || null,
         completed_at: job.completedAt || null,
         started_at: job.startedAt || null,
         attempt: Number(job.attempt || 1),
@@ -9400,6 +9531,7 @@ async function shutdown() {
       overloadCooldown.stop(),
       modelFingerprint.stop(),
       webSessionMonitor.stop(),
+      ...manualWebSessionCheckOperations,
       proxyQualityService.close(),
       sub2ApiMonitorPromise,
       taskSettingsWritePromise,

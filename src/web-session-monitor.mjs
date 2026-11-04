@@ -108,7 +108,7 @@ export class WebSessionMonitor {
     }
     return this.snapshot();
   }
-  async probeWithRetries(job, entry) {
+  async probeWithRetries(job, entry, { isInterrupted = () => this.stopped || !this.getSettings().enabled || this.isBusy(job) } = {}) {
     for (let attempt = 1; attempt <= 3; attempt++) {
       entry.checkAttempts = attempt;
       try { return await this.probe(job); }
@@ -116,7 +116,7 @@ export class WebSessionMonitor {
         const unauthorized = [error.status, error.remoteStatus, error.response?.status].some(status => Number(status) === 401)
           || /\bHTTP\s+401\b/i.test(error.message || "");
         const terminal = /^SESSION_(?:TOKEN_EXPIRED|CREDENTIALS_UNAVAILABLE|WORKSPACE_UNAVAILABLE):/.test(error.message || "");
-        const interrupted = () => this.stopped || !this.getSettings().enabled || this.isBusy(job);
+        const interrupted = isInterrupted;
         if (attempt === 3 || unauthorized || terminal || interrupted()) throw error;
         try { await delay(this.retryDelayMs * attempt, undefined, { signal: this.retryAbort.signal }); }
         catch { throw error; }

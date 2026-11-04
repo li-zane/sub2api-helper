@@ -60,7 +60,10 @@ export async function probeAccountWebSession(job) {
     displayName: d.displayName, platform: d.platform, isCurrentDevice: d.isCurrentDevice,
     lastSignedInTimestamp: d.lastSignedInTimestamp, lastSignedInIp: d.lastSignedInIp,
   })) : undefined;
-  const previousPlan = job.workspacePlanType || job.planType;
+  // Compare against issued OAuth context too: publishing the live plan must not
+  // erase a still-pending authorization repair on the next check/restart.
+  const account = bundle?.data?.accounts?.[0];
+  const previousPlan = account?.credentials?.plan_type || account?.extra?.plan_type || job.planType || job.workspacePlanType;
   const workspaces = listing.workspaces.map(w => ({ id: w.id, name: w.name, structure: w.structure,
     planType: w.planType, current: w.current, canAccess: w.canAccess, deactivated: w.deactivated,
     availabilityReason: w.availabilityReason }));

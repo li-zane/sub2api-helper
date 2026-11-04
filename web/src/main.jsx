@@ -53,8 +53,8 @@ import { FingerprintSettingsButton, ModelFingerprintCell } from "./model-fingerp
 import { HelpTip } from "./help-tip.jsx";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
 
-const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效", banned: "账号已封禁" };
-const BATCH_KEY = "tosub2.web-login-batch";
+const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效", unavailable: "Web 凭据读取失败", banned: "账号已封禁" };
+const BATCH_KEY = "tosub2.web-session-check-batch";
 const POLL_INTERVAL_MS = 900;
 const SUB2API_PIPELINE_TIMEOUT_MS = 15 * 60_000;
 const LUBAN_API_KEY_STORAGE_KEY = "chatgpt-onboarding.luban-api-key";
@@ -1601,11 +1601,11 @@ function App() {
     if (!Array.isArray(ids) || !ids.length || batchAction) return;
     setBatchAction("web-login");
     try {
-      const data = await apiFetch(token, "/api/jobs/web-login-batch", {
+      const data = await apiFetch(token, "/api/jobs/web-session-check-batch", {
         method: "POST", body: JSON.stringify({ ids }),
       });
       const failed = data.failed || [], skipped = data.skippedJobs || [];
-      setWebBatch({ attempts: data.jobs.map(job => ({ id: job.id, attemptId: job.webLoginAttemptId })), failed, skipped });
+      setWebBatch({ attempts: data.jobs.map(job => ({ id: job.id, attemptId: job.webSessionCheckAttemptId })), failed, skipped });
       setSelectedJobIds(new Set([...failed, ...skipped].map(item => item.id)));
       setError("");
     } catch (requestError) { setError(requestError.message); }
@@ -2085,7 +2085,7 @@ function App() {
                 </button>
               )}
               <HelpTip title="批量操作说明" label="查看批量操作说明">
-                <div>勾选列表中的账号后可执行批量下载、上传号池、重新授权、Web 登录，或在“更多”中换绑 IP、冷却及配置 2FA。</div>
+                <div>勾选列表中的账号后可执行批量下载、上传号池、重新授权、Web 会话检测，或在“更多”中换绑 IP、冷却及配置 2FA。</div>
                 {features.accountSessions && selectedJobIds.size > 0 && (
                   <div style={{ marginTop: 4 }}>代理状态：{proxySwitchSelection.reason}</div>
                 )}
@@ -2160,10 +2160,10 @@ function App() {
                     className="secondary-button bulk-button"
                     onClick={() => loginWebSelected()}
                     disabled={!canLoginWebSelected || Boolean(batchAction)}
-                    title="仅登录 Web 端，与授权共用任务并发池，不执行 Codex 授权或号池上传"
+                    title="检测 Web 会话并同步套餐与自动化开关；确认失效后自动重登，与授权共用任务并发池"
                   >
                     {batchAction === "web-login" ? <LoaderCircle className="spin" size={14} /> : <Globe2 size={14} />}
-                    <span>登录 Web</span>
+                    <span>检测 Web 会话</span>
                   </button>
                 )}
 
@@ -3355,6 +3355,20 @@ function EmptyState({ filtered = false }) {
   );
 }
 
+function CredentialSyncNote({ sync, planTypeMapping }) {
+  const labels = { pending_update: "Web 凭据待更新", refreshing: "Web 凭据更新中", read_failed: "Web 凭据读取失败", authorization_pending: "Codex 凭据待更新" };
+  const label = labels[sync?.status];
+  if (!label) return null;
+  const reason = sync.reason === "workspace_mismatch" || sync.reason === "workspace_unavailable"
+    ? "Web 凭据仍绑定旧空间，需重登并复查当前空间。"
+    : sync.status === "read_failed" ? `读取失败（${sync.reason || "READ_FAILED"}），请检查服务用户的文件权限。`
+      : sync.status === "authorization_pending" ? "Web 与 Codex 的空间或套餐尚未一致，需更新授权后完成同步。"
+        : sync.status === "refreshing" ? "Web 凭据更新中，完成后将复查空间与授权是否一致。"
+          : "Web 凭据尚未确认有效，需成功重登后复查。";
+  const title = `${label}：${reason}${sync.planType ? ` 当前套餐：${formatPlanTypeLabel(sync.planType, planTypeMapping)}。` : ""}${sync.webPlanType ? ` Web 凭据签发时套餐：${formatPlanTypeLabel(sync.webPlanType, planTypeMapping)}。` : ""}`;
+  return <span className="plan-sync-note credential-sync-note" title={title} aria-label={label}>{label}</span>;
+}
+
 function OperationDetailText({ text, className, onOpen }) {
   const value = String(text ?? "");
   if (!value) return null;
@@ -3741,7 +3755,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
     if (workflowBusy || submitting) return;
     setSubmitting(true);
     try {
-      await apiFetch(token, `/api/jobs/${job.id}/web-login`, { method: "POST", body: JSON.stringify({}) });
+      await apiFetch(token, `/api/jobs/${job.id}/web-session-check`, { method: "POST", body: JSON.stringify({}) });
       onError("");
     } catch (requestError) { onError(requestError.message); }
     finally { setSubmitting(false); }
@@ -3855,9 +3869,9 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               <div className="account-meta-line">
                 <LoginMethodBadge job={job} />
                 {job.webSessionStatus && job.webSessionStatus !== "absent" && (
-                  <span className={`web-session-state ${job.webSessionStatus === "banned" ? "expired" : job.webSessionStatus}`} title={job.webSessionStatus === "banned" ? extractResponseMessage(job.autoRepairBlockedReason || "账号已确认封禁，已停止 Web 重登") : job.webSessionVerifiedAt ? `最近验证：${formatDateTime(job.webSessionVerifiedAt)}` : "读取工作区或设备后验证"}>
+                  <span className={`web-session-state ${["banned", "unavailable"].includes(job.webSessionStatus) ? "expired" : job.webSessionStatus}`} title={job.webSessionStatus === "banned" ? extractResponseMessage(job.autoRepairBlockedReason || "账号已确认封禁，已停止 Web 重登") : job.webSessionStatus === "unavailable" ? `Web 凭据读取失败（${job.webSessionReadError || "READ_FAILED"}），请检查服务用户的文件权限` : job.webSessionVerifiedAt ? `最近验证：${formatDateTime(job.webSessionVerifiedAt)}` : "读取工作区或设备后验证"}>
                     {job.webSessionStatus === "banned" ? <Ban size={11} aria-hidden="true" /> : <Globe2 size={11} aria-hidden="true" />}
-                    {job.webSessionStatus === "banned" ? "账号封禁" : job.webSessionStatus === "valid" ? "Web已验" : job.webSessionStatus === "expired" ? "Web失效" : "Web待验"}
+                    {job.webSessionStatus === "banned" ? "账号封禁" : job.webSessionStatus === "unavailable" ? "Web读取失败" : job.webSessionStatus === "valid" ? "Web已验" : job.webSessionStatus === "expired" ? "Web失效" : "Web待验"}
                   </span>
                 )}
               </div>
@@ -3875,6 +3889,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
       </td>
       <td className={`plan-cell ${job.planType ? "" : "unknown"}`} title={job.planType || "未知"}>
         <span className="plan-tag">{formatPlanTypeLabel(job.planType, planTypeMapping)}</span>
+        <CredentialSyncNote sync={job.webCredentialSync} planTypeMapping={planTypeMapping} />
         {job.sub2apiInPool === true && job.sub2apiPlanType && job.planType
           && job.sub2apiPlanType !== job.planType && (
           <span
@@ -3948,7 +3963,9 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               : job.poolRefreshReady ? "正在更新号池凭据" : "正在重新登录授权，完成后更新号池凭据"}
           className="prompt-line" onOpen={onOpenOperationDetail} />}
         {job.prompt && <OperationDetailText text={job.prompt} className="prompt-line" onOpen={onOpenOperationDetail} />}
-        {job.webSessionRepairRetryAt && <OperationDetailText text={`Web 自动重登冷却中，最早于 ${formatDateTime(job.webSessionRepairRetryAt)} 重试；到期后由巡检调度。可手动登录 Web 立即重试。`} className="prompt-line" onOpen={onOpenOperationDetail} />}
+        {job.webSessionCheckPending && <OperationDetailText text={job.webSessionCheckStatus === "queued" ? "Web 会话检测排队中" : job.webSessionCheckStatus === "relogin" ? "Web 会话已确认失效，正在重登，完成后自动复检" : "正在检测 Web 会话并核对套餐与自动化开关"} className="prompt-line" onOpen={onOpenOperationDetail} />}
+        {job.webSessionCheckError && <OperationDetailText text={`Web 会话检测失败：${job.webSessionCheckError}`} className="row-error" onOpen={onOpenOperationDetail} />}
+        {job.webSessionRepairRetryAt && <OperationDetailText text={`Web 自动重登冷却中，最早于 ${formatDateTime(job.webSessionRepairRetryAt)} 重试；到期后由巡检调度。可手动检测 Web 会话，确认失效后立即重登。`} className="prompt-line" onOpen={onOpenOperationDetail} />}
         {job.status === "canceled" && job.webSessionStatus === "valid" && (
           <OperationDetailText text="上次 Codex 授权已取消；Web 会话已验证，Web 登录不会改变授权任务结果。" className="prompt-line" onOpen={onOpenOperationDetail} />
         )}
@@ -4072,10 +4089,10 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="secondary-button icon-only-action"
             onClick={loginWeb}
             disabled={!webLoginAvailable || rowBusy || !job.canLoginWeb}
-            title={job.autoRepairBlocked ? "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新登录并授权" : job.webLoginError || (job.canLoginWeb ? `${WEB_STATES[job.webSessionStatus || "absent"]}：登录 Web` : "当前状态不可登录 Web")}
-            aria-label="登录 Web"
+            title={job.autoRepairBlocked ? "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新登录并授权" : job.webLoginError || (job.canLoginWeb ? `${WEB_STATES[job.webSessionStatus || "absent"]}：检测会话；失效后自动重登` : "当前状态不可检测 Web 会话")}
+            aria-label="检测 Web 会话"
           >
-            {submitting ? <LoaderCircle className="spin" size={13} /> : <Globe2 size={13} />}
+            {submitting || job.webSessionCheckPending ? <LoaderCircle className="spin" size={13} /> : <Globe2 size={13} />}
           </button>
           <button
             type="button"
@@ -4390,7 +4407,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">
           <div className="section-title-row">
             <h3 id="web-session-monitor-title">WebSession 定时巡检</h3>
-            <HelpTip label="WebSession 定时巡检说明">由服务端执行，关闭页面后仍运行。使用原设备身份和账号代理检查会话、设备与空间；确认会话失效或空间/PlanType 变化后，通过共享登录队列重新登录授权，并应用新方案、同步号池。网络、403 或上游故障只记录失败，不当作掉线。仅检查已有 Web 登录态的账号；主动登出后不自动补登。</HelpTip>
+            <HelpTip label="WebSession 定时巡检说明">由服务端执行，关闭页面后仍运行。使用原设备身份和账号代理检查会话、设备与空间；确认会话失效或空间/PlanType 变化后，通过共享登录队列重新登录授权，并应用新方案、同步号池。网络、403 或上游故障只记录失败，不当作掉线。会话检测成功后按当前套餐核对过载检测、过载冷却及继承套餐规则的降智检测。仅检查已有 Web 登录态的账号；主动登出后不自动补登。</HelpTip>
           </div>
           <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.enabled} disabled={saving} onChange={e => setWebMonitor(v => ({ ...v, enabled: e.target.checked }))} /><span>启用 WebSession 定时检测</span></label>
           <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.autoRelogin} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, autoRelogin: e.target.checked }))} /><span>确认失效或空间变化后自动重登并授权</span></label>
