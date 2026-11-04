@@ -13,7 +13,7 @@ let action = async () => ({ devices: [{ displayName: "Saved browser" }], workspa
 const options = {
   filePath: path.join(root, "monitor.json"), getSettings: () => settings, listJobs: () => [job],
   hasSession: async j => j.saved, isBusy: j => j.busy, now: () => now,
-  probe: async () => { calls++; return action(); }, repair: async () => { repairs++; }, tickMs: 10,
+  probe: async () => { calls++; return action(); }, repair: async () => { repairs++; }, tickMs: 10, retryDelayMs: 0,
 };
 let monitor = new WebSessionMonitor(options);
 try {

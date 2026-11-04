@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 export const DEFAULT_WEB_SESSION_MONITOR = Object.freeze({ enabled: false, intervalMinutes: 15, autoRelogin: true, retryMinutes: 60 });
 export function normalizeWebSessionMonitor(value = {}) {
@@ -14,11 +15,12 @@ export function normalizeWebSessionMonitor(value = {}) {
 }
 
 // Server-owned, serial checks. No UI polling, parallel logins, logout-all or
-// retries on proxy/403/5xx errors; only confirmed expiry/workspace changes repair.
+// At most two retries for non-401 failures; only confirmed expiry/workspace changes repair.
 export class WebSessionMonitor {
-  constructor({ filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, lock = (_job, fn) => fn(), now = Date.now, tickMs = 30_000 }) {
-    Object.assign(this, { filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, lock, now, tickMs });
+  constructor({ filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, lock = (_job, fn) => fn(), withSlot = (_job, fn) => fn(), now = Date.now, tickMs = 30_000, retryDelayMs = 1_000 }) {
+    Object.assign(this, { filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, lock, withSlot, now, tickMs, retryDelayMs });
     this.accounts = Object.create(null); this.running = null; this.timer = null; this.stopped = false; this.writes = Promise.resolve();
+    this.retryAbort = new AbortController();
   }
   async load() {
     try {
@@ -29,11 +31,12 @@ export class WebSessionMonitor {
   snapshot() { return { running: Boolean(this.running), settings: this.getSettings(), accounts: structuredClone(this.accounts) }; }
   start() {
     this.stopped = false;
+    if (this.retryAbort.signal.aborted) this.retryAbort = new AbortController();
     if (!this.timer) { this.timer = setInterval(() => { void this.run().catch(() => {}); }, this.tickMs); this.timer.unref?.(); }
     void this.run().catch(() => {});
   }
   trigger(force = false) { if (!this.stopped) void this.run({ force }).catch(() => {}); }
-  async stop() { this.stopped = true; clearInterval(this.timer); this.timer = null; await this.running; await this.writes; }
+  async stop() { this.stopped = true; this.retryAbort.abort(); clearInterval(this.timer); this.timer = null; await this.running; await this.writes; }
   async repairFinished(email) {
     const entry = this.accounts[email.toLowerCase()];
     if (entry) { entry.nextCheckAt = new Date(this.now()).toISOString(); await this.save(); }
@@ -51,7 +54,9 @@ export class WebSessionMonitor {
       const existing = this.accounts[email];
       if (!force && Date.parse(existing?.nextCheckAt) > this.now()) continue;
       if (this.isBusy(job) || !(await this.hasSession(job))) continue;
-      await this.lock(job, async () => {
+      // Admission may skip a full shared pool. Leave nextCheckAt untouched so the
+      // next scheduler tick can try again without pretending a check happened.
+      await this.withSlot(job, () => this.lock(job, async () => {
         if (this.stopped || !this.getSettings().enabled || this.isBusy(job)) return;
         const settings = this.getSettings();
         const at = new Date(this.now()).toISOString();
@@ -60,7 +65,7 @@ export class WebSessionMonitor {
         entry.nextCheckAt = new Date(this.now() + settings.intervalMinutes * 60_000).toISOString();
         let reason = null;
         try {
-          const result = await this.probe(job);
+          const result = await this.probeWithRetries(job, entry);
           if (Array.isArray(result.devices)) entry.devices = result.devices;
           entry.workspaces = result.workspaces || [];
           entry.currentWorkspaceId = result.currentWorkspaceId || null;
@@ -86,9 +91,25 @@ export class WebSessionMonitor {
           if (await this.repair(job, { reason }) === false) entry.status = "needs_attention";
         } catch { entry.status = "needs_attention"; entry.lastError = "自动重登未能入队，请检查账号资料或手动登录"; }
         await this.save();
-      });
+      }));
     }
     return this.snapshot();
+  }
+  async probeWithRetries(job, entry) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      entry.checkAttempts = attempt;
+      try { return await this.probe(job); }
+      catch (error) {
+        const unauthorized = [error.status, error.remoteStatus, error.response?.status].some(status => Number(status) === 401)
+          || /\bHTTP\s+401\b/i.test(error.message || "");
+        const terminal = /^SESSION_(?:TOKEN_EXPIRED|CREDENTIALS_UNAVAILABLE):/.test(error.message || "");
+        const interrupted = () => this.stopped || !this.getSettings().enabled || this.isBusy(job);
+        if (attempt === 3 || unauthorized || terminal || interrupted()) throw error;
+        try { await delay(this.retryDelayMs * attempt, undefined, { signal: this.retryAbort.signal }); }
+        catch { throw error; }
+        if (interrupted()) throw error;
+      }
+    }
   }
   save() {
     const value = JSON.stringify({ version: 1, accounts: this.accounts }, null, 2) + "\n";

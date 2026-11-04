@@ -77,8 +77,8 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ filePath, getContext, listTargets, getAccount, sample, updateGroups, onChange = () => {}, now = Date.now, detectorLoader, challenges = generateChallenges }) {
-    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateGroups, onChange, now, challenges });
+  constructor({ filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked = () => false, onChange = () => {}, now = Date.now, detectorLoader, challenges = generateChallenges }) {
+    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked, onChange, now, challenges });
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
     this.detectorLoader = detectorLoader || (() => loadDetector({ source: "https://lm.ikale.io/data/", cache: path.join(path.dirname(filePath), "model-fingerprint-data.bin") }));
   }
@@ -191,6 +191,7 @@ export class ModelFingerprintService {
     return groups.filter(id => rules[String(id)] !== "verified" || result?.status === "match" || result?.status !== "mismatch" && existing.has(String(id)));
   }
   assertRunnable(email, planType, { manual = false } = {}) {
+    if (this.isBlocked(email)) throw Object.assign(new Error("账号已确认封禁、删除或永久停用，已停止自动化"), { status: 409 });
     const config = this.effective(email, planType), context = this.getContext();
     if (!config.models.length) throw invalid("请先设置至少一个检测模型");
     if (this.closing) throw Object.assign(new Error("检测服务正在关闭"), { status: 503 });
@@ -213,7 +214,7 @@ export class ModelFingerprintService {
     while (this.active.size < this.settings.maxConcurrentAccounts && this.queued.size) {
       const [email, task] = this.queued.entries().next().value;
       this.queued.delete(email);
-      if (!task.options.manual && (this.stopped || !this.effective(email, task.planType).enabled)) { this.inFlight.delete(email); task.resolve(this.snapshot(email, task.planType)); continue; }
+      if (this.isBlocked(email) || !task.options.manual && (this.stopped || !this.effective(email, task.planType).enabled)) { this.inFlight.delete(email); task.resolve(this.snapshot(email, task.planType)); continue; }
       const operation = this.perform(email, task.planType, task.options);
       const settled = () => { this.inFlight.delete(email); this.drain(); this.onChange(); };
       void operation.then(value => { task.resolve(value); settled(); }, error => { task.reject(error); settled(); });
@@ -221,6 +222,7 @@ export class ModelFingerprintService {
   }
   async perform(email, planType, { manual = false } = {}) {
     email = label(email);
+    if (this.isBlocked(email)) return this.snapshot(email, planType);
     if (this.active.has(email)) return this.snapshot(email, planType);
     const config = this.effective(email, planType);
     if (!config.models.length) throw invalid("请先设置至少一个检测模型");
@@ -244,6 +246,7 @@ export class ModelFingerprintService {
         if (account.status && account.status !== "active" || account.schedulable === false) throw new Error("账号已暂停或状态异常，本轮跳过");
         for (const model of config.models) {
           controller.signal.throwIfAborted();
+          if (this.isBlocked(email)) return this.snapshot(email, planType);
           const outputs = [], sampleFailures = [];
           try {
             for (const challenge of this.challenges(3)) {
@@ -300,12 +303,13 @@ export class ModelFingerprintService {
     return this.mutate(() => this.reconcileLocked(email, planType, targets, revision));
   }
   async reconcileLocked(email, planType, targets, revision) {
+    if (this.isBlocked(email)) return;
     const entry = this.accounts.get(email), state = this.snapshot(email, planType), context = this.getContext();
     if (!["match", "mismatch"].includes(state.result?.status) || !entry.groupSyncPending) return;
     try {
       for (const target of targets) {
         const account = await this.getAccount(context.config, target.id);
-        if (revision !== this.revision || state.result.signature !== this.signature(email, planType)) return;
+        if (this.isBlocked(email) || revision !== this.revision || state.result.signature !== this.signature(email, planType)) return;
         if (state.result.identities?.[target.id] !== fingerprintAccountIdentity(account)) { entry.groupSyncPending = false; entry.groupSyncError = "账号凭据或代理已变更，请重新检测"; await this.persist(); return; }
         const profileId = target.profileId, profile = context.profiles.find(p => p.id === profileId);
         if (!profile) continue;
@@ -327,6 +331,7 @@ export class ModelFingerprintService {
     const context = this.getContext(), scheduled = [];
     for (const job of context.jobs) {
       if (this.stopped) break;
+      if (this.isBlocked(job.email)) continue;
       if (this.inFlight.has(label(job.email))) continue;
       const state = this.snapshot(job.email, job.planType), entry = this.accounts.get(label(job.email));
       if (entry?.groupSyncPending && ["match", "mismatch"].includes(state.result?.status)) {

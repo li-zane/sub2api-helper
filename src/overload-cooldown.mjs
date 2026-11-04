@@ -16,8 +16,8 @@ export function normalizeOverloadCooldown(value = DEFAULT_OVERLOAD_COOLDOWN) {
 }
 
 export class OverloadCooldown {
-  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, onChange = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, onChange, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, isBlocked = () => false, onChange = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, isBlocked, onChange, now, setTimer, clearTimer });
     this.accounts = new Map();
     this.locks = new Map();
     this.writePromise = Promise.resolve();
@@ -99,6 +99,12 @@ export class OverloadCooldown {
     return this.snapshot(email);
   }
 
+  // Unlike a normal disable, a permanent block must never resume the pool row.
+  async blockAccount(email) {
+    email = email.toLowerCase();
+    await this.lock(email, () => this.update(email, { enabled: false, phase: "idle", resumeAccountIds: [], coolingUntil: null, lastError: null }));
+  }
+
   // A manual pool switch takes ownership away from the automatic cooldown.
   async manualOverride(email, accountIds, action) {
     email = email.toLowerCase();
@@ -144,7 +150,7 @@ export class OverloadCooldown {
     this.rerun = false;
     const config = this.getConfig();
     if (this.stopped || !config?.baseUrl || !config?.adminApiKey) return;
-    const active = [...this.accounts].filter(([, entry]) => entry.enabled || entry.resumeAccountIds?.length);
+    const active = [...this.accounts].filter(([email, entry]) => !this.isBlocked(email) && (entry.enabled || entry.resumeAccountIds?.length));
     if (!active.length) return;
     let mapping;
     try { mapping = await this.listAccounts(config); }
@@ -163,7 +169,7 @@ export class OverloadCooldown {
 
   async checkAccount(email, config, records) {
     let entry = this.accounts.get(email);
-    if (!entry || this.stopped) return;
+    if (!entry || this.stopped || this.isBlocked(email)) return;
     const backend = this.backendIdentity(config);
     if (this.backendIdentity(this.getConfig()) !== backend) return;
     if (entry.resumeAccountIds?.length) {
@@ -181,7 +187,7 @@ export class OverloadCooldown {
     const end = this.now();
     const start = Math.max(end - settings.windowMinutes * 60_000, Date.parse(entry.lastResumedAt || "") || 0);
     if (start >= end) return;
-    const valid = () => !this.stopped && this.accounts.get(email)?.enabled && this.backendIdentity(this.getConfig()) === backend;
+    const valid = () => !this.stopped && !this.isBlocked(email) && this.accounts.get(email)?.enabled && this.backendIdentity(this.getConfig()) === backend;
     const count = await collectOverloadWindow({ start, end, accountIds: records.map(record => record.id), config, request: this.request, isEnabled: valid });
     if (count === null || !valid()) return;
     entry = await this.update(email, { windowCount: count, lastCheckedAt: new Date(end).toISOString(), lastError: null });
@@ -197,7 +203,7 @@ export class OverloadCooldown {
   async pause(email, config, records) {
     const entry = this.accounts.get(email);
     for (const id of entry.resumeAccountIds || []) {
-      if (this.stopped || this.backendIdentity(this.getConfig()) !== entry.backend) return;
+      if (this.stopped || this.isBlocked(email) || this.backendIdentity(this.getConfig()) !== entry.backend) return;
       const record = records.find(record => String(record.id) === id);
       if (!record || record.enabled === false) continue;
       await this.setSchedulable(config, id, false);
@@ -208,7 +214,7 @@ export class OverloadCooldown {
   async resume(email, config, records) {
     let entry = await this.update(email, { phase: "resuming" });
     for (const id of [...entry.resumeAccountIds]) {
-      if (this.stopped || this.backendIdentity(this.getConfig()) !== entry.backend) return;
+      if (this.stopped || this.isBlocked(email) || this.backendIdentity(this.getConfig()) !== entry.backend) return;
       const record = records.find(record => String(record.id) === id);
       if (record && record.enabled !== true) await this.setSchedulable(config, id, true);
       const remaining = entry.resumeAccountIds.filter(item => item !== id);

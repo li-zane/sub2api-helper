@@ -38,21 +38,21 @@ export async function fetchAccountUsage(job) {
  * List every ChatGPT account/workspace available to the saved Web session.
  * The response intentionally omits access/refresh tokens and other credentials.
  */
-export async function listAccountWorkspaces(job, { forceWebRefresh = false } = {}) {
-  const result = await requestWithWebSession(job, "GET", "/accounts/check/v4-2023-04-27", undefined, { forceWebRefresh });
+export async function listAccountWorkspaces(job, { forceWebRefresh = false, refreshOnUnauthorized = true } = {}) {
+  const result = await requestWithWebSession(job, "GET", "/accounts/check/v4-2023-04-27", undefined, { forceWebRefresh, refreshOnUnauthorized });
   return normalizeAccountWorkspaces(result.data, result.session.web?.workspaceId);
 }
 
 // A live check, unlike inspectAccountWebSession(), which only reads a file.
 // Confirm workspace loss from a successful account listing, never from 403/5xx.
 export async function probeAccountWebSession(job) {
-  const listing = await listAccountWorkspaces(job, { forceWebRefresh: true });
+  const listing = await listAccountWorkspaces(job, { forceWebRefresh: true, refreshOnUnauthorized: false });
   const session = await readAccountWebSession(job);
   const bundle = await readOAuthBundle(job).catch(() => null);
   const savedId = session.web?.workspaceId || bundle?.accountId || listing.currentWorkspaceId;
   const selected = listing.workspaces.find(w => w.id === savedId);
   const available = selected && isAccountWorkspaceAvailable(selected);
-  const devices = available ? (await listAccountSessions(job)).devices.map(d => ({
+  const devices = available ? (await listAccountSessions(job, { refreshOnUnauthorized: false })).devices.map(d => ({
     displayName: d.displayName, platform: d.platform, isCurrentDevice: d.isCurrentDevice,
     lastSignedInTimestamp: d.lastSignedInTimestamp, lastSignedInIp: d.lastSignedInIp,
   })) : undefined;
@@ -346,8 +346,8 @@ export function normalizeAccountUsage(payload) {
   };
 }
 
-export async function listAccountSessions(job) {
-  const result = await requestWithWebSession(job, "GET", "/accounts/sessions?include_trusted_devices=true");
+export async function listAccountSessions(job, { refreshOnUnauthorized = true } = {}) {
+  const result = await requestWithWebSession(job, "GET", "/accounts/sessions?include_trusted_devices=true", undefined, { refreshOnUnauthorized });
   return {
     showSessionManager: result.data?.show_session_manager !== false,
     devices: normalizeSessionDevices(result.data),
@@ -457,7 +457,7 @@ async function requestWithWebSession(job, method, endpoint, jsonBody = undefined
   finally { if (webSessionRequests.get(key) === pending) webSessionRequests.delete(key); }
 }
 
-async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefresh = false } = {}) {
+async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefresh = false, refreshOnUnauthorized = true } = {}) {
   const session = await readAccountWebSession(job);
   const chatgptBase = String(process.env.CHATGPT_BASE || DEFAULT_CHATGPT_BASE).replace(/\/$/, "");
   const transport = process.env.NODE_ENV !== "production" && process.env.TOSUB2_SESSION_NATIVE_HTTP === "1"
@@ -469,7 +469,13 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
     });
   const client = new ProtocolClient({ jar: CookieJar.fromJSON(session.cookies), transport, browserIdentity: session.identity });
   let loggedOut = false;
-  const parse = (response) => { try { return JSON.parse(response.text); } catch { return {}; } };
+  const parse = (response) => {
+    try { return JSON.parse(response.text); }
+    catch {
+      if (response.res.ok) throw new Error(`SESSION_PROVIDER_ERROR: HTTP ${response.res.status}: 上游未返回有效 JSON，尚未确认会话失效`);
+      return {};
+    }
+  };
   async function refreshWebToken() {
     session.accessToken = null;
     const response = await client.request("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/`, timeoutMs: REQUEST_TIMEOUT_MS });
@@ -499,7 +505,7 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
     if (transport) await transport.configure(job?.proxyUrl || null, { force: true });
     if (forceWebRefresh || !session.accessToken || !tokenExpiresAfter(session.accessToken, TOKEN_REFRESH_SKEW_SECONDS)) await refreshWebToken();
     let response = await send();
-    if (response.res.status === 401) { await refreshWebToken(); response = await send(); }
+    if (response.res.status === 401 && refreshOnUnauthorized) { await refreshWebToken(); response = await send(); }
     const data = parse(response);
     if (!response.res.ok) {
       if (response.res.status === 401) throw new Error("SESSION_TOKEN_EXPIRED: Web 登录态已失效，请重新登录 Web");

@@ -149,8 +149,8 @@ export async function collectRequestIntervals({ config, accountIds, request, now
 }
 
 export class OverloadMonitor {
-  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, now, setTimer, clearTimer });
     this.backend = null;
     this.accounts = new Map();
     this.writePromise = Promise.resolve();
@@ -269,7 +269,7 @@ export class OverloadMonitor {
     const backend = this.backend;
     const config = this.getConfig();
     const now = this.now();
-    const entries = [...this.accounts].filter(([, entry]) => entry.enabled);
+    const entries = [...this.accounts].filter(([email, entry]) => entry.enabled && !this.isBlocked(email));
     if (!entries.length) return;
     let mapping;
     try { mapping = await this.listAccounts(config); }
@@ -283,7 +283,7 @@ export class OverloadMonitor {
     const worker = async () => {
       while (cursor < entries.length) {
         const [email, entry] = entries[cursor++];
-        const isEnabled = () => !this.stopped && this.accounts.get(email) === entry
+        const isEnabled = () => !this.stopped && !this.isBlocked(email) && this.accounts.get(email) === entry
           && this.getConfig() && this.backendIdentity(this.getConfig()) === backend;
         if (!isEnabled()) continue;
         try {

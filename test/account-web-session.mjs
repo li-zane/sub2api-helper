@@ -31,6 +31,8 @@ let wrongEmail = false;
 let authReads = 0;
 let authStatus = 200;
 let teamUnavailable = false;
+let sessionsUnauthorized = false;
+let malformedAuth = false;
 const management = [];
 const signins = [];
 const server = http.createServer(async (req, res) => {
@@ -50,6 +52,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/auth/session") {
     authReads++;
     assert.match(req.headers.cookie, /__Secure-next-auth.session-token=web-cookie/);
+    if (malformedAuth) return res.end("<!DOCTYPE html><title>temporary gateway page</title>");
     if (authStatus !== 200) { res.statusCode = authStatus; return res.end(JSON.stringify({ message: "temporary upstream failure" })); }
     return res.end(JSON.stringify(expired ? {} : { accessToken: jwt, user: { email: wrongEmail ? "other@example.test" : email } }));
   }
@@ -60,6 +63,7 @@ const server = http.createServer(async (req, res) => {
   assert.equal(req.headers["sec-ch-ua"], identity.browser.secChUa);
   assert.match(req.headers.cookie, new RegExp(`oai-did=${identity.deviceId}`));
   if (force401) { force401 = false; res.statusCode = 401; return res.end("{}"); }
+  if (sessionsUnauthorized && url.pathname.endsWith("/accounts/sessions")) { res.statusCode = 401; return res.end("{}"); }
   if (url.pathname.endsWith("/accounts/sessions")) return res.end(JSON.stringify({ devices: [
     { session_id: "current", is_current_device: true, app_sessions: [{ client_name: "ChatGPT Web" }] },
   ] }));
@@ -103,6 +107,20 @@ try {
   const readsBeforeProbe = authReads;
   assert.equal((await probeAccountWebSession(job)).repairReason, null);
   assert.equal(authReads, readsBeforeProbe + 1, "scheduled probe validates cookies even when the saved access token is still valid");
+  const before401 = await readAccountWebSession(job);
+  malformedAuth = true;
+  await assert.rejects(probeAccountWebSession(job), /SESSION_PROVIDER_ERROR: HTTP 200/);
+  assert.notEqual((await readAccountWebSession(job)).validation.status, "expired", "malformed 200 must be retryable, not false session expiry");
+  malformedAuth = false;
+  for (const endpoint of ["workspace", "sessions"]) {
+    const authBefore = authReads, managementBefore = management.length;
+    if (endpoint === "workspace") force401 = true; else sessionsUnauthorized = true;
+    await assert.rejects(probeAccountWebSession(job), /SESSION_TOKEN_EXPIRED/);
+    assert.equal(authReads, authBefore + 1, "a probe's backend 401 must not refresh cookies and retry again");
+    assert.equal(management.length, managementBefore + (endpoint === "workspace" ? 1 : 2));
+    sessionsUnauthorized = false;
+    await writeAccountWebSession(webPath, before401);
+  }
   authStatus = 503;
   await assert.rejects(probeAccountWebSession(job), /SESSION_PROVIDER_ERROR: HTTP 503/);
   assert.notEqual((await readAccountWebSession(job)).validation.status, "expired", "upstream failure is not session expiry");

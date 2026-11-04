@@ -161,6 +161,7 @@ const proxyQualityService = new ProxyQualityService({
 });
 const consoleToken = crypto.randomBytes(24).toString("base64url");
 const jobs = new Map();
+const automationBlockWrites = new Map();
 const customSmsPoolPositions = new Map();
 const emailJobLocks = new Map();
 let outputSyncPromise = null;
@@ -168,6 +169,7 @@ let lastOutputSyncAt = 0;
 let shuttingDown = false;
 let queueSchedulingPaused = false;
 let maxActiveJobs = initialMaxActiveJobs();
+let activeWebSessionChecks = 0;
 let taskAutoActions = Object.create(null);
 let globalProxyUrl = null;
 let allowDirectFallback = false;
@@ -222,10 +224,19 @@ const webSessionMonitor = new WebSessionMonitor({
   filePath: path.join(OUTPUT_ROOT, "web-session-monitor.json"),
   getSettings: () => webSessionMonitorSettings,
   listJobs: () => listUniqueJobs(),
-  isBusy: job => shuttingDown || !canLoginWeb(job) || job.autoRepairBlocked || ["canceled", "banned"].includes(job.status),
+  isBusy: job => shuttingDown || !canLoginWeb(job) || accountAutomationBlocked(job.email) || job.status === "canceled",
   hasSession: job => fileExists(webSessionPathForJob(job)),
+  withSlot: withWebSessionCheckSlot,
   probe: async job => {
-    const snapshot = await probeAccountWebSession(job);
+    let snapshot;
+    try { snapshot = await probeAccountWebSession(job); }
+    catch (error) {
+      if (isPermanentAccountFailure(error.message)) {
+        markAutoRepairBlocked(job, error.message);
+        await automationBlockWrites.get(job.email.toLowerCase());
+      }
+      throw error;
+    }
     if (!job.resultSaved && snapshot.planType) {
       job.workspacePlanType = snapshot.planType;
       if (snapshot.repairReason === "plan_changed") snapshot.repairReason = null;
@@ -255,6 +266,7 @@ const webSessionMonitor = new WebSessionMonitor({
 });
 
 const overloadMonitor = new OverloadMonitor({
+  isBlocked: accountAutomationBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-monitor.json"),
   getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
   backendIdentity: monitorBackendIdentity,
@@ -274,6 +286,7 @@ const overloadMonitor = new OverloadMonitor({
 });
 
 const overloadCooldown = new OverloadCooldown({
+  isBlocked: accountAutomationBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
   getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
   backendIdentity: monitorBackendIdentity,
@@ -302,6 +315,7 @@ async function readFingerprintAccount(config, id) {
 const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprintAccount, getProxies: listSub2ApiProxies,
   testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
 const modelFingerprint = new ModelFingerprintService({
+  isBlocked: accountAutomationBlocked,
   filePath: path.join(OUTPUT_ROOT, "model-fingerprint.json"),
   getContext: () => ({ config: sub2ApiSettingsConfig, backend: sub2ApiSettingsConfig ? monitorBackendIdentity(sub2ApiSettingsConfig) : null,
     profiles: [...sub2ApiProfiles.values()].map(p => ({ id: p.id, name: p.name, groupIds: p.groupIds || [], planTypes: Object.keys(sub2ApiPlanTypeBindings).filter(t => sub2ApiPlanTypeBindings[t] === p.id) })),
@@ -353,6 +367,14 @@ await overloadCooldown.load();
 await modelFingerprint.load();
 await syncCompletedOutputs(true);
 await webSessionMonitor.load();
+// Migrate both existing bans and Web-only failures before starting any timers.
+for (const job of jobs.values()) {
+  const failure = [job.lastError, job.webLoginError].find(isPermanentAccountFailure);
+  if (job.status === "banned" || job.autoRepairBlocked || failure) {
+    markAutoRepairBlocked(job, failure || job.autoRepairBlockedReason);
+    await automationBlockWrites.get(job.email.toLowerCase());
+  }
+}
 for (const job of jobs.values()) {
   if (job.poolRefreshAction) {
     schedulePoolRefresh(job, job.poolRefreshAction === "cooldown" && job.poolRefreshDueAt
@@ -528,11 +550,16 @@ async function handleApi(req, res, requestUrl) {
     if (!job || job.deleted) throw httpError(404, "账号不存在");
     const planType = getJobPlanType(job) || "unknown";
     if (fingerprintMatch[2]) {
+      if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认永久停用，降智检测已停止");
       if (isActive(job.status)) throw httpError(409, "账号任务正在执行，请完成后再检测");
       void modelFingerprint.run(job.email, planType, { manual: true }).catch(() => {});
       sendJson(res, 202, { job: publicJob(job) }); return;
     }
-    else await modelFingerprint.saveOverride(job.email, await readJson(req));
+    else {
+      const body = await readJson(req);
+      if (accountAutomationBlocked(job.email) && body.enabled !== false) throw httpError(409, "账号已确认永久停用，请先手动恢复账号后再启用自动化");
+      await modelFingerprint.saveOverride(job.email, body);
+    }
     sendJson(res, 200, { job: publicJob(job) }); return;
   }
 
@@ -1002,6 +1029,7 @@ async function handleApi(req, res, requestUrl) {
     if (!job) throw httpError(404, "Login flow not found");
     const body = await readJson(req);
     if (typeof body.enabled !== "boolean") throw httpError(400, "自动冷却状态必须是布尔值");
+    if (body.enabled && accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认永久停用，自动冷却已关闭");
     if (body.enabled && !overloadCooldown.snapshot(job.email).configured) throw httpError(409, "请先配置 Sub2API 后端地址和管理员 API Key");
     await overloadCooldown.setEnabled(job.email, body.enabled);
     sendJson(res, 200, { job: publicJob(job) });
@@ -1014,6 +1042,7 @@ async function handleApi(req, res, requestUrl) {
     if (!job) throw httpError(404, "Login flow not found");
     const body = await readJson(req);
     if (typeof body.enabled !== "boolean") throw httpError(400, "检测状态必须是布尔值");
+    if (body.enabled && accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认永久停用，过载检测已关闭");
     if (body.enabled && !overloadMonitor.snapshot(job.email).configured) {
       throw httpError(409, "请先配置 Sub2API 后端地址和管理员 API Key");
     }
@@ -1235,7 +1264,7 @@ async function handleApi(req, res, requestUrl) {
       await refreshJobProxyBinding(job);
       sendJson(res, 200, { sessions: await listAccountSessions(job) });
     } catch (error) {
-      throw sessionApiError(error);
+      throw sessionApiError(error, job);
     }
     return;
   }
@@ -1245,7 +1274,7 @@ async function handleApi(req, res, requestUrl) {
       await refreshJobProxyBinding(job);
       sendJson(res, 200, { workspaces: await listAccountWorkspaces(job) });
     } catch (error) {
-      throw sessionApiError(error);
+      throw sessionApiError(error, job);
     }
     return;
   }
@@ -1371,7 +1400,7 @@ async function handleApi(req, res, requestUrl) {
         return revokeAccountSession(job, body);
       });
     } catch (error) {
-      throw sessionApiError(error);
+      throw sessionApiError(error, job);
     }
     sendJson(res, 200, result);
     return;
@@ -1387,7 +1416,7 @@ async function handleApi(req, res, requestUrl) {
         return revokeAllAccountSessions(job);
       });
     } catch (error) {
-      throw sessionApiError(error);
+      throw sessionApiError(error, job);
     }
     sendJson(res, 200, result);
     return;
@@ -1471,7 +1500,8 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
       sub2apiEnabled,
     },
     stats: {
-      active: allJobs.filter(occupiesActiveSlot).length,
+      active: allJobs.filter(occupiesActiveSlot).length + activeWebSessionChecks,
+      webSessionChecks: activeWebSessionChecks,
       queued: allJobs.filter((job) => job.status === "queued").length,
       completed: allJobs.filter((job) => job.status === "completed").length,
     },
@@ -1679,7 +1709,7 @@ async function startJob(email, credentials = {}, proxyUrl = null) {
 
 function scheduleQueuedJobs() {
   if (shuttingDown || queueSchedulingPaused) return;
-  let availableSlots = maxActiveJobs - [...jobs.values()].filter(occupiesActiveSlot).length;
+  let availableSlots = maxActiveJobs - [...jobs.values()].filter(occupiesActiveSlot).length - activeWebSessionChecks;
   if (availableSlots <= 0) return;
   const queuedJobs = [...jobs.values()]
     .filter((job) => job.status === "queued")
@@ -1710,6 +1740,16 @@ function scheduleQueuedJobs() {
     availableSlots -= 1;
     if (availableSlots <= 0) break;
   }
+}
+
+async function withWebSessionCheckSlot(_job, operation) {
+  // Foreground login jobs get first use of available shared slots. Checks that
+  // find the pool full remain due and are retried by the monitor's next tick.
+  scheduleQueuedJobs();
+  if (shuttingDown || queueSchedulingPaused || [...jobs.values()].filter(occupiesActiveSlot).length + activeWebSessionChecks >= maxActiveJobs) return;
+  activeWebSessionChecks++;
+  try { return await operation(); }
+  finally { activeWebSessionChecks--; scheduleQueuedJobs(); }
 }
 
 async function prepareAndLaunchJob(job, mode, queueRunId) {
@@ -1938,7 +1978,11 @@ async function handleChildClose(job, { code, signal, mode, runId }) {
       job.webSessionMonitorRepair = false;
       await webSessionMonitor.repairFinished(job.email);
     }
-    if (mode === "full") completeAuthorizationAutomationAttempt(job);
+    if (mode === "full") {
+      completeAuthorizationAutomationAttempt(job);
+      // A successful new login supersedes an old Web-only ban diagnostic.
+      job.webLoginError = null;
+    }
     job.loginCheckpointAvailable = false;
     job.status = "completed";
     job.prompt = "授权完成，可以下载导入文件";
@@ -2138,6 +2182,10 @@ async function finishWebLogin(job, code, signal, message = null) {
   const previous = job.webLoginPreviousState;
   if (previous) Object.assign(job, previous);
   job.webLoginError = success ? null : failure;
+  if (!success && isPermanentAccountFailure(failure)) {
+    markAutoRepairBlocked(job, failure);
+    await automationBlockWrites.get(job.email.toLowerCase());
+  }
   if (success) {
     job.webLoginCompletedAt = new Date().toISOString();
     job.webSessionAvailable = true;
@@ -7154,6 +7202,7 @@ function clearAutoRepairBlock(job) {
 }
 
 function markAutoRepairBlocked(job, reason) {
+  const alreadyBlocked = job.autoRepairBlocked;
   job.autoRepairBlocked = true;
   job.autoRepairBlockedReason = String(reason || "账号已被永久停用").slice(0, 500);
   job.autoRepairBlockedAt = new Date().toISOString();
@@ -7161,12 +7210,40 @@ function markAutoRepairBlocked(job, reason) {
   job.autoRepairPendingAccountIds = [];
   job.autoRepairPendingBackend = null;
   job.autoRepairOperation = null;
-  appendJobLog(job, "[monitor] 已确认账号被封禁、删除或永久停用，后续号池巡检将直接跳过。\n");
+  if (!alreadyBlocked) appendJobLog(job, "[monitor] 已确认账号被封禁、删除或永久停用，已停止该账号自动化。\n");
+  const email = job.email.toLowerCase();
+  modelFingerprint.invalidateAccount(email);
+  const operation = (automationBlockWrites.get(email) || Promise.resolve()).catch(() => {}).then(async () => {
+    for (const related of jobs.values()) {
+      if (related.email.toLowerCase() !== email) continue;
+      related.autoRepairBlocked = true;
+      related.autoRepairBlockedReason = job.autoRepairBlockedReason;
+      related.autoRepairBlockedAt = job.autoRepairBlockedAt;
+      clearPoolRefreshTimer(related);
+      related.poolRefreshAction = null; related.poolRefreshDueAt = null; related.poolRefreshReady = false;
+      if (["pending", "running"].includes(related.autoTaskStatus)) {
+        related.autoTaskStatus = "failed"; related.autoTaskError = "账号已确认永久停用，自动任务已停止";
+      }
+      await saveJobMetadata(related);
+    }
+    if (overloadMonitor.snapshot(email).enabled) await overloadMonitor.setEnabled(email, false);
+    const cooldown = overloadCooldown.accounts.get(email);
+    if (cooldown?.enabled || cooldown?.resumeAccountIds?.length) await overloadCooldown.blockAccount(email);
+    const override = modelFingerprint.snapshot(email).override;
+    if (override.enabled !== false) await modelFingerprint.saveOverride(email, { ...override, enabled: false });
+  });
+  automationBlockWrites.set(email, operation);
+  void operation.catch(error => console.warn(`[warn] 自动化关闭状态保存失败：${error.message}`));
+}
+
+function accountAutomationBlocked(email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  return [...jobs.values()].some(job => !job.deleted && job.email.toLowerCase() === normalized && (job.status === "banned" || job.autoRepairBlocked));
 }
 
 function isPermanentAccountFailure(message) {
   const text = String(message || "");
-  return /(?:account|user)_(?:deactivated|deleted|suspended|disabled)|(?:your|this) account (?:has been|is) (?:deleted|deactivated|suspended|disabled)|account has been (?:deleted|deactivated|suspended|disabled)|deleted or deactivated|do not have an account because it has been deleted/i.test(text);
+  return /(?:account|user)_(?:deactivated|deleted|suspended|disabled|banned)|(?:your|this) account (?:has been|is) (?:deleted|deactivated|suspended|disabled|banned)|account has been (?:deleted|deactivated|suspended|disabled|banned)|do not have an account because it has been deleted/i.test(text);
 }
 
 function requireStage(job, expected) {
@@ -7211,7 +7288,7 @@ function beginPoolRefresh(job, action, dueAt = null) {
 
 function schedulePoolRefresh(job, delayMs) {
   clearPoolRefreshTimer(job);
-  if (shuttingDown || job.deleted || !job.poolRefreshAction) return;
+  if (shuttingDown || job.deleted || accountAutomationBlocked(job.email) || !job.poolRefreshAction) return;
   const timer = setTimeout(() => {
     poolRefreshTimers.delete(job.id);
     if (shuttingDown || job.deleted || jobs.get(job.id) !== job || !job.poolRefreshAction) return;
@@ -7231,7 +7308,7 @@ function schedulePoolRefresh(job, delayMs) {
 }
 
 async function runPoolRefresh(job) {
-  if (shuttingDown || job.deleted || !job.poolRefreshAction) return;
+  if (shuttingDown || job.deleted || accountAutomationBlocked(job.email) || !job.poolRefreshAction) return;
   if (job.poolRefreshReady && job.status === "completed" && job.resultSaved) {
     await synchronizePoolRefresh(job);
     return;
@@ -8585,6 +8662,7 @@ async function runConfiguredTaskActions(job) {
     touch(job);
     await saveJobMetadata(job);
     for (let index = job.autoTaskIndex || 0; index < job.autoTaskActions.length; index += 1) {
+      if (accountAutomationBlocked(job.email)) throw new Error("账号已确认永久停用，自动任务已停止");
       const action = job.autoTaskActions[index];
       job.autoTaskIndex = index;
       touch(job);
@@ -9070,7 +9148,8 @@ function httpError(status, message) {
   return error;
 }
 
-function sessionApiError(error) {
+function sessionApiError(error, job) {
+  if (job && isPermanentAccountFailure(error?.message)) markAutoRepairBlocked(job, error.message);
   if (error?.status) return error;
   const message = String(error?.message || "SESSION_PROVIDER_ERROR: 会话服务请求失败")
     .replace(/[\r\n]+/g, " ")
@@ -9132,6 +9211,7 @@ async function shutdown() {
       ...sub2ApiRequestPromises,
       ...sub2ApiAutoRepairPromises,
       ...poolRefreshOperations,
+      ...automationBlockWrites.values(),
     ].filter(Boolean));
     const activeJobs = [...jobs.values()].filter((job) => isActive(job.status));
     const childWaits = activeJobs

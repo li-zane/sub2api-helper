@@ -14,12 +14,15 @@ const id = "11111111-1111-4111-8111-000000000001";
 const email = "monitored@example.test";
 const scenario = process.argv.includes("--web-only") ? "web-only" : process.argv.includes("--binding-drift") ? "binding" : process.argv.includes("--workspace-lost") ? "workspace" : "expired";
 const webOnly = scenario === "web-only";
+const sharedSlots = process.argv.includes("--shared-slots");
+const foregroundId = "22222222-2222-4222-8222-000000000002";
 const initialPlan = scenario === "binding" ? "free" : "business";
 const dir = path.join(output, id);
 const webFile = path.join(dir, "web-session.json");
 const resultFile = path.join(dir, "sub2api-import-oauth.json");
 const traceFile = path.join(root, "trace.json");
 let authStatus = 200;
+let holdAuth = false, unblockAuth;
 const token = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
 const remoteAccount = { id: 10, platform: "openai", type: "oauth", status: "active", proxy_id: 1, credentials: { email, plan_type: initialPlan, access_token: "old-Codex", refresh_token: "old-refresh" }, extra: {} };
 const updates = [];
@@ -44,8 +47,12 @@ const upstream = http.createServer((req, res) => {
   requests.push({ path: p, cookie: req.headers.cookie, device: req.headers["oai-device-id"], account: req.headers["chatgpt-account-id"] });
   res.setHeader("content-type", "application/json");
   if (p === "/api/auth/session") {
-    res.statusCode = authStatus;
-    return res.end(JSON.stringify(authStatus !== 200 ? { message: "temporary failure" } : req.headers.cookie?.includes("renewed") ? { user: { email }, accessToken: token } : {}));
+    const respond = () => {
+      res.statusCode = authStatus;
+      res.end(JSON.stringify(authStatus !== 200 ? { message: "temporary failure" } : req.headers.cookie?.includes("renewed") ? { user: { email }, accessToken: token } : {}));
+    };
+    if (holdAuth) { unblockAuth = respond; return; }
+    return respond();
   }
   if (p.endsWith("/accounts/check/v4-2023-04-27")) return res.end(JSON.stringify({ current_account_id: "personal", accounts: {
     old: { account: { account_id: "old", plan_type: "business", is_deactivated: true } },
@@ -86,9 +93,18 @@ try {
   await writeAccountWebSession(webFile, { email, identity, cookies: jar.toJSON(), web: { workspaceId: scenario === "binding" ? "personal" : "old" }, accessToken: null });
   if (!webOnly) await fs.writeFile(resultFile, JSON.stringify({ type: "sub2api-data", accounts: [remoteAccount] }));
   await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: webOnly ? "failed" : "completed", result_saved: !webOnly, plan_type: initialPlan, assigned_proxy_id: 1, authorization_proxy_selected: true, bound_ip: "198.51.100.1", created_at: "2026-11-01T00:00:00Z" }));
+  if (sharedSlots) {
+    const fgDir = path.join(output, foregroundId); await fs.mkdir(fgDir);
+    await fs.writeFile(path.join(fgDir, "job-meta.json"), JSON.stringify({ version: 1, email: "foreground@example.test", status: "completed", result_saved: true, plan_type: "business", assigned_proxy_id: 1, authorization_proxy_selected: true }));
+    await fs.writeFile(path.join(fgDir, "sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ ...remoteAccount, credentials: { ...remoteAccount.credentials, email: "foreground@example.test" } }] }));
+  }
   await fs.writeFile(path.join(output, "task-settings.json"), JSON.stringify({ maxActiveJobs: 1, accountProxyMode: "plan", codexAuthMode: "local", accountProxyCooldownMinutes: 60 }));
   await fs.writeFile(path.join(output, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { baseUrl: poolUrl, adminApiKey: "fixture" }, profiles: [{ id: "default", name: "Paid", proxyId: "1" }, { id: "free", name: "Free", proxyId: "direct" }], planTypeBindings: { business: "default", free: "free" }, activeProfileId: "default" }));
   await fs.writeFile(wrapper, `import fs from 'node:fs/promises';
+if (process.env.TOSUB2_WEB_MONITOR_REPAIR !== '1') {
+  console.log('Email OTP (r=resend, q=quit):'); process.stdin.resume();
+  await new Promise(resolve => process.stdin.once('data', resolve)); process.exit(0);
+}
 const f = process.env.TOSUB2_WEB_SESSION_PATH;
 const session = JSON.parse(await fs.readFile(f, 'utf8'));
 const webOnly = process.argv.includes('--web-only');
@@ -110,6 +126,34 @@ process.disconnect();
   assert.equal(state.body.settings.enabled, false);
   assert.equal((await api("/api/task-settings", { webSessionMonitor: { enabled: true, intervalMinutes: 0 } })).status, 400);
   assert.equal((await api("/api/web-session-monitor/check", {})).status, 409);
+  if (sharedSlots) {
+    await api(`/api/jobs/${foregroundId}/web-login`, {});
+    const fgId = foregroundId;
+    await wait(async () => (await api("/api/jobs")).body.jobs.find(j => j.id === fgId)?.status === "email_otp");
+    authStatus = 503;
+    await api("/api/task-settings", { webSessionMonitor: { enabled: true, autoRelogin: true, intervalMinutes: 15, retryMinutes: 60 } });
+    await api("/api/web-session-monitor/check", {});
+    assert.equal(requests.length, 0, "a full foreground task pool must defer WebSession probes");
+    assert.equal((await api("/api/web-session-monitor")).body.accounts[email], undefined, "a deferred probe must stay due");
+    await api(`/api/jobs/${fgId}/cancel`, {});
+    await wait(async () => (await api("/api/jobs")).body.stats.active === 0);
+    holdAuth = true;
+    const checking = api("/api/web-session-monitor/check", {});
+    await wait(async () => typeof unblockAuth === "function");
+    const stats = (await api("/api/jobs")).body.stats;
+    assert.equal(stats.active, 1); assert.equal(stats.webSessionChecks, 1, "probe reserves and reports a shared active slot");
+    await api(`/api/jobs/${foregroundId}/web-login`, {});
+    const nextId = foregroundId;
+    assert.equal((await api("/api/jobs")).body.jobs.find(j => j.id === nextId).status, "queued", "login must not exceed the shared limit while a probe holds the slot");
+    holdAuth = false; unblockAuth();
+    await checking;
+    assert.equal(requests.filter(r => r.path === "/api/auth/session").length, 3, "one check plus at most two retries");
+    await wait(async () => (await api("/api/jobs")).body.jobs.find(j => j.id === nextId).status === "email_otp");
+    assert.equal((await api("/api/jobs")).body.stats.webSessionChecks, 0);
+    await api(`/api/jobs/${nextId}/cancel`, {});
+    await api("/api/task-settings", { webSessionMonitor: { enabled: false } });
+    console.log("WEB_SHARED_SLOTS_HTTP_PASS foreground-full defers probe; probe holds/reports one shared slot across retries; queued login waits and resumes on release; max-three-attempts");
+  } else {
   // 503 while refreshing a Web token must NOT initiate a login or alter binding.
   authStatus = 503;
   await api("/api/task-settings", { webSessionMonitor: { enabled: true, autoRelogin: true, intervalMinutes: 15, retryMinutes: 60 } });
@@ -149,4 +193,5 @@ process.disconnect();
   await api("/api/task-settings", { webSessionMonitor: { enabled: false } });
   assert.equal((await api("/api/web-session-monitor/check", {})).status, 409);
   console.log(`WEB_SESSION_MONITOR_HTTP_PASS scenario=${scenario}; auth/settings; 503 not expired; ${webOnly ? "Web-only renewal without Codex enrollment or pool mutation" : "confirmed change -> shared login -> fresh Free plan -> direct binding -> pool sync"}; persistent device/workspaces; restart/cooldown; no secret snapshots`);
+  }
 } finally { await stop(); await Promise.all([new Promise(r => upstream.close(r)), new Promise(r => pool.close(r))]); await fs.rm(root, { recursive: true, force: true }); }
