@@ -574,7 +574,7 @@ async function run() {
           });
         }
         console.log(
-          client.jar.has("__Secure-next-auth.session-token")
+          hasChatgptSessionCookie(client, chatgptBase)
             ? "[ok] ChatGPT web session cookie received"
             : "[warn] ChatGPT session cookie not found; continue with auth cookies",
         );
@@ -704,7 +704,7 @@ async function run() {
         });
       }
       console.log(
-        client.jar.has("__Secure-next-auth.session-token")
+        hasChatgptSessionCookie(client, chatgptBase)
           ? "[ok] ChatGPT web session cookie received"
           : "[warn] ChatGPT session cookie not found; continue with auth cookies",
       );
@@ -1559,13 +1559,20 @@ function isEmailVerificationPage(url) {
   }
 }
 
+function hasChatgptSessionCookie(client, chatgptBase) {
+  const names = client.jar.namesFor(`${chatgptBase}/`);
+  // NextAuth splits large session cookies into .0, .1, ... chunks. Their
+  // presence only admits the callback; token/email/workspace checks still run.
+  return names.includes("__Secure-next-auth.session-token") || names.includes("__Secure-next-auth.session-token.0");
+}
+
 function isCompletedChatgptLoginPage(url, chatgptBase, client) {
   try {
     const current = new URL(url);
     const expected = new URL(chatgptBase);
     return current.origin === expected.origin
       && current.pathname === "/"
-      && client.jar.has("__Secure-next-auth.session-token");
+      && hasChatgptSessionCookie(client, chatgptBase);
   } catch {
     return false;
   }

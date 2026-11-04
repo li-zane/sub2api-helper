@@ -484,6 +484,7 @@ function App() {
           setJobs(data.jobs);
           setCredentialJob((current) => data.jobs.find((job) => job.id === current?.id) || current);
           setSessionJob((current) => data.jobs.find((job) => job.id === current?.id) || current);
+          setWorkspaceJob((current) => data.jobs.find((job) => job.id === current?.id) || current);
           setJobSelectionIndex(data.selection || data.jobs);
           setPagination(data.pagination || { page, pageSize: 20, total: data.jobs.length, totalPages: 1 });
           setStats(data.stats || { active: 0, queued: 0, completed: 0 });
@@ -3947,6 +3948,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               : job.poolRefreshReady ? "正在更新号池凭据" : "正在重新登录授权，完成后更新号池凭据"}
           className="prompt-line" onOpen={onOpenOperationDetail} />}
         {job.prompt && <OperationDetailText text={job.prompt} className="prompt-line" onOpen={onOpenOperationDetail} />}
+        {job.webSessionRepairRetryAt && <OperationDetailText text={`Web 自动重登冷却中，最早于 ${formatDateTime(job.webSessionRepairRetryAt)} 重试；到期后由巡检调度。可手动登录 Web 立即重试。`} className="prompt-line" onOpen={onOpenOperationDetail} />}
         {job.status === "canceled" && job.webSessionStatus === "valid" && (
           <OperationDetailText text="上次 Codex 授权已取消；Web 会话已验证，Web 登录不会改变授权任务结果。" className="prompt-line" onOpen={onOpenOperationDetail} />
         )}
@@ -4079,8 +4081,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="icon-button"
             onClick={onOpenSessions}
-            disabled={!sessionsAvailable || rowBusy || (!job.canDownload && !job.webSessionAvailable)}
-            title={job.canDownload || job.webSessionAvailable ? "查看已登录设备和会话" : "暂无可读取的已登录会话"}
+            disabled={!sessionsAvailable || rowBusy || (!job.canDownload && !job.webSessionAvailable && !isBlockedAccount(job))}
+            title={isBlockedAccount(job) ? "账号已封禁，查看封禁原因" : job.canDownload || job.webSessionAvailable ? "查看已登录设备和会话" : "暂无可读取的已登录会话"}
             aria-label="查看已登录设备和会话"
           >
             <MonitorSmartphone size={13} />
@@ -4089,8 +4091,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="icon-button"
             onClick={onOpenWorkspaces}
-            disabled={!workspacesAvailable || rowBusy || (!job.canDownload && !job.webSessionAvailable)}
-            title={job.canDownload || job.webSessionAvailable ? "查看并切换工作空间" : "暂无可切换的工作空间"}
+            disabled={!workspacesAvailable || rowBusy || (!job.canDownload && !job.webSessionAvailable && !isBlockedAccount(job))}
+            title={isBlockedAccount(job) ? "账号已封禁，查看封禁原因" : job.canDownload || job.webSessionAvailable ? "查看并切换工作空间" : "暂无可切换的工作空间"}
             aria-label="查看并切换工作空间"
           >
             <BriefcaseBusiness size={13} />
@@ -4918,7 +4920,25 @@ function CredentialDialog({ token, job, accountProxyUrl, totpReplaceAvailable, o
   );
 }
 
+function isBlockedAccount(job) {
+  return Boolean(job.autoRepairBlocked || job.status === "banned" || job.webSessionStatus === "banned");
+}
+
+function AccountBlockedWebState({ job }) {
+  return (
+    <div className="dialog-error dialog-state-panel error" role="alert">
+      <Ban size={18} aria-hidden="true" />
+      <div className="dialog-state-text">
+        <strong>账号已封禁</strong>
+        <span>{extractResponseMessage(job.autoRepairBlockedReason || "账号已被删除、封禁或永久停用")}</span>
+        <small>已停止读取设备、会话和工作空间，Web 重登及自动维护已关闭。{job.banProxyReleasePending ? "IP 解绑待重试。" : job.boundProxyStatus === "unbound" ? "IP 绑定已解除。" : "IP 解绑状态待同步。"}确认解封后可使用“重新登录并授权”验证恢复。</small>
+      </div>
+    </div>
+  );
+}
+
 function SessionDialog({ token, job, onClose, onError }) {
+  const blocked = isBlockedAccount(job);
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -4927,6 +4947,7 @@ function SessionDialog({ token, job, onClose, onError }) {
   const [notice, setNotice] = useState("");
 
   async function loadSessions({ initial = false } = {}) {
+    if (blocked) return;
     if (initial) setLoading(true);
     else setRefreshing(true);
     setDialogError("");
@@ -4945,6 +4966,9 @@ function SessionDialog({ token, job, onClose, onError }) {
 
   useEffect(() => {
     let stopped = false;
+    setDevices([]);
+    setNotice("");
+    if (blocked) { setLoading(false); setDialogError(""); return; }
     setLoading(true);
     setDialogError("");
     apiFetch(token, `/api/jobs/${job.id}/sessions`)
@@ -4960,9 +4984,10 @@ function SessionDialog({ token, job, onClose, onError }) {
     return () => {
       stopped = true;
     };
-  }, [job.id, token]);
+  }, [job.id, token, blocked]);
 
   async function logoutDevice(device) {
+    if (blocked) return;
     if (device.isCurrentDevice) {
       setDialogError("当前设备不能在这里单独登出，请使用一键登出");
       return;
@@ -4990,7 +5015,7 @@ function SessionDialog({ token, job, onClose, onError }) {
   }
 
   async function logoutAll() {
-    if (action || !job.canLogoutAllSessions) return;
+    if (blocked || action || !job.canLogoutAllSessions) return;
     if (!window.confirm("确定登出该账号的所有设备和会话吗？当前会话也会失效，需要重新登录。")) return;
     setAction("all");
     setDialogError("");
@@ -5021,7 +5046,7 @@ function SessionDialog({ token, job, onClose, onError }) {
             <HelpTip label="登录 IP 说明">
               登录 IP 仅显示上游返回的设备记录；缺失时标注“上游未提供”，不以账号绑定的代理 IP 代替。
             </HelpTip>
-            {!loading && !dialogError && (
+            {!blocked && !loading && !dialogError && (
               <span className="dialog-count-pill">{devices.length} 台设备</span>
             )}
           </div>
@@ -5034,7 +5059,7 @@ function SessionDialog({ token, job, onClose, onError }) {
             type="button"
             className="icon-button dialog-header-btn"
             onClick={() => loadSessions()}
-            disabled={loading || refreshing || Boolean(action)}
+            disabled={blocked || loading || refreshing || Boolean(action)}
             title="刷新设备列表"
             aria-label="刷新设备列表"
           >
@@ -5056,7 +5081,7 @@ function SessionDialog({ token, job, onClose, onError }) {
       </div>
 
       <div className="dialog-body">
-        {loading ? (
+        {blocked ? <AccountBlockedWebState job={job} /> : loading ? (
           <div className="credential-loading dialog-state-panel" role="status" aria-live="polite">
             <LoaderCircle className="spin" size={18} />
             <div className="dialog-state-text">
@@ -5166,13 +5191,13 @@ function SessionDialog({ token, job, onClose, onError }) {
           </div>
         )}
 
-        {!loading && devices.length > 0 && dialogError && (
+        {!blocked && !loading && devices.length > 0 && dialogError && (
           <div className="dialog-error" role="alert">
             <CircleAlert size={15} />
             <span>{dialogError}</span>
           </div>
         )}
-        {notice && (
+        {!blocked && notice && (
           <div className="credential-notice" role="status">
             <Check size={15} />
             <span>{notice}</span>
@@ -5185,7 +5210,7 @@ function SessionDialog({ token, job, onClose, onError }) {
           type="button"
           className="danger-button session-logout-all-button"
           onClick={logoutAll}
-          disabled={loading || Boolean(action) || !job.canLogoutAllSessions}
+          disabled={blocked || loading || Boolean(action) || !job.canLogoutAllSessions}
         >
           {action === "all" ? <LoaderCircle className="spin" size={15} /> : <LogOut size={15} />}一键登出所有设备
         </button>
@@ -5228,6 +5253,7 @@ function formatSessionPlatform(device) {
 }
 
 function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobUpdate, onWorkspaceSwitched }) {
+  const blocked = isBlockedAccount(job);
   const [workspaces, setWorkspaces] = useState([]);
   const [currentWorkspaceId, setCurrentWorkspaceId] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -5237,6 +5263,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
   const [notice, setNotice] = useState("");
 
   async function loadWorkspaces({ initial = false } = {}) {
+    if (blocked) return;
     if (initial) setLoading(true);
     else setRefreshing(true);
     setDialogError("");
@@ -5256,6 +5283,11 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
 
   useEffect(() => {
     let stopped = false;
+    setWorkspaces([]);
+    setCurrentWorkspaceId(null);
+    setNotice("");
+    setDialogError("");
+    if (blocked) { setLoading(false); return; }
     setLoading(true);
     apiFetch(token, `/api/jobs/${job.id}/workspaces`)
       .then((data) => {
@@ -5271,14 +5303,15 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
         if (!stopped) setLoading(false);
       });
     return () => { stopped = true; };
-  }, [job.id, token]);
+  }, [job.id, token, blocked]);
 
   useEffect(() => {
-    if (job.lastOperationType !== "workspace_switch" || job.status !== "completed") return;
+    if (blocked || job.lastOperationType !== "workspace_switch" || job.status !== "completed") return;
     void loadWorkspaces();
-  }, [job.lastOperationAt, job.lastOperationType, job.status]);
+  }, [job.lastOperationAt, job.lastOperationType, job.status, blocked]);
 
   async function switchWorkspace(workspace) {
+    if (blocked) return;
     if (!workspace?.id || workspace.id === currentWorkspaceId || action) return;
     if (isWorkspaceEntryDisabled(workspace)) return;
     setAction(workspace.id);
@@ -5323,7 +5356,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
         <div className="dialog-heading-group">
           <div className="section-title-row">
             <h2 id="workspace-dialog-title">工作空间</h2>
-            {!loading && !dialogError && (
+            {!blocked && !loading && !dialogError && (
               <span className="dialog-count-pill">{workspaces.length} 个空间</span>
             )}
           </div>
@@ -5336,7 +5369,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
             type="button"
             className="icon-button dialog-header-btn"
             onClick={() => loadWorkspaces()}
-            disabled={loading || refreshing || Boolean(action)}
+            disabled={blocked || loading || refreshing || Boolean(action)}
             title="刷新工作空间"
             aria-label="刷新工作空间"
           >
@@ -5358,7 +5391,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
       </div>
 
       <div className="dialog-body">
-        {loading ? (
+        {blocked ? <AccountBlockedWebState job={job} /> : loading ? (
           <div className="credential-loading dialog-state-panel" role="status" aria-live="polite">
             <LoaderCircle className="spin" size={18} />
             <div className="dialog-state-text">
@@ -5483,13 +5516,13 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
           </div>
         )}
 
-        {!loading && workspaces.length > 0 && dialogError && (
+        {!blocked && !loading && workspaces.length > 0 && dialogError && (
           <div className="dialog-error" role="alert">
             <CircleAlert size={15} />
             <span>{dialogError}</span>
           </div>
         )}
-        {notice && (
+        {!blocked && notice && (
           <div className="credential-notice" role="status">
             <Check size={15} />
             <span>{notice}</span>

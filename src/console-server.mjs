@@ -1256,6 +1256,7 @@ async function handleApi(req, res, requestUrl) {
   }
 
   const action = match[2];
+  if (/^(?:sessions|workspaces)(?:\/|$)/.test(action || "")) assertAccountWebActionsAllowed(job);
   if (req.method === "GET" && action === "logs") {
     sendJson(res, 200, { id: job.id, logs: job.logs });
     return;
@@ -6843,6 +6844,7 @@ function publicJob(job) {
     webLoginPending: Boolean(job.webLoginPreviousState),
     webLoginCompletedAt: job.webLoginCompletedAt || null,
     webLoginError: job.webLoginError || null,
+    webSessionRepairRetryAt: webSessionRepairRetryAt(job),
     canLogoutAllSessions: canLogoutAllSessions(job),
     canSetupTotp: canSetupTotp(job),
     canReplaceTotp: canReplaceTotp(job),
@@ -7114,7 +7116,7 @@ function publicSelectionJob(job) {
 }
 
 function canLogoutAllSessions(job) {
-  return Boolean(job.webSessionAvailable || (job.resultSaved && !job.webSessionStatus)) && canForceRelogin(job);
+  return !accountAutomationBlocked(job.email) && Boolean(job.webSessionAvailable || (job.resultSaved && !job.webSessionStatus)) && canForceRelogin(job);
 }
 
 function canLoginWeb(job, { maintenance = false } = {}) {
@@ -7364,6 +7366,21 @@ async function reconcileSub2ApiAccountBans(config, accounts) {
     markAutoRepairBlocked(job, reason, { config, accounts });
     await automationBlockWrites.get(email);
   }
+}
+
+function assertAccountWebActionsAllowed(job) {
+  if (!accountAutomationBlocked(job.email)) return;
+  const reason = job.autoRepairBlockedReason || [...jobs.values()].find(item => item.email.toLowerCase() === job.email.toLowerCase() && item.autoRepairBlockedReason)?.autoRepairBlockedReason;
+  throw httpError(409, `账号已封禁，已停止读取设备、会话和工作空间${reason ? `：${String(reason).replace(/[\r\n]+/g, " ").slice(0, 320)}` : ""}`);
+}
+
+function webSessionRepairRetryAt(job) {
+  if (!webSessionMonitorSettings.enabled || !webSessionMonitorSettings.autoRelogin || accountAutomationBlocked(job.email)
+    || job.webLoginPreviousState || (job.webSessionStatus !== "expired" && !job.webLoginError)) return null;
+  const entry = webSessionMonitor.accounts[job.email.toLowerCase()];
+  if (!entry?.repairReason || entry.webRecoveryPending) return null;
+  const at = Date.parse(entry.lastRepairAt) + webSessionMonitorSettings.retryMinutes * 60_000;
+  return at > Date.now() ? new Date(at).toISOString() : null;
 }
 
 function accountAutomationBlocked(email) {
@@ -9324,6 +9341,10 @@ function httpError(status, message) {
 
 function sessionApiError(error, job) {
   if (job && isPermanentAccountFailure(error?.message)) markAutoRepairBlocked(job, error.message);
+  if (job) {
+    try { assertAccountWebActionsAllowed(job); }
+    catch (blocked) { return blocked; }
+  }
   if (error?.status) return error;
   const message = String(error?.message || "SESSION_PROVIDER_ERROR: 会话服务请求失败")
     .replace(/[\r\n]+/g, " ")

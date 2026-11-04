@@ -32,8 +32,69 @@ async (page) => {
     check(await banned.getByRole("button", { name: "登录 Web", exact: true }).isDisabled(), "known bans must not offer Web login");
     check((await banned.getByRole("button", { name: "登录 Web", exact: true }).getAttribute("title")).includes("封禁"), "disabled Web login must explain the ban");
     check(await banned.locator(".bound-ip-cell").innerText() === "未绑定", "released ban must not appear as direct or bound");
+    let reads = 0;
+    const providerReads = /\/api\/jobs\/[^/]+\/(?:sessions|workspaces)$/;
+    await page.route(providerReads, route => { reads++; return route.fulfill({ json: {} }); });
+    try {
+      for (const [button, title, refresh] of [["查看已登录设备和会话", "已登录设备与会话", "刷新设备列表"], ["查看并切换工作空间", "工作空间", "刷新工作空间"]]) {
+        await banned.getByRole("button", { name: button, exact: true }).click();
+        const modal = page.getByRole("dialog", { name: title, exact: true });
+        check(await modal.getByText("账号已封禁", { exact: true }).isVisible(), title+": confirmed ban explanation missing");
+        check((await modal.innerText()).includes("已停止读取设备、会话和工作空间"), "ban does not explain stopped actions");
+        check(await modal.getByRole("button", { name: refresh, exact: true }).isDisabled(), "banned dialog still allows refresh");
+        check(await modal.getByRole("button", { name: "重试", exact: true }).count() === 0, "banned dialog must not suggest retry");
+        check(await modal.locator(".dialog-count-pill").count() === 0, "ban must not show a misleading zero count");
+        await modal.getByRole("button", { name: title === "工作空间" ? "关闭工作空间" : "关闭已登录设备与会话", exact: true }).click();
+      }
+      check(reads === 0, "opening known-ban dialogs must not request upstream data");
+    } finally { await page.unroute(providerReads); }
     await filter.selectOption("");
     await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+  });
+
+  await test("open-dialog-updates-on-ban", async () => {
+    let blocked = false;
+    const jobsPattern = /\/api\/jobs(?:\?|$)/;
+    await page.route(jobsPattern, async route => {
+      const response = await route.fetch(); const data = await response.json();
+      if (blocked) data.jobs = data.jobs.map(job => job.email === "review-1@example.test" ? { ...job, status: "banned", autoRepairBlocked: true, webSessionStatus: "banned", autoRepairBlockedReason: "account_deactivated", boundProxyStatus: "unbound" } : job);
+      await route.fulfill({ json: data });
+    });
+    await page.route("**/api/jobs/*/sessions", route => route.fulfill({ json: { sessions: { devices: [{ id: "cached", displayName: "Cached browser" }] } } }));
+    await page.route("**/api/jobs/*/workspaces", route => route.fulfill({ json: { workspaces: { workspaces: [{ id: "cached", name: "Cached workspace", structure: "personal", planType: "free", current: true }] } } }));
+    try {
+      for (const [button,title] of [["查看已登录设备和会话","已登录设备与会话"],["查看并切换工作空间","工作空间"]]) {
+        blocked = false; await page.reload();
+        await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+        await row().getByRole("button", { name: button, exact: true }).click();
+        const modal=page.getByRole("dialog", { name: title, exact: true });
+        await modal.getByText(title === "工作空间" ? "Cached workspace" : "Cached browser", { exact: true }).waitFor();
+        blocked = true;
+        await modal.getByText("账号已封禁", { exact: true }).waitFor();
+        check((await modal.innerText()).includes("account_deactivated"), "live ban reason missing");
+        check(await modal.locator(".session-list,.workspace-list").count() === 0, "cached records survive a confirmed ban");
+        await modal.getByRole("button", { name: title === "工作空间" ? "关闭工作空间" : "关闭已登录设备与会话", exact: true }).click();
+      }
+    } finally {
+      await page.unroute(jobsPattern); await page.unroute("**/api/jobs/*/sessions"); await page.unroute("**/api/jobs/*/workspaces");
+      await page.reload(); await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+    }
+  });
+
+  await test("web-relogin-cooldown-explanation", async () => {
+    const jobsPattern = /\/api\/jobs(?:\?|$)/;
+    await page.route(jobsPattern, async route => {
+      const response=await route.fetch(); const data=await response.json();
+      data.jobs=data.jobs.map(job=>job.email === "review-1@example.test" ? { ...job,webSessionStatus:"expired",webLoginError:"previous login failed",webSessionRepairRetryAt:"2026-11-04T14:16:57.007Z" } : job);
+      await route.fulfill({ json:data });
+    });
+    try {
+      await page.reload();
+      await page.waitForFunction(() => [...document.querySelectorAll("tr.job-row")].some(row=>row.innerText.includes("Web 自动重登冷却中")));
+      check((await row().innerText()).includes("到期后由巡检调度"),"cooldown must explain scheduling after the earliest retry time");
+      check((await row().innerText()).includes("可手动登录 Web 立即重试"),"manual retry must remain discoverable");
+      check(await row().getByRole("button",{name:"登录 Web",exact:true}).isEnabled(),"cooldown must not block a manual login");
+    } finally { await page.unroute(jobsPattern); await page.reload(); await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20); }
   });
 
   await test("exact-email-list-filter", async () => {
