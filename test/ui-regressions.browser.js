@@ -165,5 +165,317 @@ async (page) => {
     check(await modal.getByRole("checkbox", { name: "确认失效或空间变化后自动重登并授权", exact: true }).isChecked(), "auto-relogin default missing");
     await modal.getByRole("button", { name: "取消", exact: true }).click();
   });
+
+  await test("usage-quota-and-reset-cards", async () => {
+    await page.setViewportSize({ width: 1307, height: 900 });
+    const jobsPattern = /\/api\/jobs(?:\?|$)/;
+    await page.route(jobsPattern, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      const response = await route.fetch();
+      const data = await response.json();
+      if (Array.isArray(data.jobs)) {
+        data.jobs = data.jobs.map((job, idx) => {
+          if (idx === 0) {
+            return {
+              ...job,
+              canDownload: true,
+              sub2apiUsage: {
+                source: "sub2api",
+                allowed: true,
+                limitReached: false,
+                fetchedAt: "2026-11-04T06:00:00Z",
+                primary: { usedPercent: 24, limitWindowSeconds: 18000, resetAfterSeconds: 7200 },
+                secondary: { usedPercent: 48, limitWindowSeconds: 604800, resetAfterSeconds: 172800 },
+                credits: { hasCredits: true, unlimited: false, balance: "250.0000000000", overageLimitReached: false },
+                resetCredits: { availableCount: 0, credits: [] },
+              },
+            };
+          }
+          if (idx === 1) {
+            return {
+              ...job,
+              canDownload: true,
+              sub2apiUsage: {
+                source: "sub2api",
+                allowed: true,
+                limitReached: false,
+                primary: { usedPercent: 62, limitWindowSeconds: 18000, resetAfterSeconds: 3600 },
+                credits: { hasCredits: true, unlimited: false, balance: "961.5884507500", overageLimitReached: false },
+                resetCredits: { availableCount: 2, credits: [{ expiresAt: "2026-12-01T00:00:00Z" }] },
+              },
+            };
+          }
+          if (idx === 2) {
+            return {
+              ...job,
+              canDownload: true,
+              sub2apiUsage: {
+                source: "sub2api",
+                allowed: true,
+                limitReached: false,
+                primary: { usedPercent: 10, limitWindowSeconds: 18000, resetAfterSeconds: 1800 },
+                credits: { hasCredits: true, unlimited: false, balance: "0", overageLimitReached: false },
+                resetCredits: null,
+              },
+            };
+          }
+          if (idx === 3) {
+            return {
+              ...job,
+              canDownload: true,
+              sub2apiUsage: {
+                source: "sub2api",
+                allowed: true,
+                limitReached: false,
+                primary: { usedPercent: 15, limitWindowSeconds: 18000, resetAfterSeconds: 1800 },
+                credits: { hasCredits: false, unlimited: false, balance: null, overageLimitReached: false },
+                resetCredits: null,
+              },
+            };
+          }
+          if (idx === 4) {
+            return {
+              ...job,
+              canDownload: true,
+              sub2apiUsage: {
+                source: "sub2api",
+                allowed: true,
+                limitReached: false,
+                primary: { usedPercent: 15, limitWindowSeconds: 18000, resetAfterSeconds: 1800 },
+                credits: { hasCredits: false, unlimited: false, balance: "invalid-value", overageLimitReached: false },
+                resetCredits: { availableCount: 1, credits: [] },
+              },
+            };
+          }
+          return job;
+        });
+      }
+      await route.fulfill({ json: data });
+    });
+    try {
+      await page.reload();
+      await page.waitForFunction(() => document.querySelectorAll(".usage-meta-pills").length >= 5);
+      const rows = page.locator("tr.job-row");
+      const row0Pills = rows.nth(0).locator(".usage-meta-pills");
+      check((await row0Pills.locator(".usage-window").innerText()).trim() === "额度 250.00", "250.0000000000 not formatted as 250.00");
+      check((await row0Pills.locator(".usage-reset-credits").innerText()).trim() === "重置卡 0 张", "0 reset cards not shown as 0 张");
+      check(await row0Pills.locator(".usage-window").getAttribute("title") === "额度 250.0000000000", "raw balance not preserved in title");
+      const box0Quota = await row0Pills.locator(".usage-window").boundingBox();
+      const box0Reset = await row0Pills.locator(".usage-reset-credits").boundingBox();
+      check(Math.abs(box0Quota.y - box0Reset.y) <= 2 && Math.abs(box0Quota.height - box0Reset.height) <= 1, "quota and reset card pills are not aligned on the same row at 1307px");
+
+      const row1Pills = rows.nth(1).locator(".usage-meta-pills");
+      check((await row1Pills.locator(".usage-window").innerText()).trim() === "额度 961.59", "961.5884507500 not rounded to 961.59");
+      check((await row1Pills.locator(".usage-reset-credits").innerText()).trim() === "重置卡 2 张", "positive reset card count missing");
+      check((await row1Pills.locator(".usage-reset-credits").getAttribute("title") || "").includes("重置卡到期时间："), "reset card expiration tooltip missing");
+
+      const row2Pills = rows.nth(2).locator(".usage-meta-pills");
+      check((await row2Pills.locator(".usage-window").innerText()).trim() === "额度 0.00", "0 balance not formatted as 0.00");
+      check((await row2Pills.locator(".usage-reset-credits").innerText()).trim() === "重置卡 未知", "null resetCredits not shown as 未知");
+      const zeroBorder = await row0Pills.locator(".usage-reset-credits").evaluate(e => getComputedStyle(e).borderStyle);
+      const unknownBorder = await row2Pills.locator(".usage-reset-credits").evaluate(e => getComputedStyle(e).borderStyle);
+      check(zeroBorder !== unknownBorder, "0 张 and 未知 reset card pills are not visually distinguished");
+
+      const row3Pills = rows.nth(3).locator(".usage-meta-pills");
+      check(await row3Pills.locator(".usage-window").count() === 0, "null balance must not be converted to 0.00");
+      const row4Pills = rows.nth(4).locator(".usage-meta-pills");
+      check(await row4Pills.locator(".usage-window").count() === 0, "invalid balance must not be converted to 0.00");
+    } finally {
+      await page.unroute(jobsPattern);
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.reload();
+      await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+    }
+  });
+
+  await test("session-dialog-ui-and-states", async () => {
+    let mode = "list";
+    await page.route("**/api/jobs/*/sessions", async (route) => {
+      if (mode === "error") {
+        return route.fulfill({ status: 502, json: { error: "上游网关连接超时 (502)" } });
+      }
+      if (mode === "empty") {
+        return route.fulfill({ json: { sessions: { devices: [] } } });
+      }
+      return route.fulfill({
+        json: {
+          sessions: {
+            devices: [
+              {
+                id: "dev-current",
+                sessionId: "sess-1",
+                displayName: "MacBook Pro",
+                description: "MacBook Pro · macOS 15.1 Sequoia Ultra-Long-Device-Identifier-Name-For-Overflow-Check",
+                platform: "macos",
+                osVersion: "15.1",
+                isCurrentDevice: true,
+                isTrustedDevice: true,
+                lastSignedInTimestamp: 1790000000,
+                lastSignedInCity: "San Francisco",
+                lastSignedInRegionCode: "CA",
+                lastSignedInCountry: "US",
+                lastSignedInIp: "2001:db8:abcd:1234:5678:9012:3456:7890",
+                appSessions: ["Codex CLI", "ChatGPT Web"],
+              },
+              {
+                id: "dev-other",
+                deviceIdHash: "hash-2",
+                displayName: "Windows Workstation",
+                description: "Windows 11 Pro",
+                platform: "windows",
+                osVersion: "11",
+                isCurrentDevice: false,
+                isTrustedDevice: false,
+                lastSignedInTimestamp: 1789900000,
+                lastSignedInCity: "Tokyo",
+                lastSignedInCountry: "JP",
+                lastSignedInIp: null,
+                appSessions: [],
+              },
+            ],
+          },
+        },
+      });
+    });
+    try {
+      const trigger = row().getByRole("button", { name: "查看已登录设备和会话", exact: true });
+      await trigger.click();
+      const modal = page.getByRole("dialog", { name: "已登录设备与会话", exact: true });
+      await modal.locator(".session-item").first().waitFor();
+      check(await modal.getByRole("tooltip").count() === 0, "session IP HelpTip must not auto-open on dialog entry");
+      check(await modal.getByRole("button", { name: "关闭已登录设备与会话", exact: true }).evaluate(e => e === document.activeElement), "initial focus not on session dialog close button");
+      check(await modal.locator(".session-item.current .session-badge.current").innerText() === "当前会话", "current session badge missing");
+      check(await modal.locator(".session-item").first().locator(".session-login-ip code").innerText() === "2001:db8:abcd:1234:5678:9012:3456:7890", "login IP code missing");
+      check((await modal.locator(".session-item").nth(1).locator(".session-login-ip").innerText()).includes("上游未提供"), "missing IP must remain 上游未提供");
+      check(await modal.locator(".session-item").first().locator(".session-logout-button").isDisabled(), "current device single logout must remain disabled");
+      check(await modal.locator(".session-item").nth(1).locator(".session-logout-button").isEnabled(), "secondary device logout should be enabled");
+      await page.setViewportSize({ width: 390, height: 700 });
+      check(await modal.locator(".session-list").evaluate(e => e.scrollWidth <= e.clientWidth + 1), "long IPv6 creates a horizontal scrollbar on narrow screens");
+      check(await modal.locator(".session-login-ip code").evaluate(e => e.getBoundingClientRect().right <= e.closest(".session-item").getBoundingClientRect().right), "IPv6 overflows its device card");
+      await page.setViewportSize({ width: 1440, height: 1000 });
+
+      mode = "error";
+      await modal.getByRole("button", { name: "刷新设备列表", exact: true }).click();
+      await modal.getByRole("alert").waitFor();
+      check(await modal.locator(".session-empty").count() === 0, "error state must not simultaneously show empty state");
+      const errText = await modal.getByRole("alert").innerText();
+      check(errText.includes("上游网关连接超时") && !errText.includes("未登录账号"), "error state message inaccurate");
+
+      mode = "empty";
+      await modal.getByRole("button", { name: "重试", exact: true }).click();
+      await modal.locator(".session-empty").waitFor();
+      check(await modal.getByRole("alert").count() === 0, "alert should clear after empty retry succeeds");
+
+      await page.keyboard.press("Escape");
+      check(await modal.count() === 0, "Escape should close session dialog");
+      check(await trigger.evaluate(e => e === document.activeElement), "focus not restored after closing session dialog");
+    } finally {
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.unroute("**/api/jobs/*/sessions");
+    }
+  });
+
+  await test("workspace-dialog-ui-and-states", async () => {
+    let mode = "list";
+    await page.route("**/api/jobs/*/workspaces", async (route) => {
+      if (mode === "error") {
+        return route.fulfill({ status: 503, json: { error: "工作空间服务暂时不可用 (503)" } });
+      }
+      return route.fulfill({
+        json: {
+          workspaces: {
+            currentWorkspaceId: "ws-team-1",
+            workspaces: [
+              {
+                id: "ws-team-1",
+                name: "Acme Enterprise Collaboration Workspace With Very Long Organization Name",
+                structure: "workspace",
+                planType: "business",
+                role: "account-owner",
+                current: true,
+                canAccess: mode !== "inactive",
+                deactivated: mode === "inactive",
+                availabilityReason: mode === "inactive" ? "deactivated" : "available",
+                availabilityLabel: mode === "inactive" ? "空间已停用" : "",
+              },
+              {
+                id: "ws-personal",
+                name: "个人默认空间",
+                structure: "personal",
+                planType: "plus",
+                role: "owner",
+                current: false,
+                canAccess: true,
+                deactivated: false,
+                availabilityReason: "available",
+                availabilityLabel: "",
+              },
+              {
+                id: "ws-deactivated",
+                name: "已归档研发空间",
+                structure: "workspace",
+                planType: "team",
+                role: "standard-user",
+                current: false,
+                canAccess: false,
+                deactivated: true,
+                availabilityReason: "deactivated",
+                availabilityLabel: "空间已停用",
+                availabilityMessage: "该组织空间已被管理员停用",
+              },
+            ],
+          },
+        },
+      });
+    });
+    await page.route("**/api/jobs/*/workspaces/switch", async (route) => {
+      await route.fulfill({
+        json: {
+          currentWorkspaceId: "ws-personal",
+          sub2api: { configured: true, updated: 1 },
+        },
+      });
+    });
+    try {
+      const trigger = row().getByRole("button", { name: "查看并切换工作空间", exact: true });
+      await trigger.click();
+      const modal = page.getByRole("dialog", { name: "工作空间", exact: true });
+      await modal.locator(".workspace-item").first().waitFor();
+      check(await modal.getByRole("button", { name: "关闭工作空间", exact: true }).evaluate(e => e === document.activeElement), "initial focus not on workspace dialog close button");
+      const items = modal.locator(".workspace-item");
+      check(await items.count() === 3, "expected 3 workspaces");
+      check((await items.nth(0).innerText()).includes("当前空间") && (await items.nth(0).innerText()).includes("组织"), "current org workspace badges missing");
+      check((await items.nth(1).innerText()).includes("个人") && (await items.nth(1).locator(".workspace-item-action").innerText()).trim() === "切换", "personal switchable workspace missing");
+      check(await items.nth(2).isDisabled(), "deactivated workspace must be disabled");
+      check((await items.nth(2).locator(".workspace-item-action").innerText()).trim() === "已停用", "disabled workspace must not disguise as 切换");
+      mode = "inactive";
+      await modal.getByRole("button", { name: "刷新工作空间", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector(".workspace-item.selected.is-disabled"));
+      check((await items.nth(0).locator(".workspace-item-action").innerText()).trim() === "已停用", "inactive current workspace must prioritize its unavailable action state");
+      check(await items.nth(0).locator(".workspace-badge.current").count() === 1, "current workspace identity badge must remain visible");
+      mode = "list";
+      await modal.getByRole("button", { name: "刷新工作空间", exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector(".workspace-item.selected.is-disabled"));
+
+      await items.nth(1).click();
+      await modal.getByRole("status").waitFor();
+      check((await modal.getByRole("status").innerText()).includes("已切换到“个人默认空间”"), "workspace switch success notice missing");
+
+      mode = "error";
+      await page.setViewportSize({ width: 1307, height: 900 });
+      await modal.getByRole("button", { name: "关闭", exact: true }).click();
+      check(await modal.count() === 0, "close button did not close workspace dialog");
+      check(await trigger.evaluate(e => e === document.activeElement), "focus not restored after closing workspace dialog");
+
+      await trigger.click();
+      const errModal = page.getByRole("dialog", { name: "工作空间", exact: true });
+      await errModal.getByRole("alert").waitFor();
+      check(await errModal.locator(".workspace-empty").count() === 0, "workspace error state must not show empty state simultaneously");
+      await errModal.getByRole("button", { name: "关闭", exact: true }).click();
+    } finally {
+      await page.unroute("**/api/jobs/*/workspaces");
+      await page.unroute("**/api/jobs/*/workspaces/switch");
+    }
+  });
   return { passed: results.filter(r => r.passed).length, total: results.length, results };
 }

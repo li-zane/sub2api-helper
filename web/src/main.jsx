@@ -4930,6 +4930,7 @@ function SessionDialog({ token, job, onClose, onError }) {
       setDevices(data.sessions?.devices || []);
       onError("");
     } catch (error) {
+      setDevices([]);
       setDialogError(error.message);
     } finally {
       if (initial) setLoading(false);
@@ -5002,86 +5003,191 @@ function SessionDialog({ token, job, onClose, onError }) {
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !action) onClose();
-    }}>
-      <section className="batch-dialog session-dialog" role="dialog" aria-modal="true" aria-labelledby="session-dialog-title">
-        <div className="dialog-header">
-          <div>
-            <div className="section-title-row">
-              <h2 id="session-dialog-title">已登录设备与会话</h2>
-              <HelpTip label="登录 IP 说明">
-                登录 IP 仅显示上游返回的设备记录；缺失时标注“上游未提供”，不以账号绑定的代理 IP 代替。
-              </HelpTip>
-            </div>
-            <span>{job.email}</span>
+    <AccessibleDialog
+      className="session-dialog"
+      labelledBy="session-dialog-title"
+      closeDisabled={Boolean(action)}
+      onClose={onClose}
+    >
+      <div className="dialog-header">
+        <div className="dialog-heading-group">
+          <div className="section-title-row">
+            <h2 id="session-dialog-title">已登录设备与会话</h2>
+            <HelpTip label="登录 IP 说明">
+              登录 IP 仅显示上游返回的设备记录；缺失时标注“上游未提供”，不以账号绑定的代理 IP 代替。
+            </HelpTip>
+            {!loading && !dialogError && (
+              <span className="dialog-count-pill">{devices.length} 台设备</span>
+            )}
           </div>
-          <div className="dialog-header-actions">
-            <button type="button" className="icon-button" onClick={() => loadSessions()} disabled={loading || refreshing || Boolean(action)} title="刷新设备列表" aria-label="刷新设备列表">
-              <RefreshCw className={refreshing ? "spin" : ""} size={17} />
-            </button>
-            <button type="button" className="icon-button" onClick={onClose} disabled={Boolean(action)} title="关闭">
-              <X size={18} />
-            </button>
+          <div className="dialog-subtitle-row">
+            <span className="dialog-account-email" title={job.email}>{job.email}</span>
           </div>
         </div>
+        <div className="dialog-header-actions">
+          <button
+            type="button"
+            className="icon-button dialog-header-btn"
+            onClick={() => loadSessions()}
+            disabled={loading || refreshing || Boolean(action)}
+            title="刷新设备列表"
+            aria-label="刷新设备列表"
+          >
+            <RefreshCw className={refreshing ? "spin" : ""} size={15} />
+          </button>
+          <button
+            type="button"
+            className="icon-button dialog-header-btn"
+            autoFocus
+            data-dialog-initial-focus
+            onClick={onClose}
+            disabled={Boolean(action)}
+            title="关闭"
+            aria-label="关闭已登录设备与会话"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      </div>
 
+      <div className="dialog-body">
         {loading ? (
-          <div className="credential-loading"><LoaderCircle className="spin" size={18} />正在读取设备和会话</div>
+          <div className="credential-loading dialog-state-panel" role="status" aria-live="polite">
+            <LoaderCircle className="spin" size={18} />
+            <div className="dialog-state-text">
+              <strong>正在读取设备和会话</strong>
+              <span>正在同步该账号的上游活跃设备记录，请稍候…</span>
+            </div>
+          </div>
         ) : devices.length ? (
           <div className="session-list" aria-live="polite">
-            {devices.map((device) => (
-              <article className="session-item" key={device.id}>
-                <div className="session-item-icon" aria-hidden="true"><MonitorSmartphone size={19} /></div>
-                <div className="session-item-main">
-                  <div className="session-item-heading">
-                    <strong>{device.description || device.displayName}</strong>
-                    {device.isCurrentDevice && <span className="session-badge current">当前会话</span>}
-                    {!device.isCurrentDevice && device.isTrustedDevice && <span className="session-badge trusted">可信设备</span>}
-                  </div>
-                  <div className="session-item-meta">
-                    {device.description && device.displayName !== device.description && <span>{device.displayName}</span>}
-                    {formatSessionLocation(device) && <span>{formatSessionLocation(device)}</span>}
-                    {device.lastSignedInTimestamp && <time dateTime={new Date(device.lastSignedInTimestamp * 1000).toISOString()}>最近登录 {formatDateTime(new Date(device.lastSignedInTimestamp * 1000).toISOString())}</time>}
-                  </div>
-                  <div className={`session-login-ip${device.lastSignedInIp ? "" : " unavailable"}`}>
-                    <span>最近登录 IP</span>
-                    {device.lastSignedInIp
-                      ? <code>{device.lastSignedInIp}</code>
-                      : <span>上游未提供</span>}
-                  </div>
-                  {device.appSessions?.length > 0 && (
-                    <div className="session-apps">应用：{device.appSessions.join("、")}</div>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  className="icon-button danger session-logout-button"
-                  onClick={() => logoutDevice(device)}
-                  disabled={Boolean(action) || device.isCurrentDevice || (!device.sessionId && !device.deviceIdHash)}
-                  title={device.isCurrentDevice ? "当前会话请使用一键登出" : "登出该设备"}
-                  aria-label={`登出 ${device.displayName || "设备"}`}
+            {devices.map((device) => {
+              const titleText = device.description || device.displayName || "未知设备";
+              const platformText = formatSessionPlatform(device);
+              const locationText = formatSessionLocation(device);
+              const signedInIso = device.lastSignedInTimestamp
+                ? new Date(device.lastSignedInTimestamp * 1000).toISOString()
+                : null;
+              const canLogoutSingle = !device.isCurrentDevice && Boolean(device.sessionId || device.deviceIdHash);
+              return (
+                <article
+                  className={`session-item${device.isCurrentDevice ? " current" : ""}${device.isTrustedDevice ? " trusted" : ""}`}
+                  key={device.id}
                 >
-                  {action === device.id ? <LoaderCircle className="spin" size={16} /> : <LogOut size={16} />}
-                </button>
-              </article>
-            ))}
+                  <div className="session-item-icon" aria-hidden="true">
+                    <MonitorSmartphone size={17} />
+                  </div>
+                  <div className="session-item-main">
+                    <div className="session-item-heading">
+                      <strong className="session-item-title" title={titleText}>{titleText}</strong>
+                      <div className="session-item-badges">
+                        {device.isCurrentDevice && <span className="session-badge current">当前会话</span>}
+                        {device.isTrustedDevice && <span className="session-badge trusted">可信设备</span>}
+                      </div>
+                    </div>
+                    {(
+                      (device.description && device.displayName && device.displayName !== device.description)
+                      || platformText
+                      || locationText
+                      || signedInIso
+                    ) && (
+                      <div className="session-item-meta">
+                        {device.description && device.displayName && device.displayName !== device.description && (
+                          <span className="session-meta-chip" title={device.displayName}>{device.displayName}</span>
+                        )}
+                        {platformText && <span className="session-meta-chip">{platformText}</span>}
+                        {locationText && <span className="session-meta-item" title={locationText}>{locationText}</span>}
+                        {signedInIso && (
+                          <time className="session-meta-item" dateTime={signedInIso}>
+                            最近登录 {formatDateTime(signedInIso)}
+                          </time>
+                        )}
+                      </div>
+                    )}
+                    <div className="session-item-details">
+                      <div className={`session-login-ip${device.lastSignedInIp ? "" : " unavailable"}`}>
+                        <span className="session-detail-label">最近登录 IP</span>
+                        {device.lastSignedInIp
+                          ? <code>{device.lastSignedInIp}</code>
+                          : <span className="session-ip-empty">上游未提供</span>}
+                      </div>
+                      {device.appSessions?.length > 0 && (
+                        <div className="session-apps" title={`应用：${device.appSessions.join("、")}`}>
+                          <span className="session-detail-label">应用</span>
+                          <span className="session-apps-value">{device.appSessions.join("、")}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-button danger session-logout-button"
+                    onClick={() => logoutDevice(device)}
+                    disabled={Boolean(action) || !canLogoutSingle}
+                    title={device.isCurrentDevice ? "当前会话请使用一键登出" : !canLogoutSingle ? "该设备缺少可单独登出的会话标识" : "登出该设备"}
+                    aria-label={`登出 ${device.displayName || device.description || "设备"}`}
+                  >
+                    {action === device.id ? <LoaderCircle className="spin" size={14} /> : <LogOut size={14} />}
+                    <span className="session-logout-label">{device.isCurrentDevice ? "当前" : "登出"}</span>
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        ) : dialogError ? (
+          <div className="dialog-error dialog-state-panel error" role="alert">
+            <CircleAlert size={18} />
+            <div className="dialog-state-text">
+              <strong>读取设备与会话失败</strong>
+              <span>{dialogError}</span>
+              <small>请求未完成，并不代表账号未登录或会话已失效；可点击重试重新读取。</small>
+            </div>
+            <button
+              type="button"
+              className="secondary-button compact-btn dialog-state-retry"
+              onClick={() => loadSessions()}
+              disabled={refreshing || Boolean(action)}
+            >
+              <RefreshCw className={refreshing ? "spin" : ""} size={13} />重试
+            </button>
           </div>
         ) : (
-          <div className="session-empty"><MonitorSmartphone size={24} /><strong>没有可显示的设备或会话</strong><span>账号可能刚刚完成登出，刷新后会重新读取状态。</span></div>
+          <div className="session-empty dialog-state-panel">
+            <MonitorSmartphone size={22} />
+            <div className="dialog-state-text">
+              <strong>没有可显示的设备或会话</strong>
+              <span>上游当前未返回设备记录，或刚刚完成登出操作；点击右上角刷新可重新读取。</span>
+            </div>
+          </div>
         )}
 
-        {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{dialogError}</div>}
-        {notice && <div className="credential-notice" role="status"><Check size={15} />{notice}</div>}
-        <div className="dialog-actions session-dialog-actions">
-          <button type="button" className="danger-button" onClick={logoutAll} disabled={loading || Boolean(action) || !job.canLogoutAllSessions}>
-            {action === "all" ? <LoaderCircle className="spin" size={16} /> : <LogOut size={16} />}一键登出所有设备
-          </button>
-          <span className="dialog-actions-spacer" />
-          <button type="button" className="cancel-button" onClick={onClose} disabled={Boolean(action)}>关闭</button>
-        </div>
-      </section>
-    </div>
+        {!loading && devices.length > 0 && dialogError && (
+          <div className="dialog-error" role="alert">
+            <CircleAlert size={15} />
+            <span>{dialogError}</span>
+          </div>
+        )}
+        {notice && (
+          <div className="credential-notice" role="status">
+            <Check size={15} />
+            <span>{notice}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="dialog-actions session-dialog-actions">
+        <button
+          type="button"
+          className="danger-button session-logout-all-button"
+          onClick={logoutAll}
+          disabled={loading || Boolean(action) || !job.canLogoutAllSessions}
+        >
+          {action === "all" ? <LoaderCircle className="spin" size={15} /> : <LogOut size={15} />}一键登出所有设备
+        </button>
+        <span className="dialog-actions-spacer" />
+        <button type="button" className="cancel-button" onClick={onClose} disabled={Boolean(action)}>关闭</button>
+      </div>
+    </AccessibleDialog>
   );
 }
 
@@ -5089,6 +5195,30 @@ function formatSessionLocation(device) {
   const parts = [device.lastSignedInCity, device.lastSignedInRegionCode, device.lastSignedInCountry]
     .map((value) => String(value || "").trim())
     .filter(Boolean);
+  return [...new Set(parts)].join(" · ");
+}
+
+function formatSessionPlatform(device) {
+  const titleLower = String(device.description || device.displayName || "").toLowerCase();
+  const map = { macos: "macOS", windows: "Windows", ios: "iOS", ipad: "iPadOS", android: "Android", linux: "Linux", web: "Web" };
+  const parts = [];
+  const rawPlatform = String(device.platform || "").trim();
+  const rawOs = String(device.osVersion || "").trim();
+  if (rawPlatform) {
+    const label = map[rawPlatform.toLowerCase()] || rawPlatform;
+    const combined = rawOs && !label.toLowerCase().includes(rawOs.toLowerCase()) ? `${label} ${rawOs}` : label;
+    if (!titleLower.includes(combined.toLowerCase())) {
+      parts.push(combined);
+    } else if (!titleLower.includes(label.toLowerCase())) {
+      parts.push(label);
+    }
+  } else if (rawOs && !titleLower.includes(rawOs.toLowerCase())) {
+    parts.push(rawOs);
+  }
+  const rawModel = String(device.deviceModel || "").trim();
+  if (rawModel && !titleLower.includes(rawModel.toLowerCase())) {
+    parts.push(rawModel);
+  }
   return [...new Set(parts)].join(" · ");
 }
 
@@ -5111,6 +5241,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
       setWorkspaces(listedWorkspaces);
       setCurrentWorkspaceId(data.workspaces?.currentWorkspaceId || listedWorkspaces.find((item) => item.current)?.id || null);
     } catch (error) {
+      setWorkspaces([]);
       setDialogError(error.message);
     } finally {
       if (initial) setLoading(false);
@@ -5144,6 +5275,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
 
   async function switchWorkspace(workspace) {
     if (!workspace?.id || workspace.id === currentWorkspaceId || action) return;
+    if (isWorkspaceEntryDisabled(workspace)) return;
     setAction(workspace.id);
     setDialogError("");
     setNotice("");
@@ -5176,72 +5308,247 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !action) onClose();
-    }}>
-      <section className="batch-dialog workspace-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-dialog-title">
-        <div className="dialog-header">
-          <div>
+    <AccessibleDialog
+      className="workspace-dialog"
+      labelledBy="workspace-dialog-title"
+      closeDisabled={Boolean(action)}
+      onClose={onClose}
+    >
+      <div className="dialog-header">
+        <div className="dialog-heading-group">
+          <div className="section-title-row">
             <h2 id="workspace-dialog-title">工作空间</h2>
-            <span>{job.email}</span>
+            {!loading && !dialogError && (
+              <span className="dialog-count-pill">{workspaces.length} 个空间</span>
+            )}
           </div>
-          <div className="dialog-header-actions">
-            <button type="button" className="icon-button" onClick={() => loadWorkspaces()} disabled={loading || refreshing || Boolean(action)} title="刷新工作空间" aria-label="刷新工作空间">
-              <RefreshCw className={refreshing ? "spin" : ""} size={17} />
-            </button>
-            <button type="button" className="icon-button" onClick={onClose} disabled={Boolean(action)} title="关闭">
-              <X size={18} />
-            </button>
+          <div className="dialog-subtitle-row">
+            <span className="dialog-account-email" title={job.email}>{job.email}</span>
           </div>
         </div>
+        <div className="dialog-header-actions">
+          <button
+            type="button"
+            className="icon-button dialog-header-btn"
+            onClick={() => loadWorkspaces()}
+            disabled={loading || refreshing || Boolean(action)}
+            title="刷新工作空间"
+            aria-label="刷新工作空间"
+          >
+            <RefreshCw className={refreshing ? "spin" : ""} size={15} />
+          </button>
+          <button
+            type="button"
+            className="icon-button dialog-header-btn"
+            autoFocus
+            data-dialog-initial-focus
+            onClick={onClose}
+            disabled={Boolean(action)}
+            title="关闭"
+            aria-label="关闭工作空间"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div className="dialog-body">
         {loading ? (
-          <div className="credential-loading"><LoaderCircle className="spin" size={18} />正在读取工作空间</div>
+          <div className="credential-loading dialog-state-panel" role="status" aria-live="polite">
+            <LoaderCircle className="spin" size={18} />
+            <div className="dialog-state-text">
+              <strong>正在读取工作空间</strong>
+              <span>正在获取该账号关联的个人与组织空间列表，请稍候…</span>
+            </div>
+          </div>
         ) : workspaces.length ? (
           <div className="workspace-list" aria-live="polite">
             {workspaces.map((workspace) => {
               const selected = workspace.id === currentWorkspaceId || (currentWorkspaceId === null && workspace.current === true);
-              const disabled = workspace.canAccess === false
-                || workspace.deactivated
-                || workspace.availabilityReason && workspace.availabilityReason !== "available";
-              const availabilityLabel = workspace.availabilityLabel || "不可用";
+              const disabled = isWorkspaceEntryDisabled(workspace);
+              const availabilityLabel = resolveWorkspaceAvailabilityLabel(workspace);
+              const disabledActionText = resolveWorkspaceDisabledActionText(workspace);
+              const isPersonal = workspace.structure === "personal";
+              const displayName = workspace.name || workspace.id;
+              const planLabel = formatPlanTypeLabel(workspace.planType, planTypeMapping);
+              const planTone = resolveWorkspacePlanTone(workspace.planType);
+              const roleLabel = formatWorkspaceRole(workspace.role);
               return (
                 <button
                   type="button"
-                  className={`workspace-item ${selected ? "selected" : ""}`}
+                  className={`workspace-item${selected ? " selected" : ""}${disabled ? " is-disabled" : ""}`}
                   key={workspace.id}
                   onClick={() => switchWorkspace(workspace)}
                   disabled={disabled || selected || Boolean(action)}
                 >
-                  <span className="workspace-item-icon" aria-hidden="true"><BriefcaseBusiness size={18} /></span>
+                  <span className={`workspace-item-icon${selected ? " selected" : ""}${disabled ? " disabled" : ""}`} aria-hidden="true">
+                    <BriefcaseBusiness size={17} />
+                  </span>
                   <span className="workspace-item-main">
                     <span className="workspace-item-heading">
-                      <strong>{workspace.name || workspace.id}</strong>
-                      {workspace.structure === "personal" && <span className="workspace-badge personal">个人</span>}
-                      {selected && <span className="workspace-badge current">当前</span>}
-                      {disabled && <span className="workspace-badge disabled" title={workspace.availabilityMessage || availabilityLabel}>{availabilityLabel}</span>}
+                      <strong className="workspace-item-title" title={displayName}>{displayName}</strong>
+                      <span className="workspace-item-badges">
+                        <span className={`workspace-badge structure ${isPersonal ? "personal" : "organization"}`}>
+                          {isPersonal ? "个人" : "组织"}
+                        </span>
+                        <span
+                          className={`workspace-badge plan-badge ${planTone}`}
+                          title={workspace.planType ? `PlanType: ${workspace.planType}` : "PlanType 未知"}
+                        >
+                          {planLabel}
+                        </span>
+                        {selected && (
+                          <span className="workspace-badge current">
+                            <Check size={11} aria-hidden="true" />当前空间
+                          </span>
+                        )}
+                        {disabled ? (
+                          <span className="workspace-badge disabled" title={workspace.availabilityMessage || availabilityLabel}>
+                            {availabilityLabel}
+                          </span>
+                        ) : (
+                          !selected && <span className="workspace-badge available">可用</span>
+                        )}
+                      </span>
                     </span>
                     <span className="workspace-item-meta">
-                      <span>{formatPlanTypeLabel(workspace.planType, planTypeMapping)}</span>
-                      <code>{workspace.id}</code>
+                      <code className="workspace-id-code" title={`空间 ID: ${workspace.id}`}>{workspace.id}</code>
+                      {roleLabel && (
+                        <span className="workspace-meta-pill" title={`空间权限: ${workspace.role}`}>
+                          权限：{roleLabel}
+                        </span>
+                      )}
+                      {disabled && workspace.availabilityMessage && (
+                        <span className="workspace-meta-reason" title={workspace.availabilityMessage}>
+                          {workspace.availabilityMessage}
+                        </span>
+                      )}
                     </span>
                   </span>
-                  <span className="workspace-item-action">{action === workspace.id ? <LoaderCircle className="spin" size={16} /> : selected ? "当前" : "切换"}</span>
+                  <span className={`workspace-item-action${action === workspace.id ? " switching" : disabled ? " disabled" : selected ? " current" : " switchable"}`}>
+                    {action === workspace.id ? (
+                      <>
+                        <LoaderCircle className="spin" size={13} />
+                        <span>切换中</span>
+                      </>
+                    ) : disabled ? (
+                      <>
+                        <Ban size={12} aria-hidden="true" />
+                        <span>{disabledActionText}</span>
+                      </>
+                    ) : selected ? (
+                      <>
+                        <Check size={13} aria-hidden="true" />
+                        <span>当前空间</span>
+                      </>
+                    ) : (
+                      <span>切换</span>
+                    )}
+                  </span>
                 </button>
               );
             })}
           </div>
+        ) : dialogError ? (
+          <div className="dialog-error dialog-state-panel error" role="alert">
+            <CircleAlert size={18} />
+            <div className="dialog-state-text">
+              <strong>读取工作空间失败</strong>
+              <span>{dialogError}</span>
+              <small>未能获取该账号的工作空间列表；可点击重试重新读取。</small>
+            </div>
+            <button
+              type="button"
+              className="secondary-button compact-btn dialog-state-retry"
+              onClick={() => loadWorkspaces()}
+              disabled={refreshing || Boolean(action)}
+            >
+              <RefreshCw className={refreshing ? "spin" : ""} size={13} />重试
+            </button>
+          </div>
         ) : (
-          <div className="workspace-empty"><BriefcaseBusiness size={24} /><strong>没有可用的工作空间</strong><span>该账号当前没有返回可切换的个人或组织空间。</span></div>
+          <div className="workspace-empty dialog-state-panel">
+            <BriefcaseBusiness size={22} />
+            <div className="dialog-state-text">
+              <strong>没有可用的工作空间</strong>
+              <span>该账号当前没有返回可切换的个人或组织空间。</span>
+            </div>
+          </div>
         )}
-        {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{dialogError}</div>}
-        {notice && <div className="credential-notice" role="status"><Check size={15} />{notice}</div>}
-        <div className="dialog-actions workspace-dialog-actions">
-          <span className="dialog-actions-spacer" />
-          <button type="button" className="cancel-button" onClick={onClose} disabled={Boolean(action)}>关闭</button>
-        </div>
-      </section>
-    </div>
+
+        {!loading && workspaces.length > 0 && dialogError && (
+          <div className="dialog-error" role="alert">
+            <CircleAlert size={15} />
+            <span>{dialogError}</span>
+          </div>
+        )}
+        {notice && (
+          <div className="credential-notice" role="status">
+            <Check size={15} />
+            <span>{notice}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="dialog-actions workspace-dialog-actions">
+        <span className="dialog-actions-spacer" />
+        <button type="button" className="cancel-button" onClick={onClose} disabled={Boolean(action)}>关闭</button>
+      </div>
+    </AccessibleDialog>
   );
+}
+
+function isWorkspaceEntryDisabled(workspace) {
+  return Boolean(
+    workspace?.canAccess === false
+      || workspace?.deactivated
+      || (workspace?.availabilityReason && workspace.availabilityReason !== "available"),
+  );
+}
+
+function resolveWorkspaceAvailabilityLabel(workspace) {
+  if (workspace?.availabilityLabel) return workspace.availabilityLabel;
+  const codeSuffix = workspace?.availabilityCode ? `（${workspace.availabilityCode}）` : "";
+  if (workspace?.deactivated || workspace?.availabilityReason === "deactivated") return `空间已停用${codeSuffix}`;
+  if (workspace?.availabilityReason === "removed") return `已移出空间${codeSuffix}`;
+  if (workspace?.availabilityReason === "banned") return `空间封禁${codeSuffix || "（402）"}`;
+  if (workspace?.availabilityReason === "inaccessible" || workspace?.canAccess === false) return `无权访问${codeSuffix}`;
+  return `已失效${codeSuffix}`;
+}
+
+function resolveWorkspaceDisabledActionText(workspace) {
+  if (workspace?.deactivated || workspace?.availabilityReason === "deactivated") return "已停用";
+  if (workspace?.availabilityReason === "inaccessible" || (workspace?.canAccess === false && !workspace?.availabilityReason)) return "无权限";
+  if (workspace?.availabilityReason === "removed") return "已失效";
+  if (workspace?.availabilityReason === "banned") return "已失效";
+  return "不可用";
+}
+
+function resolveWorkspacePlanTone(planType) {
+  const raw = String(planType || "").trim().toLowerCase();
+  if (!raw || raw === "unknown") return "unknown";
+  if (raw.includes("free")) return "free";
+  if (raw.includes("business") || raw.includes("enterprise") || raw.includes("pro")) return "business";
+  if (raw.includes("team")) return "team";
+  if (raw.includes("plus")) return "plus";
+  return "default";
+}
+
+function formatWorkspaceRole(role) {
+  if (!role) return "";
+  const normalized = String(role).trim().toLowerCase();
+  const map = {
+    "account-owner": "所有者",
+    owner: "所有者",
+    "account-admin": "管理员",
+    admin: "管理员",
+    "standard-user": "成员",
+    member: "成员",
+    user: "成员",
+    reader: "只读",
+    viewer: "只读",
+  };
+  return map[normalized] || String(role).trim();
 }
 
 function StatusBadge({ status }) {
@@ -5268,6 +5575,30 @@ function StatusBadge({ status }) {
     resume_available: ["可继续", <RotateCcw size={14} />],
   }[status] || [status, null];
   return <span className={`status-badge ${status}`}>{config[1]}{config[0]}</span>;
+}
+
+const usageCreditBalanceFormatter = new Intl.NumberFormat("en-US", {
+  useGrouping: false,
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function formatUsageCreditBalance(value) {
+  if (value === null || value === undefined || typeof value === "boolean") {
+    return null;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? usageCreditBalanceFormatter.format(value) : null;
+  }
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(text)) {
+    const parsed = Number(text);
+    // Keep decimal strings exact instead of first rounding them to binary floats.
+    return Number.isFinite(parsed) ? usageCreditBalanceFormatter.format(text) : null;
+  }
+  if (text === "未知") return "未知";
+  return null;
 }
 
 function AccountUsageCell({ usage, available, enabled, onRefresh }) {
@@ -5304,6 +5635,13 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
     { key: "primary", label: usageWindowLabel("5h", primary), value: primary },
     { key: "secondary", label: usageWindowLabel("7d", secondary), value: secondary },
   ].filter((item) => item.value);
+  const formattedBalance = formatUsageCreditBalance(credits?.balance);
+  const resetCreditCount = Number.isInteger(resetCredits?.availableCount) && resetCredits.availableCount >= 0
+    ? resetCredits.availableCount
+    : null;
+  const resetCreditsTitle = resetCredits?.credits?.length
+    ? `重置卡到期时间：${resetCredits.credits.map((credit) => formatDateTime(credit.expiresAt)).join("、")}`
+    : "从 Sub2API 同步可用重置卡数量；点击刷新可查询最新数量";
   return (
     <div className={`account-usage ${restricted ? "restricted" : ""}`} title={usage.fetchedAt ? `Sub2API 同步于 ${formatDateTime(usage.fetchedAt)}` : "Sub2API 用量"}>
       <div className="usage-state-row">
@@ -5311,11 +5649,24 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
         {onRefresh && <button type="button" className="usage-refresh-icon" onClick={onRefresh} title="从 Sub2API 同步用量" aria-label="从 Sub2API 同步用量"><RefreshCw size={13} /></button>}
       </div>
       {windows.map((item) => <UsageWindowProgress key={item.key} tone={item.key} label={item.label} window={item.value} />)}
-      {credits && credits.unlimited === true && <span className="usage-window">无限额度</span>}
-      {credits && credits.balance !== null && <span className="usage-window">额度 {credits.balance}</span>}
-      <span className="usage-reset-credits" title={resetCredits?.credits?.length ? `重置卡到期时间：${resetCredits.credits.map((credit) => formatDateTime(credit.expiresAt)).join("、")}` : "从 Sub2API 同步可用重置卡数量；点击刷新可查询最新数量"}>
-        重置卡 <strong>{resetCredits ? `${resetCredits.availableCount} 张` : "未知"}</strong>
-      </span>
+      <div className="usage-meta-pills">
+        {credits && credits.unlimited === true && (
+          <span className="usage-meta-pill usage-window">
+            <span><strong>无限额度</strong></span>
+          </span>
+        )}
+        {formattedBalance !== null && (
+          <span className={`usage-meta-pill usage-window${formattedBalance === "未知" ? " is-unknown" : ""}`} title={`额度 ${credits?.balance ?? formattedBalance}`}>
+            <span>额度 <strong>{formattedBalance}</strong></span>
+          </span>
+        )}
+        <span
+          className={`usage-meta-pill usage-reset-credits ${resetCreditCount === null ? "is-unknown" : resetCreditCount > 0 ? "has-cards" : "is-zero"}`}
+          title={resetCreditsTitle}
+        >
+          <span>重置卡 <strong>{resetCreditCount !== null ? `${resetCreditCount} 张` : "未知"}</strong></span>
+        </span>
+      </div>
     </div>
   );
 }
