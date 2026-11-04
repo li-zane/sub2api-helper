@@ -1,6 +1,25 @@
 const record = value => value && typeof value === "object" && !Array.isArray(value);
 const identifier = value => typeof value === "string" && value.trim().length <= 256 ? value.trim() : "";
 
+// JWT claims describe the Web token's context, not the workspace picked in the UI.
+// Upstream authorization remains responsible for validating the token itself.
+export function webTokenWorkspaceId(token) {
+  try {
+    const claims = JSON.parse(Buffer.from(String(token).split(".")[1], "base64url").toString("utf8"));
+    return identifier(claims?.["https://api.openai.com/auth"]?.chatgpt_account_id);
+  } catch { return ""; }
+}
+
+export function workspaceProviderCode(data) {
+  return identifier(data?.error?.code || data?.code || data?.error_code || data?.detail?.code
+    || (typeof data?.error === "string" ? data.error : "")).toLowerCase();
+}
+
+export function isDeactivatedWorkspaceError(error) {
+  return Number(error?.remoteStatus ?? error?.status) === 402
+    && ["deactivated_workspace", "workspace_deactivated"].includes(error?.providerCode);
+}
+
 // The provider can return both an alias and a canonical entry for one account.
 // Merge by canonical ID before counting candidates; never discard a denial.
 export function uniqueWorkspaceAccounts(payload) {

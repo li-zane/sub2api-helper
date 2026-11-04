@@ -285,11 +285,16 @@ try {
     { mode: "web", status: 401, recover: false },
     { mode: "sub2api", status: 403, recover: false },
     { mode: "sub2api", status: 503, recover: false },
+    { mode: "web", status: 402, recover: true, workspaceError: true },
+    { mode: "web", status: 402, recover: false, workspaceError: true },
+    { mode: "web", status: 402, recover: false },
+    { mode: "web", status: 200, recover: true, workspaceMismatch: true },
+    { mode: "web", status: 200, recover: false, workspaceMismatch: true },
   ]) {
     // The public session endpoint succeeds while the authenticated endpoint
     // rejects its revoked token, matching the observed production failure.
     await fs.writeFile(savedWebPath, JSON.stringify(savedWeb));
-    const fixtureResponse = await fetch(`${baseUrl}/__test/web-token-status`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: scenario.status, recoverOnLogin: scenario.recover, email: "mfa-test@example.com" }) });
+    const fixtureResponse = await fetch(`${baseUrl}/__test/web-token-status`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: scenario.status, recoverOnLogin: scenario.recover, workspaceError: scenario.workspaceError, workspaceMismatch: scenario.workspaceMismatch, email: "mfa-test@example.com" }) });
     assert.equal(fixtureResponse.status, 200);
     const before = await fetch(`${baseUrl}/__test/state`).then(r => r.json());
     const beforeOAuth = await fs.readFile(outputPath, "utf8");
@@ -302,21 +307,27 @@ try {
       ...(scenario.resume ? ["--resume-checkpoint", revokedCheckpoint] : []),
     ], { CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "JBSWY3DPEHPK3PXP" });
     const after = await fetch(`${baseUrl}/__test/state`).then(r => r.json());
-    if (scenario.status === 401) {
+    if (scenario.status === 401 || scenario.workspaceError || scenario.workspaceMismatch) {
       assert.equal(after.webSignInCount - before.webSignInCount, 1, "revoked Web credentials must perform exactly one real sign-in per rejected session");
       assert.match(result.output, /Password accepted/);
       assert.equal(result.code, scenario.recover ? 0 : 1, result.output);
-      if (!scenario.recover) assert.match(result.output, /WEB_LOGIN_TOKEN_REVOKED/);
+      if (!scenario.recover) assert.match(result.output, /WEB_LOGIN_(?:TOKEN_REVOKED|WORKSPACE_UNAVAILABLE|WORKSPACE_MISMATCH)/);
     } else {
       assert.notEqual(result.code, 0);
       assert.equal(after.webSignInCount, before.webSignInCount, "403/5xx must not trigger account sign-in");
     }
     const afterWeb = JSON.parse(await fs.readFile(savedWebPath, "utf8"));
+    if (scenario.workspaceMismatch && scenario.recover) {
+      assert.equal(afterWeb.web.workspaceId,"workspace-personal");
+      const claims=JSON.parse(Buffer.from(afterWeb.accessToken.split('.')[1],"base64url"));
+      assert.equal(claims["https://api.openai.com/auth"].chatgpt_account_id,"workspace-personal","Web token must actually bind to the fallback space");
+    }
     assert.deepEqual(afterWeb.identity, savedWeb.identity, "reauthentication preserves the persistent browser identity");
     if (scenario.mode === "web" || !scenario.recover) assert.equal(await fs.readFile(outputPath, "utf8"), beforeOAuth, "failed and Web-only recovery preserve existing OAuth output");
     if (scenario.mode === "web") assert.equal(after.oauthAuthorizationCount, before.oauthAuthorizationCount);
   }
   console.log("REVOKED_WEB_LOGIN_PASS cached-200/workspace-401 -> real sign-in; Web-only; checkpoint; bounded retry; 403/503 stop; identity/OAuth preserved");
+  console.log("WORKSPACE_TOKEN_LOGIN_PASS explicit-402 and mismatched-token -> real sign-in; personal fallback; actual token verified; bounded failure; generic-402 no reauth");
   console.log("password/email OTP + 2FA workspace smoke tests passed");
 } catch (error) {
   error.message = `${error.message}\nMock server output:\n${serverLogs}`;

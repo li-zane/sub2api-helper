@@ -53,7 +53,7 @@ import { FingerprintSettingsButton, ModelFingerprintCell } from "./model-fingerp
 import { HelpTip } from "./help-tip.jsx";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
 
-const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效" };
+const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效", banned: "账号已封禁" };
 const BATCH_KEY = "tosub2.web-login-batch";
 const POLL_INTERVAL_MS = 900;
 const SUB2API_PIPELINE_TIMEOUT_MS = 15 * 60_000;
@@ -3854,9 +3854,9 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               <div className="account-meta-line">
                 <LoginMethodBadge job={job} />
                 {job.webSessionStatus && job.webSessionStatus !== "absent" && (
-                  <span className={`web-session-state ${job.webSessionStatus}`} title={job.webSessionVerifiedAt ? `最近验证：${formatDateTime(job.webSessionVerifiedAt)}` : "读取工作区或设备后验证"}>
-                    <Globe2 size={11} aria-hidden="true" />
-                    {job.webSessionStatus === "valid" ? "Web已验" : job.webSessionStatus === "expired" ? "Web失效" : "Web待验"}
+                  <span className={`web-session-state ${job.webSessionStatus === "banned" ? "expired" : job.webSessionStatus}`} title={job.webSessionStatus === "banned" ? extractResponseMessage(job.autoRepairBlockedReason || "账号已确认封禁，已停止 Web 重登") : job.webSessionVerifiedAt ? `最近验证：${formatDateTime(job.webSessionVerifiedAt)}` : "读取工作区或设备后验证"}>
+                    {job.webSessionStatus === "banned" ? <Ban size={11} aria-hidden="true" /> : <Globe2 size={11} aria-hidden="true" />}
+                    {job.webSessionStatus === "banned" ? "账号封禁" : job.webSessionStatus === "valid" ? "Web已验" : job.webSessionStatus === "expired" ? "Web失效" : "Web待验"}
                   </span>
                 )}
               </div>
@@ -3954,6 +3954,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
         {job.autoRepairBlocked && (
           <OperationDetailText text={`号池监控已永久跳过：${extractResponseMessage(job.autoRepairBlockedReason || "账号已不可用")}`} className="row-error" onOpen={onOpenOperationDetail} />
         )}
+        {job.banProxyReleasePending && <OperationDetailText text={job.banProxyReleaseError ? `封禁账号 IP 解绑待重试：${job.banProxyReleaseError}` : "封禁账号 IP 正在解绑"} className="row-error" onOpen={onOpenOperationDetail} />}
         {job.totpSetupError && <OperationDetailText text={`2FA：${extractResponseMessage(job.totpSetupError)}`} className="row-error" onOpen={onOpenOperationDetail} />}
         {job.passwordAddError && <OperationDetailText text={`添加密码：${extractResponseMessage(job.passwordAddError)}`} className="row-error" onOpen={onOpenOperationDetail} />}
         {job.mailApiError && job.status === "email_otp" && <OperationDetailText text={job.mailApiError} className="mail-error" onOpen={onOpenOperationDetail} />}
@@ -4069,7 +4070,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="secondary-button icon-only-action"
             onClick={loginWeb}
             disabled={!webLoginAvailable || rowBusy || !job.canLoginWeb}
-            title={job.webLoginError || (job.canLoginWeb ? `${WEB_STATES[job.webSessionStatus || "absent"]}：登录 Web` : "当前状态不可登录 Web")}
+            title={job.autoRepairBlocked ? "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新登录并授权" : job.webLoginError || (job.canLoginWeb ? `${WEB_STATES[job.webSessionStatus || "absent"]}：登录 Web` : "当前状态不可登录 Web")}
             aria-label="登录 Web"
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <Globe2 size={13} />}
@@ -6498,7 +6499,7 @@ function proxyDistributionByIp(proxies) {
 
 function BoundProxyCell({ job }) {
   const proxies = Array.isArray(job.boundProxies) ? job.boundProxies : (job.boundIps || []).map((ipAddress) => ({ id: ipAddress, ipAddress, name: "" }));
-  const label = job.boundProxyStatus === "direct" ? "直连" : job.boundProxyStatus === "bound" ? "待获取" : "未绑定";
+  const label = job.banProxyReleasePending ? "解绑待重试" : job.boundProxyStatus === "direct" ? "直连" : job.boundProxyStatus === "bound" ? "待获取" : "未绑定";
   const visible = job.boundProxyStatus === "direct" ? [] : proxies;
   return <td className="bound-ip-cell" title={visible.length ? visible.map((proxy) => `${proxy.name}${proxy.ipAddress ? ` · ${proxy.ipAddress}` : ""}`).join("、") : label}>
     {visible.length ? visible.map((proxy) => <span className="bound-proxy" key={proxy.id}>
@@ -6515,7 +6516,8 @@ function sub2ApiStatusJobFields(status) {
     sub2apiPriority: status?.priority ?? null,
     sub2apiAccountId: status?.accountId || null,
     sub2apiAccountIds: Array.isArray(status?.accountIds) ? status.accountIds : [],
-    ...(Array.isArray(status?.boundIps) ? { boundIps: status.boundIps, boundProxyStatus: status.proxyIds?.length ? "bound" : "direct" } : {}),
+    ...(Array.isArray(status?.boundIps) ? { boundIps: status.boundIps, boundProxyStatus: status.boundProxyStatus || (status.proxyIds?.length ? "bound" : "direct") } : {}),
+    ...(status?.accountBlocked ? { autoRepairBlocked: true, autoRepairBlockedReason: status.accountBlockReason, webSessionStatus: "banned", canLoginWeb: false } : {}),
     ...(Array.isArray(status?.boundProxies) ? { boundProxies: status.boundProxies } : {}),
     sub2apiGroupIds: Array.isArray(status?.groupIds) ? status.groupIds : [],
     sub2apiRemoteStatus: status?.remoteStatus || null,

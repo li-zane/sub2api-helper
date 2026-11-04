@@ -45,7 +45,7 @@ export class WebSessionMonitor {
       entry.nextCheckAt = new Date(this.now()).toISOString();
       // One successful Web renewal may require a separate workspace/OAuth repair.
       // Persist this continuation; a restart must neither lose it nor reset cooldown.
-      entry.webRecoveryPending = success && webOnly && entry.repairReason === "expired";
+      entry.webRecoveryPending = success && webOnly && ["expired", "web_workspace_unavailable"].includes(entry.repairReason);
       await this.save();
     }
   }
@@ -82,14 +82,16 @@ export class WebSessionMonitor {
           entry.lastError = null;
           entry.lastSuccessAt = at;
           reason = result.repairReason || null;
-          followUp = entry.webRecoveryPending === true && Boolean(reason) && reason !== "expired";
+          followUp = entry.webRecoveryPending === true && Boolean(reason) && !["expired", "web_workspace_unavailable"].includes(reason);
           entry.webRecoveryPending = false;
           entry.status = reason ? "changed" : "valid";
         } catch (error) {
-          reason = /^SESSION_TOKEN_EXPIRED:/.test(error.message) ? "expired" : null;
-          entry.status = reason ? "expired" : "check_failed";
+          reason = /^SESSION_TOKEN_EXPIRED:/.test(error.message) ? "expired"
+            : /^SESSION_WORKSPACE_UNAVAILABLE:/.test(error.message) ? "web_workspace_unavailable" : null;
+          entry.status = reason === "expired" ? "expired" : reason ? "changed" : "check_failed";
           // Persist a diagnostic class, never upstream response/token/cookie text.
-          entry.lastError = reason ? "Web 登录态已确认失效" : "巡检未完成：网络、代理、权限或上游异常；保留原绑定";
+          entry.lastError = reason === "expired" ? "Web 登录态已确认失效" : reason ? "Web 凭据绑定的空间已停用，需要恢复 Web 登录"
+            : "巡检未完成：网络、代理、权限或上游异常；保留原绑定";
         }
         entry.repairReason = reason;
         await this.save();
@@ -113,7 +115,7 @@ export class WebSessionMonitor {
       catch (error) {
         const unauthorized = [error.status, error.remoteStatus, error.response?.status].some(status => Number(status) === 401)
           || /\bHTTP\s+401\b/i.test(error.message || "");
-        const terminal = /^SESSION_(?:TOKEN_EXPIRED|CREDENTIALS_UNAVAILABLE):/.test(error.message || "");
+        const terminal = /^SESSION_(?:TOKEN_EXPIRED|CREDENTIALS_UNAVAILABLE|WORKSPACE_UNAVAILABLE):/.test(error.message || "");
         const interrupted = () => this.stopped || !this.getSettings().enabled || this.isBusy(job);
         if (attempt === 3 || unauthorized || terminal || interrupted()) throw error;
         try { await delay(this.retryDelayMs * attempt, undefined, { signal: this.retryAbort.signal }); }

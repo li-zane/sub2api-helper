@@ -38,11 +38,11 @@ try {
 } finally { await monitor.stop(); await fs.rm(root, { recursive: true, force: true }); }
 
 for (const args of [
-  ["--stable-oauth"], ["--same-plan-space"], ["--pending-oauth"],
+  ["--stable-oauth"], ["--deactivated-token"], ["--same-plan-space"], ["--pending-oauth"],
   ["--pool-auth-error"], ["--pool-auth-error", "--manual-disabled"],
   ["--pool-auth-error", "--cooling"], ["--pool-auth-error", "--sync-failure"],
 ]) {
   const result = spawnSync(process.execPath, ["test/console-web-session-monitor-smoke.mjs", ...args], { stdio: "inherit", windowsHide: true });
   if (result.status !== 0) process.exit(result.status || 1);
 }
-console.log("WEB_RECOVERY_PASS 7 HTTP scenarios and durable continuation");
+console.log("WEB_RECOVERY_PASS 8 HTTP scenarios and durable continuation");

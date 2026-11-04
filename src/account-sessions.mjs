@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { isIP } from "node:net";
 import { CookieJar, ProtocolClient } from "./protocol-login.mjs";
 import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, setWebSessionState } from "./account-web-session.mjs";
-import { uniqueWorkspaceAccounts } from "./workspace-accounts.mjs";
+import { uniqueWorkspaceAccounts, webTokenWorkspaceId, workspaceProviderCode, isDeactivatedWorkspaceError } from "./workspace-accounts.mjs";
 
 import {
   TlsFingerprintTransport,
@@ -53,7 +53,10 @@ export async function probeAccountWebSession(job) {
   const savedId = session.web?.workspaceId || bundle?.accountId || listing.currentWorkspaceId;
   const selected = listing.workspaces.find(w => w.id === savedId);
   const available = selected && isAccountWorkspaceAvailable(selected);
-  const devices = available ? (await listAccountSessions(job, { refreshOnUnauthorized: false })).devices.map(d => ({
+  const tokenWorkspaceId = webTokenWorkspaceId(session.accessToken);
+  const tokenWorkspace = listing.workspaces.find(w => w.id === tokenWorkspaceId);
+  const invalidTokenWorkspace = Boolean(tokenWorkspaceId && !isAccountWorkspaceAvailable(tokenWorkspace));
+  const devices = available && !invalidTokenWorkspace ? (await listAccountSessions(job, { refreshOnUnauthorized: false })).devices.map(d => ({
     displayName: d.displayName, platform: d.platform, isCurrentDevice: d.isCurrentDevice,
     lastSignedInTimestamp: d.lastSignedInTimestamp, lastSignedInIp: d.lastSignedInIp,
   })) : undefined;
@@ -64,7 +67,8 @@ export async function probeAccountWebSession(job) {
   return {
     devices, workspaces, currentWorkspaceId: savedId,
     planType: available ? selected.planType : null,
-    repairReason: !available ? "workspace_unavailable"
+    repairReason: invalidTokenWorkspace ? "web_workspace_unavailable"
+      : !available ? "workspace_unavailable"
       : bundle?.accountId && bundle.accountId !== savedId ? "workspace_changed"
       : previousPlan && selected.planType && previousPlan !== selected.planType ? "plan_changed" : null,
   };
@@ -514,11 +518,20 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
       if (response.res.status === 401) throw new Error("SESSION_TOKEN_EXPIRED: Web 登录态已失效，请重新登录 Web");
       throw providerError(response.res.status, data);
     }
-    session.validation = { status: "valid", verifiedAt: new Date().toISOString() };
-    setWebSessionState(job, "valid", session.validation.verifiedAt);
+    const tokenWorkspaceId = webTokenWorkspaceId(session.accessToken);
+    const accounts = endpoint === "/accounts/check/v4-2023-04-27" ? normalizeAccountWorkspaces(data).workspaces : [];
+    if (tokenWorkspaceId && accounts.length && !isAccountWorkspaceAvailable(accounts.find(w => w.id === tokenWorkspaceId))) {
+      invalidateWebWorkspace(job, session, "workspace_unavailable");
+    } else {
+      session.validation = { status: "valid", verifiedAt: new Date().toISOString() };
+      setWebSessionState(job, "valid", session.validation.verifiedAt);
+    }
     loggedOut = method === "POST" && endpoint === "/accounts/logout_all";
     return { data, status: response.res.status, session };
   } catch (error) {
+    if (/^SESSION_WORKSPACE_UNAVAILABLE:/.test(error.message)) {
+      invalidateWebWorkspace(job, session, error.providerCode);
+    }
     if (/SESSION_TOKEN_EXPIRED|Web 会话返回了其他账号/.test(error.message)) {
       session.validation = { status: "expired", verifiedAt: session.validation?.verifiedAt || null };
       setWebSessionState(job, "expired", session.validation.verifiedAt);
@@ -535,12 +548,24 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
 }
 
 function providerError(status, data) {
+  const providerCode = workspaceProviderCode(data);
+  if (isDeactivatedWorkspaceError({ remoteStatus: status, providerCode })) {
+    return Object.assign(new Error(`SESSION_WORKSPACE_UNAVAILABLE: Web 凭据仍绑定已停用的工作空间（${providerCode}），需要重新登录 Web`), {
+      remoteStatus: status, providerCode,
+    });
+  }
   const raw = data?.error?.message || data?.message || data?.error || `HTTP ${status}`;
   const message = String(raw)
     .replace(/[\r\n]+/g, " ")
     .replace(/(bearer\s+|access_token\s*[=:]\s*|refresh_token\s*[=:]\s*)[^\s,}]+/gi, "$1<redacted>")
     .slice(0, 240);
-  return new Error(`SESSION_PROVIDER_ERROR: HTTP ${status}: ${message}`);
+  return Object.assign(new Error(`SESSION_PROVIDER_ERROR: HTTP ${status}: ${message}`), { remoteStatus: status, providerCode });
+}
+
+function invalidateWebWorkspace(job, session, code) {
+  session.validation = { status: "expired", reason: "workspace_unavailable", code,
+    verifiedAt: session.validation?.verifiedAt || null };
+  setWebSessionState(job, "expired", session.validation.verifiedAt);
 }
 
 async function readOAuthBundle(job) {

@@ -29,6 +29,9 @@ let replacementEnrollFailureSent = false;
 let workspaceHttpStatus = 200;
 let recoverWorkspaceOnLogin = true;
 let webSignInCount = 0;
+let workspaceFallback = false;
+let staleTokenContext = false;
+let workspaceErrorCode = "token_revoked";
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", base);
@@ -51,23 +54,28 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/__test/web-token-status") {
     const input = parseJson(body);
     workspaceHttpStatus = input.status;
+    workspaceFallback = input.workspaceMismatch === true;
+    staleTokenContext = workspaceFallback;
+    workspaceErrorCode = input.workspaceError ? "deactivated_workspace" : "token_revoked";
     recoverWorkspaceOnLogin = input.recoverOnLogin !== false;
     selectedEmail = input.email || selectedEmail;
     chatgptLoginComplete = true;
     return sendJson(res, 200, { ok: true });
   }
   if (req.method === "GET" && url.pathname === "/backend-api/accounts/check/v4-2023-04-27" && workspaceHttpStatus !== 200) {
-    return sendJson(res, workspaceHttpStatus, { error: { code: "token_revoked", message: "Encountered invalidated oauth token for user, failing request" } });
+    return sendJson(res, workspaceHttpStatus, { error: { code: workspaceErrorCode, message: workspaceErrorCode === "deactivated_workspace" ? "Payment Required" : "Encountered invalidated oauth token for user, failing request" } });
   }
   if (req.method === "GET" && url.pathname === "/backend-api/accounts/check/v4-2023-04-27") return sendJson(res, 200, {
     default_account_id: organizationWorkspaceId,
     accounts: [
-      { id: organizationWorkspaceId, structure: "workspace", plan_type: "team" },
+      { id: organizationWorkspaceId, structure: "workspace", plan_type: "team", is_deactivated: workspaceFallback },
       { id: personalWorkspaceId, structure: "personal", plan_type: "free" },
     ],
   });
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
-    const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url");
+    const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600,
+      ...(workspaceFallback ? { "https://api.openai.com/auth": { chatgpt_account_id: staleTokenContext ? organizationWorkspaceId : personalWorkspaceId } } : {}),
+    })).toString("base64url");
     return sendJson(res, 200, chatgptLoginComplete ? { accessToken: `web.${payload}.signature`, user: { email: selectedEmail } } : {});
   }
   if (req.method === "GET" && url.pathname === "/api/auth/csrf") return sendJson(res, 200, { csrfToken: "mock-csrf" });
@@ -86,6 +94,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/auth/signin/openai") {
     webSignInCount++;
     if (recoverWorkspaceOnLogin) workspaceHttpStatus = 200;
+    if (recoverWorkspaceOnLogin) staleTokenContext = false;
     chatgptWorkspaceSelected = false;
     chatgptLoginComplete = false;
     selectedEmail = url.searchParams.get("login_hint") || selectedEmail;
@@ -225,7 +234,7 @@ const server = http.createServer(async (req, res) => {
       page: { type: "workspace" },
       "oai-client-auth-session": {
         workspaces: [
-          { id: organizationWorkspaceId, kind: "organization" },
+          { id: organizationWorkspaceId, kind: "organization", is_deactivated: workspaceFallback },
           { id: personalWorkspaceId, kind: "personal" },
         ],
       },
@@ -263,7 +272,7 @@ const server = http.createServer(async (req, res) => {
       "oai-client-auth-session": {
         workspaces: [
           { id: personalWorkspaceId, kind: "personal" },
-          { id: organizationWorkspaceId, kind: "organization" },
+          { id: organizationWorkspaceId, kind: "organization", is_deactivated: workspaceFallback },
         ],
       },
     });
@@ -271,14 +280,14 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/accounts/workspace/select") {
     const payload = parseJson(body);
     if (!chatgptWorkspaceSelected && selectedEmail !== "skip-workspace@example.com") {
-      if (payload.workspace_id !== organizationWorkspaceId) {
+      if (payload.workspace_id !== (workspaceFallback ? personalWorkspaceId : organizationWorkspaceId)) {
         return sendJson(res, 400, { error: { message: "unexpected ChatGPT workspace" } });
       }
       chatgptWorkspaceSelected = true;
       workspaceSelectionCount += 1;
       return sendJson(res, 200, { continue_url: `${base}/web-callback`, page: { type: "external_url" } });
     }
-    if (payload.workspace_id !== organizationWorkspaceId) {
+    if (payload.workspace_id !== (workspaceFallback ? personalWorkspaceId : organizationWorkspaceId)) {
       return sendJson(res, 400, { error: { message: "unexpected Codex workspace" } });
     }
     workspaceSelectionCount += 1;
@@ -352,7 +361,7 @@ function mfaSession() {
     mfa_factors: [{ factor_type: "totp", id: factorId, metadata: {} }],
     mfa_challenge_factors: [{ factor_type: "totp", id: factorId, metadata: {} }],
     workspaces: [
-      { id: organizationWorkspaceId, kind: "organization" },
+      { id: organizationWorkspaceId, kind: "organization", is_deactivated: workspaceFallback },
       { id: personalWorkspaceId, kind: "personal" },
     ],
   };

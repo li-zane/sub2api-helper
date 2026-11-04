@@ -81,7 +81,7 @@ try {
 
   const server = await fs.readFile(path.join(root, "src/console-server.mjs"), "utf8");
   const admission = server.slice(server.indexOf("function canLoginWeb("), server.indexOf("function canSetupTotp("));
-  const canLoginWeb = vm.runInNewContext(admission + "\ncanLoginWeb;");
+  const canLoginWeb = vm.runInNewContext(admission + "\ncanLoginWeb;", { accountAutomationBlocked: () => false });
   const job = { email: "fixture@example.test", status: "failed", poolRefreshAction: "relogin", poolRefreshError: "WEB_PLAN_UNAVAILABLE", poolRefreshReady: false };
   assert.equal(canLoginWeb(job), false, "manual Web login remains guarded");
   assert.equal(canLoginWeb(job, { maintenance: true }), true, "failed refresh must not block maintenance forever");

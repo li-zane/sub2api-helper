@@ -13,7 +13,7 @@ import {
 import { normalizeCodexAuthMode, generateSub2ApiOAuth, exchangeSub2ApiOAuth, refreshSub2ApiOAuth, sub2ApiOAuthIdentity } from "./sub2api-oauth.mjs";
 import { getAccountBrowserIdentity } from "./account-browser-identity.mjs";
 import { readAccountWebSession, saveProtocolWebSession } from "./account-web-session.mjs";
-import { uniqueWorkspaceAccounts, isUsableWorkspaceAccount, isTeamWorkspaceAccount } from "./workspace-accounts.mjs";
+import { uniqueWorkspaceAccounts, isUsableWorkspaceAccount, isTeamWorkspaceAccount, webTokenWorkspaceId, workspaceProviderCode, isDeactivatedWorkspaceError } from "./workspace-accounts.mjs";
 
 const DEFAULT_CHATGPT_BASE = "https://chatgpt.com";
 const DEFAULT_AUTH_BASE = "https://auth.openai.com";
@@ -624,7 +624,7 @@ async function run() {
 
     async function selectCodexProxy() {
       const identity = await identifyWebPlan(client, { chatgptBase, web,
-        allowPersonalFallback: true, preferTeam: true });
+        allowPersonalFallback: true, preferTeam: true, verifyTokenWorkspace: true });
       web = { ...web, workspaceId: identity.workspaceId };
       codexOptions.currentWorkspaceId = identity.workspaceId || undefined;
       codexOptions.allowedWorkspaceIds = identity.workspaceId ? [identity.workspaceId] : undefined;
@@ -722,7 +722,7 @@ async function run() {
 
       try {
         if (args.webOnly) {
-          const identity = await identifyWebPlan(client, { chatgptBase, web, allowPersonalFallback: true, preferTeam: true });
+          const identity = await identifyWebPlan(client, { chatgptBase, web, allowPersonalFallback: true, preferTeam: true, verifyTokenWorkspace: true });
           web = { ...web, workspaceId: identity.workspaceId };
         } else {
           console.log("[2/5] Start Codex OAuth flow");
@@ -755,6 +755,7 @@ async function run() {
       if (sessionEmail && sessionEmail !== email.trim().toLowerCase()) throw new Error("WEB_LOGIN_ACCOUNT_MISMATCH: Web 会话与当前账号不匹配");
       const accessToken = session?.accessToken || session?.access_token;
       if (!accessToken) throw new Error("WEB_LOGIN_SESSION_MISSING: Web 会话尚未建立，请重新登录");
+      assertWebTokenWorkspace(accessToken, web?.workspaceId);
       webCredentials = { accessToken, expiresAt: session.expires || null };
     }
     await saveProtocolWebSession(webSessionPath, client, web, webCredentials);
@@ -1282,6 +1283,12 @@ async function reuseSavedWebLogin({ file, email, transport, chatgptBase, verbose
     return { client, reused: false };
   }
   const result = await client.request("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/`, timeoutMs: 30_000 });
+  let failureData;
+  try { failureData = JSON.parse(result.text); } catch {}
+  if (isDeactivatedWorkspaceError({ remoteStatus: result.res.status, providerCode: workspaceProviderCode(failureData) })) {
+    console.log("[web-session] Saved Web workspace is deactivated; continuing login with the same browser cookies.");
+    return { client, reused: false };
+  }
   if (result.res.status === 401) {
     console.log("[web-session] Saved Web session expired; continuing login with the same browser cookies.");
     return { client, reused: false };
@@ -1442,7 +1449,7 @@ export async function selectChatgptLoginWorkspaceIfNeeded(client, { authBase, pa
       // challenges, server errors and session 401 must not silently change space.
       const message = String(error?.message || "");
       const unavailable = /\bHTTP (?:400|402|403|404)\b/.test(message)
-        && /(?:workspace|account|organization)[_ -](?:deactivated|disabled|removed|deleted|not[_ -]found|unavailable|access[_ -]denied)|not[_ -](?:a[_ -])?member/i.test(message);
+        && /deactivated_workspace|(?:workspace|account|organization)[_ -](?:deactivated|disabled|removed|deleted|not[_ -]found|unavailable|access[_ -]denied)|not[_ -](?:a[_ -])?member/i.test(message);
       if (!unavailable || index === candidates.length - 1) throw error;
       // Remember the explicit rejection for this client/login only. A stale
       // discovery response must not select the rejected team again after fallback.
@@ -1734,7 +1741,7 @@ function decodeBase32Secret(value) {
   return Buffer.from(bytes);
 }
 
-export async function identifyWebPlan(client, { chatgptBase, web = null, allowPersonalFallback = false, preferTeam = false }) {
+export async function identifyWebPlan(client, { chatgptBase, web = null, allowPersonalFallback = false, preferTeam = false, verifyTokenWorkspace = false }) {
   const { data: session } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
   const accessToken = session?.accessToken || session?.access_token;
   if (!accessToken) throw new Error("WEB_PLAN_UNAVAILABLE: 网页登录会话未返回访问令牌，请重新登录");
@@ -1750,6 +1757,7 @@ export async function identifyWebPlan(client, { chatgptBase, web = null, allowPe
     // /api/auth/session may keep returning a revoked token with HTTP 200.
     // A 401 from the authenticated workspace endpoint requires real sign-in.
     if (error.status === 401) throw new Error("WEB_LOGIN_TOKEN_REVOKED: Web 会话令牌已被拒绝，需要重新登录", { cause: error });
+    if (isDeactivatedWorkspaceError(error)) throw new Error("WEB_LOGIN_WORKSPACE_UNAVAILABLE: Web 凭据绑定的空间已停用，需要重新登录", { cause: error });
     throw error;
   }
   const accounts = uniqueWorkspaceAccounts(payload).filter(a => !client.unavailableLoginWorkspaceIds?.has(a.id));
@@ -1774,10 +1782,18 @@ export async function identifyWebPlan(client, { chatgptBase, web = null, allowPe
     throw new Error("WEB_PLAN_UNAVAILABLE: 未确认当前工作空间，已停止按 PlanType 选择代理");
   }
   const workspaceId = selected.account_id || selected.id;
+  if (verifyTokenWorkspace) assertWebTokenWorkspace(accessToken, workspaceId);
   const planType = (tokenAccountId === workspaceId ? planTypeFromClaims(claims) : null)
     || normalizePlanType(selected.plan_type || selected.planType);
   if (!planType) throw new Error("WEB_PLAN_UNAVAILABLE: 当前工作空间未返回 PlanType");
   return { planType, workspaceId };
+}
+
+function assertWebTokenWorkspace(accessToken, workspaceId) {
+  const tokenWorkspaceId = webTokenWorkspaceId(accessToken);
+  if (tokenWorkspaceId && workspaceId && tokenWorkspaceId !== workspaceId) {
+    throw new Error("WEB_LOGIN_WORKSPACE_MISMATCH: Web token 与选中空间不一致，需要重新登录后确认真实空间绑定");
+  }
 }
 
 function requestCodexProxy(identity) {
@@ -2556,6 +2572,7 @@ function assertOk(result, label) {
   const body = text.replace(/\s+/g, " ").slice(0, 220);
   const error = new Error(`${label} failed with HTTP ${res.status}: ${body}`);
   error.status = res.status;
+  try { error.providerCode = workspaceProviderCode(JSON.parse(text)); } catch {}
   throw error;
 }
 
@@ -2711,7 +2728,7 @@ async function removeProtocolCheckpoint(checkpointPath) {
 }
 
 function isExpiredCheckpointError(error) {
-  return /WEB_LOGIN_TOKEN_REVOKED|CHECKPOINT_INVALID|SESSION_SELECTION_INVALID|CODEX_AUTH_LOGIN_REQUIRED|TOTP_ACCESS_TOKEN_MISSING|invalid_state|no longer valid|session.+(?:invalid|expired)|expired.+session/i.test(
+  return /WEB_LOGIN_TOKEN_REVOKED|WEB_LOGIN_WORKSPACE_(?:UNAVAILABLE|MISMATCH)|CHECKPOINT_INVALID|SESSION_SELECTION_INVALID|CODEX_AUTH_LOGIN_REQUIRED|TOTP_ACCESS_TOKEN_MISSING|invalid_state|no longer valid|session.+(?:invalid|expired)|expired.+session/i.test(
     String(error?.message || ""),
   );
 }

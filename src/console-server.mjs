@@ -162,6 +162,7 @@ const proxyQualityService = new ProxyQualityService({
 const consoleToken = crypto.randomBytes(24).toString("base64url");
 const jobs = new Map();
 const automationBlockWrites = new Map();
+const automationBlockRunning = new Set();
 const customSmsPoolPositions = new Map();
 const emailJobLocks = new Map();
 let outputSyncPromise = null;
@@ -256,7 +257,7 @@ const webSessionMonitor = new WebSessionMonitor({
   },
   lock: (job, fn) => withEmailJobLock(job.email, fn),
   repair: async (job, { reason }) => {
-    const webOnly = !job.resultSaved || reason === "expired";
+    const webOnly = !job.resultSaved || ["expired", "web_workspace_unavailable"].includes(reason);
     if (webOnly) {
       job.webSessionMonitorRepair = true;
       await startWebLogin(job, { maintenance: true });
@@ -979,6 +980,7 @@ async function handleApi(req, res, requestUrl) {
       // not hide an OAuth account or contribute to either IP/direct counts.
       if (account.platform !== "openai" || account.type !== "oauth") continue;
       const email = sub2ApiAccountEmail(account);
+      if (accountAutomationBlocked(email) || sub2ApiPermanentAccountFailure(account)) continue;
       if (email && countedEmails.has(email)) continue;
       if (email) countedEmails.add(email);
       const job = ["sub2api", "plan"].includes(accountProxyMode) ? findJobByEmail(email) : null;
@@ -994,7 +996,7 @@ async function handleApi(req, res, requestUrl) {
       for (const job of listUniqueJobs()) {
         // A login/canceled task is not an OAuth account until it has saved an
         // authorization result. Pool OAuth records were already counted above.
-        if (!job.resultSaved || countedEmails.has(job.email.toLowerCase())) continue;
+        if (accountAutomationBlocked(job.email) || !job.resultSaved || countedEmails.has(job.email.toLowerCase())) continue;
         if (!normalizeStoredProxyId(job.assignedProxyId)) directAccountCount += 1;
         const proxy = proxiesById.get(normalizeStoredProxyId(job.assignedProxyId));
         if (!proxy) continue;
@@ -1075,6 +1077,7 @@ async function handleApi(req, res, requestUrl) {
       sendJson(res, 404, { error: "Login flow not found" });
       return;
     }
+    if (body.enabled && accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，请先完成重新登录授权以确认恢复");
     const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
     if (!config?.baseUrl || !config?.adminApiKey) throw httpError(409, "请先配置 Sub2API 后端和管理员 API Key");
     const state = await loadSub2ApiAccountStatus({ forceRefresh: true });
@@ -1526,7 +1529,7 @@ function normalizeJobFilters(value) {
   return {
     search: search || null,
     lockedOnly,
-    webSession: ["absent", "saved", "valid", "expired"].includes(source.webSession) ? source.webSession : null,
+    webSession: ["absent", "saved", "valid", "expired", "banned"].includes(source.webSession) ? source.webSession : null,
     accountType: ["password_totp", "pool_only"].includes(accountTypeValue) ? accountTypeValue : null,
     status: JOB_STATUS_FILTER_VALUES.includes(statusValue) ? statusValue : null,
     planType: planTypeValue || null,
@@ -1550,7 +1553,7 @@ function matchesJobFilters(job, filters) {
     const proxyMatch = job.assignedProxyId ? String(job.assignedProxyId).includes(q) : false;
     if (!emailMatch && !remarkMatch && !planMatch && !proxyMatch) return false;
   }
-  if (filters.webSession && (job.webSessionStatus || "absent") !== filters.webSession) return false;
+  if (filters.webSession && (accountAutomationBlocked(job.email) ? "banned" : job.webSessionStatus || "absent") !== filters.webSession) return false;
   if (filters.accountType === "pool_only" && !job.poolOnly) return false;
   if (filters.accountType === "password_totp"
     && (job.poolOnly || job.loginMode !== "password" || !hasJobTotpKey(job))) return false;
@@ -2150,6 +2153,7 @@ function webLoginCheckpointPath(job) {
 }
 
 async function startWebLogin(job, { maintenance = false } = {}) {
+  if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新登录并授权");
   if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
   await reloadMissingJobCredentials(job);
   if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号当前不能登录 Web");
@@ -2197,7 +2201,9 @@ async function finishWebLogin(job, code, signal, message = null) {
     job.webLoginCompletedAt = new Date().toISOString();
     job.webSessionAvailable = true;
   }
-  job.prompt = success ? "Web 登录成功，登录态已保存；原 Codex 授权保持不变" : `Web 登录未完成：${failure}`;
+  if (accountAutomationBlocked(job.email)) job.status = "banned";
+  job.prompt = accountAutomationBlocked(job.email) ? job.banProxyReleasePending ? "账号已确认封禁，IP 解绑待重试" : "账号已确认封禁，已停止自动化并解除 IP 绑定"
+    : success ? "Web 登录成功，登录态已保存；原 Codex 授权保持不变" : `Web 登录未完成：${failure}`;
   job.webLoginPreviousState = null;
   job.webLoginResultSaved = false;
   if (job.webSessionMonitorRepair) {
@@ -2241,6 +2247,7 @@ function restoreWebLoginState(job, metadata) {
 }
 
 async function forceReloginJob(job, options = {}, context = {}) {
+  await automationBlockWrites.get(job.email.toLowerCase());
   if (!canForceRelogin(job)) {
     throw httpError(409, "当前任务正在进行中，不能重新登录");
   }
@@ -3717,7 +3724,7 @@ async function buildSub2ApiUploadPayload(downloadable) {
 }
 
 async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2ApiProfileState(), { recoverAuthorization = false } = {}) {
-  const downloadable = selected.filter((job) => job.resultSaved);
+  const downloadable = selected.filter((job) => job.resultSaved && !accountAutomationBlocked(job.email));
   if (downloadable.length === 0) throw httpError(409, "选中的任务里没有已完成的导入文件");
   if (accountProxyMode === "sub2api") {
     const unassigned = downloadable.filter((job) => !normalizeStoredProxyId(job.assignedProxyId));
@@ -4774,6 +4781,7 @@ async function runSub2ApiMonitor(trigger = "scheduled") {
       const accountListing = await listSub2ApiAccounts(config, { withMeta: true });
       const allRemoteAccounts = accountListing.accounts;
       if (accountListing.complete) {
+        await reconcileSub2ApiAccountBans(config, allRemoteAccounts);
         summary.datePrioritySync = await syncImportDatePriorities(config, accountListing, profileState);
         await fallBackExpiredSub2ApiProxies(config, profileState, allRemoteAccounts, summary);
         const previousPlanTypes = sub2ApiMonitorState.planTypesBackend === backend
@@ -4995,6 +5003,7 @@ async function fallBackExpiredSub2ApiProxies(config, profileState, accounts, sum
     for (const account of accounts) {
       if (shuttingDown) return;
       const job = findJobByEmail(sub2ApiAccountEmail(account));
+      if (accountAutomationBlocked(sub2ApiAccountEmail(account))) continue;
       if (accountProxyMode === "plan" && !hasPlanProxyBinding(job)) continue;
       const accountId = normalizeSub2ApiAccountId(account?.id);
       const assignedProxyId = normalizeStoredProxyId(job?.assignedProxyId);
@@ -5029,6 +5038,7 @@ async function fallBackExpiredSub2ApiProxies(config, profileState, accounts, sum
     if (target === proxyId) continue;
     for (const account of accounts) {
       const accountId = normalizeSub2ApiAccountId(account?.id);
+      if (accountAutomationBlocked(sub2ApiAccountEmail(account))) continue;
       if (!accountId || Number(account?.proxy_id) !== proxyId) continue;
       try {
         await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
@@ -5290,6 +5300,7 @@ async function buildSub2ApiAccountUpdate(localAccount, accountConfig, remoteAcco
 }
 
 async function sub2ApiProxyFieldsForAccount(accountConfig, email, remoteAccount = {}) {
+  if (accountAutomationBlocked(email)) return { proxy_id: 0 };
   if (accountProxyMode === "plan") {
     const job = findJobByEmail(email);
     return hasPlanProxyBinding(job) ? { proxy_id: normalizeStoredProxyId(job.assignedProxyId) || 0 } : {};
@@ -5617,6 +5628,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
     const remoteAccounts = listing.accounts;
     await listSub2ApiProxies(config).catch(() => []);
     await importSub2ApiPoolOnlyAccounts(remoteAccounts);
+    await reconcileSub2ApiAccountBans(config, remoteAccounts);
     await pullSub2ApiRemarks(listing, config, versions);
     const accounts = new Map();
     const fetchedAt = new Date().toISOString();
@@ -5685,9 +5697,10 @@ async function importSub2ApiPoolOnlyAccounts(remoteAccounts) {
       const outputDir = path.join(OUTPUT_ROOT, id);
       const createdAt = new Date().toISOString();
       const planType = extractPlanTypeFromAccount(account, { preferJwt: false }) || null;
+      const blockedReason = sub2ApiPermanentAccountFailure(account);
       await fs.mkdir(outputDir, { recursive: true });
       // OAuth tokens stay in the protected export file; status APIs expose only metadata.
-      const proxy = accountProxyMode === "sub2api"
+      const proxy = !blockedReason && accountProxyMode === "sub2api"
         ? (await assignSub2ApiProxies([{ email, assignedProxyId: normalizeStoredProxyId(account.proxy_id) }])).get(email)
         : null;
       if (account.credentials?.access_token || account.credentials?.refresh_token) {
@@ -5702,7 +5715,9 @@ async function importSub2ApiPoolOnlyAccounts(remoteAccounts) {
         email,
         remark: typeof account.notes === "string" ? account.notes : "",
         pool_only: true,
-        status: "completed",
+        status: blockedReason ? "banned" : "completed",
+        auto_repair_blocked: Boolean(blockedReason),
+        auto_repair_blocked_reason: blockedReason,
         prompt: "已从 Sub2API 号池同步",
         plan_type: planType,
         login_mode: "manual",
@@ -5710,7 +5725,7 @@ async function importSub2ApiPoolOnlyAccounts(remoteAccounts) {
         completed_at: createdAt,
         last_operation_at: createdAt,
         last_operation_type: "sub2api_sync",
-        assigned_proxy_id: proxy?.id || normalizeStoredProxyId(account.proxy_id),
+        assigned_proxy_id: blockedReason ? null : proxy?.id || normalizeStoredProxyId(account.proxy_id),
       }, null, 2)}\n`, { mode: 0o600 });
       if (proxy?.url) await saveStoredLoginCredentials(email, { proxyUrl: proxy.url });
       await syncCompletedOutputs(true);
@@ -5731,6 +5746,8 @@ function publicSub2ApiAccountStatusState(state = sub2ApiAccountStatusCache) {
 }
 
 function publicSub2ApiAccountStatusEntry(entry) {
+  const blocked = accountAutomationBlocked(entry.email);
+  const job = findJobByEmail(entry.email);
   return {
     email: entry.email,
     remark: entry.remark ?? null,
@@ -5745,6 +5762,9 @@ function publicSub2ApiAccountStatusEntry(entry) {
     planType: entry.planType || null,
     groupIds: [...(entry.groupIds || [])],
     remoteStatus: entry.remoteStatus || null,
+    accountBlocked: blocked,
+    accountBlockReason: blocked ? job?.autoRepairBlockedReason || null : null,
+    boundProxyStatus: blocked && !job?.banProxyReleasePending ? "unbound" : entry.proxyIds?.length ? "bound" : "direct",
     usage: publicSub2ApiUsage(entry.usage),
     fetchedAt: entry.fetchedAt || null,
   };
@@ -6377,6 +6397,7 @@ function planCodexProxyRoute(job, workspaceId) {
 }
 
 async function refreshJobProxyBinding(job) {
+  if (accountAutomationBlocked(job.email)) { job.assignedProxyId = null; job.proxyUrl = null; job.boundIp = null; job.boundProxyName = null; return; }
   if (accountProxyMode === "plan") {
     if (hasPlanProxyBinding(job)) await restorePlanProxyBinding(job);
     else job.fixedProxy = false;
@@ -6403,6 +6424,7 @@ function proxyIpKey(proxy) {
 }
 
 async function assignSub2ApiProxies(accounts, { reassign = false } = {}) {
+  if (accounts.some(account => accountAutomationBlocked(account.email))) throw httpError(409, "账号已确认封禁，不再分配代理 IP");
   const run = accountProxyAssignmentPromise.catch(() => {}).then(async () => {
     const config = sub2ApiSettingsConfig;
     if (!config?.baseUrl || !config?.adminApiKey) throw httpError(409, "请先配置 Sub2API 后端和管理员 API Key");
@@ -6431,6 +6453,7 @@ async function assignSub2ApiProxies(accounts, { reassign = false } = {}) {
     for (const remote of listing.accounts) {
       const email = String(sub2ApiAccountEmail(remote) || "").toLowerCase();
       if (email) remoteEmails.add(email);
+      if (accountAutomationBlocked(email) || sub2ApiPermanentAccountFailure(remote)) continue;
       const local = findJobByEmail(email);
       const assignedProxyId = targets.has(email)
         ? (accountProxyMode === "sub2api"
@@ -6457,7 +6480,7 @@ async function assignSub2ApiProxies(accounts, { reassign = false } = {}) {
     }
     for (const job of jobs.values()) {
       const email = String(job.email || "").toLowerCase();
-      if (!email || targets.has(email) || remoteEmails.has(email)) continue;
+      if (!email || accountAutomationBlocked(email) || targets.has(email) || remoteEmails.has(email)) continue;
       const proxy = proxyById.get(normalizeStoredProxyId(accountProxyReservations.get(email)?.proxyId || job.assignedProxyId));
       if (!proxy) continue;
       const group = ipGroups.get(proxyIpKey(proxy));
@@ -6753,6 +6776,7 @@ async function exportSourceAccounts(res, ids) {
 function publicJob(job) {
   const autoRepair = getAutoRepairEligibility(job);
   const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
+  const blocked = accountAutomationBlocked(job.email);
   return {
     id: job.id,
     email: job.email,
@@ -6813,7 +6837,7 @@ function publicJob(job) {
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
     webSessionAvailable: Boolean(job.webSessionAvailable),
-    webSessionStatus: job.webSessionStatus || "absent",
+    webSessionStatus: blocked ? "banned" : job.webSessionStatus || "absent",
     webSessionVerifiedAt: job.webSessionVerifiedAt || null,
     webLoginAttemptId: job.webLoginAttemptId || null,
     webLoginPending: Boolean(job.webLoginPreviousState),
@@ -6828,7 +6852,7 @@ function publicJob(job) {
     assignedProxyId: normalizeStoredProxyId(job.assignedProxyId),
     boundIps: publicBoundIps(sub2ApiStatus.inPool === true ? sub2ApiStatus.proxyIds || [] : [job.assignedProxyId].filter(Boolean), job),
     boundProxies: publicBoundProxies(sub2ApiStatus.inPool === true ? sub2ApiStatus.proxyIds || [] : [job.assignedProxyId].filter(Boolean), job),
-    boundProxyStatus: sub2ApiStatus.inPool === true ? (sub2ApiStatus.proxyIds?.length ? "bound" : "direct")
+    boundProxyStatus: blocked && !job.banProxyReleasePending ? "unbound" : sub2ApiStatus.inPool === true ? (sub2ApiStatus.proxyIds?.length ? "bound" : "direct")
       : job.assignedProxyId ? "bound" : job.authorizationProxySelected ? "direct" : "unbound",
     canSwitchProxy: jobCanSwitchProxy(job),
     poolRefreshReady: Boolean(job.poolRefreshReady),
@@ -6839,6 +6863,9 @@ function publicJob(job) {
     autoRepairEligibilityReason: autoRepair.reason,
     autoRepairBlocked: Boolean(job.autoRepairBlocked),
     autoRepairBlockedReason: job.autoRepairBlockedReason || null,
+    banProxyReleasePending: Boolean(job.banProxyReleasePending),
+    banProxyReleaseError: job.banProxyReleaseError || null,
+    banProxyReleasedAt: job.banProxyReleasedAt || null,
     autoRepairLastAttemptAt: job.autoRepairLastAttemptAt || null,
     autoRepairLastSuccessAt: job.autoRepairLastSuccessAt || null,
     autoRepairLastError: job.autoRepairLastError || null,
@@ -7077,7 +7104,7 @@ function publicSelectionJob(job) {
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
-    webSessionStatus: job.webSessionStatus || "absent",
+    webSessionStatus: accountAutomationBlocked(job.email) ? "banned" : job.webSessionStatus || "absent",
     canLogoutAllSessions: canLogoutAllSessions(job),
     canSwitchProxy: jobCanSwitchProxy(job),
     canSetupTotp: canSetupTotp(job),
@@ -7095,7 +7122,7 @@ function canLoginWeb(job, { maintenance = false } = {}) {
   // unchanged, but let maintenance re-check it under the existing retry cooldown.
   const failedRefresh = maintenance && !job.child && !job.poolRefreshReady && Boolean(job.poolRefreshError)
     && ["failed", "mfa_failed", "reauth_required", "resume_available"].includes(job.status);
-  return canForceRelogin(job) && (!job.poolRefreshAction || failedRefresh) && !job.autoRepairOperation
+  return !accountAutomationBlocked(job.email) && canForceRelogin(job) && (!job.poolRefreshAction || failedRefresh) && !job.autoRepairOperation
     && !["queued", "running"].includes(job.autoTaskStatus);
 }
 
@@ -7207,13 +7234,15 @@ function clearAutoRepairBlock(job) {
   job.autoRepairBlocked = false;
   job.autoRepairBlockedReason = null;
   job.autoRepairBlockedAt = null;
+  job.banProxyReleasePending = false;
+  job.banProxyReleaseError = null;
 }
 
-function markAutoRepairBlocked(job, reason) {
+function markAutoRepairBlocked(job, reason, context = {}) {
   const alreadyBlocked = job.autoRepairBlocked;
   job.autoRepairBlocked = true;
   job.autoRepairBlockedReason = String(reason || "账号已被永久停用").slice(0, 500);
-  job.autoRepairBlockedAt = new Date().toISOString();
+  job.autoRepairBlockedAt ||= new Date().toISOString();
   job.autoRepairLastError = job.autoRepairBlockedReason;
   job.autoRepairPendingAccountIds = [];
   job.autoRepairPendingBackend = null;
@@ -7221,12 +7250,29 @@ function markAutoRepairBlocked(job, reason) {
   if (!alreadyBlocked) appendJobLog(job, "[monitor] 已确认账号被封禁、删除或永久停用，已停止该账号自动化。\n");
   const email = job.email.toLowerCase();
   modelFingerprint.invalidateAccount(email);
+  if (automationBlockRunning.has(email)) return;
+  automationBlockRunning.add(email);
   const operation = (automationBlockWrites.get(email) || Promise.resolve()).catch(() => {}).then(async () => {
     for (const related of jobs.values()) {
       if (related.email.toLowerCase() !== email) continue;
       related.autoRepairBlocked = true;
       related.autoRepairBlockedReason = job.autoRepairBlockedReason;
       related.autoRepairBlockedAt = job.autoRepairBlockedAt;
+      if (!isTerminalStatus(related.status)) {
+        related.child?.kill("SIGTERM");
+        related.queuedMode = null;
+        related.queueRunId = null;
+      }
+      related.status = "banned";
+      related.banProxyReleasePending = true;
+      related.banProxyReleaseError = null;
+      related.assignedProxyId = null;
+      related.authorizationProxySelected = false;
+      related.proxyUrl = null;
+      related.boundIp = null;
+      related.boundProxyName = null;
+      related.fixedProxy = false;
+      related.prompt = "账号已确认封禁，已停止自动化；正在解除 IP 绑定";
       clearPoolRefreshTimer(related);
       related.poolRefreshAction = null; related.poolRefreshDueAt = null; related.poolRefreshReady = false;
       if (["pending", "running"].includes(related.autoTaskStatus)) {
@@ -7234,14 +7280,90 @@ function markAutoRepairBlocked(job, reason) {
       }
       await saveJobMetadata(related);
     }
+    accountProxyReservations.delete(email);
     if (overloadMonitor.snapshot(email).enabled) await overloadMonitor.setEnabled(email, false);
     const cooldown = overloadCooldown.accounts.get(email);
     if (cooldown?.enabled || cooldown?.resumeAccountIds?.length) await overloadCooldown.blockAccount(email);
     const override = modelFingerprint.snapshot(email).override;
     if (override.enabled !== false) await modelFingerprint.saveOverride(email, { ...override, enabled: false });
-  });
+    try {
+      await releaseBlockedAccountProxies(email, context);
+      for (const related of jobs.values()) {
+        if (related.email.toLowerCase() !== email || !related.autoRepairBlocked) continue;
+        related.banProxyReleasePending = false;
+        related.banProxyReleasedAt = new Date().toISOString();
+        related.prompt = "账号已确认封禁，已停止自动化并解除 IP 绑定";
+        await saveJobMetadata(related);
+      }
+    } catch (error) {
+      for (const related of jobs.values()) {
+        if (related.email.toLowerCase() !== email || !related.autoRepairBlocked) continue;
+        related.banProxyReleaseError = String(error?.message || error).slice(0, 300);
+        related.prompt = "账号已确认封禁，IP 解绑待重试";
+        await saveJobMetadata(related);
+      }
+    }
+  }).finally(() => automationBlockRunning.delete(email));
   automationBlockWrites.set(email, operation);
   void operation.catch(error => console.warn(`[warn] 自动化关闭状态保存失败：${error.message}`));
+}
+
+async function releaseBlockedAccountProxies(email, { config = sub2ApiSettingsConfig || sub2ApiMonitorConfig, accounts = null } = {}) {
+  // Clear only the proxy field; preserve saved password and 2FA credentials.
+  const stored = await credentialStore.load(email);
+  if (stored.proxyUrl) await credentialStore.save(email, { ...stored, proxyUrl: "" });
+  if (!config?.baseUrl || !config?.adminApiKey) return;
+  if (!accounts) {
+    const listing = await listSub2ApiAccounts(config, { withMeta: true });
+    if (!listing.complete) throw new Error("号池账号列表不完整，IP 解绑待重试");
+    accounts = listing.accounts;
+  }
+  for (const account of accounts) {
+    if (account.platform !== "openai" || account.type !== "oauth" || sub2ApiAccountEmail(account) !== email) continue;
+    const id = normalizeSub2ApiAccountId(account.id);
+    if (!id || !accountAutomationBlocked(email)) continue;
+    if (monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiSettingsConfig || sub2ApiMonitorConfig)) throw new Error("号池后端已变化，IP 解绑待重试");
+    if (normalizeStoredProxyId(account.proxy_id)) {
+      await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ proxy_id: 0 }) });
+      account.proxy_id = 0;
+    }
+    if (account.schedulable !== false) {
+      await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}/schedulable`, { method: "POST", body: JSON.stringify({ schedulable: false }) });
+      account.schedulable = false;
+    }
+  }
+  if (sub2ApiAccountStatusCache.backend === monitorBackendIdentity(config)) {
+    const cached = sub2ApiAccountStatusCache.accounts.get(email);
+    if (cached) { cached.proxyIds = []; cached.enabled = false; }
+  }
+}
+
+function sub2ApiPermanentAccountFailure(account) {
+  if (account.platform !== "openai" || account.type !== "oauth") return null;
+  const reason = typeof account.error_message === "string" ? account.error_message : JSON.stringify(account.error_message || account.error || "");
+  if (String(account.status).toLowerCase() === "banned") return reason || "Sub2API 账号已标记封禁";
+  return isPermanentAccountFailure(reason) ? reason : null;
+}
+
+async function reconcileSub2ApiAccountBans(config, accounts) {
+  const emails = new Map();
+  for (const account of accounts) {
+    const email = sub2ApiAccountEmail(account), job = findJobByEmail(email);
+    if (!job) continue;
+    const reason = sub2ApiPermanentAccountFailure(account);
+    if ((reason && (!job.autoRepairBlocked || !job.banProxyReleasedAt))
+      || (accountAutomationBlocked(email) && (job.banProxyReleasePending || normalizeStoredProxyId(account.proxy_id) || account.schedulable !== false))) {
+      emails.set(email, { job, reason: reason || job.autoRepairBlockedReason });
+    }
+  }
+  for (const job of jobs.values()) {
+    const email = job.email.toLowerCase();
+    if (job.autoRepairBlocked && job.banProxyReleasePending && !emails.has(email)) emails.set(email, { job, reason: job.autoRepairBlockedReason });
+  }
+  for (const [email, { job, reason }] of emails) {
+    markAutoRepairBlocked(job, reason, { config, accounts });
+    await automationBlockWrites.get(email);
+  }
 }
 
 function accountAutomationBlocked(email) {
@@ -8160,6 +8282,9 @@ function restoredAutoRepairState(metadata = {}) {
     authAutomationAttempt: null,
     autoRepairBlocked: metadata.auto_repair_blocked === true,
     autoRepairBlockedReason: metadata.auto_repair_blocked_reason || null,
+    banProxyReleasePending: metadata.ban_proxy_release_pending === true,
+    banProxyReleaseError: metadata.ban_proxy_release_error || null,
+    banProxyReleasedAt: metadata.ban_proxy_released_at || null,
     autoRepairBlockedAt: metadata.auto_repair_blocked_at || null,
     autoRepairLastAttemptAt: metadata.auto_repair_last_attempt_at || null,
     autoRepairLastSuccessAt: metadata.auto_repair_last_success_at || null,
@@ -8932,6 +9057,9 @@ async function saveJobMetadata(job) {
         last_auth_requirements: job.lastAuthRequirements || null,
         auto_repair_blocked: Boolean(job.autoRepairBlocked),
         auto_repair_blocked_reason: job.autoRepairBlockedReason || null,
+        ban_proxy_release_pending: Boolean(job.banProxyReleasePending),
+        ban_proxy_release_error: job.banProxyReleaseError || null,
+        ban_proxy_released_at: job.banProxyReleasedAt || null,
         auto_repair_blocked_at: job.autoRepairBlockedAt || null,
         auto_repair_last_attempt_at: job.autoRepairLastAttemptAt || null,
         auto_repair_last_success_at: job.autoRepairLastSuccessAt || null,
@@ -9200,7 +9328,7 @@ function sessionApiError(error, job) {
   const message = String(error?.message || "SESSION_PROVIDER_ERROR: 会话服务请求失败")
     .replace(/[\r\n]+/g, " ")
     .slice(0, 320);
-  const status = /SESSION_(?:CREDENTIALS_UNAVAILABLE|TOKEN_EXPIRED)/.test(message)
+  const status = /SESSION_(?:CREDENTIALS_UNAVAILABLE|TOKEN_EXPIRED|WORKSPACE_UNAVAILABLE)/.test(message)
     ? 409
     : /SESSION_(?:TARGET_INVALID|CURRENT_DEVICE)/.test(message)
       ? 400
@@ -9221,7 +9349,7 @@ function accountUsageApiError(error) {
   const message = String(error?.message || "ACCOUNT_USAGE_PROVIDER_ERROR: Sub2API 用量同步失败")
     .replace(/[\r\n]+/g, " ")
     .slice(0, 320);
-  const status = /ACCOUNT_USAGE_CREDENTIALS_UNAVAILABLE|SESSION_CREDENTIALS_UNAVAILABLE|SESSION_TOKEN_EXPIRED/.test(message)
+  const status = /ACCOUNT_USAGE_CREDENTIALS_UNAVAILABLE|SESSION_CREDENTIALS_UNAVAILABLE|SESSION_TOKEN_EXPIRED|SESSION_WORKSPACE_UNAVAILABLE/.test(message)
     ? 409
     : /SESSION_PROVIDER_ERROR: HTTP 401/.test(message)
       ? 401

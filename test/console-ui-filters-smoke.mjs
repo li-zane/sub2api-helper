@@ -54,7 +54,8 @@ try {
   assert.equal(search.filter.search, "BUSINESS");
   assert.equal((await get("?search=primary")).jobs[0].email, fixture[0].email);
   assert.equal((await get("?webSession=valid")).pagination.total, 0);
-  assert.equal((await get("?webSession=absent")).pagination.total, 3);
+  assert.equal((await get("?webSession=absent")).pagination.total, 2);
+  assert.deepEqual((await get("?webSession=banned")).jobs.map(job => job.email), [fixture[2].email]);
   const locked = await get("?lockedOnly=true");
   assert.deepEqual(locked.jobs.map(job => job.email), [fixture[2].email]);
   assert.equal(locked.filter.lockedOnly, true);

@@ -23,6 +23,19 @@ async (page) => {
     check(activeColor !== inactiveColor, "Web filter active styling does not follow its selected value");
   });
 
+  await test("banned-account-Web-state", async () => {
+    const filter = page.getByRole("combobox", { name: "筛选 Web 登录态", exact: true });
+    await filter.selectOption("banned");
+    await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 1);
+    const banned = page.locator("tr.job-row");
+    check(await banned.getByText("账号封禁", { exact: true }).isVisible(), "ban must override the ordinary Web state");
+    check(await banned.getByRole("button", { name: "登录 Web", exact: true }).isDisabled(), "known bans must not offer Web login");
+    check((await banned.getByRole("button", { name: "登录 Web", exact: true }).getAttribute("title")).includes("封禁"), "disabled Web login must explain the ban");
+    check(await banned.locator(".bound-ip-cell").innerText() === "未绑定", "released ban must not appear as direct or bound");
+    await filter.selectOption("");
+    await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
+  });
+
   await test("exact-email-list-filter", async () => {
     const button = page.getByRole("button", { name: "邮箱列表筛选", exact: true });
     check(await button.count() === 1, "email-list control missing");

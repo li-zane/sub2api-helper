@@ -15,7 +15,8 @@ const id = "11111111-1111-4111-8111-000000000001";
 const email = "monitored@example.test";
 const pendingOAuth = process.argv.includes("--pending-oauth");
 const failedRefresh = process.argv.includes("--failed-refresh") || pendingOAuth;
-const stableOAuth = process.argv.includes("--stable-oauth");
+const deactivatedToken = process.argv.includes("--deactivated-token");
+const stableOAuth = process.argv.includes("--stable-oauth") || deactivatedToken;
 const authRecovery = process.argv.includes("--pool-auth-error");
 const manualDisabled = process.argv.includes("--manual-disabled");
 const cooling = process.argv.includes("--cooling");
@@ -32,7 +33,8 @@ const resultFile = path.join(dir, "sub2api-import-oauth.json");
 const traceFile = path.join(root, "trace.json");
 let authStatus = 200;
 let holdAuth = false, unblockAuth;
-const token = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
+const tokenFor = workspace => `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, ...(deactivatedToken ? { "https://api.openai.com/auth": { chatgpt_account_id: workspace } } : {}) })).toString("base64url")}.signature`;
+const token = tokenFor("personal"), deadToken = tokenFor("old");
 const remoteAccount = { id: 10, platform: "openai", type: "oauth", status: "active", proxy_id: 1, credentials: { email, plan_type: initialPlan, access_token: "old-Codex", refresh_token: "old-refresh" }, extra: {} };
 const updates = [];
 const recoveries = [];
@@ -69,7 +71,7 @@ const upstream = http.createServer((req, res) => {
   if (p === "/api/auth/session") {
     const respond = () => {
       res.statusCode = authStatus;
-      res.end(JSON.stringify(authStatus !== 200 ? { message: "temporary failure" } : req.headers.cookie?.includes("renewed") ? { user: { email }, accessToken: token } : {}));
+      res.end(JSON.stringify(authStatus !== 200 ? { message: "temporary failure" } : deactivatedToken && req.headers.cookie?.includes("context-old") ? { user: { email }, accessToken: deadToken } : req.headers.cookie?.includes("renewed") ? { user: { email }, accessToken: token } : {}));
     };
     if (holdAuth) { unblockAuth = respond; return; }
     return respond();
@@ -79,7 +81,10 @@ const upstream = http.createServer((req, res) => {
     personal: { account: { account_id: "personal", structure: "personal", plan_type: "free", can_access_with_session: true } },
     ...(failedRefresh ? { personalAlias: { account: { account_id: "personal", structure: "personal", plan_type: "free", can_access_with_session: true } } } : {}),
   } }));
-  if (p.endsWith("/accounts/sessions")) return res.end(JSON.stringify({ devices: [{ session_id: "same-browser", display_name: "Persistent browser", is_current_device: true, last_signed_in_ip_address: "203.0.113.4" }] }));
+  if (p.endsWith("/accounts/sessions")) {
+    if (deactivatedToken && req.headers.authorization === `Bearer ${deadToken}`) { res.statusCode=402;return res.end(JSON.stringify({error:{code:"deactivated_workspace",message:"Payment Required"}})); }
+    return res.end(JSON.stringify({ devices: [{ session_id: "same-browser", display_name: "Persistent browser", is_current_device: true, last_signed_in_ip_address: "203.0.113.4" }] }));
+  }
   res.statusCode = 404; res.end("{}");
 });
 await new Promise(r => pool.listen(0, "127.0.0.1", r));
@@ -111,8 +116,8 @@ async function api(route, body) {
 try {
   await fs.mkdir(dir, { recursive: true });
   const identity = await getAccountBrowserIdentity(email, { root: path.join(output, "browser-identities") });
-  const jar = new CookieJar(); jar.setFromResponse(webUrl, new Headers({ "set-cookie": `session=${scenario === "expired" || webOnly ? "old" : "renewed"}; Path=/` }));
-  await writeAccountWebSession(webFile, { email, identity, cookies: jar.toJSON(), web: { workspaceId: scenario === "binding" ? "personal" : "old" }, accessToken: null });
+  const jar = new CookieJar(); jar.setFromResponse(webUrl, new Headers({ "set-cookie": `session=${deactivatedToken ? "context-old" : scenario === "expired" || webOnly ? "old" : "renewed"}; Path=/` }));
+  await writeAccountWebSession(webFile, { email, identity, cookies: jar.toJSON(), web: { workspaceId: scenario === "binding" || deactivatedToken ? "personal" : "old" }, accessToken: null });
   if (stableOAuth || samePlanSpace || pendingOAuth) { remoteAccount.proxy_id = 0; remoteAccount.credentials.chatgpt_account_id = samePlanSpace ? "old-personal" : "personal"; }
   if (authRecovery) { remoteAccount.status = "error"; remoteAccount.schedulable = false; remoteAccount.error_message = "Token revoked (401)"; }
   if (!webOnly) await fs.writeFile(resultFile, JSON.stringify({ type: "sub2api-data", accounts: [remoteAccount] }));
@@ -153,6 +158,11 @@ console.log('[ok] Saved web session: ' + f); if (!webOnly) console.log('[ok] Sav
 process.disconnect();
 `);
   await start();
+  if (deactivatedToken) {
+    const failure = await api(`/api/jobs/${id}/sessions`);
+    assert.equal(failure.status,409,"workspace failures return actionable JSON instead of gateway 502");
+    assert.match(failure.body.error,/deactivated_workspace/);
+  }
   if (manualDisabled) {
     assert.equal((await api(`/api/sub2api/accounts/${id}/schedulable`, { enabled: false })).status, 200);
     await stop(); await start(); // Manual intent must survive a helper restart.
@@ -257,6 +267,6 @@ process.disconnect();
   assert.equal((await api("/api/web-session-monitor")).body.accounts[email].lastRepairAt, repairedAt);
   await api("/api/task-settings", { webSessionMonitor: { enabled: false } });
   assert.equal((await api("/api/web-session-monitor/check", {})).status, 409);
-  console.log(`WEB_SESSION_MONITOR_HTTP_PASS scenario=${stableOAuth ? "stable-oauth" : samePlanSpace ? "same-plan-space" : scenario}; auth/settings; 503 not expired; ${webOnly ? "Web-only renewal without Codex enrollment or pool mutation" : stableOAuth ? "Web renewal preserves OAuth bytes and pool" : "Web-first recovery -> verified workspace/binding -> OAuth -> pool sync"}; persistent device/workspaces; restart/cooldown; no secret snapshots${authRecovery ? `; auth-error-cleared; schedulable=${!manualDisabled && !cooling}; sync-retry=${retrySync}` : ""}`);
+  console.log(`WEB_SESSION_MONITOR_HTTP_PASS scenario=${deactivatedToken ? "deactivated-token" : stableOAuth ? "stable-oauth" : samePlanSpace ? "same-plan-space" : scenario}; auth/settings; 503 not expired; ${webOnly ? "Web-only renewal without Codex enrollment or pool mutation" : stableOAuth ? "Web renewal preserves OAuth bytes and pool" : "Web-first recovery -> verified workspace/binding -> OAuth -> pool sync"}; persistent device/workspaces; restart/cooldown; no secret snapshots${authRecovery ? `; auth-error-cleared; schedulable=${!manualDisabled && !cooling}; sync-retry=${retrySync}` : ""}`);
   }
 } finally { await stop(); await Promise.all([new Promise(r => upstream.close(r)), new Promise(r => pool.close(r))]); await fs.rm(root, { recursive: true, force: true }); }
