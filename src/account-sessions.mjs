@@ -65,6 +65,7 @@ export async function probeAccountWebSession(job) {
     devices, workspaces, currentWorkspaceId: savedId,
     planType: available ? selected.planType : null,
     repairReason: !available ? "workspace_unavailable"
+      : bundle?.accountId && bundle.accountId !== savedId ? "workspace_changed"
       : previousPlan && selected.planType && previousPlan !== selected.planType ? "plan_changed" : null,
   };
 }

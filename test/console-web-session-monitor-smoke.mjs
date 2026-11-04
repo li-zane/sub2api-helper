@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { CookieJar } from "../src/protocol-login.mjs";
 import { getAccountBrowserIdentity } from "../src/account-browser-identity.mjs";
 import { writeAccountWebSession } from "../src/account-web-session.mjs";
@@ -12,12 +13,19 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-web-monitor-http-")
 const output = path.join(root, "output");
 const id = "11111111-1111-4111-8111-000000000001";
 const email = "monitored@example.test";
-const failedRefresh = process.argv.includes("--failed-refresh");
-const scenario = process.argv.includes("--web-only") ? "web-only" : process.argv.includes("--binding-drift") ? "binding" : process.argv.includes("--workspace-lost") || failedRefresh ? "workspace" : "expired";
+const pendingOAuth = process.argv.includes("--pending-oauth");
+const failedRefresh = process.argv.includes("--failed-refresh") || pendingOAuth;
+const stableOAuth = process.argv.includes("--stable-oauth");
+const authRecovery = process.argv.includes("--pool-auth-error");
+const manualDisabled = process.argv.includes("--manual-disabled");
+const cooling = process.argv.includes("--cooling");
+const retrySync = process.argv.includes("--sync-failure");
+const samePlanSpace = process.argv.includes("--same-plan-space");
+const scenario = process.argv.includes("--web-only") ? "web-only" : process.argv.includes("--binding-drift") ? "binding" : process.argv.includes("--workspace-lost") || (failedRefresh && !pendingOAuth) ? "workspace" : "expired";
 const webOnly = scenario === "web-only";
 const sharedSlots = process.argv.includes("--shared-slots");
 const foregroundId = "22222222-2222-4222-8222-000000000002";
-const initialPlan = scenario === "binding" ? "free" : "business";
+const initialPlan = scenario === "binding" || stableOAuth || samePlanSpace || pendingOAuth ? "free" : "business";
 const dir = path.join(output, id);
 const webFile = path.join(dir, "web-session.json");
 const resultFile = path.join(dir, "sub2api-import-oauth.json");
@@ -27,6 +35,8 @@ let holdAuth = false, unblockAuth;
 const token = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
 const remoteAccount = { id: 10, platform: "openai", type: "oauth", status: "active", proxy_id: 1, credentials: { email, plan_type: initialPlan, access_token: "old-Codex", refresh_token: "old-refresh" }, extra: {} };
 const updates = [];
+const recoveries = [];
+let failClear = retrySync;
 const pool = http.createServer(async (req, res) => {
   const chunks = []; for await (const b of req) chunks.push(b);
   const p = new URL(req.url, "http://fixture").pathname;
@@ -37,6 +47,15 @@ const pool = http.createServer(async (req, res) => {
   if (p === "/api/v1/admin/accounts") return res.end(JSON.stringify({ data: { items: [remoteAccount], total: 1, pages: 1 } }));
   if (p === "/api/v1/admin/accounts/10" && req.method === "PUT") {
     const update = JSON.parse(Buffer.concat(chunks).toString()); updates.push(update); Object.assign(remoteAccount, update);
+    return res.end(JSON.stringify({ data: remoteAccount }));
+  }
+  if (p === "/api/v1/admin/accounts/10/clear-error") {
+    recoveries.push("clear-error"); remoteAccount.status = "active"; remoteAccount.error_message = "";
+    if (failClear) { failClear = false; res.statusCode = 503; return res.end(JSON.stringify({ message: "partial cleanup failure" })); }
+    return res.end(JSON.stringify({ data: remoteAccount }));
+  }
+  if (p === "/api/v1/admin/accounts/10/schedulable") {
+    recoveries.push("schedulable"); Object.assign(remoteAccount, JSON.parse(Buffer.concat(chunks).toString()));
     return res.end(JSON.stringify({ data: remoteAccount }));
   }
   if (p === "/api/v1/admin/accounts/10") return res.end(JSON.stringify({ data: remoteAccount }));
@@ -71,7 +90,8 @@ const wrapper = path.join(root, "protocol.mjs");
 let child, exited, headers, base, logs = "";
 const wait = async fn => {
   for (let n = 0; n < 200; n++) { const value = await fn().catch(() => null); if (value) return value; if (child?.exitCode !== null && child?.exitCode !== undefined) throw new Error(logs); await new Promise(r => setTimeout(r, 50)); }
-  throw new Error("fixture timed out\n" + logs);
+  const details = headers ? await api(`/api/jobs/${id}/logs`).catch(() => null) : null;
+  throw new Error("fixture timed out\n" + logs + "\n" + JSON.stringify(details));
 };
 async function start() {
   const l = http.createServer(); await new Promise(r => l.listen(0, "127.0.0.1", r)); const port = l.address().port; await new Promise(r => l.close(r));
@@ -93,8 +113,11 @@ try {
   const identity = await getAccountBrowserIdentity(email, { root: path.join(output, "browser-identities") });
   const jar = new CookieJar(); jar.setFromResponse(webUrl, new Headers({ "set-cookie": `session=${scenario === "expired" || webOnly ? "old" : "renewed"}; Path=/` }));
   await writeAccountWebSession(webFile, { email, identity, cookies: jar.toJSON(), web: { workspaceId: scenario === "binding" ? "personal" : "old" }, accessToken: null });
+  if (stableOAuth || samePlanSpace || pendingOAuth) { remoteAccount.proxy_id = 0; remoteAccount.credentials.chatgpt_account_id = samePlanSpace ? "old-personal" : "personal"; }
+  if (authRecovery) { remoteAccount.status = "error"; remoteAccount.schedulable = false; remoteAccount.error_message = "Token revoked (401)"; }
   if (!webOnly) await fs.writeFile(resultFile, JSON.stringify({ type: "sub2api-data", accounts: [remoteAccount] }));
-  await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: webOnly || failedRefresh ? "failed" : "completed", result_saved: !webOnly, plan_type: initialPlan, assigned_proxy_id: 1, authorization_proxy_selected: true, bound_ip: "198.51.100.1", created_at: "2026-11-01T00:00:00Z",
+  const originalOAuth = !webOnly && await fs.readFile(resultFile, "utf8");
+  await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: webOnly || failedRefresh ? "failed" : "completed", result_saved: !webOnly, plan_type: initialPlan, assigned_proxy_id: stableOAuth || samePlanSpace || pendingOAuth ? null : 1, authorization_proxy_selected: true, bound_ip: stableOAuth || samePlanSpace || pendingOAuth ? null : "198.51.100.1", created_at: "2026-11-01T00:00:00Z",
     ...(failedRefresh ? { pool_refresh_action: "relogin", pool_refresh_ready: false, pool_refresh_error: "WEB_PLAN_UNAVAILABLE: fixture failure" } : {}),
   }));
   if (failedRefresh) await fs.writeFile(path.join(output, "web-session-monitor.json"), JSON.stringify({ version: 1, accounts: { [email]: { status: "repairing", lastRepairAt: new Date(Date.now() - 61 * 60_000).toISOString(), nextCheckAt: new Date(0).toISOString() } } }));
@@ -105,6 +128,10 @@ try {
   }
   await fs.writeFile(path.join(output, "task-settings.json"), JSON.stringify({ maxActiveJobs: 1, accountProxyMode: "plan", codexAuthMode: "local", accountProxyCooldownMinutes: 60 }));
   await fs.writeFile(path.join(output, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { baseUrl: poolUrl, adminApiKey: "fixture" }, profiles: [{ id: "default", name: "Paid", proxyId: "1" }, { id: "free", name: "Free", proxyId: "direct" }], planTypeBindings: { business: "default", free: "free" }, activeProfileId: "default" }));
+  if (cooling) await fs.writeFile(path.join(output, "overload-cooldown.json"), JSON.stringify({ version: 1, accounts: { [email]: {
+    enabled: true, backend: crypto.createHash("sha256").update(poolUrl + "\0fixture").digest("hex").slice(0, 24),
+    phase: "cooling", resumeAccountIds: ["10"], coolingUntil: new Date(Date.now() + 3600_000).toISOString(),
+  } } }));
   await fs.writeFile(wrapper, `import fs from 'node:fs/promises';
 if (process.env.TOSUB2_WEB_MONITOR_REPAIR !== '1') {
   console.log('Email OTP (r=resend, q=quit):'); process.stdin.resume();
@@ -113,6 +140,7 @@ if (process.env.TOSUB2_WEB_MONITOR_REPAIR !== '1') {
 const f = process.env.TOSUB2_WEB_SESSION_PATH;
 const session = JSON.parse(await fs.readFile(f, 'utf8'));
 const webOnly = process.argv.includes('--web-only');
+await fs.appendFile(${JSON.stringify(path.join(root, "login-modes.txt"))}, webOnly ? 'web\\n' : 'codex\\n');
 if (process.env.TOSUB2_WEB_MONITOR_REPAIR !== '1') throw Error('missing monitor context');
 if (!webOnly && process.env.TOSUB2_PHASED_PROXY !== '1') throw Error('monitor must re-discover plan before OAuth');
 const route = webOnly ? { proxyUrl: 'unchanged' } : await new Promise((resolve, reject) => { process.once('message', m => m.error ? reject(Error(m.error)) : resolve(m.route)); process.send({ type: 'codex-proxy-request', id: 'fixture', planType: 'free', workspaceId: 'personal' }); });
@@ -125,6 +153,10 @@ console.log('[ok] Saved web session: ' + f); if (!webOnly) console.log('[ok] Sav
 process.disconnect();
 `);
   await start();
+  if (manualDisabled) {
+    assert.equal((await api(`/api/sub2api/accounts/${id}/schedulable`, { enabled: false })).status, 200);
+    await stop(); await start(); // Manual intent must survive a helper restart.
+  }
   assert.equal((await fetch(base + "/api/web-session-monitor")).status, 403);
   let state = await api("/api/web-session-monitor");
   assert.equal(state.status, 200, "WebSession monitor endpoint must exist");
@@ -165,12 +197,26 @@ process.disconnect();
   await api("/api/web-session-monitor/check", {});
   assert.equal((await api("/api/web-session-monitor")).body.accounts[email].status, "check_failed");
   assert.equal(await fs.stat(traceFile).then(() => true, () => false), false);
-  assert.equal(remoteAccount.proxy_id, 1);
+  assert.equal(remoteAccount.proxy_id, stableOAuth || samePlanSpace || pendingOAuth ? 0 : 1);
   authStatus = 200;
   const started = await api("/api/web-session-monitor/check", {});
-  assert.equal(started.body.accounts[email].repairReason, { expired: "expired", "web-only": "expired", workspace: "workspace_unavailable", binding: "binding_changed" }[scenario]);
+  assert(started.body.accounts[email].lastRepairAt, "confirmed failure must enqueue recovery; a fast repair may already have advanced the snapshot");
   if (webOnly) await wait(async () => (await api(`/api/jobs/${id}/logs`)).body.logs?.includes("[web-login] Web 登录态已保存，未执行 Codex 授权或更新号池。"));
-  else await wait(async () => remoteAccount.proxy_id === 0 && remoteAccount.credentials.plan_type === "free");
+  else if (!stableOAuth && scenario !== "expired") await wait(async () => remoteAccount.proxy_id === 0 && remoteAccount.credentials.plan_type === "free");
+  if (retrySync) {
+    await wait(async () => {
+      await api("/api/web-session-monitor/check", {});
+      return (await api("/api/jobs")).body.jobs.find(j => j.id === id)?.poolRefreshError?.includes("partial cleanup failure");
+    });
+    assert(!recoveries.includes("schedulable"), "do not enable until cleanup succeeds");
+    await stop();
+    const metaFile = path.join(dir, "job-meta.json");
+    const meta = JSON.parse(await fs.readFile(metaFile, "utf8"));
+    assert(Object.values(meta.pool_refresh_recovery || {}).includes(true), "persist partial recovery intent");
+    meta.pool_refresh_due_at = new Date(0).toISOString();
+    await fs.writeFile(metaFile, JSON.stringify(meta));
+    await start();
+  }
   await wait(async () => {
     await api("/api/web-session-monitor/check", {});
     return (await api("/api/web-session-monitor")).body.accounts[email].status === "valid";
@@ -182,10 +228,24 @@ process.disconnect();
   assert.equal(state.body.accounts[email].devices[0].lastSignedInIp, "203.0.113.4");
   assert.equal(JSON.parse(await fs.readFile(traceFile, "utf8")).deviceId, identity.deviceId);
   assert.equal(JSON.parse(await fs.readFile(webFile, "utf8")).identity.deviceId, identity.deviceId);
+  if (authRecovery) {
+    await wait(async () => !(await api("/api/jobs")).body.jobs.find(j => j.id === id)?.poolRefreshAction);
+    assert.equal(remoteAccount.status, "active");
+    assert.equal(remoteAccount.error_message, "");
+    assert.equal(remoteAccount.schedulable, !manualDisabled && !cooling);
+    assert.equal(await fs.readFile(path.join(root, "login-modes.txt"), "utf8"), "web\ncodex\n", "sync retry must never repeat login");
+  }
   if (webOnly) {
     assert.equal(await fs.stat(resultFile).then(() => true, () => false), false, "Web-only repair must not enroll in Codex");
     assert.equal(updates.length, 0); assert.equal(remoteAccount.proxy_id, 1);
-  } else assert(updates.some(u => u.proxy_id === 0 && u.credentials?.plan_type === "free"));
+  } else if (stableOAuth) {
+    assert.equal(await fs.readFile(resultFile, "utf8"), originalOAuth, "Web expiry alone must preserve Codex credentials byte-for-byte");
+    assert.equal(updates.length, 0, "Web expiry alone must not update the pool");
+    assert.equal(await fs.readFile(path.join(root, "login-modes.txt"), "utf8"), "web\n");
+  } else {
+    assert(updates.some(u => u.proxy_id === 0 && u.credentials?.plan_type === "free"));
+    if (scenario === "expired") assert.equal(await fs.readFile(path.join(root, "login-modes.txt"), "utf8"), "web\ncodex\n", "renew Web before authorizing changed workspace");
+  }
   assert(requests.some(r => r.path.endsWith("/accounts/check/v4-2023-04-27") && !r.account), "workspace discovery is not scoped to the invalid old space");
   const snapshot = await fs.readFile(path.join(output, "web-session-monitor.json"), "utf8");
   for (const secret of [token, "new-Codex", "new-refresh", "session=renewed"]) assert(!snapshot.includes(secret));
@@ -197,6 +257,6 @@ process.disconnect();
   assert.equal((await api("/api/web-session-monitor")).body.accounts[email].lastRepairAt, repairedAt);
   await api("/api/task-settings", { webSessionMonitor: { enabled: false } });
   assert.equal((await api("/api/web-session-monitor/check", {})).status, 409);
-  console.log(`WEB_SESSION_MONITOR_HTTP_PASS scenario=${scenario}; auth/settings; 503 not expired; ${webOnly ? "Web-only renewal without Codex enrollment or pool mutation" : "confirmed change -> shared login -> fresh Free plan -> direct binding -> pool sync"}; persistent device/workspaces; restart/cooldown; no secret snapshots`);
+  console.log(`WEB_SESSION_MONITOR_HTTP_PASS scenario=${stableOAuth ? "stable-oauth" : samePlanSpace ? "same-plan-space" : scenario}; auth/settings; 503 not expired; ${webOnly ? "Web-only renewal without Codex enrollment or pool mutation" : stableOAuth ? "Web renewal preserves OAuth bytes and pool" : "Web-first recovery -> verified workspace/binding -> OAuth -> pool sync"}; persistent device/workspaces; restart/cooldown; no secret snapshots${authRecovery ? `; auth-error-cleared; schedulable=${!manualDisabled && !cooling}; sync-retry=${retrySync}` : ""}`);
   }
 } finally { await stop(); await Promise.all([new Promise(r => upstream.close(r)), new Promise(r => pool.close(r))]); await fs.rm(root, { recursive: true, force: true }); }

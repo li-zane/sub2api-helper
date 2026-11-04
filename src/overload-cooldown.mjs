@@ -56,6 +56,10 @@ export class OverloadCooldown {
     return Boolean(entry?.resumeAccountIds?.length && entry.backend === this.backendIdentity(this.getConfig()));
   }
 
+  isManuallyDisabled(email, accountId, config = this.getConfig()) {
+    return this.accounts.get(String(email).toLowerCase())?.manualScheduling?.[this.backendIdentity(config)]?.[String(accountId)] === false;
+  }
+
   persist() {
     const data = JSON.stringify({ version: 1, accounts: Object.fromEntries(this.accounts) }, null, 2);
     const operation = this.writePromise.catch(() => {}).then(async () => {
@@ -106,10 +110,16 @@ export class OverloadCooldown {
   }
 
   // A manual pool switch takes ownership away from the automatic cooldown.
-  async manualOverride(email, accountIds, action) {
+  async manualOverride(email, accountIds, action, { enabled } = {}) {
     email = email.toLowerCase();
     return this.lock(email, async () => {
       const entry = this.accounts.get(email);
+      if (typeof enabled === "boolean") {
+        const backend = this.backendIdentity(this.getConfig());
+        const manualScheduling = structuredClone(entry?.manualScheduling || {});
+        manualScheduling[backend] = { ...manualScheduling[backend], ...Object.fromEntries(accountIds.map(id => [String(id), enabled])) };
+        await this.update(email, { enabled: entry?.enabled === true, manualScheduling });
+      }
       if (entry && (!entry.resumeAccountIds?.length || entry.backend === this.backendIdentity(this.getConfig()))) {
         const removed = new Set(accountIds.map(String));
         const remaining = (entry.resumeAccountIds || []).filter(id => !removed.has(id));

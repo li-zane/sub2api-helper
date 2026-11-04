@@ -37,12 +37,15 @@ export class WebSessionMonitor {
   }
   trigger(force = false) { if (!this.stopped) void this.run({ force }).catch(() => {}); }
   async stop() { this.stopped = true; this.retryAbort.abort(); clearInterval(this.timer); this.timer = null; await this.running; await this.writes; }
-  async repairFinished(email, { success = true } = {}) {
+  async repairFinished(email, { success = true, webOnly = false } = {}) {
     const entry = this.accounts[email.toLowerCase()];
     if (entry) {
       entry.status = success ? "pending_check" : "needs_attention";
       entry.lastError = success ? null : "自动重登未完成；将在冷却限制内重新巡检";
       entry.nextCheckAt = new Date(this.now()).toISOString();
+      // One successful Web renewal may require a separate workspace/OAuth repair.
+      // Persist this continuation; a restart must neither lose it nor reset cooldown.
+      entry.webRecoveryPending = success && webOnly && entry.repairReason === "expired";
       await this.save();
     }
   }
@@ -69,6 +72,7 @@ export class WebSessionMonitor {
         entry.lastCheckedAt = at;
         entry.nextCheckAt = new Date(this.now() + settings.intervalMinutes * 60_000).toISOString();
         let reason = null;
+        let followUp = false;
         try {
           const result = await this.probeWithRetries(job, entry);
           if (Array.isArray(result.devices)) entry.devices = result.devices;
@@ -78,6 +82,8 @@ export class WebSessionMonitor {
           entry.lastError = null;
           entry.lastSuccessAt = at;
           reason = result.repairReason || null;
+          followUp = entry.webRecoveryPending === true && Boolean(reason) && reason !== "expired";
+          entry.webRecoveryPending = false;
           entry.status = reason ? "changed" : "valid";
         } catch (error) {
           reason = /^SESSION_TOKEN_EXPIRED:/.test(error.message) ? "expired" : null;
@@ -88,7 +94,7 @@ export class WebSessionMonitor {
         entry.repairReason = reason;
         await this.save();
         if (!reason || this.stopped || !this.getSettings().enabled || !settings.autoRelogin) return;
-        if (Date.parse(entry.lastRepairAt) + settings.retryMinutes * 60_000 > this.now()) { entry.status = "retry_wait"; await this.save(); return; }
+        if (!followUp && Date.parse(entry.lastRepairAt) + settings.retryMinutes * 60_000 > this.now()) { entry.status = "retry_wait"; await this.save(); return; }
         // Persist the cooldown before enqueueing so a restart cannot duplicate it.
         entry.lastRepairAt = at; entry.status = "repairing";
         await this.save();

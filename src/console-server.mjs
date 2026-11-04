@@ -249,16 +249,19 @@ const webSessionMonitor = new WebSessionMonitor({
         || (fixedId && fixedId !== normalizeStoredProxyId(job.assignedProxyId))
         || (target === SUB2API_PROXY_BALANCED && !normalizeStoredProxyId(job.assignedProxyId))) snapshot.repairReason = "binding_changed";
     }
+    if (job.resultSaved && !snapshot.repairReason && job.poolRefreshAction && !job.poolRefreshReady && job.poolRefreshError) {
+      snapshot.repairReason = "authorization_pending";
+    }
     return snapshot;
   },
   lock: (job, fn) => withEmailJobLock(job.email, fn),
-  repair: async job => {
-    const webOnly = !job.resultSaved;
+  repair: async (job, { reason }) => {
+    const webOnly = !job.resultSaved || reason === "expired";
     if (webOnly) {
       job.webSessionMonitorRepair = true;
-      await startWebLogin(job);
+      await startWebLogin(job, { maintenance: true });
     } else await forceReloginJob(job, {}, { webSessionMonitorRepair: true, poolRefreshAction: "relogin" });
-    appendJobLog(job, webOnly ? "[web-session-monitor] 已确认 Web 登录态或空间失效，进入共享 Web 登录队列；不创建 Codex 授权。\n"
+    appendJobLog(job, webOnly ? "[web-session-monitor] 先独立恢复 Web 登录态；恢复后复查空间与绑定，保留现有 Codex 凭据。\n"
       : "[web-session-monitor] 已确认 Web 会话或空间/PlanType 变化，进入共享登录队列；完成后更新授权与号池绑定。\n");
     await saveJobMetadata(job);
     return true;
@@ -1084,7 +1087,7 @@ async function handleApi(req, res, requestUrl) {
         method: "POST",
         body: JSON.stringify({ schedulable: body.enabled }),
       },
-    ))));
+    ))), { enabled: body.enabled });
     const nextEntry = {
       ...entry,
       enabled: body.enabled,
@@ -2146,10 +2149,10 @@ function webLoginCheckpointPath(job) {
   return path.join(path.dirname(job.outputPath), "web-login-checkpoint.json");
 }
 
-async function startWebLogin(job) {
-  if (!canLoginWeb(job)) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
+async function startWebLogin(job, { maintenance = false } = {}) {
+  if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
   await reloadMissingJobCredentials(job);
-  if (!canLoginWeb(job)) throw httpError(409, "账号当前不能登录 Web");
+  if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号当前不能登录 Web");
   const preserved = ["status", "prompt", "lastError", "completedAt", "startedAt", "attempt", "loginCheckpointAvailable",
     "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount"];
   job.webLoginPreviousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
@@ -2199,7 +2202,7 @@ async function finishWebLogin(job, code, signal, message = null) {
   job.webLoginResultSaved = false;
   if (job.webSessionMonitorRepair) {
     job.webSessionMonitorRepair = false;
-    await webSessionMonitor.repairFinished(job.email, { success });
+    await webSessionMonitor.repairFinished(job.email, { success, webOnly: true });
   }
   job.runMode = null;
   job.runId = null;
@@ -3713,7 +3716,7 @@ async function buildSub2ApiUploadPayload(downloadable) {
   };
 }
 
-async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2ApiProfileState()) {
+async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2ApiProfileState(), { recoverAuthorization = false } = {}) {
   const downloadable = selected.filter((job) => job.resultSaved);
   if (downloadable.length === 0) throw httpError(409, "选中的任务里没有已完成的导入文件");
   if (accountProxyMode === "sub2api") {
@@ -3797,6 +3800,10 @@ async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2
           method: "PUT",
           body: JSON.stringify(accountUpdate),
         });
+        const recoveryJob = downloadable.find(job => job.email.toLowerCase() === email);
+        if (recoverAuthorization && (remoteAccount.status === "error" || recoveryJob?.poolRefreshRecovery)) {
+          await recoverSub2ApiAuthorization(accountConfig, accountId, email, { recoveryJob });
+        }
         updatedCount += 1;
         updatedAccountIds.push(accountId);
       }
@@ -6643,14 +6650,7 @@ async function performSub2ApiAutoRepairSuccess(job) {
         method: "PUT",
         body: JSON.stringify(accountUpdate),
       });
-      await requestSub2Api(operation.config, `/api/v1/admin/accounts/${accountId}/clear-error`, {
-        method: "POST",
-        body: "{}",
-      });
-      await requestSub2Api(operation.config, `/api/v1/admin/accounts/${accountId}/schedulable`, {
-        method: "POST",
-        body: JSON.stringify({ schedulable: !overloadCooldown.isPaused(job.email) }),
-      });
+      await recoverSub2ApiAuthorization(operation.config, accountId, job.email, { monitorRepair: true });
       pendingIds.delete(accountId);
       job.autoRepairPendingAccountIds = [...pendingIds];
     }
@@ -7339,14 +7339,48 @@ async function runPoolRefresh(job) {
   }
 }
 
+// Only call after fresh OAuth credentials have been accepted by the backend.
+// Serialize with manual scheduling and automatic cooldown changes for this email.
+async function recoverSub2ApiAuthorization(config, accountId, email, { monitorRepair = false, recoveryJob = null } = {}) {
+  return overloadCooldown.lock(email.toLowerCase(), async () => {
+    if (accountAutomationBlocked(email)) return;
+    const response = await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`);
+    const account = response?.data || response;
+    if (sub2ApiAccountEmail(account) !== email.toLowerCase()) throw new Error("号池账号身份发生变化，已停止恢复启用状态");
+    if (["disabled", "inactive", "banned"].includes(account.status)) return;
+    const authError = account.status === "error"
+      && /token|oauth|\b401\b|unauthoriz|invalid_grant|认证|授权|凭据/i.test(String(account.error_message || account.last_error || ""));
+    const recoveryKey = `${monitorBackendIdentity(config)}:${accountId}`;
+    const pending = recoveryJob?.poolRefreshRecovery?.[recoveryKey] === true;
+    // A durable intent covers partial clear-error success across retries/restarts.
+    if (!monitorRepair && !authError && !pending) return;
+    const schedulable = !overloadCooldown.isPaused(email)
+      && !overloadCooldown.isManuallyDisabled(email, accountId, config);
+    if (recoveryJob) {
+      recoveryJob.poolRefreshRecovery = { ...recoveryJob.poolRefreshRecovery, [recoveryKey]: true };
+      await saveJobMetadata(recoveryJob);
+    }
+    await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/clear-error`, { method: "POST", body: "{}" });
+    await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/schedulable`, {
+      method: "POST", body: JSON.stringify({ schedulable }),
+    });
+    if (recoveryJob) {
+      delete recoveryJob.poolRefreshRecovery[recoveryKey];
+      if (!Object.keys(recoveryJob.poolRefreshRecovery).length) recoveryJob.poolRefreshRecovery = null;
+      await saveJobMetadata(recoveryJob);
+    }
+  });
+}
+
 async function synchronizePoolRefresh(job) {
   const action = normalizePoolRefreshAction(job.poolRefreshAction);
   if (!action || !job.poolRefreshReady || job.status !== "completed" || shuttingDown || job.deleted) return null;
   try {
     const config = sub2ApiSettingsConfig;
     if (!config?.baseUrl || !config?.adminApiKey) throw new Error("尚未配置 Sub2API 后端和管理员 API Key");
-    await uploadJobsToSub2Api([job], config, snapshotSub2ApiProfileState());
+    await uploadJobsToSub2Api([job], config, snapshotSub2ApiProfileState(), { recoverAuthorization: true });
     job.poolRefreshAction = null;
+    job.poolRefreshRecovery = null;
     job.poolRefreshDueAt = null;
     job.poolRefreshError = null;
     job.poolRefreshReady = false;
@@ -7587,6 +7621,7 @@ async function syncCompletedOutputs(force = false) {
           poolRefreshAction: normalizePoolRefreshAction(metadata.pool_refresh_action),
           poolRefreshDueAt: metadata.pool_refresh_due_at || null,
           poolRefreshError: metadata.pool_refresh_error || null,
+          poolRefreshRecovery: metadata.pool_refresh_recovery && typeof metadata.pool_refresh_recovery === "object" ? metadata.pool_refresh_recovery : null,
           mailSeenCandidateKeys: new Set(),
           mailCandidateCounts: new Map(),
           mailStatus: mailApiUrl ? "ready" : "manual",
@@ -7704,6 +7739,7 @@ async function syncCompletedOutputs(force = false) {
           poolRefreshAction: normalizePoolRefreshAction(metadata.pool_refresh_action),
           poolRefreshDueAt: metadata.pool_refresh_due_at || null,
           poolRefreshError: metadata.pool_refresh_error || null,
+          poolRefreshRecovery: metadata.pool_refresh_recovery && typeof metadata.pool_refresh_recovery === "object" ? metadata.pool_refresh_recovery : null,
           mailSeenCandidateKeys: new Set(),
           mailCandidateCounts: new Map(),
           mailStatus: mailApiUrl ? "ready" : "manual",
@@ -7810,6 +7846,7 @@ async function syncCompletedOutputs(force = false) {
           poolRefreshAction: normalizePoolRefreshAction(metadata.pool_refresh_action),
           poolRefreshDueAt: metadata.pool_refresh_due_at || null,
           poolRefreshError: metadata.pool_refresh_error || null,
+          poolRefreshRecovery: metadata.pool_refresh_recovery && typeof metadata.pool_refresh_recovery === "object" ? metadata.pool_refresh_recovery : null,
           mailSeenCandidateKeys: new Set(),
           mailCandidateCounts: new Map(),
           mailStatus: mailApiUrl ? "baseline" : "manual",
@@ -8882,6 +8919,7 @@ async function saveJobMetadata(job) {
         pool_refresh_action: normalizePoolRefreshAction(job.poolRefreshAction),
         pool_refresh_due_at: job.poolRefreshDueAt || null,
         pool_refresh_error: job.poolRefreshError || null,
+        pool_refresh_recovery: job.poolRefreshRecovery || null,
         sms_provider_id: job.smsProviderId || null,
         sms_provider_name: job.smsProviderName || null,
         sms_service_label: job.smsServiceLabel || null,
