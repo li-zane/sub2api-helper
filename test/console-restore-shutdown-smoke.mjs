@@ -212,8 +212,9 @@ try {
     assert.equal(exit.code, 0, logs);
     assert.ok(Date.now() - shutdownStartedAt < 5_000, "shutdown should abort the pending Sub2API monitor request");
     const metadata = JSON.parse(await fs.readFile(path.join(outputRoot, created.job.id, "job-meta.json"), "utf8"));
-    assert.equal(metadata.status, "canceled");
-    assert.equal(metadata.prompt, "流程已取消");
+    assert.equal(metadata.status, "mfa_failed");
+    assert.equal(metadata.prompt, "2FA 未通过，流程已停止");
+    assert.match(metadata.last_error, /验证码未完成校验/);
     console.log("console restore and graceful shutdown tests passed");
   } else {
     console.log("console restore smoke passed (POSIX SIGTERM shutdown assertions skipped on Windows)");
