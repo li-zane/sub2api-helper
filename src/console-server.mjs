@@ -224,7 +224,7 @@ const webSessionMonitor = new WebSessionMonitor({
   filePath: path.join(OUTPUT_ROOT, "web-session-monitor.json"),
   getSettings: () => webSessionMonitorSettings,
   listJobs: () => listUniqueJobs(),
-  isBusy: job => shuttingDown || !canLoginWeb(job) || accountAutomationBlocked(job.email) || job.status === "canceled",
+  isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || accountAutomationBlocked(job.email) || job.status === "canceled",
   hasSession: job => fileExists(webSessionPathForJob(job)),
   withSlot: withWebSessionCheckSlot,
   probe: async job => {
@@ -2007,6 +2007,10 @@ async function handleChildClose(job, { code, signal, mode, runId }) {
     }
   }
   await finishSub2ApiAutoRepairFailure(job);
+  if (job.webSessionMonitorRepair) {
+    job.webSessionMonitorRepair = false;
+    await webSessionMonitor.repairFinished(job.email, { success: false });
+  }
   if (job.poolRefreshAction) {
     job.poolRefreshError = job.lastError || job.prompt || "重新授权未完成";
     job.poolRefreshDueAt = null;
@@ -2195,7 +2199,7 @@ async function finishWebLogin(job, code, signal, message = null) {
   job.webLoginResultSaved = false;
   if (job.webSessionMonitorRepair) {
     job.webSessionMonitorRepair = false;
-    await webSessionMonitor.repairFinished(job.email);
+    await webSessionMonitor.repairFinished(job.email, { success });
   }
   job.runMode = null;
   job.runId = null;
@@ -7086,8 +7090,12 @@ function canLogoutAllSessions(job) {
   return Boolean(job.webSessionAvailable || (job.resultSaved && !job.webSessionStatus)) && canForceRelogin(job);
 }
 
-function canLoginWeb(job) {
-  return canForceRelogin(job) && !job.poolRefreshAction && !job.autoRepairOperation
+function canLoginWeb(job, { maintenance = false } = {}) {
+  // A failed, finished refresh is not a running operation. Keep manual controls
+  // unchanged, but let maintenance re-check it under the existing retry cooldown.
+  const failedRefresh = maintenance && !job.child && !job.poolRefreshReady && Boolean(job.poolRefreshError)
+    && ["failed", "mfa_failed", "reauth_required", "resume_available"].includes(job.status);
+  return canForceRelogin(job) && (!job.poolRefreshAction || failedRefresh) && !job.autoRepairOperation
     && !["queued", "running"].includes(job.autoTaskStatus);
 }
 
@@ -7127,7 +7135,7 @@ function failJob(job, message) {
   job.lastError = message;
   if (job.webSessionMonitorRepair) {
     job.webSessionMonitorRepair = false;
-    void webSessionMonitor.repairFinished(job.email).catch(() => {});
+    void webSessionMonitor.repairFinished(job.email, { success: false }).catch(() => {});
   }
   if (permanentAccountFailure) markAutoRepairBlocked(job, message);
   touch(job);

@@ -37,9 +37,14 @@ export class WebSessionMonitor {
   }
   trigger(force = false) { if (!this.stopped) void this.run({ force }).catch(() => {}); }
   async stop() { this.stopped = true; this.retryAbort.abort(); clearInterval(this.timer); this.timer = null; await this.running; await this.writes; }
-  async repairFinished(email) {
+  async repairFinished(email, { success = true } = {}) {
     const entry = this.accounts[email.toLowerCase()];
-    if (entry) { entry.nextCheckAt = new Date(this.now()).toISOString(); await this.save(); }
+    if (entry) {
+      entry.status = success ? "pending_check" : "needs_attention";
+      entry.lastError = success ? null : "自动重登未完成；将在冷却限制内重新巡检";
+      entry.nextCheckAt = new Date(this.now()).toISOString();
+      await this.save();
+    }
   }
   run({ force = false } = {}) {
     if (this.running) return this.running;

@@ -13,6 +13,7 @@ import {
 import { normalizeCodexAuthMode, generateSub2ApiOAuth, exchangeSub2ApiOAuth, refreshSub2ApiOAuth, sub2ApiOAuthIdentity } from "./sub2api-oauth.mjs";
 import { getAccountBrowserIdentity } from "./account-browser-identity.mjs";
 import { readAccountWebSession, saveProtocolWebSession } from "./account-web-session.mjs";
+import { uniqueWorkspaceAccounts, isUsableWorkspaceAccount, isTeamWorkspaceAccount } from "./workspace-accounts.mjs";
 
 const DEFAULT_CHATGPT_BASE = "https://chatgpt.com";
 const DEFAULT_AUTH_BASE = "https://auth.openai.com";
@@ -622,10 +623,8 @@ async function run() {
     let reauthenticationClient = null;
 
     async function selectCodexProxy() {
-      const monitorRepair = process.env.TOSUB2_WEB_MONITOR_REPAIR === "1";
-      if (process.env.TOSUB2_PHASED_PROXY !== "1" && !monitorRepair) return;
       const identity = await identifyWebPlan(client, { chatgptBase, web,
-        allowPersonalFallback: monitorRepair });
+        allowPersonalFallback: true, preferTeam: true });
       web = { ...web, workspaceId: identity.workspaceId };
       codexOptions.currentWorkspaceId = identity.workspaceId || undefined;
       codexOptions.allowedWorkspaceIds = identity.workspaceId ? [identity.workspaceId] : undefined;
@@ -745,8 +744,8 @@ async function run() {
     }
 
     // The web login survives checkpoint cleanup and is separate from the Codex export.
-    if (args.webOnly && process.env.TOSUB2_WEB_MONITOR_REPAIR === "1") {
-      const identity = await identifyWebPlan(client, { chatgptBase, web, allowPersonalFallback: true });
+    if (args.webOnly) {
+      const identity = await identifyWebPlan(client, { chatgptBase, web, allowPersonalFallback: true, preferTeam: true });
       web = { ...web, workspaceId: identity.workspaceId };
     }
     let webCredentials = {};
@@ -1399,11 +1398,12 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
     deviceId,
     payload: authenticated,
   });
-  const workspaceId = isWorkspaceSelectionPayload(authenticated) ? pickWorkspaceId(authenticated) : null;
-  authenticated = await selectChatgptLoginWorkspaceIfNeeded(client, {
+  const selection = await selectChatgptLoginWorkspaceIfNeeded(client, {
     authBase,
     payload: authenticated,
   });
+  authenticated = selection.payload;
+  const workspaceId = selection.workspaceId;
   const callback = await continueFlow(client, authenticated);
   return {
     deviceId,
@@ -1416,19 +1416,35 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
   };
 }
 
-async function selectChatgptLoginWorkspaceIfNeeded(client, { authBase, payload }) {
-  if (!isWorkspaceSelectionPayload(payload)) return payload;
-  const workspaceId = pickWorkspaceId(payload);
-  if (!workspaceId) {
+export async function selectChatgptLoginWorkspaceIfNeeded(client, { authBase, payload }) {
+  if (!isWorkspaceSelectionPayload(payload)) return { payload, workspaceId: null };
+  const available = uniqueWorkspaceAccounts({ accounts: payload?.["oai-client-auth-session"]?.workspaces }).filter(isUsableWorkspaceAccount);
+  const candidates = [...available.filter(isTeamWorkspaceAccount), ...available.filter(a => !isTeamWorkspaceAccount(a))];
+  if (!candidates.length) {
     console.log("[web] Workspace page did not include a selectable workspace; skipping selection.");
-    return payload;
+    return { payload, workspaceId: null };
   }
   const workspaceUrl = getContinueUrl(payload) || `${authBase}/workspace`;
   console.log("[web] Select ChatGPT login workspace");
-  const { data } = await authJsonStep(client, authBase, "POST", "/api/accounts/workspace/select", {
-    workspace_id: workspaceId,
-  }, { referer: workspaceUrl });
-  return data;
+  for (let index = 0; index < candidates.length; index++) {
+    const workspaceId = candidates[index].id;
+    try {
+      const { data } = await authJsonStep(client, authBase, "POST", "/api/accounts/workspace/select", {
+        workspace_id: workspaceId,
+      }, { referer: workspaceUrl });
+      return { payload: data, workspaceId };
+    } catch (error) {
+      // Only an explicit workspace rejection permits fallback. Network errors,
+      // challenges, server errors and session 401 must not silently change space.
+      const message = String(error?.message || "");
+      const unavailable = /\bHTTP (?:400|402|403|404)\b/.test(message)
+        && /(?:workspace|account|organization)[_ -](?:deactivated|disabled|removed|deleted|not[_ -]found|unavailable|access[_ -]denied)|not[_ -](?:a[_ -])?member/i.test(message);
+      if (!unavailable || index === candidates.length - 1) throw error;
+      // Remember the explicit rejection for this client/login only. A stale
+      // discovery response must not select the rejected team again after fallback.
+      (client.unavailableLoginWorkspaceIds ||= new Set()).add(workspaceId);
+    }
+  }
 }
 
 async function verifyPassword(client, { authBase, rl, deviceId, password, referer }) {
@@ -1714,7 +1730,7 @@ function decodeBase32Secret(value) {
   return Buffer.from(bytes);
 }
 
-export async function identifyWebPlan(client, { chatgptBase, web = null, allowPersonalFallback = false }) {
+export async function identifyWebPlan(client, { chatgptBase, web = null, allowPersonalFallback = false, preferTeam = false }) {
   const { data: session } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
   const accessToken = session?.accessToken || session?.access_token;
   if (!accessToken) throw new Error("WEB_PLAN_UNAVAILABLE: 网页登录会话未返回访问令牌，请重新登录");
@@ -1724,19 +1740,20 @@ export async function identifyWebPlan(client, { chatgptBase, web = null, allowPe
   const { data: payload } = await client.getJson("GET", `${chatgptBase}/backend-api/accounts/check/v4-2023-04-27`, {
     referer: `${chatgptBase}/`, headers: { authorization: `Bearer ${accessToken}` },
   });
-  const raw = payload?.accounts;
-  const entries = Array.isArray(raw) ? raw : raw && typeof raw === "object"
-    ? Object.entries(raw).map(([id, value]) => ({ ...value, id: value?.id || id })) : [];
-  const accounts = entries.map((entry) => ({ ...entry, ...(entry.account || {}) }));
+  const accounts = uniqueWorkspaceAccounts(payload).filter(a => !client.unavailableLoginWorkspaceIds?.has(a.id));
   const explicitId = web?.workspaceId || payload?.current_account_id;
   const currentId = explicitId || payload?.default_account_id || payload?.default_account || session?.account?.id
     || tokenAccountId;
   let selected = accounts.find((account) => (account.account_id || account.id) === currentId)
     || (!explicitId && accounts.length === 1 ? accounts[0] : null);
-  const usable = a => a && a.can_access_with_session !== false && a.is_deactivated !== true
-    && !a.is_removed && !a.is_deleted && !a.error && !a.access_error && !a.error_code
-    && ![401, 402, 403, 404].includes(Number(a.status_code || a.http_status))
-    && !/^(?:inactive|disabled|deactivated|banned|removed|deleted|suspended)$/i.test(a.status || "");
+  const usable = isUsableWorkspaceAccount;
+  if (preferTeam) {
+    const teams = accounts.filter(a => usable(a) && isTeamWorkspaceAccount(a));
+    selected = teams.find(a => a.id === currentId)
+      || teams.find(a => a.id === tokenAccountId)
+      || teams.sort((a, b) => a.id.localeCompare(b.id))[0]
+      || selected;
+  }
   if (allowPersonalFallback && !usable(selected)) {
     const personal = accounts.filter(a => (a.structure === "personal" || a.kind === "personal") && usable(a));
     if (personal.length === 1) selected = personal[0];
@@ -1922,7 +1939,9 @@ async function resumeCodexOauth(client, options, checkpoint) {
 async function finishCodexOauth(client, options, initial, oauth) {
   let current = initial;
 
-  const workspaceId = options.currentWorkspaceId || pickWorkspaceId(current);
+  // An already-issued callback has completed authorization; its workspace was
+  // constrained in the authorize URL and must not be selected a second time.
+  const workspaceId = isLocalCallback(getContinueUrl(current)) ? null : options.currentWorkspaceId || pickWorkspaceId(current);
   if (workspaceId) {
     console.log("[5/5] Select workspace");
     const consentUrl = getContinueUrl(current);
@@ -2482,10 +2501,10 @@ function buildAccountName(email) {
   return email ? `oauth---${email}` : `oauth---${new Date().toISOString()}`;
 }
 
-function pickWorkspaceId(payload) {
-  const workspaces = payload?.["oai-client-auth-session"]?.workspaces;
+export function pickWorkspaceId(payload) {
+  const workspaces = uniqueWorkspaceAccounts({ accounts: payload?.["oai-client-auth-session"]?.workspaces }).filter(isUsableWorkspaceAccount);
   if (!Array.isArray(workspaces) || workspaces.length === 0) return null;
-  const organization = workspaces.find((item) => item?.kind === "organization" && item?.id);
+  const organization = workspaces.find(isTeamWorkspaceAccount);
   const firstAvailable = workspaces.find((item) => item?.id);
   return (organization || firstAvailable)?.id || null;
 }

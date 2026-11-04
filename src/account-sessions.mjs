@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import { isIP } from "node:net";
 import { CookieJar, ProtocolClient } from "./protocol-login.mjs";
 import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, setWebSessionState } from "./account-web-session.mjs";
+import { uniqueWorkspaceAccounts } from "./workspace-accounts.mjs";
 
 import {
   TlsFingerprintTransport,
@@ -126,10 +127,7 @@ export function normalizeAccountWorkspaces(payload, currentAccountId = "") {
       ?? source.selected_account_id
       ?? source.selectedAccountId,
   );
-  const rawAccounts = Array.isArray(source.accounts) ? source.accounts
-    : isRecord(source.accounts) ? Object.entries(source.accounts).map(([id, value]) => ({ ...value, id: value?.id || id })) : [];
-  const accounts = rawAccounts.map((entry) => ({ ...entry, ...(isRecord(entry?.account) ? entry.account : {}),
-    id: entry?.account?.account_id || entry?.account?.id || entry?.account_id || entry?.id }));
+  const accounts = uniqueWorkspaceAccounts(source);
   const accountIds = new Set(accounts.map((account) => normalizeIdentifier(account?.id ?? account?.account_id ?? account?.accountId)).filter(Boolean));
   const selectedAccountId = responseSelectedAccountId && accountIds.has(responseSelectedAccountId)
     ? responseSelectedAccountId
@@ -157,8 +155,8 @@ function normalizeAccountWorkspace(account, defaultAccountId) {
   if (!id) return null;
   const structure = normalizeUsageText(account.structure || account.kind || "workspace").toLowerCase();
   const name = publicText(account.name, structure === "personal" ? "个人账户" : "未命名工作空间");
-  const rawCanAccess = account.can_access_with_session !== false;
-  const rawDeactivated = account.is_deactivated === true;
+  const rawCanAccess = account.can_access_with_session !== false && account.canAccess !== false;
+  const rawDeactivated = account.is_deactivated === true || account.isDeactivated === true;
   const availability = normalizeAccountWorkspaceAvailability(account, rawCanAccess, rawDeactivated);
   const currentMarker = firstBoolean(
     account.current,
@@ -279,13 +277,17 @@ function normalizeAccountWorkspaceAvailability(account, canAccess, deactivated) 
 }
 
 function normalizeWorkspaceCode(...values) {
+  let successful = null;
   for (const value of values) {
     if (value === null || value === undefined || value === "") continue;
     if (typeof value !== "string" && typeof value !== "number") continue;
     const text = String(value).trim();
-    if (text && text.length <= MAX_USAGE_TEXT_LENGTH) return text;
+    if (text && text.length <= MAX_USAGE_TEXT_LENGTH) {
+      if (!/^(?:active|available|enabled|ok|success|2\d\d)$/i.test(text)) return text;
+      successful ||= text;
+    }
   }
-  return null;
+  return successful;
 }
 
 function isWorkspaceHttpStatus(...values) {
@@ -297,7 +299,7 @@ function workspaceAvailabilityLabel(reason, code) {
   const suffix = code ? `（${code}）` : "";
   switch (reason) {
     case "removed": return `已移出空间${suffix}`;
-    case "banned": return `空间封禁${suffix || "（402）"}`;
+    case "banned": return `空间封禁${suffix}`;
     case "deactivated": return `空间已停用${suffix}`;
     case "inaccessible": return `无权访问${suffix}`;
     case "unknown": return `不可用${suffix}`;

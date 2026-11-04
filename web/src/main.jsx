@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { readJsonResponse, workspaceFailureTooltip } from "./response-errors.js";
 import {
   Ban,
   Check,
@@ -5368,6 +5369,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
               const disabled = isWorkspaceEntryDisabled(workspace);
               const availabilityLabel = resolveWorkspaceAvailabilityLabel(workspace);
               const disabledActionText = resolveWorkspaceDisabledActionText(workspace);
+              const failureTooltip = disabled ? workspaceFailureTooltip(workspace, availabilityLabel) : undefined;
               const isPersonal = workspace.structure === "personal";
               const displayName = workspace.name || workspace.id;
               const planLabel = formatPlanTypeLabel(workspace.planType, planTypeMapping);
@@ -5380,6 +5382,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
                   key={workspace.id}
                   onClick={() => switchWorkspace(workspace)}
                   disabled={disabled || selected || Boolean(action)}
+                  title={failureTooltip}
                 >
                   <span className={`workspace-item-icon${selected ? " selected" : ""}${disabled ? " disabled" : ""}`} aria-hidden="true">
                     <BriefcaseBusiness size={17} />
@@ -5403,7 +5406,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
                           </span>
                         )}
                         {disabled ? (
-                          <span className="workspace-badge disabled" title={workspace.availabilityMessage || availabilityLabel}>
+                          <span className="workspace-badge disabled" title={failureTooltip}>
                             {availabilityLabel}
                           </span>
                         ) : (
@@ -5945,9 +5948,7 @@ async function copyText(value) {
 }
 
 async function readResponse(response) {
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `请求失败：HTTP ${response.status}`);
-  return data;
+  return readJsonResponse(response);
 }
 
 function shortId(id) {

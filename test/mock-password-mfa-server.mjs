@@ -45,6 +45,13 @@ const server = http.createServer(async (req, res) => {
     return sendText(res, 200, "ok");
   }
   if (req.method === "GET" && url.pathname === "/api/auth/providers") return sendJson(res, 200, {});
+  if (req.method === "GET" && url.pathname === "/backend-api/accounts/check/v4-2023-04-27") return sendJson(res, 200, {
+    default_account_id: organizationWorkspaceId,
+    accounts: [
+      { id: organizationWorkspaceId, structure: "workspace", plan_type: "team" },
+      { id: personalWorkspaceId, structure: "personal", plan_type: "free" },
+    ],
+  });
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
     const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url");
     return sendJson(res, 200, chatgptLoginComplete ? { accessToken: `web.${payload}.signature`, user: { email: selectedEmail } } : {});

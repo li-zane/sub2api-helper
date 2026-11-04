@@ -12,7 +12,8 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-web-monitor-http-")
 const output = path.join(root, "output");
 const id = "11111111-1111-4111-8111-000000000001";
 const email = "monitored@example.test";
-const scenario = process.argv.includes("--web-only") ? "web-only" : process.argv.includes("--binding-drift") ? "binding" : process.argv.includes("--workspace-lost") ? "workspace" : "expired";
+const failedRefresh = process.argv.includes("--failed-refresh");
+const scenario = process.argv.includes("--web-only") ? "web-only" : process.argv.includes("--binding-drift") ? "binding" : process.argv.includes("--workspace-lost") || failedRefresh ? "workspace" : "expired";
 const webOnly = scenario === "web-only";
 const sharedSlots = process.argv.includes("--shared-slots");
 const foregroundId = "22222222-2222-4222-8222-000000000002";
@@ -57,6 +58,7 @@ const upstream = http.createServer((req, res) => {
   if (p.endsWith("/accounts/check/v4-2023-04-27")) return res.end(JSON.stringify({ current_account_id: "personal", accounts: {
     old: { account: { account_id: "old", plan_type: "business", is_deactivated: true } },
     personal: { account: { account_id: "personal", structure: "personal", plan_type: "free", can_access_with_session: true } },
+    ...(failedRefresh ? { personalAlias: { account: { account_id: "personal", structure: "personal", plan_type: "free", can_access_with_session: true } } } : {}),
   } }));
   if (p.endsWith("/accounts/sessions")) return res.end(JSON.stringify({ devices: [{ session_id: "same-browser", display_name: "Persistent browser", is_current_device: true, last_signed_in_ip_address: "203.0.113.4" }] }));
   res.statusCode = 404; res.end("{}");
@@ -92,7 +94,10 @@ try {
   const jar = new CookieJar(); jar.setFromResponse(webUrl, new Headers({ "set-cookie": `session=${scenario === "expired" || webOnly ? "old" : "renewed"}; Path=/` }));
   await writeAccountWebSession(webFile, { email, identity, cookies: jar.toJSON(), web: { workspaceId: scenario === "binding" ? "personal" : "old" }, accessToken: null });
   if (!webOnly) await fs.writeFile(resultFile, JSON.stringify({ type: "sub2api-data", accounts: [remoteAccount] }));
-  await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: webOnly ? "failed" : "completed", result_saved: !webOnly, plan_type: initialPlan, assigned_proxy_id: 1, authorization_proxy_selected: true, bound_ip: "198.51.100.1", created_at: "2026-11-01T00:00:00Z" }));
+  await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: webOnly || failedRefresh ? "failed" : "completed", result_saved: !webOnly, plan_type: initialPlan, assigned_proxy_id: 1, authorization_proxy_selected: true, bound_ip: "198.51.100.1", created_at: "2026-11-01T00:00:00Z",
+    ...(failedRefresh ? { pool_refresh_action: "relogin", pool_refresh_ready: false, pool_refresh_error: "WEB_PLAN_UNAVAILABLE: fixture failure" } : {}),
+  }));
+  if (failedRefresh) await fs.writeFile(path.join(output, "web-session-monitor.json"), JSON.stringify({ version: 1, accounts: { [email]: { status: "repairing", lastRepairAt: new Date(Date.now() - 61 * 60_000).toISOString(), nextCheckAt: new Date(0).toISOString() } } }));
   if (sharedSlots) {
     const fgDir = path.join(output, foregroundId); await fs.mkdir(fgDir);
     await fs.writeFile(path.join(fgDir, "job-meta.json"), JSON.stringify({ version: 1, email: "foreground@example.test", status: "completed", result_saved: true, plan_type: "business", assigned_proxy_id: 1, authorization_proxy_selected: true }));
