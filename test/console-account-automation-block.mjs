@@ -88,5 +88,3 @@ try {
   console.log("ACCOUNT_AUTOMATION_BLOCK_PASS startup migration; Web-only ban; switches off; re-enable rejected; WebSession skipped; cooldown never resumes; transient/workspace preserved; restart");
 } catch (error) { console.error("ACCOUNT_AUTOMATION_BLOCK_FAIL: " + error.message); process.exitCode = 1; }
 finally { await stop(); await new Promise(r => pool.close(r)); await fs.rm(root, { recursive: true, force: true }); }
-
-
