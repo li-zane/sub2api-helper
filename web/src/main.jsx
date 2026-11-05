@@ -23,6 +23,7 @@ import {
   Filter,
   BriefcaseBusiness,
   Globe2,
+  Info,
   KeyRound,
   ListPlus,
   LoaderCircle,
@@ -301,6 +302,8 @@ function App() {
   const [accountProxyMode, setAccountProxyMode] = useState("global");
   const [accountProxyDistribution, setAccountProxyDistribution] = useState([]);
   const [accountProxyDirectCount, setAccountProxyDirectCount] = useState(0);
+  const [directPublicIp, setDirectPublicIp] = useState(null);
+  const [directIpLoading, setDirectIpLoading] = useState(false);
   const [allowDirectFallback, setAllowDirectFallback] = useState(false);
   const [proxySettingsLoaded, setProxySettingsLoaded] = useState(false);
   const [proxySettingsDirty, setProxySettingsDirty] = useState(false);
@@ -384,12 +387,30 @@ function App() {
       if (stopped) return;
       setAccountProxyDistribution(Array.isArray(data.proxies) ? data.proxies : []);
       setAccountProxyDirectCount(data.directAccountCount || 0);
+      if (data.directIp) setDirectPublicIp(data.directIp);
     })
       .catch((error) => { if (!stopped) setProxySettingsError(error.message); });
     void refresh();
     const timer = window.setInterval(refresh, 30_000);
     return () => { stopped = true; window.clearInterval(timer); };
   }, [token, accountProxyMode, sub2apiSettings]);
+
+  useEffect(() => {
+    if (!token || !proxySettingsOpen) return undefined;
+    setDirectIpLoading(true);
+    let stopped = false;
+    apiFetch(token, "/api/direct-ip")
+      .then((data) => {
+        if (!stopped) setDirectPublicIp(data?.ip || null);
+      })
+      .catch(() => {
+        if (!stopped) setDirectPublicIp(null);
+      })
+      .finally(() => {
+        if (!stopped) setDirectIpLoading(false);
+      });
+    return () => { stopped = true; };
+  }, [token, proxySettingsOpen]);
 
   async function saveAccountProxySettings() {
     if (proxySettingsSaving) return;
@@ -727,6 +748,7 @@ function App() {
       const proxies = Array.isArray(data.proxies) ? data.proxies : [];
       setAccountProxyDistribution(proxies);
       setAccountProxyDirectCount(data.directAccountCount || 0);
+      if (data.directIp) setDirectPublicIp(data.directIp);
       setProxySettingsError("");
       return proxies;
     } catch (requestError) {
@@ -2251,7 +2273,7 @@ function App() {
                     />
                   </div>
                 </th>
-                <th>
+                <th className="plan-heading">
                   <div className="column-filter-heading">
                     <span>Plan type</span>
                     <ColumnHeaderFilter
@@ -2268,7 +2290,7 @@ function App() {
                   </div>
                 </th>
                 <th className="usage-heading">用量</th>
-                <th>
+                <th className="pool-heading">
                   <div className="column-filter-heading">
                     <span>号池</span>
                     <ColumnHeaderFilter
@@ -2293,7 +2315,7 @@ function App() {
                     />
                   </div>
                 </th>
-                <th>
+                <th className="status-heading">
                   <div className="column-filter-heading">
                     <span>状态</span>
                     <ColumnHeaderFilter
@@ -2474,14 +2496,21 @@ function App() {
 
             <div className="proxy-dialog-body">
               <div className="proxy-mode-banner">
-                <Globe2 size={15} />
-                <span>
-                  {accountProxyMode === "plan"
-                    ? "当前模式：动态登录 · 按 PlanType 授权"
-                    : accountProxyMode === "sub2api"
-                      ? "当前模式：Sub2API 出口 IP 均衡分配"
-                      : "当前模式：全局代理"}
-                </span>
+                <div className="proxy-mode-content">
+                  <div className="proxy-mode-icon-wrap">
+                    <Globe2 size={15} aria-hidden="true" />
+                  </div>
+                  <div className="proxy-mode-text-group">
+                    <span className="proxy-mode-caption">当前策略</span>
+                    <span className="proxy-mode-title">
+                      {accountProxyMode === "plan"
+                        ? "动态登录 · 按 PlanType 授权"
+                        : accountProxyMode === "sub2api"
+                          ? "Sub2API 出口 IP 均衡分配"
+                          : "全局代理"}
+                    </span>
+                  </div>
+                </div>
                 <HelpTip title="代理分配模式" label="查看代理分配模式说明">
                   可在顶部“任务设置”中切换全局代理、Sub2API 均衡分配或动态登录 + 按 PlanType 授权模式。
                 </HelpTip>
@@ -2491,7 +2520,7 @@ function App() {
                 <div className="proxy-sub2api-section">
                   <div className="proxy-sub2api-header">
                     <span className={`provider-ready ${accountProxyDistribution.length ? "" : "incomplete"}`}>
-                      {accountProxyDistribution.length ? <Check size={14} /> : <CircleAlert size={14} />}
+                      <span className={`proxy-status-dot ${accountProxyDistribution.length ? "ready" : "incomplete"}`} />
                       <span className="provider-ready-text">
                         {accountProxyDistribution.length
                           ? `已读取 ${accountProxyDistribution.length} 个代理节点 / ${proxyDistributionByIp(accountProxyDistribution).length} 个出口 IP`
@@ -2505,19 +2534,49 @@ function App() {
                     </span>
                     <button
                       type="button"
-                      className="secondary-button compact-btn"
+                      className="secondary-button compact-btn proxy-refresh-btn"
                       onClick={() => { void refreshAccountProxyDistribution().catch(() => {}); }}
                       disabled={proxySettingsSaving || !token}
                     >
-                      {proxySettingsSaving ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}读取代理
+                      {proxySettingsSaving ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}读取代理
                     </button>
                   </div>
                   {(accountProxyDistribution.length > 0 || accountProxyDirectCount > 0) && (
-                    <div className="proxy-distribution" aria-label="代理 IP 账号分配">
-                      {proxyDistributionByIp(accountProxyDistribution).map((proxy) => (
-                        <span key={proxy.ipAddress}>{proxy.names.join("、")} · {proxy.ipAddress} · {proxy.accountCount} 个 OAuth 账号</span>
-                      ))}
-                      <span>未分配代理 · {accountProxyDirectCount} 个 OAuth 账号</span>
+                    <div className="proxy-distribution-container" aria-label="代理 IP 账号分配">
+                      <div className="proxy-distribution-grid">
+                        {proxyDistributionByIp(accountProxyDistribution).map((proxy) => (
+                          <div key={proxy.ipAddress} className={`proxy-segment-bar ${proxy.accountCount > 0 ? "has-accounts" : "zero-accounts"}`}>
+                            <div className="proxy-segment-col segment-name" title={proxy.names.join("、")}>
+                              <span className="segment-name-label">{proxy.names.join("、")}</span>
+                            </div>
+                            <div className="proxy-segment-col segment-ip" title={proxy.ipAddress}>
+                              <span className="segment-ip-code">{proxy.ipAddress}</span>
+                            </div>
+                            <div className="proxy-segment-col segment-count">
+                              <span className={`segment-count-pill ${proxy.accountCount > 0 ? "has-count" : "zero-count"}`}>
+                                {proxy.accountCount} 个 OAuth 账号
+                              </span>
+                            </div>
+                            <span className="sr-only">{proxy.names.join("、")} · {proxy.ipAddress} · {proxy.accountCount} 个 OAuth 账号</span>
+                          </div>
+                        ))}
+                        <div className={`proxy-segment-bar unassigned ${accountProxyDirectCount > 0 ? "has-unassigned" : ""}`}>
+                          <div className="proxy-segment-col segment-name" title="直连">
+                            <span className="segment-name-label">直连</span>
+                          </div>
+                          <div className="proxy-segment-col segment-ip" title={directPublicIp ? `本机出口 IP: ${directPublicIp}` : "本机默认网络出口"}>
+                            <span className="segment-ip-code direct-ip-code">
+                              {directPublicIp || (directIpLoading ? "读取中…" : "本机直连")}
+                            </span>
+                          </div>
+                          <div className="proxy-segment-col segment-count">
+                            <span className="segment-count-pill unassigned-count">
+                              {accountProxyDirectCount} 个 OAuth 账号
+                            </span>
+                          </div>
+                          <span className="sr-only">未分配代理 · {accountProxyDirectCount} 个 OAuth 账号</span>
+                        </div>
+                      </div>
                       <p className="proxy-distribution-scope">仅统计 OAuth 账号：号池 OpenAI OAuth 账号与本地已授权账号，按邮箱去重；不含 API Key 和未完成授权的任务。未分配代理是配置状态，不代表实时直连流量。</p>
                     </div>
                   )}
@@ -2528,7 +2587,7 @@ function App() {
                 <div className="proxy-global-section">
                   <label className="settings-field wide-settings-field">
                     <span className="field-label-row">
-                      <span>全局代理地址</span>
+                      <span className="proxy-section-subtitle">全局代理地址</span>
                       <HelpTip title="全局代理说明" label="查看全局代理说明">
                         {!proxySettingsLoaded
                           ? "正在读取服务端配置"
@@ -2558,7 +2617,10 @@ function App() {
                       onChange={(event) => { setAllowDirectFallback(event.target.checked); setProxySettingsDirty(true); }}
                       disabled={!proxySettingsLoaded || proxySettingsSaving}
                     />
-                    <span>代理失败时允许回退本地出口 IP</span>
+                    <span className="fallback-text-col">
+                      <span className="fallback-title">代理失败时允许回退本地出口 IP</span>
+                      <span className="fallback-hint">避免代理节点波动导致任务中断</span>
+                    </span>
                   </label>
                 </div>
               )}
@@ -3929,24 +3991,25 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
                   aria-label={`编辑 ${job.email} 的 Sub2API 优先级`}
                 />
               </div>
-            ) : "—"}
+            ) : (
+              <span className="pool-priority-placeholder muted">—</span>
+            )}
           </div>
         </div>
       </td>
-      <td><StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} /></td>
+      <td className="status-cell"><StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} /></td>
       <td className="step-cell recent-operation-cell">
         <div className="recent-operation-overview">
           <div className="recent-operation-summary">
             <button
               type="button"
               className={`operation-type-badge operation-feedback-trigger ${operation.tone}`}
-              title="查看最近操作的反馈代码详情"
+              title={`${operation.label} · ${operation.result}（点击查看反馈代码详情）`}
               aria-label={`查看${operation.label}反馈详情`}
               onClick={() => onOpenOperationDetail({ text: `操作：${operation.label}\n时间：${formatDateTime(operation.at)}\n\n${operation.text}` })}
             >
               {operation.label}
             </button>
-            <span className={`recent-operation-result ${operation.tone}`}>{operation.result}</span>
           </div>
         </div>
         {job.currentPhone && ["working", "phone", "phone_otp"].includes(job.status) && (
@@ -4220,8 +4283,9 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
 
   useEffect(() => {
     const dialog = dialogRef.current;
+    const initialFocus = dialog.querySelector('[data-dialog-initial-focus]:not(:disabled), .dialog-header .icon-button:not(:disabled)');
+    initialFocus?.setAttribute("autofocus", "");
     dialog.showModal();
-    dialog.querySelector("input").focus();
     return () => {
       dialog.close();
       returnFocusRef.current?.focus();
@@ -4304,7 +4368,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
               任务设置保存到服务端，所有浏览器共用。服务重启后保留此设置。
             </HelpTip>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} disabled={saving} aria-label="关闭任务设置"><X size={18} /></button>
+          <button type="button" className="icon-button" data-dialog-initial-focus onClick={onClose} disabled={saving} aria-label="关闭任务设置"><X size={18} /></button>
         </div>
         <div className="task-two-fields">
           <label className="settings-field task-limit-field" htmlFor="task-limit">
@@ -4315,7 +4379,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
               </HelpTip>
             </span>
             <div>
-              <input id="task-limit" type="number" min={settings.min} max={settings.max} step="1" required autoFocus
+              <input id="task-limit" type="number" min={settings.min} max={settings.max} step="1" required
                 value={limit} onChange={(event) => setLimit(event.target.value)} disabled={saving}
                 aria-invalid={Boolean(error)} />
               <span>条</span>
@@ -5792,23 +5856,26 @@ function Sub2ApiPoolBadge({ inPool, remoteStatus }) {
 
 function Sub2ApiEnabledToggle({ inPool, enabled, available, busy, onChange }) {
   if (inPool !== true) {
-    return <span className="muted">—</span>;
+    return <span className="pool-toggle-placeholder muted">—</span>;
   }
   const known = typeof enabled === "boolean";
   const disabled = !available || !known || busy;
+  const labelText = busy ? "更新中" : known ? (enabled ? "启用" : "关闭") : "未知";
   return (
     <button
       type="button"
       role="switch"
-      className={`status-toggle ${enabled === true ? "on" : ""}`}
+      className={`status-toggle pool-switch-toggle ${enabled === true ? "on" : "off"}`}
       aria-checked={enabled === true}
       aria-label={known ? (enabled ? "停用号池账号" : "启用号池账号") : "号池启用状态未知"}
       title={!available ? "请先配置 Sub2API" : known ? (enabled ? "点击停用" : "点击启用") : "正在同步号池状态"}
       disabled={disabled}
       onClick={() => onChange?.(!enabled)}
     >
-      <span className="status-toggle-track"><span className="status-toggle-thumb">{busy ? <LoaderCircle className="spin" size={11} /> : null}</span></span>
-      <span className="status-toggle-label">{busy ? "更新中" : known ? (enabled ? "启用" : "停用") : "未知"}</span>
+      <span className="status-toggle-track">
+        <span className="status-toggle-thumb">{busy ? <LoaderCircle className="spin" size={11} /> : null}</span>
+        <span className="status-toggle-label">{labelText}</span>
+      </span>
     </button>
   );
 }

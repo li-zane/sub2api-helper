@@ -8,7 +8,7 @@ export function AccessibleDialog({ children, className = "", labelledBy, onClose
     const dialog = ref.current;
     // React autoFocus runs before showModal(); native dialog focusing would
     // otherwise select the first help trigger and open its focus tooltip.
-    const initialFocus = dialog.querySelector('[data-dialog-initial-focus]:not(:disabled)');
+    const initialFocus = dialog.querySelector('[data-dialog-initial-focus]:not(:disabled), .dialog-header .icon-button:not(:disabled)');
     initialFocus?.setAttribute("autofocus", "");
     dialog.showModal();
     return () => {

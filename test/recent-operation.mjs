@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { recentOperation } from "../web/src/recent-operation.mjs";
 
-const labels = { completed: "已完成", canceled: "授权已取消", phone: "待手机号", failed: "失败" };
+const labels = { completed: "已完成", canceled: "授权已取消", phone: "待手机号", working: "处理中", failed: "失败" };
 const base = { createdAt: "2026-11-01T01:00:00Z", lastOperationAt: "2026-11-05T01:00:00Z", lastOperationType: "reauthorize", status: "phone", prompt: "请输入需要绑定的手机号" };
 assert.equal(recentOperation(base, labels).result, "待手机号");
+assert.equal(recentOperation(base, labels).tone, "pending");
+assert.equal(recentOperation({ ...base, status: "working" }, labels).tone, "running");
+assert.equal(recentOperation({ ...base, status: "completed" }, labels).tone, "success");
 const raw = { error: { code: "account_deactivated", message: "provider response with full details", trace: "fixture-trace" } };
 const failed = recentOperation({ ...base, status: "failed", lastError: JSON.stringify(raw) }, labels);
 assert.equal(failed.result, "失败"); assert.equal(failed.tone, "error");

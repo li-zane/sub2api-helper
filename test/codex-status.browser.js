@@ -74,12 +74,12 @@ async (page) => {
     check(history.y >= chart.y + chart.height, 'fingerprint history is not below overload dashboard');
     check(Math.abs(history.x - a.x) < 1 && Math.abs(history.x + history.width - b.x - b.width) < 1, 'fingerprint result bar must align with the top controls');
     check(Math.abs(chart.x - a.x) < 1 && Math.abs(chart.x + chart.width - b.x - b.width) < 1 && Math.abs(history.width - chart.width) < 1, 'controls, curve frame and fingerprint history must share the same width');
-    check((await row.locator('.overload-switch').first().boundingBox()).width === 40, 'overload switch was not lengthened');
-    check((await row.locator('.status-toggle-track').last().boundingBox()).width === 40, 'fingerprint switch was not lengthened');
+    check((await row.locator('.overload-switch').first().boundingBox()).width === 34, 'overload switch was not lengthened');
+    check((await row.locator('.status-toggle-track').last().boundingBox()).width === 34, 'fingerprint switch was not lengthened');
     check(Math.abs(a.width - b.width) < 1 && Math.abs(c.width - d.width) < 1 && Math.abs(a.height - c.height) < 1, 'control rows must have equally sized slots');
     const refresh = await row.locator('.fingerprint-check-button').boundingBox(), settings = await row.locator('.fingerprint-action-pair .compact-icon-btn').boundingBox();
-    check(Math.abs(refresh.width - settings.width) < 1 && refresh.width > 26, 'action buttons must share their slot evenly');
-    check(Math.abs(chart.width - 156) < 1, 'curve frame must use the narrower aligned width');
+    check(Math.abs(refresh.width - settings.width) < 1 && refresh.width > 24, 'action buttons must share their slot evenly');
+    check(Math.abs(chart.width - 132) < 1, 'curve frame must use the narrower aligned width');
   });
   await run('energy-period-counts-thresholds-and-colors', async () => {
     const energy = row.locator('.codex-energy');

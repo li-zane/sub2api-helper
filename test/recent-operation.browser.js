@@ -29,12 +29,15 @@ async (page) => {
   const row = () => page.locator("tr.job-row").filter({ has: page.getByRole("checkbox", { name: "选择 review-1@example.test", exact: true }) });
   await run("operation-summary-and-time-alignment", async () => {
     await page.reload();
-    const result = row().locator(".recent-operation-result");
-    await result.getByText("待手机号", { exact: true }).waitFor();
+    const trigger = row().locator(".operation-feedback-trigger");
+    await trigger.getByText("重新授权", { exact: true }).waitFor();
+    check(await trigger.evaluate(el => el.classList.contains("pending")), "pending operation should use pending tone class");
+    check(await row().locator(".recent-operation-result").count() === 0, "separate result text should be removed");
     check(await row().locator(".web-session-state").innerText() === "Web已验", "Web badge moved out of account column");
     check(await row().getByPlaceholder("+60123456789").isVisible(), "phone entry disappeared during column merge");
-    const tag = await row().locator(".operation-feedback-trigger").boundingBox(), feedback = await result.boundingBox();
-    check(tag.y + tag.height <= feedback.y, "operation label and result are not stacked");
+    const tag = await trigger.boundingBox();
+    const opCell = await row().locator(".recent-operation-cell").boundingBox();
+    check(Math.abs(tag.x + tag.width / 2 - opCell.x - opCell.width / 2) < 1, "operation label is not centered in its column");
     const time = await row().locator(".recent-operation-time").boundingBox();
     const timeCell = await row().locator(".recent-operation-time-cell").boundingBox();
     check(time.x >= tag.x + tag.width, "operation timestamp is not in the next column");
@@ -49,7 +52,7 @@ async (page) => {
   });
   await run("operation-feedback-code-dialog", async () => {
     mode = "failed"; await page.reload();
-    await row().locator(".recent-operation-result").getByText("失败", { exact: true }).waitFor();
+    await row().locator(".operation-feedback-trigger.error").waitFor();
     const bounds = await row().boundingBox();
     for (const selector of [".recent-operation-overview", ".recent-operation-time-cell .time-stack", ".added-time-cell .time-stack"]) {
       const content = await row().locator(selector).boundingBox();

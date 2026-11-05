@@ -7,6 +7,11 @@ const LABELS = {
 };
 const AUTHORIZATION = new Set(["initial_authorization", "reauthorize", "relogin", "automatic_relogin", "resume"]);
 const UPDATES = new Set(["account_update", "credential_update", "proxy_update", "workspace_switch"]);
+const ACTIVE_STATUSES = new Set([
+  "queued", "starting", "working", "totp_starting",
+  "password_add_starting", "finalizing", "refreshing",
+]);
+const ERROR_STATUSES = new Set(["failed", "mfa_failed", "banned", "canceled"]);
 
 function feedbackText(value) {
   if (value === null || value === undefined || value === "") return "";
@@ -20,8 +25,9 @@ export function recentOperation(job, statusLabels = {}) {
   let result = statusLabels[job.status] || "状态未知";
   let error = null;
   let message = job.prompt || "";
-  let tone = ["failed", "mfa_failed", "banned"].includes(job.status) ? "error"
-    : job.status === "completed" ? "success" : "pending";
+  let tone = ERROR_STATUSES.has(job.status) ? "error"
+    : job.status === "completed" ? "success"
+    : ACTIVE_STATUSES.has(job.status) ? "running" : "pending";
 
   // Web-only login restores the previous authorization status, so that status
   // must never be presented as the result of the newer Web operation.
@@ -31,7 +37,7 @@ export function recentOperation(job, statusLabels = {}) {
     else if (error) result = /已取消/.test(feedbackText(error)) ? "已取消" : "失败";
     else if (job.webLoginCompletedAt && Date.parse(job.webLoginCompletedAt) >= Date.parse(job.lastOperationAt || job.createdAt)) result = "已完成";
     else result = "待确认";
-    tone = error ? "error" : result === "已完成" ? "success" : "pending";
+    tone = error ? "error" : result === "已完成" ? "success" : (job.webLoginPending && (!job.status || ACTIVE_STATUSES.has(job.status))) ? "running" : "pending";
     message = job.webLoginPending ? job.prompt : error || (result === "已完成" ? "Web 登录态已保存" : "尚无本次 Web 登录的完成反馈");
   } else if (["setup_2fa", "replace_2fa"].includes(type)) {
     error = job.totpSetupError;
@@ -49,7 +55,9 @@ export function recentOperation(job, statusLabels = {}) {
     error = job.lastError;
     if (AUTHORIZATION.has(type) && job.poolRefreshError) {
       error = job.poolRefreshError; result = "同步待完成"; tone = "error";
-    } else if (type === "cooldown" && job.poolRefreshDueAt) result = "冷却中";
+    } else if (type === "cooldown" && job.poolRefreshDueAt) {
+      result = "冷却中"; tone = "pending";
+    }
   }
 
   const details = [];

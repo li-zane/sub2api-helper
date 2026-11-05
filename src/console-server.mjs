@@ -7,6 +7,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { createDirectPublicIpReader } from "./direct-public-ip.mjs";
 import { createStaticFrontend } from "./static-frontend.mjs";
 import { createCredentialStore } from "./credential-store.mjs";
 import { readAccountWebSession, webSessionPathForJob, inspectAccountWebSession, publicWebCredentialSync } from "./account-web-session.mjs";
@@ -216,6 +217,8 @@ const directTlsProfileProbe = new DirectTlsProfileProbe({
   explicitProfile: process.env.TOSUB2_TLS_PROFILE,
   validationUrl: `${String(process.env.CHATGPT_BASE || "https://chatgpt.com").replace(/\/$/, "")}/`,
 });
+const directPublicIp = createDirectPublicIpReader();
+
 const sub2ApiMonitorState = {
   running: false,
   lastCheckAt: null,
@@ -608,6 +611,12 @@ async function handleApi(req, res, requestUrl) {
       const result = await proxyQualityService.check(proxyUrl, { signal: controller.signal, rotateSession: body.target === "global" });
       if (!res.destroyed) sendJson(res, 200, { target, result });
     } finally { res.off("close", stop); }
+    return;
+  }
+
+  if (req.method === "GET" && requestUrl.pathname === "/api/direct-ip") {
+    const ip = await directPublicIp.read();
+    sendJson(res, 200, { ip: ip || null });
     return;
   }
 
@@ -1049,6 +1058,7 @@ async function handleApi(req, res, requestUrl) {
       groups: groupPayload,
       proxies: [...proxiesById.values()].map((proxy) => ({ ...publicSub2ApiProxy(proxy), accountCount: proxyCounts.get(proxyIpKey(proxy)) || 0 })),
       directAccountCount,
+      directIp: directPublicIp.peek(),
     });
     return;
   }

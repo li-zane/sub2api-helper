@@ -1,24 +1,61 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Activity, RefreshCw, Settings2, X } from "lucide-react";
+import { Activity, Check, ChevronDown, RefreshCw, Settings2, X } from "lucide-react";
 import { HelpTip } from "./help-tip.jsx";
 
 const TITLES = { match: "指纹一致", mismatch: "疑似不一致", unknown: "证据不足", error: "请求失败" };
 const toText = models => (models || []).map(m => m.expected === m.model ? m.model : `${m.model} => ${m.expected}`).join("\n");
 const fromText = text => text.split(/\n/).map(line => line.trim()).filter(Boolean).map(line => { const [model, ...parts] = line.split("=>"); return { model: model.trim(), expected: parts.join("=>").trim() || model.trim() }; });
+
+function formatReferenceTime(val) {
+  if (!val) return "—";
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return String(val).slice(0, 19).replace("T", " ");
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    const h = String(d.getHours()).padStart(2, "0");
+    const min = String(d.getMinutes()).padStart(2, "0");
+    return `${y}-${m}-${day} ${h}:${min}`;
+  } catch {
+    return String(val);
+  }
+}
+
+function formatTimelineTime(val) {
+  if (!val) return { time: "—", date: "" };
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return { time: String(val), date: "" };
+    const str = d.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+    const parts = str.split(" ");
+    return { date: parts[0] || "", time: parts[1] || str };
+  } catch {
+    return { time: String(val), date: "" };
+  }
+}
+
 async function api(token, url, body) {
   const response = await fetch(url, { method: body === undefined ? "GET" : "POST", headers: { "x-console-token": token, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const data = await response.json(); if (!response.ok) throw new Error(data.error || "指纹检测请求失败"); return data;
 }
 function Dialog({ title, subtitle, onClose, children }) {
   const ref = useRef(null);
-  useEffect(() => { const previous = document.activeElement; const dialog = ref.current; dialog.showModal(); return () => { dialog.close(); previous?.focus?.(); }; }, []);
+  useEffect(() => {
+    const previous = document.activeElement;
+    const dialog = ref.current;
+    const initialFocus = dialog.querySelector('[data-dialog-initial-focus]:not(:disabled), .dialog-header .icon-button:not(:disabled)');
+    initialFocus?.setAttribute("autofocus", "");
+    dialog.showModal();
+    return () => { dialog.close(); previous?.focus?.(); };
+  }, []);
   return <dialog ref={ref} className="batch-dialog fingerprint-dialog" aria-label={title} onCancel={event => { event.preventDefault(); onClose(); }}>
     <div className="dialog-header">
       <div>
         <h2>{title}</h2>
         {subtitle && <HelpTip title={title} label={`${title}说明`}>{subtitle}</HelpTip>}
       </div>
-      <button type="button" className="icon-button" aria-label={`关闭${title}`} onClick={onClose}><X size={18} /></button>
+      <button type="button" className="icon-button" data-dialog-initial-focus aria-label={`关闭${title}`} onClick={onClose}><X size={18} /></button>
     </div>
     {children}
   </dialog>;
@@ -101,63 +138,242 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
     </form></Dialog>}
   </>;
 }
-function AttributionModels({ models }) {
-  return <div className="fingerprint-result-models">{models.map((r, index) => <div key={index} className="fingerprint-result-model">
-    <div className="fingerprint-model-header">
-      <div className="field-label-row">
-        <strong>{r.model}</strong>
-        {(r.reason || r.error || r.expectedReference?.combined || r.samples?.length > 0) && (
-          <HelpTip title={`${r.model} 采样详情`} label={`查看 ${r.model} 采样说明`}>
-            {r.reason || r.error ? <div>{r.reason || r.error}</div> : null}
-            {r.expectedReference?.combined ? <div>合并参考类：{r.expectedReference.name}（该库不区分类内单个模型）</div> : null}
-            {r.samples?.length > 0 ? <div>样本数字数（实际 / 期望）：{r.samples.map(s => `${s.count} / ${s.expected}`).join("；")}</div> : null}
-          </HelpTip>
-        )}
+function AttributionModels({ models, parentStatus }) {
+  return <div className="fingerprint-timeline-models">{models.map((r, index) => {
+    const modelStatus = r.status || "unknown";
+    const isMatch = modelStatus === "match";
+    const isMismatch = modelStatus === "mismatch";
+    const isError = modelStatus === "error";
+    const predName = r.predictionName || r.prediction || (isError ? (r.failure?.code || "检测失败") : "未知");
+    const probPercent = r.probability != null ? `${(r.probability * 100).toFixed(2)}%` : null;
+
+    return <div key={index} className={`fingerprint-timeline-model status-${modelStatus}`}>
+      <div className="fingerprint-model-stream">
+        <div className="model-stream-left">
+          <strong className="model-name-text">{r.model}</strong>
+          {(r.reason || r.error || r.expectedReference?.combined || r.samples?.length > 0) && (
+            <HelpTip title={`${r.model} 采样详情`} label={`查看 ${r.model} 采样说明`}>
+              {r.reason || r.error ? <div>{r.reason || r.error}</div> : null}
+              {r.expectedReference?.combined ? <div>合并参考类：{r.expectedReference.name}（该库不区分类内单个模型）</div> : null}
+              {r.samples?.length > 0 ? <div>样本数字数（实际 / 期望）：{r.samples.map(s => `${s.count} / ${s.expected}`).join("；")}</div> : null}
+            </HelpTip>
+          )}
+          {r.expected && r.expected !== r.model && (
+            <span className="expected-pill">期望：{r.expected}</span>
+          )}
+        </div>
+
+        <span className="stream-arrow" aria-hidden="true">→</span>
+
+        <div className="model-stream-right">
+          <span className={`pred-name-text status-${modelStatus}`}>{predName}</span>
+          {probPercent && <span className={`prob-pill status-${modelStatus}`}>{probPercent}</span>}
+          {(models.length > 1 || r.status !== parentStatus) && (
+            <span className={`model-status-tag ${r.status}`}>{TITLES[r.status] || "证据不足"}</span>
+          )}
+        </div>
       </div>
-      <span className={`fingerprint-status ${r.status}`}>{TITLES[r.status] || "证据不足"}</span>
-    </div>
-    <p>期望：{r.expected} · 归因：{r.predictionName || r.prediction || "未知"}{r.probability != null ? ` · ${(r.probability * 100).toFixed(2)}%` : ""}</p>
-    {r.failure && <small>错误分类：{r.failure.code}{r.failure.httpStatus ? ` · HTTP ${r.failure.httpStatus}` : ""}{r.failure.upstreamCode ? ` · ${r.failure.upstreamCode}` : ""}</small>}
-    {r.sampleFailures?.length > 0 && <details><summary>采样请求记录（{r.sampleFailures.length} 次异常）</summary><ul>{r.sampleFailures.map((f, i) => <li key={i}>第 {f.sample} 份样本 · 第 {f.attempt} 次请求：{f.message}{f.httpStatus ? `（HTTP ${f.httpStatus}）` : ""}{f.upstreamCode ? ` · ${f.upstreamCode}` : ""}</li>)}</ul></details>}
-    <small>远端账号 ID：{r.accountId || "—"} · {r.status === "error" ? `采样完成：${r.completedSamples ?? 0}/3` : `有效样本：${r.usedOutputs ?? 0}/3`} · 参考库：{r.referenceBuiltAt || "—"}</small>
-    {r.candidates?.length > 0 && <details><summary>查看候选归因</summary><ol>{r.candidates.map(c => <li key={c.model}>{c.name || c.model}：{c.probability == null ? "—" : `${(c.probability * 100).toFixed(2)}%`}</li>)}</ol></details>}
-  </div>)}</div>;
+
+      {r.failure && (
+        <div className="fingerprint-error-note">
+          <span>错误分类：{r.failure.code}</span>
+          {r.failure.httpStatus ? <span> · HTTP {r.failure.httpStatus}</span> : null}
+          {r.failure.upstreamCode ? <span> · {r.failure.upstreamCode}</span> : null}
+        </div>
+      )}
+
+      {r.sampleFailures?.length > 0 && (
+        <details className="fingerprint-timeline-details sample-failures-details">
+          <summary className="timeline-details-summary">
+            <ChevronDown size={13} className="details-chevron" />
+            <span>采样请求记录（{r.sampleFailures.length} 次异常）</span>
+          </summary>
+          <ul className="timeline-details-list">
+            {r.sampleFailures.map((f, i) => (
+              <li key={i}>
+                第 {f.sample} 份样本 · 第 {f.attempt} 次请求：{f.message}
+                {f.httpStatus ? `（HTTP ${f.httpStatus}）` : ""}
+                {f.upstreamCode ? ` · ${f.upstreamCode}` : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      <div className="fingerprint-timeline-meta">
+        <span>远端账号 ID：{r.accountId || "—"}</span>
+        <span className="meta-sep">·</span>
+        <span>{r.status === "error" ? `采样完成：${r.completedSamples ?? 0}/3` : `有效样本：${r.usedOutputs ?? 0}/3`}</span>
+        <span className="meta-sep">·</span>
+        <span>参考库：{formatReferenceTime(r.referenceBuiltAt)}</span>
+      </div>
+
+      {r.candidates?.length > 0 && (
+        <details className="fingerprint-timeline-details candidates-details">
+          <summary className="timeline-details-summary">
+            <ChevronDown size={13} className="details-chevron" />
+            <span>候选归因分布 (Top {r.candidates.length})</span>
+          </summary>
+          <div className={`timeline-details-branch candidates-branch ${isMismatch ? "is-mismatch" : isMatch ? "is-match" : ""}`}>
+            {r.candidates.map((c, cIdx) => {
+              const name = c.name || c.model;
+              const probNum = c.probability != null ? c.probability * 100 : 0;
+              const probText = c.probability != null ? `${probNum.toFixed(2)}%` : "—";
+              const isFirst = cIdx === 0;
+              return (
+                <div key={c.model || cIdx} className={`branch-candidate-item ${isFirst ? "is-top-candidate" : ""}`}>
+                  <div className="candidate-name-col">
+                    <span className="candidate-rank">{cIdx + 1}.</span>
+                    <span className={`candidate-name ${isFirst ? (isMismatch ? "text-rose" : "text-emerald") : ""}`}>
+                      {name}
+                    </span>
+                  </div>
+                  <div className="candidate-prob-col">
+                    <div className="candidate-bar-track">
+                      <div
+                        className={`candidate-bar-fill ${isFirst ? (isMismatch ? "bar-rose" : "bar-emerald") : "bar-slate"}`}
+                        style={{ width: `${Math.max(0, Math.min(100, probNum))}%` }}
+                      />
+                    </div>
+                    <span className={`candidate-prob-text ${isFirst ? (isMismatch ? "text-rose" : "text-emerald") : ""}`}>
+                      {probText}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </details>
+      )}
+    </div>;
+  })}</div>;
 }
 function FingerprintHistoryDialog({ job, token, onClose }) {
   const [data, setData] = useState(null), [error, setError] = useState("");
-  const [refresh, setRefresh] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshed, setRefreshed] = useState(false);
+  const refreshTimerRef = useRef(null);
+  const requestSequence = useRef(0);
+  const mounted = useRef(false);
+  const manualPending = useRef(false);
+
   useEffect(() => {
     let stopped = false;
-    const load = async () => { try { const next = await api(token, `/api/jobs/${job.id}/model-fingerprint/history`); if (!stopped) { setData(next); setError(""); } } catch (e) { if (!stopped) setError(e.message); } };
-    void load(); const timer = setInterval(load, 5000); return () => { stopped = true; clearInterval(timer); };
-  }, [job.id, token, refresh]);
-  const time = value => new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
-  return <Dialog title={`${job.email} 最近 6 轮归因结果`} onClose={onClose}><div className="fingerprint-form fingerprint-history">
-    <div className="fingerprint-history-toolbar"><button className="secondary-button compact-btn" type="button" onClick={() => setRefresh(v => v + 1)}>刷新记录</button></div>
+    mounted.current = true;
+    const load = async () => {
+      if (manualPending.current) return;
+      const request = ++requestSequence.current;
+      try {
+        const next = await api(token, `/api/jobs/${job.id}/model-fingerprint/history`);
+        if (!stopped && request === requestSequence.current) { setData(next); setError(""); }
+      } catch (e) {
+        if (!stopped && request === requestSequence.current) setError(e.message);
+      }
+    };
+    void load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      stopped = true;
+      mounted.current = false;
+      requestSequence.current++;
+      clearInterval(timer);
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
+  }, [job.id, token]);
+
+  const handleRefresh = async () => {
+    if (manualPending.current) return;
+    manualPending.current = true;
+    const request = ++requestSequence.current;
+    const current = () => mounted.current && request === requestSequence.current;
+    setRefreshing(true);
+    setRefreshed(false);
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    const start = Date.now();
+    try {
+      const next = await api(token, `/api/jobs/${job.id}/model-fingerprint/history`);
+      if (!current()) return;
+      setData(next);
+      setError("");
+      const elapsed = Date.now() - start;
+      if (elapsed < 500) {
+        await new Promise(r => setTimeout(r, 500 - elapsed));
+      }
+      if (!current()) return;
+      setRefreshed(true);
+      refreshTimerRef.current = setTimeout(() => setRefreshed(false), 1200);
+    } catch (e) {
+      if (current()) setError(e.message);
+    } finally {
+      manualPending.current = false;
+      if (current()) setRefreshing(false);
+    }
+  };
+
+  const isInitialLoading = !data && !error;
+
+  return <Dialog title={`${job.email} 最近 6 轮归因结果`} onClose={onClose}><div className="fingerprint-history-panel">
+    <div className="fingerprint-history-toolbar">
+      <div className="fingerprint-history-meta">
+        <span className="history-meta-sub">按时间倒序排列</span>
+      </div>
+      <button
+        className={`secondary-button compact-btn fingerprint-refresh-btn ${refreshing ? "is-refreshing" : refreshed ? "is-refreshed" : ""}`}
+        type="button"
+        onClick={handleRefresh}
+        disabled={refreshing}
+        aria-label="刷新记录"
+      >
+        {refreshed ? (
+          <Check size={12} className="refresh-check-icon" />
+        ) : (
+          <RefreshCw size={12} className={refreshing || isInitialLoading ? "spin" : ""} />
+        )}
+        <span>{refreshing ? "刷新中…" : refreshed ? "已刷新" : "刷新记录"}</span>
+      </button>
+    </div>
     {data && <>
       {!data.models.length && <p className="proxy-quality-error">尚未配置检测模型，请先在“降智检测设置”或账号独立设置中添加。</p>}
       {data.groupSyncError && <p role="alert" className="proxy-quality-error">号池分组同步：{data.groupSyncError}</p>}
       {data.lastError && <p role="alert" className="proxy-quality-error">{data.lastError}</p>}
-      {!data.records.length ? <p className="fingerprint-history-empty">暂无检测记录。</p> : data.records.map((record, index) => <section key={`${record.checkedAt}-${index}`} className="fingerprint-history-record">
-        <div className="fingerprint-history-heading">
-          <div className="field-label-row">
-            <strong>{time(record.checkedAt)}</strong>
-            <span className="record-meta-tag">
-              {record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "历史结果"}
-              {record.durationMs != null ? ` · ${(record.durationMs / 1000).toFixed(1)}s` : ""}
-            </span>
-            {record.legacy && (
-              <HelpTip title="旧版记录说明" label="查看旧版记录说明">
-                旧版记录按当时结论保留，不回填或修改分组；新检测将使用修正后的参考类匹配。
-              </HelpTip>
-            )}
-          </div>
-          <span className={`fingerprint-status ${record.status}`}>{TITLES[record.status] || "证据不足"}</span>
-        </div>
-        <AttributionModels models={record.models || []} />{record.error && <p className="proxy-quality-error">{record.error}</p>}
-      </section>)}
+      {!data.records.length ? <p className="fingerprint-history-empty">暂无检测记录。</p> : <div className="fingerprint-timeline" role="list">
+        {data.records.map((record, index) => {
+          const { time, date } = formatTimelineTime(record.checkedAt);
+          const statusKey = record.status || "unknown";
+          return <div key={`${record.checkedAt}-${index}`} className={`fingerprint-timeline-node status-${statusKey}`} role="listitem">
+            <div className="timeline-node-marker" aria-hidden="true">
+              <span className={`marker-dot status-${statusKey}`} />
+            </div>
+            <div className="timeline-node-content">
+              <div className="timeline-node-header">
+                <div className="node-time-wrap">
+                  <span className="node-time">{time}</span>
+                  <span className="node-date">{date}</span>
+                  <span className="node-meta-sep">·</span>
+                  <span className="node-source-tag">
+                    {record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "历史结果"}
+                  </span>
+                  {record.durationMs != null && <>
+                    <span className="node-meta-sep">·</span>
+                    <span className="node-duration">{(record.durationMs / 1000).toFixed(1)}s</span>
+                  </>}
+                  {record.legacy && (
+                    <HelpTip title="旧版记录说明" label="查看旧版记录说明">
+                      旧版记录按当时结论保留，不回填或修改分组；新检测将使用修正后的参考类匹配。
+                    </HelpTip>
+                  )}
+                </div>
+                <span className={`fingerprint-status ${record.status}`}>{TITLES[record.status] || "证据不足"}</span>
+              </div>
+              <AttributionModels models={record.models || []} parentStatus={record.status} />
+              {record.error && <p className="proxy-quality-error timeline-record-error">{record.error}</p>}
+            </div>
+          </div>;
+        })}
+      </div>}
     </>}
-    {!data && !error && <p>正在读取归因记录…</p>}{error && <p role="alert" className="proxy-quality-error">{error}</p>}
+    {!data && !error && <p className="fingerprint-history-loading">正在读取归因记录…</p>}
+    {error && <p role="alert" className="proxy-quality-error">{error}</p>}
   </div></Dialog>;
 }
 export function ModelFingerprintCell({ job, token, onError }) {
