@@ -22,7 +22,11 @@ const pool=http.createServer(async(req,res)=>{
  res.setHeader("content-type","application/json");
  const send=(status,data)=>{res.statusCode=status;res.end(JSON.stringify({data}));};
  if(url.pathname.startsWith("/api/auth/")||url.pathname.startsWith("/backend-api/")){webReads++;return send(200,{});}
- if(url.pathname==="/api/v1/admin/accounts")return send(200,{items:rows,total:rows.length,pages:1});
+ if(url.pathname==="/api/v1/admin/accounts"){
+   // Make startup ordering deterministic: the monitor must await pool bans before restoring missing sessions.
+   await new Promise(resolve=>setTimeout(resolve,150));
+   return send(200,{items:rows,total:rows.length,pages:1});
+ }
  if(url.pathname==="/api/v1/admin/proxies/all")return send(200,[8,9].map(id=>({id,name:`IP ${id}`,protocol:"http",host:`proxy-${id}.test`,port:8080,ip_address:`198.51.100.${id}`})));
  if(url.pathname==="/api/v1/admin/groups/all")return send(200,[]);
  const m=/^\/api\/v1\/admin\/accounts\/(\d+)(\/schedulable)?$/.exec(url.pathname);
@@ -50,7 +54,7 @@ try{
  await store.save(emails[0],{password:"saved-password",totpSecret:"JBSWY3DPEHPK3PXP",proxyUrl:"http://proxy-8.test:8080"});
  await seedWebSession(path.join(root,ids[0],"sub2api-import-oauth.json"));
  const beforeOAuth=await fs.readFile(path.join(root,ids[0],"sub2api-import-oauth.json"),"utf8");
- await fs.writeFile(path.join(root,"protocol.mjs"),`import fs from 'node:fs/promises';await fs.writeFile(${JSON.stringify(path.join(root,"unexpected-login"))},'ran');process.exitCode=1;`);
+ await fs.writeFile(path.join(root,"protocol.mjs"),`import fs from 'node:fs/promises';await fs.writeFile(${JSON.stringify(path.join(root,"unexpected-login"))},JSON.stringify(process.argv));process.exitCode=1;`);
  const revokedMetaFile=path.join(root,ids[2],"job-meta.json"),revokedMeta=JSON.parse(await fs.readFile(revokedMetaFile,"utf8"));
  await fs.writeFile(revokedMetaFile,JSON.stringify({...revokedMeta,web_login_error:"fixture login failed"}));
  // Unbanned missing-session controls are inside cooldown; this fixture isolates ban handling.
@@ -80,9 +84,9 @@ try{
  for(const email of [emails[2],emails[3]])assert.equal(all.find(j=>j.email===email).autoRepairBlocked,false);
  const credentials=await store.load(emails[0]);assert.equal(credentials.password,"saved-password");assert.equal(credentials.totpSecret,"JBSWY3DPEHPK3PXP");assert.equal(credentials.proxyUrl,"");
  assert.equal(await fs.readFile(path.join(root,ids[0],"sub2api-import-oauth.json"),"utf8"),beforeOAuth);
- assert.equal(await fs.stat(path.join(root,"unexpected-login")).then(()=>true,()=>false),false);
+ assert.equal(await fs.readFile(path.join(root,"unexpected-login"),"utf8").catch(()=>null),null,"unexpected login worker arguments");
  const count=writes.length;await api("/api/sub2api/account-status?refresh=1");assert.equal(writes.length,count,"successful unbind is idempotent");
  await stop();await start();known=(await jobs()).find(j=>j.email===emails[0]);assert.equal(known.webSessionStatus,"banned");assert.equal(known.boundProxyStatus,"unbound");
  console.log("BAN_PROXY_PASS ban display; Web/device/workspace actions blocked before upstream; automatic retry time; local/pool unbind; durable retry/restart; duplicate OAuth rows; credentials preserved; transient/workspace/API-key isolation; no login or rebind");
-}catch(error){console.error("BAN_PROXY_FAIL "+error.message);process.exitCode=1;}
+}catch(error){console.error("BAN_PROXY_FAIL "+error.stack);process.exitCode=1;}
 finally{await stop();await new Promise(r=>pool.close(r));await fs.rm(root,{recursive:true,force:true});}

@@ -35,6 +35,8 @@ async (page) => {
     check(await row().getByPlaceholder("+60123456789").isVisible(), "phone entry disappeared during column merge");
     const tag = await row().locator(".operation-feedback-trigger").boundingBox(), feedback = await result.boundingBox();
     check(tag.y + tag.height <= feedback.y, "operation label and result are not stacked");
+    const time = await row().locator(".recent-operation-time").boundingBox();
+    check(time.x >= tag.x + tag.width && Math.abs(time.y - tag.y) < 6, "operation timestamp is not beside the label");
     for (const selector of [".time-date", ".time-clock"]) {
       const a = await row().locator(".recent-operation-time " + selector).boundingBox();
       const b = await row().locator(".added-time-cell " + selector).boundingBox();

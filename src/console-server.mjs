@@ -32,6 +32,7 @@ import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-trans
 import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
 import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
+import { createUsageTotalsReader, combineUsageTotals } from "./sub2api-usage-totals.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService, normalizeFingerprintSettings } from "./model-fingerprint.mjs";
 import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
@@ -199,6 +200,8 @@ let planTypeLabelMappingConfigured = false;
 let sub2ApiMonitorTimer = null;
 let sub2ApiMonitorPromise = null;
 let sub2ApiAccountStatusPromise = null;
+const readUsageTotals = createUsageTotalsReader({ request: (...args) => shuttingDown
+  ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args) });
 let sub2ApiAccountStatusCache = {
   backend: null,
   fetchedAt: null,
@@ -229,7 +232,11 @@ let webSessionMonitorSettings = { ...DEFAULT_WEB_SESSION_MONITOR };
 const webSessionMonitor = new WebSessionMonitor({
   filePath: path.join(OUTPUT_ROOT, "web-session-monitor.json"),
   getSettings: () => webSessionMonitorSettings,
-  listJobs: () => listUniqueJobs(),
+  listJobs: async () => {
+    // Resolve pool bans before missing-session recovery can enqueue a login at startup.
+    await loadSub2ApiAccountStatus();
+    return listUniqueJobs();
+  },
   isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || accountAutomationBlocked(job.email) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
   hasSession: async job => {
     try { await fs.access(webSessionPathForJob(job)); return true; }
@@ -4572,19 +4579,20 @@ function requestSub2Api(config, endpoint, options = {}) {
 }
 
 async function performSub2ApiRequest(config, endpoint, options = {}) {
+  const { timeoutMs = 120_000, ...fetchOptions } = options;
   const controller = new AbortController();
   sub2ApiRequestControllers.add(controller);
-  const timeout = setTimeout(() => controller.abort(), 120_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${config.baseUrl}${endpoint}`, {
-      ...options,
+      ...fetchOptions,
       redirect: "manual",
       signal: controller.signal,
       headers: {
         accept: "application/json",
         "content-type": "application/json",
         "x-api-key": config.adminApiKey,
-        ...(options.headers || {}),
+        ...(fetchOptions.headers || {}),
       },
     });
     const text = await response.text();
@@ -5811,6 +5819,21 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       current.usage = mergeSub2ApiUsage(current.usage, usage);
     }
     sub2ApiAccountStatusCache = { backend, fetchedAt, accounts };
+    // Accounting queries do not block the task list or quota synchronization.
+    const usageIds = remoteAccounts.filter(account => account.platform === "openai" && account.type === "oauth" && sub2ApiAccountEmail(account))
+      .map(account => normalizeSub2ApiAccountId(account.id)).filter(Boolean);
+    const eligibleIds = new Set(usageIds);
+    for (const [email, entry] of accounts) {
+      const previous = previousAccounts.get(email);
+      if (previous && entry.accountIds.join(",") !== previous.accountIds.join(",") && entry.usage) entry.usage.totals = null;
+    }
+    void readUsageTotals(config, usageIds).then(records => {
+      if (sub2ApiAccountStatusCache.backend !== backend) return;
+      for (const entry of sub2ApiAccountStatusCache.accounts.values()) {
+        if (!entry.accountIds.every(id => eligibleIds.has(id) && records.has(String(id)))) continue;
+        entry.usage = { ...entry.usage, totals: combineUsageTotals(entry.accountIds, records) };
+      }
+    }).catch(() => {});
     return sub2ApiAccountStatusCache;
   })().finally(() => {
     sub2ApiAccountStatusPromise = null;
@@ -5968,6 +5991,7 @@ function publicSub2ApiUsage(usage) {
     primary: publicSub2ApiUsageWindow(usage.primary),
     secondary: publicSub2ApiUsageWindow(usage.secondary),
     credits: usage.credits ? { ...usage.credits } : null,
+    totals: usage.totals ? { ...usage.totals } : null,
     resetCredits: usage.resetCredits ? normalizeResetCredits({
       available_count: usage.resetCredits.availableCount,
       credits: usage.resetCredits.credits.map((credit) => ({ expires_at: credit.expiresAt })),
@@ -6008,6 +6032,7 @@ function mergeSub2ApiUsage(current, next) {
     secondary,
     credits,
     resetCredits,
+    totals: next.totals ?? current.totals ?? null,
     resetCreditsObserved: preferNextReset ? next.resetCreditsObserved : current.resetCreditsObserved,
     resetCreditsFetchedAt: preferNextReset ? next.resetCreditsFetchedAt : current.resetCreditsFetchedAt,
   };
@@ -7033,10 +7058,13 @@ async function getAccountUsage(job, forceRefresh = false) {
   let status = getSub2ApiAccountStatusForJob(job, state);
   if (forceRefresh && status.inPool === true && status.accountIds.length) {
     const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
-    const refreshed = await refreshSub2ApiAccountUsage(config, status.accountIds);
-    if (refreshed) {
+    const [refreshed, totals] = await Promise.all([
+      refreshSub2ApiAccountUsage(config, status.accountIds),
+      readUsageTotals(config, status.accountIds, { forceRefresh: true }),
+    ]);
+    if (refreshed || totals.size) {
       const entry = state.accounts.get(String(job.email || "").toLowerCase());
-      const merged = mergeSub2ApiUsage(entry?.usage || status.usage || null, refreshed);
+      const merged = { ...mergeSub2ApiUsage(entry?.usage || status.usage || null, refreshed), totals: combineUsageTotals(status.accountIds, totals) };
       if (entry) {
         entry.usage = merged;
         entry.fetchedAt = new Date().toISOString();

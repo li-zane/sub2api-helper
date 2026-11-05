@@ -80,7 +80,9 @@ try {
   assert(free?.canDownload);
   assert.equal(free.sub2apiUsage.resetCredits.availableCount, 2, "expired cached cards are omitted");
   assert.equal(page.jobs.find(j => j.email === records[1].email).sub2apiUsage.resetCredits.availableCount, 0);
-  assert.equal(page.jobs.find(j => j.email === records[2].email).sub2apiUsage, null);
+  const unknownUsage = page.jobs.find(j => j.email === records[2].email).sub2apiUsage;
+  assert.equal(unknownUsage?.primary ?? null, null, "accounting metadata must not invent quota windows");
+  assert.equal(unknownUsage?.totals?.tokens ?? null, null, "unavailable accounting must not become zero");
   profiles[0].autoResetCreditEnabled = true;
   const before = calls.length; result = await post("/api/sub2api/settings", body()); assert.equal(result.status, 200);
   const puts = calls.slice(before).filter(c => c.method === "PUT"); assert.equal(puts.length, 1);

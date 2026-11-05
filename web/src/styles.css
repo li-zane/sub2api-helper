@@ -1933,6 +1933,27 @@ select {
   min-width: 100px;
 }
 
+.usage-total-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-width: 255px;
+}
+
+.usage-total-pill {
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--ink-2);
+  font-size: 10px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.usage-total-pills.is-stale .usage-total-pill { color: var(--muted); border-style: dashed; }
+
 .usage-state-row {
   display: flex;
   align-items: center;
@@ -2328,6 +2349,9 @@ select {
   color: var(--ink);
 }
 
+.bound-proxy-state { min-width: 48px; padding: 5px 8px; }
+.bound-proxy-state .bound-proxy-name { color: var(--muted); font-weight: 500; }
+
 .bound-proxy-ip {
   font-size: 9.5px;
   color: var(--muted);
@@ -2366,7 +2390,14 @@ select {
 
 .table-frame td.recent-operation-cell,
 .table-frame td.added-time-cell {
-  vertical-align: bottom;
+  vertical-align: top;
+}
+
+.recent-operation-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: start;
+  gap: 8px;
 }
 
 .recent-operation-summary {
@@ -2374,7 +2405,7 @@ select {
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  margin-bottom: 6px;
+  min-width: 0;
 }
 
 .recent-operation-result {
@@ -2393,11 +2424,12 @@ select {
 
 .recent-operation-cell .recent-operation-time {
   display: flex;
-  margin-top: 6px;
+  margin-top: 2px;
 }
 
 .added-time-cell .time-stack {
   display: flex;
+  margin-top: 2px;
 }
 
 .operation-type-badge {
@@ -2830,6 +2862,10 @@ button.status-toggle.on .status-toggle-thumb {
 .fingerprint-round.error {
   background: var(--amber);
 }
+
+.fingerprint-cell-body.is-disabled .fingerprint-round { background: var(--surface-strong); }
+.fingerprint-cell-body.is-disabled .fingerprint-check-button,
+.fingerprint-cell-body.is-disabled .compact-icon-btn { color: var(--muted); }
 
 /* ==========================================================================
    9. Apple Sheet Modals & Dialogs (Refined macOS / iOS Sheet Design)

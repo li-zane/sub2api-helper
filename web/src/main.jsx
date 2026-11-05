@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { readJsonResponse, workspaceFailureTooltip } from "./response-errors.js";
 import { accountMutationBlockReason } from "./account-action-state.mjs";
 import { recentOperation } from "./recent-operation.mjs";
+import { formatUsageTotal } from "./usage-totals.mjs";
 import {
   Ban,
   Check,
@@ -322,7 +323,7 @@ function App() {
   const [accountUsageByJobId, setAccountUsageByJobId] = useState({});
 
   const accountUsageJobKey = jobs
-    .filter((job) => job.canDownload)
+    .filter((job) => job.canDownload || job.sub2apiInPool === true)
     .map((job) => `${job.id}:${job.lastOperationAt || job.updatedAt || ""}:${JSON.stringify(job.sub2apiUsage || null)}`)
     .join("|");
 
@@ -582,7 +583,7 @@ function App() {
 
   useEffect(() => {
     if (!token || !features.accountUsage) return undefined;
-    const usageJobs = jobs.filter((job) => job.canDownload);
+    const usageJobs = jobs.filter((job) => job.canDownload || job.sub2apiInPool === true);
     const usageJobIds = usageJobs.map((job) => job.id);
     setAccountUsageByJobId((current) => {
       const next = { ...current };
@@ -1034,8 +1035,10 @@ function App() {
       }));
       setUploadNotice(`已更新 ${job.email} 的 Sub2API 优先级为 ${status.priority}`);
       setError("");
+      return true;
     } catch (requestError) {
       setError(requestError.message);
+      return false;
     } finally {
       setSub2apiPriorityBusy((current) => {
         const next = new Set(current);
@@ -3645,18 +3648,32 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
   const [value, setValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [priorityValue, setPriorityValue] = useState(() => job.sub2apiPriority === null || job.sub2apiPriority === undefined ? "" : String(job.sub2apiPriority));
+  const priorityInputRef = useRef(null);
+  const prioritySavingRef = useRef(false);
+  const prioritySavedRef = useRef(priorityValue);
   const [accountNameCopied, setAccountNameCopied] = useState(false);
   const rowBusy = submitting || workflowBusy;
   const mutationReason = accountMutationBlockReason(job, { workflowBusy, submitting });
 
   useEffect(() => setValue(""), [job.status]);
   useEffect(() => {
-    setPriorityValue(job.sub2apiPriority === null || job.sub2apiPriority === undefined ? "" : String(job.sub2apiPriority));
+    const saved = job.sub2apiPriority == null ? "" : String(job.sub2apiPriority);
+    prioritySavedRef.current = saved;
+    if (document.activeElement !== priorityInputRef.current && !prioritySavingRef.current) setPriorityValue(saved);
   }, [job.sub2apiPriority]);
 
-  function savePriority() {
-    if (!sub2apiPriorityAvailable || job.sub2apiInPool !== true || sub2apiPriorityBusy) return;
-    onUpdateSub2ApiPriority(priorityValue.trim());
+  async function savePriority() {
+    if (!sub2apiPriorityAvailable || job.sub2apiInPool !== true || sub2apiPriorityBusy || prioritySavingRef.current) return;
+    const value = priorityValue.trim();
+    if (!value || !Number.isInteger(Number(value)) || Number(value) < 0 || Number(value) > 10000) {
+      onError("优先级必须为 0–10000 的整数");
+      return;
+    }
+    if (prioritySavedRef.current !== "" && Number(value) === Number(prioritySavedRef.current)) return;
+    prioritySavingRef.current = true;
+    try {
+      if (await onUpdateSub2ApiPriority(value)) prioritySavedRef.current = value;
+    } finally { prioritySavingRef.current = false; }
   }
 
   async function sendInput(action, submittedValue = value) {
@@ -3887,7 +3904,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
         )}
       </td>
       <td className="usage-cell-column">
-        <AccountUsageCell usage={accountUsage} available={job.canDownload} enabled={accountUsageAvailable} onRefresh={onRefreshUsage} />
+        <AccountUsageCell usage={accountUsage} available={job.canDownload || job.sub2apiInPool === true} enabled={accountUsageAvailable} onRefresh={onRefreshUsage} />
       </td>
       <td className="pool-status-cell">
         <Sub2ApiPoolBadge inPool={job.sub2apiInPool} remoteStatus={job.sub2apiRemoteStatus} />
@@ -3903,11 +3920,12 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
       </td>
       <td
         className={`sub2api-priority-cell ${job.sub2apiInPool !== true ? "unknown" : ""}`}
-        title={job.sub2apiInPool !== true ? "尚未同步 Sub2API 优先级" : "编辑并保存 Sub2API 优先级"}
+        title={job.sub2apiInPool !== true ? "尚未同步 Sub2API 优先级" : "离开输入框时自动保存 Sub2API 优先级"}
       >
         {job.sub2apiInPool === true ? (
           <div className="sub2api-priority-editor">
             <input
+              ref={priorityInputRef}
               type="number"
               min="0"
               max="10000"
@@ -3915,41 +3933,36 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               inputMode="numeric"
               value={priorityValue}
               onChange={(event) => setPriorityValue(event.target.value)}
+              onBlur={savePriority}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  savePriority();
+                  event.currentTarget.blur();
                 }
               }}
               disabled={!sub2apiPriorityAvailable || sub2apiPriorityBusy}
+              aria-busy={sub2apiPriorityBusy}
               aria-label={`编辑 ${job.email} 的 Sub2API 优先级`}
             />
-            <button
-              type="button"
-              className="icon-button priority-save-button"
-              onClick={savePriority}
-              disabled={!sub2apiPriorityAvailable || sub2apiPriorityBusy}
-              title="保存 Sub2API 优先级"
-              aria-label="保存 Sub2API 优先级"
-            >
-              {sub2apiPriorityBusy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
-            </button>
           </div>
         ) : "—"}
       </td>
       <td><StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} /></td>
       <td className="step-cell recent-operation-cell">
-        <div className="recent-operation-summary">
-          <button
-            type="button"
-            className={`operation-type-badge operation-feedback-trigger ${operation.tone}`}
-            title="查看最近操作的反馈代码详情"
-            aria-label={`查看${operation.label}反馈详情`}
-            onClick={() => onOpenOperationDetail({ text: `操作：${operation.label}\n时间：${formatDateTime(operation.at)}\n\n${operation.text}` })}
-          >
-            {operation.label}
-          </button>
-          <span className={`recent-operation-result ${operation.tone}`}>{operation.result}</span>
+        <div className="recent-operation-overview">
+          <div className="recent-operation-summary">
+            <button
+              type="button"
+              className={`operation-type-badge operation-feedback-trigger ${operation.tone}`}
+              title="查看最近操作的反馈代码详情"
+              aria-label={`查看${operation.label}反馈详情`}
+              onClick={() => onOpenOperationDetail({ text: `操作：${operation.label}\n时间：${formatDateTime(operation.at)}\n\n${operation.text}` })}
+            >
+              {operation.label}
+            </button>
+            <span className={`recent-operation-result ${operation.tone}`}>{operation.result}</span>
+          </div>
+          <OperationTime value={operation.at} className="recent-operation-time" />
         </div>
         {job.currentPhone && ["working", "phone", "phone_otp"].includes(job.status) && (
           <div className="phone-target"><Smartphone size={13} />当前手机号：<strong>{job.currentPhone}</strong></div>
@@ -4028,7 +4041,6 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             )}
           </div>
         )}
-        <OperationTime value={operation.at} className="recent-operation-time" />
       </td>
       <td className="time-cell added-time-cell">
         <OperationTime value={job.createdAt} />
@@ -5659,7 +5671,7 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
   const secondary = usage.secondary;
   const credits = usage.credits;
   const resetCredits = usage.resetCredits;
-  if (!primary && !secondary && !credits && !resetCredits && usage.allowed === null && usage.limitReached === null) {
+  if (!primary && !secondary && !credits && !resetCredits && !usage.totals && usage.allowed === null && usage.limitReached === null) {
     return (
       <span className="usage-empty">
         <span className="usage-state muted" title="从 Sub2API 同步用量（重置卡未知）">暂无用量</span>
@@ -5686,6 +5698,11 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
         {onRefresh && <button type="button" className="usage-refresh-icon" onClick={onRefresh} title="从 Sub2API 同步用量" aria-label="从 Sub2API 同步用量"><RefreshCw size={13} /></button>}
       </div>
       {windows.map((item) => <UsageWindowProgress key={item.key} tone={item.key} label={item.label} window={item.value} />)}
+      {usage.totals && <div className={`usage-total-pills${usage.totals.stale ? " is-stale" : ""}`} title={`账号累计用量（Sub2API 留存的全部历史）${usage.totals.stale ? "；同步失败，保留上次数据，待重试" : ""}${usage.totals.fetchedAt ? `；同步于 ${formatDateTime(usage.totals.fetchedAt)}` : ""}`}>
+        <span className="usage-total-pill" title={`账号实际用量：${usage.totals.accountCost ?? "未知"} USD`}>A {usage.totals.accountCost == null ? "—" : `$${formatUsageTotal(usage.totals.accountCost)}`}</span>
+        <span className="usage-total-pill" title={`用户收费：${usage.totals.userCost ?? "未知"} USD`}>U {usage.totals.userCost == null ? "—" : `$${formatUsageTotal(usage.totals.userCost)}`}</span>
+        <span className="usage-total-pill" title={`Token 总消耗：${usage.totals.tokens ?? "未知"}（含缓存 Token）`}>T {formatUsageTotal(usage.totals.tokens, { tokens: true })}</span>
+      </div>}
       <div className="usage-meta-pills">
         {credits && credits.unlimited === true && (
           <span className="usage-meta-pill usage-window">
@@ -6515,7 +6532,7 @@ function BoundProxyCell({ job }) {
     {visible.length ? visible.map((proxy) => <span className="bound-proxy" key={proxy.id}>
       {proxy.name && <span className="bound-proxy-name">{proxy.name}</span>}
       <span className="bound-proxy-ip">{proxy.ipAddress || "出口 IP 待获取"}</span>
-    </span>) : <span className="muted">{label}</span>}
+    </span>) : <span className={`bound-proxy bound-proxy-state ${job.boundProxyStatus === "direct" ? "is-direct" : "is-unbound"}`}><span className="bound-proxy-name">{label}</span></span>}
   </td>;
 }
 

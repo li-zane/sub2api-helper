@@ -172,7 +172,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
   const recent = (state.recentResults || (result || state.previousResult ? [result || state.previousResult] : [])).slice(0, 6).reverse();
   const rounds = [...Array(6 - recent.length).fill(null), ...recent];
   const checking = state.phase === "running" || state.phase === "queued";
-  return <div className="fingerprint-cell-body">
+  return <div className={`fingerprint-cell-body${state.enabled ? "" : " is-disabled"}`}>
     <div className="fingerprint-cell-actions">
       <button type="button" role="switch" aria-checked={state.enabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${state.enabled ? "on" : ""}`} disabled={!token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
       <button type="button" className="fingerprint-check-button" disabled={!token || busy || checking || !state.models.length || !job.sub2apiInPool} onClick={() => update({}, true)}>{state.phase === "running" ? "检测中…" : state.phase === "queued" ? "排队中…" : "立即检测"}</button>
@@ -181,7 +181,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
     <div className="fingerprint-rounds" role="group" aria-label={`${job.email} 最近 6 轮检测结果`}>
       {rounds.map((round, index) => {
         const status = !round ? "empty" : round.status === "match" ? "match" : round.status === "mismatch" ? "mismatch" : "error";
-        const label = !round ? "暂无检测记录" : `${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${new Date(round.checkedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`;
+        const label = `${state.enabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${new Date(round.checkedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`}`;
         return <button key={round?.checkedAt || `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
       })}
     </div>
