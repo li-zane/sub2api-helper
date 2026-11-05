@@ -90,9 +90,12 @@ async (page) => {
     });
     try {
       await page.reload();
-      await page.waitForFunction(() => [...document.querySelectorAll("tr.job-row")].some(row=>row.innerText.includes("Web 自动重登冷却中")));
-      check((await row().innerText()).includes("到期后由巡检调度"),"cooldown must explain scheduling after the earliest retry time");
-      check((await row().innerText()).includes("可手动检测 Web 会话，确认失效后立即重登"),"manual retry must remain discoverable");
+      await row().locator(".operation-feedback-trigger").click();
+      const detail = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
+      const text = await detail.locator("pre").innerText();
+      check(text.includes("Web 自动重登冷却中") && text.includes("到期后由巡检调度"), "cooldown must explain scheduling after the earliest retry time");
+      check(text.includes("可手动检测 Web 会话，确认失效后立即重登"), "manual retry must remain discoverable");
+      await page.keyboard.press("Escape");
       check(await row().getByRole("button",{name:"检测 Web 会话",exact:true}).isEnabled(),"cooldown must not block a manual login");
     } finally { await page.unroute(jobsPattern); await page.reload(); await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20); }
   });
@@ -197,10 +200,13 @@ async (page) => {
       await row().getByRole("checkbox").check();
       await page.locator(".bulk-actions").getByRole("button", { name: "重新授权", exact: true }).click();
       await page.waitForSelector(".workflow-busy");
-      for (const name of ["重新授权", "重新登录并授权", "设置 2FA", "添加密码", "检测 Web 会话", "查看或修改账号凭据"]) {
+      for (const name of ["重新授权", "重新开始授权", "设置 2FA", "添加密码", "检测 Web 会话"]) {
         check(await row().getByRole("button", { name, exact: true }).isDisabled(), name + " enabled while batch busy");
       }
-      check(await row().getByRole("button", { name: "查看协议日志", exact: true }).isEnabled(), "read-only logs unnecessarily disabled");
+      for (const name of ["查看协议日志", "查看或修改账号凭据", "查看已登录设备和会话", "查看并切换工作空间", "下载导入文件"]) {
+        check(await row().getByRole("button", { name, exact: true }).isEnabled(), name + " unnecessarily disabled while batch busy");
+      }
+      check((await row().getByRole("button", { name: "检测 Web 会话", exact: true }).getAttribute("title")).includes("批量操作"), "batch lock does not explain the reason");
     } finally {
       release();
       await page.waitForFunction(() => !document.querySelector(".workflow-busy"));
@@ -242,12 +248,122 @@ async (page) => {
     });
     try {
       await page.reload();
-      await row().getByText("正在检测 Web 会话并核对套餐与自动化开关", { exact: true }).waitFor();
+      await row().locator(".operation-feedback-trigger").click();
+      let detail = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
+      check((await detail.locator("pre").innerText()).includes("正在检测 Web 会话并核对套餐与自动化开关"), "pending check feedback missing from operation details");
+      await page.keyboard.press("Escape");
       check(await row().getByRole("button", { name: "检测 Web 会话", exact: true }).isDisabled(), "pending check allows duplicate submission");
       pending = false; await page.reload();
-      await row().getByText("Web 会话检测失败：HTTP 503", { exact: true }).waitFor();
+      await row().locator(".operation-feedback-trigger").click();
+      detail = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
+      const text = await detail.locator("pre").innerText();
+      check(text.includes("Web 会话检测失败") && text.includes("HTTP 503"), "check error code missing from operation details");
+      await page.keyboard.press("Escape");
       check(await row().getByRole("button", { name: "检测 Web 会话", exact: true }).isEnabled(), "failed check cannot retry");
     } finally { await page.unroute(pattern); await page.reload(); await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20); }
+  });
+
+  await test("Web-maintenance-pause-explains-manual-resume", async () => {
+    const pattern = /\/api\/jobs(?:\?|$)/;
+    await page.route(pattern, async route => {
+      const response = await route.fetch(), data = await response.json();
+      data.jobs = data.jobs.map(job => job.email === "review-1@example.test"
+        ? { ...job, webSessionMaintenancePause: { reason: "logout", at: "2026-11-01T00:00:00Z" } } : job);
+      await route.fulfill({ json: data });
+    });
+    try {
+      await page.reload();
+      await row().locator(".operation-feedback-trigger").click();
+      const detail = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
+      const text = await detail.locator("pre").innerText();
+      check(text.includes("Web 自动维护已暂停") && text.includes("已主动登出；手动检测或重新登录可恢复。"), "maintenance pause explanation missing");
+      await page.keyboard.press("Escape");
+      check(await row().getByRole("button", { name: "检测 Web 会话", exact: true }).isEnabled(), "paused maintenance prevents manual resume");
+    } finally { await page.unroute(pattern); await page.reload(); await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20); }
+  });
+
+  await test("authorization-buttons-phone-and-checkpoint-states", async () => {
+    let mode = "phone", single = 0, restart = 0;
+    const pattern = /\/api\/jobs(?:\?|$)/;
+    await page.route(pattern, async route => {
+      const response = await route.fetch(), data = await response.json();
+      data.jobs = data.jobs.map(job => job.email === "review-1@example.test" ? {
+        ...job, status: mode === "phone" ? "phone" : "canceled", canDownload: true,
+        canLoginWeb: mode !== "phone", canForceRelogin: mode !== "phone", canRegenerate: false,
+        canRetry: mode !== "phone", canResume: mode === "continue", canSetupTotp: false,
+        canAddPassword: false, canLogoutAllSessions: mode !== "phone", webSessionAvailable: true,
+        webSessionStatus: "valid", prompt: "请输入需要绑定的手机号", poolRefreshAction: mode === "phone" ? "reauthorize" : null,
+      } : job);
+      await route.fulfill({ json: data });
+    });
+    const mutations = ["**/api/jobs/*/retry", "**/api/jobs/*/relogin"];
+    await page.route(mutations[0], route => { single++; return route.fulfill({ json: {} }); });
+    await page.route(mutations[1], route => { restart++; return route.fulfill({ json: {} }); });
+    try {
+      await page.reload();
+      await row().getByRole("button", { name: "取消任务", exact: true }).waitFor();
+      for (const name of ["检测 Web 会话", "重新授权", "重新开始授权", "登出所有设备"]) {
+        const button = row().getByRole("button", { name, exact: true });
+        check(await button.isDisabled(), name + " overlaps phone input");
+        check((await button.getAttribute("title")).includes("等待绑定手机号"), name + " hides phone lock reason");
+      }
+      for (const name of ["查看或修改账号凭据", "查看已登录设备和会话", "查看并切换工作空间", "下载导入文件"]) {
+        check(await row().getByRole("button", { name, exact: true }).isEnabled(), name + " blocked during phone input");
+      }
+      mode = "continue"; await page.reload();
+      await row().getByRole("button", { name: "继续授权", exact: true }).click();
+      check(single === 1, "continue does not use retry endpoint");
+      const restartButton = row().getByRole("button", { name: "重新开始授权", exact: true });
+      await page.waitForFunction(() => {
+        const target = [...document.querySelectorAll("tr.job-row")].find(row => row.textContent.includes("review-1@example.test"));
+        return target?.querySelector('button[aria-label="重新开始授权"]')?.title.includes("清除旧 Codex 授权检查点");
+      });
+      const title = await restartButton.getAttribute("title");
+      check(title.includes("清除旧 Codex 授权检查点") && title.includes("Web 会话仍会复用"), "restart overpromises fresh Web login");
+      await restartButton.click(); check(restart === 1, "restart must use relogin endpoint");
+      mode = "missing"; await page.reload();
+      check(await row().getByRole("button", { name: "重试授权", exact: true }).isEnabled(), "missing checkpoint prevents retry");
+      check((await row().getByRole("button", { name: "重试授权", exact: true }).getAttribute("title")).includes("没有可恢复"), "missing checkpoint looks resumable");
+    } finally { await page.unrouteAll({ behavior: "wait" }); await page.reload(); }
+  });
+
+  await test("read-dialogs-preserve-mutation-locks", async () => {
+    const pattern = /\/api\/jobs(?:\?|$)/;
+    await page.route(pattern, async route => {
+      const response = await route.fetch(), data = await response.json();
+      data.jobs = data.jobs.map(job => job.email === "review-1@example.test" ? {
+        ...job, status: "phone", canForceRelogin: false, canLoginWeb: false, canLogoutAllSessions: false,
+        canReplaceTotp: false, canDownload: true, webSessionAvailable: true,
+      } : job);
+      await route.fulfill({ json: data });
+    });
+    await page.route("**/api/jobs/*/credentials", route => route.fulfill({ json: { credentials: { password: "fixture", passwordAvailable: true, sub2apiJson: "{}" } } }));
+    await page.route("**/api/jobs/*/sessions", route => route.fulfill({ json: { sessions: { devices: [{ id: "other", sessionId: "other-session", displayName: "Other browser", isCurrentDevice: false }] } } }));
+    await page.route("**/api/jobs/*/workspaces", route => route.fulfill({ json: { workspaces: { currentWorkspaceId: "a", workspaces: [{ id: "b", name: "Other workspace", structure: "personal", availability: "available", canAccessWithSession: true }] } } }));
+    try {
+      await page.reload();
+      await row().getByRole("button", { name: "查看或修改账号凭据", exact: true }).click();
+      let modal = page.getByRole("dialog", { name: "账号凭据", exact: true });
+      await modal.getByText("当前仅查看凭据。", { exact: false }).waitFor();
+      check(await modal.getByRole("textbox", { name: "密码", exact: true }).getAttribute("readonly") !== null, "credentials remain editable while phone login waits");
+      check(await modal.getByRole("button", { name: "保存凭据", exact: true }).isDisabled(), "credential read unlocks save");
+      await modal.getByRole("button", { name: "关闭", exact: true }).last().click();
+      await row().getByRole("button", { name: "查看已登录设备和会话", exact: true }).click();
+      modal = page.getByRole("dialog", { name: "已登录设备与会话", exact: true });
+      await modal.getByText("Other browser", { exact: true }).waitFor();
+      check(await modal.getByRole("button", { name: "登出 Other browser", exact: true }).isDisabled(), "session read unlocks device logout");
+      check(await modal.getByRole("button", { name: "一键登出所有设备", exact: true }).isDisabled(), "session read unlocks logout-all");
+      await modal.getByRole("button", { name: "关闭", exact: true }).last().click();
+      await row().getByRole("button", { name: "查看并切换工作空间", exact: true }).click();
+      modal = page.getByRole("dialog", { name: "工作空间", exact: true });
+      await modal.getByText("Other workspace", { exact: true }).waitFor();
+      check(await modal.locator(".workspace-item").isDisabled(), "workspace read unlocks switch");
+      check((await modal.locator(".workspace-item").getAttribute("title")).includes("等待绑定手机号"), "switch lock lacks reason");
+      await modal.getByRole("button", { name: "关闭", exact: true }).last().click();
+    } finally {
+      await page.unrouteAll({ behavior: "wait" });
+      await page.reload();
+    }
   });
 
   await test("mobile-action-column", async () => {
@@ -455,6 +571,7 @@ async (page) => {
                 lastSignedInRegionCode: "CA",
                 lastSignedInCountry: "US",
                 lastSignedInIp: "2001:db8:abcd:1234:5678:9012:3456:7890",
+                helperLoginProxy: { kind: "proxy", name: "Helper-Login-Proxy-Long-Node-Name-For-Mobile-Overflow-Check", proxyId: "12", recordedAt: "2026-11-05T01:00:00Z" },
                 appSessions: ["Codex CLI", "ChatGPT Web"],
               },
               {
@@ -487,11 +604,14 @@ async (page) => {
       check(await modal.locator(".session-item.current .session-badge.current").innerText() === "当前会话", "current session badge missing");
       check(await modal.locator(".session-item").first().locator(".session-login-ip code").innerText() === "2001:db8:abcd:1234:5678:9012:3456:7890", "login IP code missing");
       check((await modal.locator(".session-item").nth(1).locator(".session-login-ip").innerText()).includes("上游未提供"), "missing IP must remain 上游未提供");
+      check((await modal.locator(".session-item").first().locator(".session-login-proxy").innerText()).includes("Helper-Login-Proxy-Long"), "known Helper login proxy missing");
+      check(await modal.locator(".session-item").nth(1).locator(".session-login-proxy").count() === 0, "unknown device must not inherit proxy label");
       check(await modal.locator(".session-item").first().locator(".session-logout-button").isDisabled(), "current device single logout must remain disabled");
       check(await modal.locator(".session-item").nth(1).locator(".session-logout-button").isEnabled(), "secondary device logout should be enabled");
       await page.setViewportSize({ width: 390, height: 700 });
       check(await modal.locator(".session-list").evaluate(e => e.scrollWidth <= e.clientWidth + 1), "long IPv6 creates a horizontal scrollbar on narrow screens");
       check(await modal.locator(".session-login-ip code").evaluate(e => e.getBoundingClientRect().right <= e.closest(".session-item").getBoundingClientRect().right), "IPv6 overflows its device card");
+      check(await modal.locator(".session-login-proxy").evaluate(e => e.getBoundingClientRect().right <= e.closest(".session-item").getBoundingClientRect().right), "proxy name overflows device card");
       await page.setViewportSize({ width: 1440, height: 1000 });
 
       mode = "error";

@@ -15,10 +15,10 @@ export function normalizeWebSessionMonitor(value = {}) {
 }
 
 // Server-owned, serial checks. No UI polling, parallel logins, logout-all or
-// At most two retries for non-401 failures; only confirmed expiry/workspace changes repair.
+// At most two retries for non-401 failures; confirmed missing/expired sessions or workspace changes repair.
 export class WebSessionMonitor {
-  constructor({ filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, lock = (_job, fn) => fn(), withSlot = (_job, fn) => fn(), now = Date.now, tickMs = 30_000, retryDelayMs = 1_000 }) {
-    Object.assign(this, { filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, lock, withSlot, now, tickMs, retryDelayMs });
+  constructor({ filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, restoreMissingSession = () => false, lock = (_job, fn) => fn(), withSlot = (_job, fn) => fn(), now = Date.now, tickMs = 30_000, retryDelayMs = 1_000 }) {
+    Object.assign(this, { filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, restoreMissingSession, lock, withSlot, now, tickMs, retryDelayMs });
     this.accounts = Object.create(null); this.running = null; this.timer = null; this.stopped = false; this.writes = Promise.resolve();
     this.retryAbort = new AbortController();
   }
@@ -45,7 +45,7 @@ export class WebSessionMonitor {
       entry.nextCheckAt = new Date(this.now()).toISOString();
       // One successful Web renewal may require a separate workspace/OAuth repair.
       // Persist this continuation; a restart must neither lose it nor reset cooldown.
-      entry.webRecoveryPending = success && webOnly && ["expired", "web_workspace_unavailable"].includes(entry.repairReason);
+      entry.webRecoveryPending = success && webOnly && ["expired", "web_workspace_unavailable", "missing"].includes(entry.repairReason);
       await this.save();
     }
   }
@@ -61,11 +61,13 @@ export class WebSessionMonitor {
       const email = job.email.toLowerCase();
       const existing = this.accounts[email];
       if (!force && Date.parse(existing?.nextCheckAt) > this.now()) continue;
-      if (this.isBusy(job) || !(await this.hasSession(job))) continue;
+      if (this.isBusy(job) || (!(await this.hasSession(job)) && !this.restoreMissingSession(job))) continue;
       // Admission may skip a full shared pool. Leave nextCheckAt untouched so the
       // next scheduler tick can try again without pretending a check happened.
       await this.withSlot(job, () => this.lock(job, async () => {
         if (this.stopped || !this.getSettings().enabled || this.isBusy(job)) return;
+        const hasSession = await this.hasSession(job);
+        if (!hasSession && !this.restoreMissingSession(job)) return;
         const settings = this.getSettings();
         const at = new Date(this.now()).toISOString();
         const entry = this.accounts[email] ||= {};
@@ -74,6 +76,9 @@ export class WebSessionMonitor {
         let reason = null;
         let followUp = false;
         try {
+          // Recheck under the email lock: a logout/pause may have completed
+          // while this check waited for admission. Only confirmed ENOENT is missing.
+          if (!hasSession) throw new Error("SESSION_CREDENTIALS_MISSING: Web 会话文件缺失");
           const result = await this.probeWithRetries(job, entry);
           if (Array.isArray(result.devices)) entry.devices = result.devices;
           entry.workspaces = result.workspaces || [];
@@ -82,15 +87,18 @@ export class WebSessionMonitor {
           entry.lastError = null;
           entry.lastSuccessAt = at;
           reason = result.repairReason || null;
-          followUp = entry.webRecoveryPending === true && Boolean(reason) && !["expired", "web_workspace_unavailable"].includes(reason);
+          followUp = entry.webRecoveryPending === true && Boolean(reason) && !["expired", "web_workspace_unavailable", "missing"].includes(reason);
           entry.webRecoveryPending = false;
           entry.status = reason ? "changed" : "valid";
         } catch (error) {
-          reason = /^SESSION_TOKEN_EXPIRED:/.test(error.message) ? "expired"
+          const missing = /^SESSION_CREDENTIALS_MISSING:/.test(error.message)
+            || /^SESSION_CREDENTIALS_UNAVAILABLE:/.test(error.message) && !(await this.hasSession(job)) && this.restoreMissingSession(job);
+          reason = missing ? "missing" : /^SESSION_TOKEN_EXPIRED:/.test(error.message) ? "expired"
             : /^SESSION_WORKSPACE_UNAVAILABLE:/.test(error.message) ? "web_workspace_unavailable" : null;
-          entry.status = reason === "expired" ? "expired" : reason ? "changed" : "check_failed";
+          entry.status = missing ? "missing" : reason === "expired" ? "expired" : reason ? "changed" : "check_failed";
+          if (missing) { entry.devices = []; entry.workspaces = []; entry.currentWorkspaceId = null; entry.planType = null; entry.checkAttempts = 0; }
           // Persist a diagnostic class, never upstream response/token/cookie text.
-          entry.lastError = reason === "expired" ? "Web 登录态已确认失效" : reason ? "Web 凭据绑定的空间已停用，需要恢复 Web 登录"
+          entry.lastError = missing ? "Web 会话缺失，等待补登" : reason === "expired" ? "Web 登录态已确认失效" : reason ? "Web 凭据绑定的空间已停用，需要恢复 Web 登录"
             : "巡检未完成：网络、代理、权限或上游异常；保留原绑定";
         }
         entry.repairReason = reason;

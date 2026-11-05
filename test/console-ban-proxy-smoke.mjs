@@ -53,7 +53,8 @@ try{
  await fs.writeFile(path.join(root,"protocol.mjs"),`import fs from 'node:fs/promises';await fs.writeFile(${JSON.stringify(path.join(root,"unexpected-login"))},'ran');process.exitCode=1;`);
  const revokedMetaFile=path.join(root,ids[2],"job-meta.json"),revokedMeta=JSON.parse(await fs.readFile(revokedMetaFile,"utf8"));
  await fs.writeFile(revokedMetaFile,JSON.stringify({...revokedMeta,web_login_error:"fixture login failed"}));
- await fs.writeFile(path.join(root,"web-session-monitor.json"),JSON.stringify({version:1,accounts:{[emails[2]]:{status:"retry_wait",repairReason:"expired",lastRepairAt:repairAt,nextCheckAt:retryAt}}}));
+ // Unbanned missing-session controls are inside cooldown; this fixture isolates ban handling.
+ await fs.writeFile(path.join(root,"web-session-monitor.json"),JSON.stringify({version:1,accounts:Object.fromEntries([emails[2],emails[3]].map(email=>[email,{status:"retry_wait",repairReason:"expired",lastRepairAt:repairAt,nextCheckAt:retryAt}]))}));
  await fs.writeFile(path.join(root,"task-settings.json"),JSON.stringify({accountProxyMode:"plan",maxActiveJobs:1,webSessionMonitor:{enabled:true,autoRelogin:true,intervalMinutes:15,retryMinutes:60}}));
  await fs.writeFile(path.join(root,"sub2api-settings.json"),JSON.stringify({version:2,config:{baseUrl:`http://127.0.0.1:${pool.address().port}`,adminApiKey:"fixture"},profiles:[{id:"default",name:"Default",proxyId:"8"}],activeProfileId:"default"}));
  await start();

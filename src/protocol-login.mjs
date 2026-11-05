@@ -12,7 +12,7 @@ import {
 } from "./tls-transport.mjs";
 import { normalizeCodexAuthMode, generateSub2ApiOAuth, exchangeSub2ApiOAuth, refreshSub2ApiOAuth, sub2ApiOAuthIdentity } from "./sub2api-oauth.mjs";
 import { getAccountBrowserIdentity } from "./account-browser-identity.mjs";
-import { readAccountWebSession, saveProtocolWebSession } from "./account-web-session.mjs";
+import { readAccountWebSession, saveProtocolWebSession, normalizeHelperLoginProxy } from "./account-web-session.mjs";
 import { uniqueWorkspaceAccounts, isUsableWorkspaceAccount, isTeamWorkspaceAccount, webTokenWorkspaceId, workspaceProviderCode, isDeactivatedWorkspaceError } from "./workspace-accounts.mjs";
 
 const DEFAULT_CHATGPT_BASE = "https://chatgpt.com";
@@ -378,6 +378,8 @@ async function run() {
     rotateProxySessions: process.env.CHATGPT_PROXY_FIXED !== "1",
     sameProxyRiskRetryDelayMs: process.env.CHATGPT_SAME_PROXY_RISK_RETRY_DELAY_MS,
   });
+  try { transport.helperLoginProxy = normalizeHelperLoginProxy(JSON.parse(process.env.TOSUB2_WEB_LOGIN_PROXY || "null")); }
+  catch { transport.helperLoginProxy = null; }
   transport.accountBrowserIdentity = accountBrowserIdentity;
   transport.accountIdentityRoot = browserIdentityRoot;
   async function prepareLoginProxy(url) {
@@ -639,6 +641,7 @@ async function run() {
       // configure() creates a fresh transport session. ProtocolClient carries
       // the verified cookie jar across the explicit proxy boundary.
       transport.rotateProxySessions = false;
+      transport.helperLoginProxy = normalizeHelperLoginProxy(route.helperLoginProxy);
       await transport.prepareProxy(route.proxyUrl, `${authBase}/`);
       console.log(`[proxy-phase] Codex authorization proxy selected for PlanType ${identity.planType}.`);
     }
@@ -1424,6 +1427,8 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
     emailVerified: true,
     loginMethod,
     mfaVerified: mfaRequired,
+    ...(loginMethod !== "existing_session" && client.transport?.helperLoginProxy
+      ? { helperLoginProxy: { ...client.transport.helperLoginProxy, recordedAt: new Date().toISOString() } } : {}),
   };
 }
 

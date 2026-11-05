@@ -2,9 +2,9 @@
 
 在顶部 **任务设置 → WebSession 定时巡检** 启用后保存。默认关闭；检测间隔默认 15 分钟（1–1440），重登重试间隔默认 60 分钟（15–1440），也可关闭自动重登、仅检测。
 
-- 巡检由服务端定时器运行，关闭浏览器后仍执行。检查已有 Web 登录态，主动登出删除登录态后不自动补登；忙碌、封禁、已取消的任务跳过。
+- 巡检由服务端定时器运行，关闭浏览器后仍执行。已有 Web 登录态会定期测活；本地已完成授权或曾成功登录 Web 的账号，缺失会话文件时也会补登。忙碌、封禁、已取消及明确暂停维护的账号跳过。仅从号池导入且未在 Helper 登录的账号不自动创建 Web 会话。
 - 每轮先使用保存的 Cookie 和原浏览器/设备身份校验 WebSession，即使缓存 access token 尚未过期也访问 `/api/auth/session`；成功后读取可用工作空间与登录设备，持久化摘要。
-- 只有确认 Web 会话失效、当前空间不可用、PlanType 改变，或现有绑定不符合已确认的当前 PlanType 方案，才进入原有共享登录队列。网络、403、5xx 和代理失败仅记录检测失败，保留原绑定，不据此认定掉线或 Free。
+- 只有确认符合补登条件的 Web 会话文件缺失、Web 会话失效、当前空间不可用、PlanType 改变，或现有绑定不符合已确认的当前 PlanType 方案，才进入原有共享登录队列。网络、403、5xx 和代理失败仅记录检测失败，保留原绑定，不据此认定掉线或 Free。
 - 自动修复重新确认空间和 PlanType，再执行 Codex 授权；仅当当前空间不可用且上游明确返回唯一可用个人空间时，允许本次自动修复选用它。无法确认时停止，不猜测 Free，不选择其他企业空间。
 - PlanType 代理模式下，修复登录沿用当前出口，登录后按新 PlanType 应用直连/固定节点/均衡方案，然后同步号池。普通手动登录保留原先的工作空间选择规则。设备身份与 Cookie 沿用原存储，不执行“登出全部设备”。需要 OTP/2FA 人工输入时停留在现有任务队列。
 - 启用自动重登后，修改 PlanType 方案造成的代理绑定不一致也会在巡检中触发重新应用；仅检测模式只记录状态，不入队。已有 Web 登录态但没有 Codex 授权文件的账号只补登 Web，不自动创建 Codex 授权。
@@ -22,6 +22,14 @@
 
 手动检测不依赖定时巡检开关，使用同一个任务并发池，满并发时排队，封禁及忙碌账号跳过。批量面板显示排队、检测、重登、待输入与最终结果，失败项重试仍先检测。此批次进度仅在当前服务进程保存；重启后旧批次显示中断，可重新检测。
 
+## 缺失会话与主动暂停
+
+仅确认 `ENOENT`（会话文件不存在）时才按“缺失”进入共享 Web 登录队列，沿用重登冷却、并发及登录后复检；文件权限、I/O 或上游异常不会据此触发登录。仅检测模式会记录缺失并清除过期设备/空间摘要，不补登。补登先恢复 Web，保留原 Codex 凭据；如复检发现授权/空间变化，再按原有流程处理。
+
+用户主动“登出所有设备”或取消登录任务，会持久化 `web_session_maintenance_pause`，服务重启后仍跳过自动维护。手动“检测 Web 会话”、登录或重新授权会恢复维护。内部冷却、轮换和换绑中的登出不设置此暂停标记。服务停止造成的 Web 登录中断也不会标记为用户暂停。
+
+旧账号没有明确暂停标记时，单次历史“Web 登录已取消”错误不再使已授权账号永久漏检；原任务本身为已取消状态时仍跳过。
+
 接口均需控制台令牌：
 
 - `GET /api/web-session-monitor`：设置、运行状态和各账号最近快照。
@@ -31,4 +39,4 @@
 - `POST /api/jobs/web-session-check-progress`，请求 `{ attempts: [{ id, attemptId }] }`：读取检测/重登进度。
 - `POST /api/task-settings` 中的 `webSessionMonitor`：`{ enabled, intervalMinutes, autoRelogin, retryMinutes }`。
 
-验证：`node test/web-session-monitor.mjs`、`node test/console-web-session-monitor-smoke.mjs`、`node test/account-web-session.mjs`、`node test/web-plan-identity.mjs`、`npm run test:ui:browser`。所有 HTTP 测试使用本地模拟账号/上游，不操作真实账号。
+验证：`node test/console-missing-web-session-smoke.mjs`、`node test/web-session-monitor.mjs`、`node test/console-web-session-monitor-smoke.mjs`、`node test/account-web-session.mjs`、`node test/web-plan-identity.mjs`、`npm run test:ui:browser`。所有 HTTP 测试使用本地模拟账号/上游，不操作真实账号。

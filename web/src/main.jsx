@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { readJsonResponse, workspaceFailureTooltip } from "./response-errors.js";
+import { accountMutationBlockReason } from "./account-action-state.mjs";
+import { recentOperation } from "./recent-operation.mjs";
 import {
   Ban,
   Check,
@@ -1615,7 +1617,7 @@ function App() {
   async function forceReloginSelected() {
     if (!canForceReloginSelected || batchAction) return;
     const skipped = selectedJobIds.size - forceReloginSelectedCount;
-    const message = `确定让选中的 ${forceReloginSelectedCount} 个账号跳过刷新令牌，重新登录并授权吗？${skipped ? `另有 ${skipped} 个进行中账号将自动跳过。` : ""}`;
+    const message = `确定让选中的 ${forceReloginSelectedCount} 个账号跳过刷新令牌、清除旧 Codex 授权检查点并重新开始授权吗？有效的 Web 会话仍会复用。${skipped ? `另有 ${skipped} 个进行中账号将自动跳过。` : ""}`;
     if (!window.confirm(message)) return;
     setBatchAction("relogin");
     try {
@@ -1623,7 +1625,7 @@ function App() {
         method: "POST",
         body: JSON.stringify({ ids: [...selectedJobIds] }),
       });
-      setUploadNotice(`已开始重新登录并授权 ${data.started} 个账号${data.skipped ? `，跳过 ${data.skipped} 个` : ""}`);
+      setUploadNotice(`已开始重新开始授权 ${data.started} 个账号${data.skipped ? `，跳过 ${data.skipped} 个` : ""}`);
       setSelectedJobIds(new Set());
       setError("");
     } catch (requestError) {
@@ -2216,7 +2218,6 @@ function App() {
               <col className="status-column" />
               <col className="step-column" />
               <col className="time-column" />
-              <col className="op-time-column" />
               <col className="bound-ip-column" />
               <col className="overload-column" />
               <col className="fingerprint-column" />
@@ -2312,9 +2313,8 @@ function App() {
                     />
                   </div>
                 </th>
-                <th>当前操作</th>
-                <th>开始时间</th>
-                <th>最近操作时间</th>
+                <th className="recent-operation-heading">最近操作</th>
+                <th className="added-time-heading">添加时间</th>
                 <th className="bound-ip-heading">绑定 IP</th>
                 <th className="overload-heading">过载检测</th>
                 <th className="fingerprint-heading">降智检测</th>
@@ -2410,6 +2410,7 @@ function App() {
           key={activeCredentialJob.id}
           token={token}
           job={activeCredentialJob}
+          readOnlyReason={accountMutationBlockReason(activeCredentialJob, { workflowBusy: Boolean(batchAction) })}
           accountProxyUrl={accountProxyUrl}
           totpReplaceAvailable={Boolean(features.totpReplace)}
           onClose={() => setCredentialJob(null)}
@@ -2421,6 +2422,7 @@ function App() {
           key={activeSessionJob.id}
           token={token}
           job={activeSessionJob}
+          readOnlyReason={accountMutationBlockReason(activeSessionJob, { workflowBusy: Boolean(batchAction) })}
           onClose={() => setSessionJob(null)}
           onError={setError}
         />
@@ -2430,6 +2432,7 @@ function App() {
           key={activeWorkspaceJob.id}
           token={token}
           job={activeWorkspaceJob}
+          readOnlyReason={accountMutationBlockReason(activeWorkspaceJob, { workflowBusy: Boolean(batchAction) })}
           planTypeMapping={planTypeMapping}
           onClose={() => setWorkspaceJob(null)}
           onError={setError}
@@ -3344,7 +3347,7 @@ function App() {
 function EmptyState({ filtered = false }) {
   return (
     <tr>
-      <td colSpan="15">
+      <td colSpan="14">
         <div className="empty-state">
           <div className="empty-state-icon"><Mail size={24} /></div>
           <h3>{filtered ? "没有匹配账号" : "暂无授权任务"}</h3>
@@ -3367,32 +3370,6 @@ function CredentialSyncNote({ sync, planTypeMapping }) {
           : "Web 凭据尚未确认有效，需成功重登后复查。";
   const title = `${label}：${reason}${sync.planType ? ` 当前套餐：${formatPlanTypeLabel(sync.planType, planTypeMapping)}。` : ""}${sync.webPlanType ? ` Web 凭据签发时套餐：${formatPlanTypeLabel(sync.webPlanType, planTypeMapping)}。` : ""}`;
   return <span className="plan-sync-note credential-sync-note" title={title} aria-label={label}>{label}</span>;
-}
-
-function OperationDetailText({ text, className, onOpen }) {
-  const value = String(text ?? "");
-  if (!value) return null;
-  function open() {
-    onOpen?.({ title: "当前操作详情", text: value });
-  }
-  return (
-    <div
-      className={`${className} operation-detail-trigger`}
-      role="button"
-      tabIndex="0"
-      title="点击查看详细内容"
-      aria-label="查看当前操作详细内容"
-      onClick={open}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          open();
-        }
-      }}
-    >
-      {value}
-    </div>
-  );
 }
 
 function RemarkDialog({ token, job, onClose, onSaved }) {
@@ -3455,25 +3432,31 @@ function RemarkDialog({ token, job, onClose, onSaved }) {
 
 function OperationDetailDialog({ detail, onClose }) {
   return (
-    <div className="modal-backdrop operation-detail-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose();
-    }}>
-      <section className="batch-dialog operation-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="operation-detail-title">
-        <div className="dialog-header">
-          <div>
-            <h2 id="operation-detail-title">{detail.title || "当前操作详情"}</h2>
-            {detail.email && <span>{detail.email}</span>}
-          </div>
-          <button type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭详情">
-            <X size={18} />
-          </button>
+    <AccessibleDialog className="operation-detail-dialog" labelledBy="operation-detail-title" onClose={onClose}>
+      <div className="dialog-header">
+        <div>
+          <h2 id="operation-detail-title">最近操作反馈</h2>
+          {detail.email && <span>{detail.email}</span>}
         </div>
-        <pre className="operation-detail-content">{detail.text}</pre>
-        <div className="dialog-actions">
-          <span className="dialog-actions-spacer" />
-          <button type="button" className="cancel-button" onClick={onClose}>关闭</button>
-        </div>
-      </section>
+        <button type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭详情" data-dialog-initial-focus>
+          <X size={18} />
+        </button>
+      </div>
+      <pre className="operation-detail-content" tabIndex="0" aria-label="操作反馈代码详情">{detail.text}</pre>
+      <div className="dialog-actions">
+        <span className="dialog-actions-spacer" />
+        <button type="button" className="cancel-button" onClick={onClose}>关闭</button>
+      </div>
+    </AccessibleDialog>
+  );
+}
+
+function OperationTime({ value, className = "" }) {
+  const parts = formatTimeParts(value);
+  return (
+    <div className={`time-stack ${className}`.trim()} title={formatDateTime(value)}>
+      <span className="time-date">{parts.date}</span>
+      <span className="time-clock">{parts.time}</span>
     </div>
   );
 }
@@ -3560,10 +3543,10 @@ function BulkMoreMenu({
                   role="menuitem"
                   disabled={!canForceReloginSelected || Boolean(batchAction)}
                   onClick={() => { setOpen(false); forceReloginSelected(); }}
-                  title="重新执行完整登录流程并申请新授权"
+                  title="清除旧 Codex 授权检查点，重新申请授权；有效 Web 会话仍会复用"
                 >
                   {batchAction === "relogin" ? <LoaderCircle className="spin" size={14} /> : <LogIn size={14} />}
-                  <span>重登并授权</span>
+                  <span>重新开始授权</span>
                 </button>
               )}
               {features.accountSessions && (
@@ -3664,6 +3647,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
   const [priorityValue, setPriorityValue] = useState(() => job.sub2apiPriority === null || job.sub2apiPriority === undefined ? "" : String(job.sub2apiPriority));
   const [accountNameCopied, setAccountNameCopied] = useState(false);
   const rowBusy = submitting || workflowBusy;
+  const mutationReason = accountMutationBlockReason(job, { workflowBusy, submitting });
 
   useEffect(() => setValue(""), [job.status]);
   useEffect(() => {
@@ -3841,6 +3825,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
     }
   }
 
+  const operation = recentOperation(job, JOB_STATUS_LABELS);
   const inputConfig = getInputConfig(job.status, job.currentPhone);
   const terminal = ["completed", "failed", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available"].includes(job.status);
 
@@ -3953,30 +3938,19 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
         ) : "—"}
       </td>
       <td><StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} /></td>
-      <td className="step-cell">
-        {job.assignedProxyId && <span className="prompt-line">绑定代理 #{job.assignedProxyId}</span>}
-        {job.poolRefreshAction && <OperationDetailText
-          text={job.poolRefreshError
-            ? `号池凭据待更新：${job.poolRefreshError}${job.poolRefreshReady ? "；稍后自动重试同步" : "；请重试登录授权"}`
-            : job.poolRefreshDueAt
-              ? `冷却中，将于 ${new Date(job.poolRefreshDueAt).toLocaleString()} 重新登录并更新号池凭据`
-              : job.poolRefreshReady ? "正在更新号池凭据" : "正在重新登录授权，完成后更新号池凭据"}
-          className="prompt-line" onOpen={onOpenOperationDetail} />}
-        {job.prompt && <OperationDetailText text={job.prompt} className="prompt-line" onOpen={onOpenOperationDetail} />}
-        {job.webSessionCheckPending && <OperationDetailText text={job.webSessionCheckStatus === "queued" ? "Web 会话检测排队中" : job.webSessionCheckStatus === "relogin" ? "Web 会话已确认失效，正在重登，完成后自动复检" : "正在检测 Web 会话并核对套餐与自动化开关"} className="prompt-line" onOpen={onOpenOperationDetail} />}
-        {job.webSessionCheckError && <OperationDetailText text={`Web 会话检测失败：${job.webSessionCheckError}`} className="row-error" onOpen={onOpenOperationDetail} />}
-        {job.webSessionRepairRetryAt && <OperationDetailText text={`Web 自动重登冷却中，最早于 ${formatDateTime(job.webSessionRepairRetryAt)} 重试；到期后由巡检调度。可手动检测 Web 会话，确认失效后立即重登。`} className="prompt-line" onOpen={onOpenOperationDetail} />}
-        {job.status === "canceled" && job.webSessionStatus === "valid" && (
-          <OperationDetailText text="上次 Codex 授权已取消；Web 会话已验证，Web 登录不会改变授权任务结果。" className="prompt-line" onOpen={onOpenOperationDetail} />
-        )}
-        {job.lastError && <OperationDetailText text={extractResponseMessage(job.lastError)} className="row-error" onOpen={onOpenOperationDetail} />}
-        {job.autoRepairBlocked && (
-          <OperationDetailText text={`号池监控已永久跳过：${extractResponseMessage(job.autoRepairBlockedReason || "账号已不可用")}`} className="row-error" onOpen={onOpenOperationDetail} />
-        )}
-        {job.banProxyReleasePending && <OperationDetailText text={job.banProxyReleaseError ? `封禁账号 IP 解绑待重试：${job.banProxyReleaseError}` : "封禁账号 IP 正在解绑"} className="row-error" onOpen={onOpenOperationDetail} />}
-        {job.totpSetupError && <OperationDetailText text={`2FA：${extractResponseMessage(job.totpSetupError)}`} className="row-error" onOpen={onOpenOperationDetail} />}
-        {job.passwordAddError && <OperationDetailText text={`添加密码：${extractResponseMessage(job.passwordAddError)}`} className="row-error" onOpen={onOpenOperationDetail} />}
-        {job.mailApiError && job.status === "email_otp" && <OperationDetailText text={job.mailApiError} className="mail-error" onOpen={onOpenOperationDetail} />}
+      <td className="step-cell recent-operation-cell">
+        <div className="recent-operation-summary">
+          <button
+            type="button"
+            className={`operation-type-badge operation-feedback-trigger ${operation.tone}`}
+            title="查看最近操作的反馈代码详情"
+            aria-label={`查看${operation.label}反馈详情`}
+            onClick={() => onOpenOperationDetail({ text: `操作：${operation.label}\n时间：${formatDateTime(operation.at)}\n\n${operation.text}` })}
+          >
+            {operation.label}
+          </button>
+          <span className={`recent-operation-result ${operation.tone}`}>{operation.result}</span>
+        </div>
         {job.currentPhone && ["working", "phone", "phone_otp"].includes(job.status) && (
           <div className="phone-target"><Smartphone size={13} />当前手机号：<strong>{job.currentPhone}</strong></div>
         )}
@@ -4054,19 +4028,10 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             )}
           </div>
         )}
+        <OperationTime value={operation.at} className="recent-operation-time" />
       </td>
-      <td className="time-cell">
-        <div className="time-stack" title={formatDateTime(job.createdAt)}>
-          <span className="time-date">{formatTimeParts(job.createdAt).date}</span>
-          <span className="time-clock">{formatTimeParts(job.createdAt).time}</span>
-        </div>
-      </td>
-      <td className="operation-time-cell">
-        <div className="time-stack" title={formatDateTime(job.lastOperationAt || job.createdAt)}>
-          <span className="time-date">{formatTimeParts(job.lastOperationAt || job.createdAt).date}</span>
-          <span className="time-clock">{formatTimeParts(job.lastOperationAt || job.createdAt).time}</span>
-          <span className="operation-type-badge">{operationLabel(job.lastOperationType)}</span>
-        </div>
+      <td className="time-cell added-time-cell">
+        <OperationTime value={job.createdAt} />
       </td>
       <BoundProxyCell job={job} />
       <td className="overload-cell"><OverloadDetection job={job} token={token} onError={onError} /></td>
@@ -4078,7 +4043,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="icon-button"
             onClick={onOpenCredentials}
-            disabled={!credentialsAvailable || rowBusy}
+            disabled={!credentialsAvailable}
             title={credentialsAvailable ? "查看或修改账号凭据" : "暂无凭据管理权限"}
             aria-label="查看或修改账号凭据"
           >
@@ -4089,7 +4054,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="secondary-button icon-only-action"
             onClick={loginWeb}
             disabled={!webLoginAvailable || rowBusy || !job.canLoginWeb}
-            title={job.autoRepairBlocked ? "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新登录并授权" : job.webLoginError || (job.canLoginWeb ? `${WEB_STATES[job.webSessionStatus || "absent"]}：检测会话；失效后自动重登` : "当前状态不可检测 Web 会话")}
+            title={job.autoRepairBlocked ? "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新开始授权" : rowBusy || !job.canLoginWeb ? mutationReason || "当前账号尚不具备 Web 检测条件" : `${WEB_STATES[job.webSessionStatus || "absent"]}：检测会话；缺失或失效后自动补登 Web，保留 Codex 授权`}
             aria-label="检测 Web 会话"
           >
             {submitting || job.webSessionCheckPending ? <LoaderCircle className="spin" size={13} /> : <Globe2 size={13} />}
@@ -4098,7 +4063,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="icon-button"
             onClick={onOpenSessions}
-            disabled={!sessionsAvailable || rowBusy || (!job.canDownload && !job.webSessionAvailable && !isBlockedAccount(job))}
+            disabled={!sessionsAvailable || (!job.canDownload && !job.webSessionAvailable && !isBlockedAccount(job))}
             title={isBlockedAccount(job) ? "账号已封禁，查看封禁原因" : job.canDownload || job.webSessionAvailable ? "查看已登录设备和会话" : "暂无可读取的已登录会话"}
             aria-label="查看已登录设备和会话"
           >
@@ -4108,7 +4073,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="icon-button"
             onClick={onOpenWorkspaces}
-            disabled={!workspacesAvailable || rowBusy || (!job.canDownload && !job.webSessionAvailable && !isBlockedAccount(job))}
+            disabled={!workspacesAvailable || (!job.canDownload && !job.webSessionAvailable && !isBlockedAccount(job))}
             title={isBlockedAccount(job) ? "账号已封禁，查看封禁原因" : job.canDownload || job.webSessionAvailable ? "查看并切换工作空间" : "暂无可切换的工作空间"}
             aria-label="查看并切换工作空间"
           >
@@ -4118,8 +4083,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="download-button icon-only-action"
             onClick={download}
-            disabled={rowBusy || !job.canDownload}
-            title={job.canDownload ? "下载导入文件" : "尚未完成授权，暂无导入文件可下载"}
+            disabled={!job.canDownload}
+            title={job.canDownload ? "下载已有导入文件；当前授权任务未完成时下载的是上次保存的结果" : "尚未完成授权，暂无导入文件可下载"}
             aria-label="下载导入文件"
           >
             <Download size={13} />
@@ -4150,7 +4115,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="regenerate-button icon-only-action"
             onClick={regenerate}
             disabled={rowBusy || !job.canRegenerate}
-            title={job.canRegenerate ? "重新授权：优先使用刷新令牌，失效后自动重新登录" : "当前状态不可重新授权"}
+            title={rowBusy || !job.canRegenerate ? mutationReason || "需要先完成一次 Codex 授权，再使用刷新令牌更新" : "重新授权：优先使用刷新令牌；令牌失效后转入登录授权，可能需要验证"}
             aria-label="重新授权"
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}
@@ -4160,8 +4125,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="relogin-button icon-only-action"
             onClick={forceRelogin}
             disabled={rowBusy || !forceReloginAvailable || !job.canForceRelogin}
-            title={job.canForceRelogin ? "跳过刷新令牌和旧检查点，完整重新登录后自动授权" : "当前不可执行重新登录"}
-            aria-label="重新登录并授权"
+            title={rowBusy || !job.canForceRelogin ? mutationReason || "请先结束当前任务，再重新开始授权" : "跳过刷新令牌并清除旧 Codex 授权检查点；有效 Web 会话仍会复用，失效后补登 Web"}
+            aria-label="重新开始授权"
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <LogIn size={13} />}
           </button>
@@ -4182,8 +4147,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               className="retry-button icon-only-action"
               onClick={retry}
               disabled={rowBusy || !job.canRetry}
-              title={job.canRetry ? (job.securityCheckRequired ? "手动重试" : job.canResume ? "继续流程" : "重新授权") : "当前无需重试"}
-              aria-label={job.securityCheckRequired ? "手动重试" : job.canResume ? "继续流程" : "重试"}
+              title={rowBusy || !job.canRetry ? mutationReason || "当前没有需要重试的授权任务" : job.canResume ? "继续已有 Codex 授权检查点；可能仍需完成手机、邮箱或 2FA 验证" : "当前没有可恢复的授权检查点，将重新尝试授权"}
+              aria-label={job.canResume ? "继续授权" : "重试授权"}
             >
               {submitting ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
             </button>
@@ -4193,7 +4158,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="icon-button"
             onClick={setupTotp}
             disabled={rowBusy || !totpSetupAvailable || !job.canSetupTotp}
-            title={job.hasTotpKey ? "已设置 2FA（可在凭据管理中查看或更换）" : job.canSetupTotp ? "设置 2FA" : "当前不可设置 2FA"}
+            title={job.hasTotpKey ? "已设置 2FA（可在凭据管理中查看或更换）" : !rowBusy && job.canSetupTotp ? "设置 2FA" : mutationReason || "请先完成登录，再设置 2FA"}
             aria-label="设置 2FA"
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <ShieldCheck size={13} />}
@@ -4203,7 +4168,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="icon-button"
             onClick={addPassword}
             disabled={rowBusy || !passwordAddAvailable || !job.canAddPassword}
-            title={job.hasPassword ? "已设置密码（可在凭据管理中查看或修改）" : job.canAddPassword ? "添加密码" : "当前不可添加密码"}
+            title={job.hasPassword ? "已设置密码（可在凭据管理中查看或修改）" : !rowBusy && job.canAddPassword ? "添加密码" : mutationReason || "请先完成登录，再添加密码"}
             aria-label="添加密码"
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <Lock size={13} />}
@@ -4213,7 +4178,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="icon-button danger"
             onClick={onLogoutAllSessions}
             disabled={rowBusy || deleteDisabled || !job.canLogoutAllSessions || !sessionsAvailable}
-            title={job.canLogoutAllSessions ? "登出所有设备和会话（包括当前会话）" : "账号正在运行或没有已保存的授权，暂不能登出所有设备"}
+            title={rowBusy || !job.canLogoutAllSessions ? mutationReason || (isBlockedAccount(job) ? "账号已封禁，已停止设备操作" : "需要有效的 Web 会话才能登出设备") : "登出所有设备和会话（包括当前会话）"}
             aria-label="登出所有设备"
           >
             {logoutAllBusy ? <LoaderCircle className="spin" size={13} /> : <LogOut size={13} />}
@@ -4407,7 +4372,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">
           <div className="section-title-row">
             <h3 id="web-session-monitor-title">WebSession 定时巡检</h3>
-            <HelpTip label="WebSession 定时巡检说明">由服务端执行，关闭页面后仍运行。使用原设备身份和账号代理检查会话、设备与空间；确认会话失效或空间/PlanType 变化后，通过共享登录队列重新登录授权，并应用新方案、同步号池。网络、403 或上游故障只记录失败，不当作掉线。会话检测成功后按当前套餐核对过载检测、过载冷却及继承套餐规则的降智检测。仅检查已有 Web 登录态的账号；主动登出后不自动补登。</HelpTip>
+            <HelpTip label="WebSession 定时巡检说明">由服务端执行，关闭页面后仍运行。使用原设备身份和账号代理检查会话、设备与空间；确认会话失效或空间/PlanType 变化后，通过共享登录队列重新登录授权，并应用新方案、同步号池。网络、403 或上游故障只记录失败，不当作掉线。会话检测成功后按当前套餐核对过载检测、过载冷却及继承套餐规则的降智检测。已有 Web 登录态会定期测活；本地已授权或曾成功登录 Web 的账号缺失会话时可自动补登。主动登出或取消任务会暂停维护，手动检测或登录可恢复。</HelpTip>
           </div>
           <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.enabled} disabled={saving} onChange={e => setWebMonitor(v => ({ ...v, enabled: e.target.checked }))} /><span>启用 WebSession 定时检测</span></label>
           <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.autoRelogin} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, autoRelogin: e.target.checked }))} /><span>确认失效或空间变化后自动重登并授权</span></label>
@@ -4596,7 +4561,7 @@ function LogDialog({ token, job, onClose }) {
   );
 }
 
-function CredentialDialog({ token, job, accountProxyUrl, totpReplaceAvailable, onClose, onError }) {
+function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, totpReplaceAvailable, onClose, onError }) {
   const [details, setDetails] = useState(null);
   const [password, setPassword] = useState("");
   const [totpSecret, setTotpSecret] = useState("");
@@ -4698,6 +4663,7 @@ function CredentialDialog({ token, job, accountProxyUrl, totpReplaceAvailable, o
 
   async function save(event) {
     event.preventDefault();
+    if (readOnlyReason) return;
     const body = {};
     if (passwordDirty) body.password = password;
     if (totpDirty) {
@@ -4739,6 +4705,7 @@ function CredentialDialog({ token, job, accountProxyUrl, totpReplaceAvailable, o
   }
 
   async function replaceTotp() {
+    if (readOnlyReason) return;
     const confirmed = window.confirm(
       "确定轮换该账号的 2FA 吗？服务会先停用旧 2FA，再创建并激活新密钥；如果远端创建失败，账号可能暂时没有 2FA，需要在本窗口重试。",
     );
@@ -4823,6 +4790,7 @@ function CredentialDialog({ token, job, accountProxyUrl, totpReplaceAvailable, o
                   aria-label="密码"
                   type={showPassword ? "text" : "password"}
                   value={password}
+                  readOnly={Boolean(readOnlyReason)}
                   onChange={(event) => { setPassword(event.target.value); setPasswordDirty(true); }}
                   placeholder={details?.passwordAvailable ? "凭据已保存" : details?.hasPassword ? "原文不可恢复，请重新录入" : "未保存密码"}
                   autoComplete="off"
@@ -4846,6 +4814,7 @@ function CredentialDialog({ token, job, accountProxyUrl, totpReplaceAvailable, o
                   aria-label="2FA 密钥"
                   type={showTotp ? "text" : "password"}
                   value={totpSecret}
+                  readOnly={Boolean(readOnlyReason)}
                   onChange={(event) => { setTotpSecret(event.target.value); setTotpDirty(true); }}
                   placeholder={details?.totpSecretAvailable ? "密钥已保存" : details?.hasTotpKey ? "原文不可恢复，请重新录入" : "未保存 2FA 密钥"}
                   autoComplete="off"
@@ -4909,6 +4878,7 @@ function CredentialDialog({ token, job, accountProxyUrl, totpReplaceAvailable, o
                 <div className="credential-json-empty">当前任务还没有可用的 Sub2API 导入 JSON</div>
               )}
             </section>
+            {readOnlyReason && <p className="prompt-line" role="status">{readOnlyReason}；当前仅查看凭据。</p>}
             <div className="credential-meta">
               <span>当前状态：{job.status}</span>
               {details?.persisted === false && <span className="credential-warning">系统未提供持久凭据存储</span>}
@@ -4920,13 +4890,13 @@ function CredentialDialog({ token, job, accountProxyUrl, totpReplaceAvailable, o
             {notice && <div className="credential-notice" role="status"><Check size={15} />{notice}</div>}
             <div className="dialog-actions credential-dialog-actions">
               {totpReplaceAvailable && job.canReplaceTotp && (
-                <button type="button" className="danger-button" onClick={replaceTotp} disabled={saving || replacing}>
+                <button type="button" className="danger-button" onClick={replaceTotp} disabled={saving || replacing || Boolean(readOnlyReason)} title={readOnlyReason || undefined}>
                   {replacing ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}轮换 2FA
                 </button>
               )}
               <span className="dialog-actions-spacer" />
               <button type="button" className="cancel-button" onClick={onClose} disabled={saving || replacing}>关闭</button>
-              <button type="submit" className="primary-button" disabled={loading || saving || replacing || (!passwordDirty && !totpDirty)}>
+              <button type="submit" className="primary-button" disabled={Boolean(readOnlyReason) || loading || saving || replacing || (!passwordDirty && !totpDirty)} title={readOnlyReason || undefined}>
                 {saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存凭据
               </button>
             </div>
@@ -4948,13 +4918,13 @@ function AccountBlockedWebState({ job }) {
       <div className="dialog-state-text">
         <strong>账号已封禁</strong>
         <span>{extractResponseMessage(job.autoRepairBlockedReason || "账号已被删除、封禁或永久停用")}</span>
-        <small>已停止读取设备、会话和工作空间，Web 重登及自动维护已关闭。{job.banProxyReleasePending ? "IP 解绑待重试。" : job.boundProxyStatus === "unbound" ? "IP 绑定已解除。" : "IP 解绑状态待同步。"}确认解封后可使用“重新登录并授权”验证恢复。</small>
+        <small>已停止读取设备、会话和工作空间，Web 重登及自动维护已关闭。{job.banProxyReleasePending ? "IP 解绑待重试。" : job.boundProxyStatus === "unbound" ? "IP 绑定已解除。" : "IP 解绑状态待同步。"}确认解封后可使用“重新开始授权”验证恢复。</small>
       </div>
     </div>
   );
 }
 
-function SessionDialog({ token, job, onClose, onError }) {
+function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
   const blocked = isBlockedAccount(job);
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -5004,7 +4974,7 @@ function SessionDialog({ token, job, onClose, onError }) {
   }, [job.id, token, blocked]);
 
   async function logoutDevice(device) {
-    if (blocked) return;
+    if (blocked || readOnlyReason) return;
     if (device.isCurrentDevice) {
       setDialogError("当前设备不能在这里单独登出，请使用一键登出");
       return;
@@ -5032,7 +5002,7 @@ function SessionDialog({ token, job, onClose, onError }) {
   }
 
   async function logoutAll() {
-    if (blocked || action || !job.canLogoutAllSessions) return;
+    if (blocked || readOnlyReason || action || !job.canLogoutAllSessions) return;
     if (!window.confirm("确定登出该账号的所有设备和会话吗？当前会话也会失效，需要重新登录。")) return;
     setAction("all");
     setDialogError("");
@@ -5061,7 +5031,7 @@ function SessionDialog({ token, job, onClose, onError }) {
           <div className="section-title-row">
             <h2 id="session-dialog-title">已登录设备与会话</h2>
             <HelpTip label="登录 IP 说明">
-              登录 IP 仅显示上游返回的设备记录；缺失时标注“上游未提供”，不以账号绑定的代理 IP 代替。
+              登录 IP 仅显示上游返回的设备记录；缺失时标注“上游未提供”。通过 Helper 登录且有记录的设备会额外显示当时的代理名称或“直连”；旧会话没有记录时不展示代理标签。
             </HelpTip>
             {!blocked && !loading && !dialogError && (
               <span className="dialog-count-pill">{devices.length} 台设备</span>
@@ -5158,6 +5128,12 @@ function SessionDialog({ token, job, onClose, onError }) {
                           ? <code>{device.lastSignedInIp}</code>
                           : <span className="session-ip-empty">上游未提供</span>}
                       </div>
+                      {device.helperLoginProxy && (
+                        <div className="session-login-proxy" title={`Helper 登录时记录${device.helperLoginProxy.recordedAt ? `：${formatDateTime(device.helperLoginProxy.recordedAt)}` : ""}`}>
+                          <span className="session-detail-label">Helper 登录代理</span>
+                          <span className="session-proxy-name">{device.helperLoginProxy.name}</span>
+                        </div>
+                      )}
                       {device.appSessions?.length > 0 && (
                         <div className="session-apps" title={`应用：${device.appSessions.join("、")}`}>
                           <span className="session-detail-label">应用</span>
@@ -5170,8 +5146,8 @@ function SessionDialog({ token, job, onClose, onError }) {
                     type="button"
                     className="icon-button danger session-logout-button"
                     onClick={() => logoutDevice(device)}
-                    disabled={Boolean(action) || !canLogoutSingle}
-                    title={device.isCurrentDevice ? "当前会话请使用一键登出" : !canLogoutSingle ? "该设备缺少可单独登出的会话标识" : "登出该设备"}
+                    disabled={Boolean(readOnlyReason) || Boolean(action) || !canLogoutSingle}
+                    title={readOnlyReason || (device.isCurrentDevice ? "当前会话请使用一键登出" : !canLogoutSingle ? "该设备缺少可单独登出的会话标识" : "登出该设备")}
                     aria-label={`登出 ${device.displayName || device.description || "设备"}`}
                   >
                     {action === device.id ? <LoaderCircle className="spin" size={14} /> : <LogOut size={14} />}
@@ -5227,7 +5203,8 @@ function SessionDialog({ token, job, onClose, onError }) {
           type="button"
           className="danger-button session-logout-all-button"
           onClick={logoutAll}
-          disabled={blocked || loading || Boolean(action) || !job.canLogoutAllSessions}
+          title={readOnlyReason || undefined}
+          disabled={Boolean(readOnlyReason) || blocked || loading || Boolean(action) || !job.canLogoutAllSessions}
         >
           {action === "all" ? <LoaderCircle className="spin" size={15} /> : <LogOut size={15} />}一键登出所有设备
         </button>
@@ -5269,7 +5246,7 @@ function formatSessionPlatform(device) {
   return [...new Set(parts)].join(" · ");
 }
 
-function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobUpdate, onWorkspaceSwitched }) {
+function WorkspaceDialog({ token, job, readOnlyReason = "", planTypeMapping, onClose, onError, onJobUpdate, onWorkspaceSwitched }) {
   const blocked = isBlockedAccount(job);
   const [workspaces, setWorkspaces] = useState([]);
   const [currentWorkspaceId, setCurrentWorkspaceId] = useState(null);
@@ -5328,7 +5305,7 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
   }, [job.lastOperationAt, job.lastOperationType, job.status, blocked]);
 
   async function switchWorkspace(workspace) {
-    if (blocked) return;
+    if (blocked || readOnlyReason) return;
     if (!workspace?.id || workspace.id === currentWorkspaceId || action) return;
     if (isWorkspaceEntryDisabled(workspace)) return;
     setAction(workspace.id);
@@ -5435,8 +5412,8 @@ function WorkspaceDialog({ token, job, planTypeMapping, onClose, onError, onJobU
                   className={`workspace-item${selected ? " selected" : ""}${disabled ? " is-disabled" : ""}`}
                   key={workspace.id}
                   onClick={() => switchWorkspace(workspace)}
-                  disabled={disabled || selected || Boolean(action)}
-                  title={failureTooltip}
+                  disabled={Boolean(readOnlyReason) || disabled || selected || Boolean(action)}
+                  title={failureTooltip || readOnlyReason || undefined}
                 >
                   <span className={`workspace-item-icon${selected ? " selected" : ""}${disabled ? " disabled" : ""}`} aria-hidden="true">
                     <BriefcaseBusiness size={17} />
@@ -6040,23 +6017,6 @@ function formatTimeParts(value) {
     date: `${month}/${day}`,
     time: `${hours}:${minutes}:${seconds}`,
   };
-}
-
-function operationLabel(type) {
-  return ({
-    initial_authorization: "首次授权",
-    reauthorize: "重新授权",
-    relogin: "重新登录并授权",
-    web_login: "Web 登录",
-    automatic_relogin: "号池自动重登并授权",
-    resume: "继续中断流程",
-    setup_2fa: "设置 2FA",
-    replace_2fa: "更换 2FA",
-    add_password: "添加密码",
-    account_update: "更新账号资料",
-    proxy_update: "更新代理 IP",
-    cooldown: "账号冷却",
-  })[type] || "账号操作";
 }
 
 function countBatchLines(value) {

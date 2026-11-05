@@ -52,11 +52,58 @@ export async function writeAccountWebSession(file, session) {
   } finally { await fs.rm(temporary, { force: true }); }
 }
 
+// Only a display label and stable pool ID cross into session metadata. Never
+// persist a proxy URL, authentication fields or a guessed historical binding.
+export function normalizeHelperLoginProxy(value) {
+  if (!value || !["proxy", "direct"].includes(value.kind)) return null;
+  const name = value.kind === "direct" ? "直连" : String(value.name || "").trim();
+  if (!name || name.length > 160 || /[\x00-\x1f\x7f]/.test(name) || /[a-z][a-z0-9+.-]*:\/\//i.test(name)) return null;
+  const proxyId = /^\d+$/.test(String(value.proxyId || "")) ? String(value.proxyId) : null;
+  const recordedAt = typeof value.recordedAt === "string" && Number.isFinite(Date.parse(value.recordedAt)) ? value.recordedAt : null;
+  return { kind: value.kind, name, proxyId: value.kind === "direct" ? null : proxyId, recordedAt };
+}
+
+export function attachHelperLoginProxies(devices, session) {
+  const key = device => device.sessionId ? `session:${device.sessionId}` : device.deviceIdHash ? `trusted:${device.deviceIdHash}` : null;
+  const signature = device => Number(device.lastSignedInTimestamp) || null;
+  const saved = new Map();
+  for (const item of Array.isArray(session.helperDeviceProxies) ? session.helperDeviceProxies.slice(-500) : []) {
+    if (!item || typeof item !== "object") continue;
+    const proxy = normalizeHelperLoginProxy(item.proxy);
+    if (typeof item.key === "string" && item.key.length <= 300 && proxy) saved.set(item.key, { key: item.key, signedInAt: Number(item.signedInAt) || null, proxy });
+  }
+  const current = devices.filter(device => device.isCurrentDevice);
+  const proxy = normalizeHelperLoginProxy(session.web?.helperLoginProxy);
+  // A unique current row is identified by the authenticated cookie jar itself.
+  // Display names, OS, location and the job's current pool binding are not IDs.
+  if (proxy && current.length === 1 && key(current[0])) saved.set(key(current[0]), { key: key(current[0]), signedInAt: signature(current[0]), proxy });
+  const retained = [];
+  const result = devices.map(device => {
+    const entry = saved.get(key(device));
+    if (!entry || entry.signedInAt !== signature(device)) return device;
+    retained.push(entry);
+    return { ...device, helperLoginProxy: entry.proxy };
+  });
+  session.helperDeviceProxies = retained.slice(-500);
+  return result;
+}
+
 export async function saveProtocolWebSession(file, client, web, credentials = {}) {
   if (!client.browserIdentity) return;
+  let helperDeviceProxies = [];
+  try {
+    const previous = JSON.parse(await fs.readFile(file, "utf8"));
+    if (previous.email === client.browserIdentity.email && previous.identity?.deviceId === client.browserIdentity.deviceId) {
+      helperDeviceProxies = Array.isArray(previous.helperDeviceProxies) ? previous.helperDeviceProxies.slice(-500) : [];
+    }
+  } catch (error) { if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; }
+  const helperLoginProxy = normalizeHelperLoginProxy(web?.helperLoginProxy);
+  const storedWeb = { ...web };
+  delete storedWeb.helperLoginProxy;
+  if (helperLoginProxy) storedWeb.helperLoginProxy = helperLoginProxy;
   await writeAccountWebSession(file, {
     email: client.browserIdentity.email, identity: client.browserIdentity,
-    cookies: client.jar.toJSON(), web,
+    cookies: client.jar.toJSON(), web: storedWeb, helperDeviceProxies,
     ...(credentials.accessToken ? { validation: { status: "valid", verifiedAt: new Date().toISOString() } } : {}), accessToken: credentials.accessToken || null, expiresAt: credentials.expiresAt || null,
   });
 }

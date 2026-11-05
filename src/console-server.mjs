@@ -230,8 +230,12 @@ const webSessionMonitor = new WebSessionMonitor({
   filePath: path.join(OUTPUT_ROOT, "web-session-monitor.json"),
   getSettings: () => webSessionMonitorSettings,
   listJobs: () => listUniqueJobs(),
-  isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || accountAutomationBlocked(job.email) || job.status === "canceled",
-  hasSession: job => fileExists(webSessionPathForJob(job)),
+  isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || accountAutomationBlocked(job.email) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
+  hasSession: async job => {
+    try { await fs.access(webSessionPathForJob(job)); return true; }
+    catch (error) { return error.code !== "ENOENT"; } // Permissions/I/O errors must reach the probe, not trigger a login.
+  },
+  restoreMissingSession: job => !job.webSessionMaintenancePause && ((job.resultSaved && !job.poolOnly) || Boolean(job.webLoginCompletedAt)),
   withSlot: withWebSessionCheckSlot,
   probe: async job => {
     let snapshot;
@@ -263,7 +267,7 @@ const webSessionMonitor = new WebSessionMonitor({
   },
   lock: (job, fn) => withEmailJobLock(job.email, fn),
   repair: async (job, { reason }) => {
-    const webOnly = !job.resultSaved || ["expired", "web_workspace_unavailable"].includes(reason);
+    const webOnly = !job.resultSaved || ["expired", "web_workspace_unavailable", "missing"].includes(reason);
     if (webOnly) {
       job.webSessionMonitorRepair = true;
       await startWebLogin(job, { maintenance: true });
@@ -1457,7 +1461,11 @@ async function handleApi(req, res, requestUrl) {
           throw httpError(409, "账号正在运行或没有已保存的授权，暂不能登出所有设备");
         }
         await refreshJobProxyBinding(job);
-        return revokeAllAccountSessions(job);
+        const previousPause = job.webSessionMaintenancePause || null;
+        job.webSessionMaintenancePause = { reason: "logout", at: new Date().toISOString() };
+        await saveJobMetadata(job);
+        try { return await revokeAllAccountSessions(job); }
+        catch (error) { job.webSessionMaintenancePause = previousPause; await saveJobMetadata(job); throw error; }
       });
     } catch (error) {
       throw sessionApiError(error, job);
@@ -1852,6 +1860,13 @@ function enqueueJob(job, mode, startPrompt) {
   scheduleQueuedJobs();
 }
 
+function helperLoginProxyRoute(job, proxyUrl) {
+  if (!proxyUrl) return { kind: "direct", name: "直连" };
+  const bound = proxyUrl === job.proxyUrl && Boolean(job.boundProxyName && normalizeStoredProxyId(job.assignedProxyId));
+  return { kind: "proxy", name: bound ? job.boundProxyName : proxyUrl === globalProxyUrl ? "动态代理" : "自定义代理",
+    proxyId: bound ? normalizeStoredProxyId(job.assignedProxyId) : null };
+}
+
 function launchJob(job, options = {}) {
   if (options.phasedProxy) job.runLoginProxyUrl = options.loginProxyUrl;
   else if (Object.hasOwn(options, "loginProxyUrl")) job.proxyUrl = options.loginProxyUrl;
@@ -1924,6 +1939,7 @@ function launchJob(job, options = {}) {
       CHATGPT_TOTP_SECRET: job.totpSecret || "",
       CHATGPT_NEW_PASSWORD: mode === "password_add" ? job.pendingNewPassword || "" : "",
       CHATGPT_PROXY_URL: job.proxyFallbackActive ? "" : ((options.phasedProxy ? options.loginProxyUrl : job.proxyUrl) || ""),
+      TOSUB2_WEB_LOGIN_PROXY: JSON.stringify(helperLoginProxyRoute(job, job.proxyFallbackActive ? null : options.phasedProxy ? options.loginProxyUrl : job.proxyUrl)),
       CHATGPT_PROXY_FIXED: job.runProxyFixed ? "1" : "0",
       TOSUB2_PHASED_PROXY: options.phasedProxy ? "1" : "0",
       TOSUB2_WEB_MONITOR_REPAIR: job.webSessionMonitorRepair ? "1" : "0",
@@ -2105,6 +2121,7 @@ async function retryJob(job, options = {}) {
   if (!["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status)) {
     throw httpError(409, "当前任务不需要重新授权");
   }
+  job.webSessionMaintenancePause = null;
   const retryingSecurityCheck = Boolean(job.securityCheckRequired);
   job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
   job.proxyFallbackAttempted = false;
@@ -2113,8 +2130,8 @@ async function retryJob(job, options = {}) {
     job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl, String(options.proxyUrl || "").trim() ? normalizeProxyUrl(options.proxyUrl) : null);
     const persisted = await saveStoredLoginCredentials(job.email, job);
   }
-  const resumingCheckpoint = job.status === "resume_available"
-    || (retryingSecurityCheck && await fileExists(job.checkpointPath));
+  const resumingCheckpoint = await fileExists(job.checkpointPath);
+  job.loginCheckpointAvailable = resumingCheckpoint;
   stopMailPolling(job);
   if (resumingCheckpoint) stopSmsPolling(job);
   else releaseSmsNumber(job, "idle");
@@ -2123,7 +2140,7 @@ async function retryJob(job, options = {}) {
   job.child = null;
   const startPrompt = retryingSecurityCheck && resumingCheckpoint
     ? "正在使用已有登录状态重试手机号绑定"
-    : "正在重新建立登录会话";
+    : resumingCheckpoint ? "正在继续已有 Codex 授权检查点" : "正在重新建立登录会话";
   job.lastError = null;
   job.parserTail = "";
   job.completedAt = null;
@@ -2160,6 +2177,7 @@ async function regenerateJob(job, options = {}) {
   if (job.status !== "completed" || !job.resultSaved) {
     throw httpError(409, "只能为已经完成的任务重新生成授权");
   }
+  job.webSessionMaintenancePause = null;
   job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
   if (Object.hasOwn(options, "proxyUrl")) {
     job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl, String(options.proxyUrl || "").trim() ? normalizeProxyUrl(options.proxyUrl) : null);
@@ -2214,6 +2232,8 @@ function drainWebSessionChecks() {
         touch(job);
         return withEmailJobLock(job.email, async () => {
           if (!canLoginWeb(job, { checking: true })) throw new Error("账号状态已变化，请稍后重试");
+          job.webSessionMaintenancePause = null;
+          await saveJobMetadata(job);
           try {
             const snapshot = await webSessionMonitor.probeWithRetries(job, {}, { isInterrupted: () => shuttingDown || accountAutomationBlocked(job.email) });
             if (["web_workspace_unavailable", "workspace_unavailable"].includes(snapshot.repairReason)) throw new Error("SESSION_WORKSPACE_UNAVAILABLE: Web 会话绑定空间已不可用");
@@ -2263,10 +2283,11 @@ async function reconcilePlanAutomations(job, planType) {
 }
 
 async function startWebLogin(job, { maintenance = false } = {}) {
-  if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新登录并授权");
+  if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新开始授权");
   if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
   await reloadMissingJobCredentials(job);
   if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号当前不能登录 Web");
+  if (!maintenance) job.webSessionMaintenancePause = null;
   const preserved = ["status", "prompt", "lastError", "completedAt", "startedAt", "attempt", "loginCheckpointAvailable",
     "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount"];
   job.webLoginPreviousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
@@ -2367,6 +2388,7 @@ async function forceReloginJob(job, options = {}, context = {}) {
     throw httpError(409, "当前任务正在进行中，不能重新登录");
   }
   await reloadMissingJobCredentials(job);
+  if (!context.autoRepair && !context.webSessionMonitorRepair) job.webSessionMaintenancePause = null;
   job.webSessionMonitorRepair = context.webSessionMonitorRepair === true;
   job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
   if (!canForceRelogin(job)) {
@@ -2635,7 +2657,7 @@ async function finishPasswordAdd(job, code, signal) {
 
   job.status = job.passwordAddResumesAuthorization ? "resume_available" : "completed";
   job.lastError = job.passwordAddResumesAuthorization
-    ? "ChatGPT 登录状态已保留，点击继续流程即可重新开始 Codex 授权"
+    ? "ChatGPT 登录状态已保留，点击“继续授权”即可重新开始 Codex 授权"
     : null;
   job.runMode = null;
   job.runId = null;
@@ -2653,7 +2675,7 @@ function restorePasswordAddFailure(job, message) {
     ? "本次添加密码未完成，原登录检查点仍可继续"
     : "原授权文件仍可使用，本次添加密码未完成";
   job.passwordAddError = message;
-  job.lastError = resumeAuthorization ? "点击继续流程可恢复 Codex 授权" : null;
+  job.lastError = resumeAuthorization ? "点击“继续授权”可恢复 Codex 授权" : null;
   job.runMode = null;
   job.runId = null;
   job.pendingNewPassword = null;
@@ -2756,7 +2778,7 @@ async function finishTotpSetup(job, code, signal) {
 
   job.status = resumeAuthorization ? "resume_available" : "completed";
   job.lastError = resumeAuthorization
-    ? "ChatGPT 登录状态已保留，点击继续流程即可重新开始 Codex 授权"
+    ? "ChatGPT 登录状态已保留，点击“继续授权”即可重新开始 Codex 授权"
     : null;
   job.runMode = null;
   job.runId = null;
@@ -2802,7 +2824,7 @@ function restoreTotpSetupFailure(job, message) {
   job.totpSetupUri = null;
   job.totpSetupReplaceExisting = false;
   job.totpSetupResumesAuthorization = false;
-  job.lastError = resumeAuthorization ? "点击继续流程可恢复 Codex 授权" : null;
+  job.lastError = resumeAuthorization ? "点击“继续授权”可恢复 Codex 授权" : null;
   job.runMode = null;
   job.child?.kill("SIGTERM");
   job.child = null;
@@ -3690,7 +3712,8 @@ async function cancelJob(job) {
     job.runId = null;
     job.child?.kill("SIGTERM");
     job.child = null;
-    await finishWebLogin(job, 1, "SIGTERM", "Web 登录已取消");
+    if (!shuttingDown) job.webSessionMaintenancePause = { reason: "canceled", at: new Date().toISOString() };
+    await finishWebLogin(job, 1, "SIGTERM", shuttingDown ? "Web 登录因服务停止中断，将由巡检重试" : "Web 登录已取消");
     return;
   }
   if (job.runMode === "totp_setup" || job.queuedMode === "totp_setup") {
@@ -3727,6 +3750,7 @@ async function cancelJob(job) {
   }
   stopMailPolling(job);
   releaseSmsNumber(job, "idle");
+  if (!shuttingDown) job.webSessionMaintenancePause = { reason: "canceled", at: new Date().toISOString() };
   const mfaPending = job.status === "mfa_otp";
   job.status = mfaPending ? "mfa_failed" : "canceled";
   job.prompt = mfaPending ? "2FA 未通过，流程已停止" : "流程已取消";
@@ -6505,7 +6529,7 @@ async function preparePlanCodexProxy(job, rawPlanType, workspaceId, { reapply = 
 
 function planCodexProxyRoute(job, workspaceId) {
   const config = sub2ApiSettingsConfig;
-  return { proxyUrl: job.proxyUrl || null, codexAuthMode,
+  return { proxyUrl: job.proxyUrl || null, helperLoginProxy: helperLoginProxyRoute(job, job.proxyUrl), codexAuthMode,
     workspaceId: typeof workspaceId === "string" ? workspaceId : null,
     sub2ApiOAuth: codexAuthMode === "sub2api" ? { baseUrl: config.baseUrl, adminApiKey: config.adminApiKey, proxyId: normalizeStoredProxyId(job.assignedProxyId) } : null };
 }
@@ -6946,12 +6970,13 @@ function publicJob(job) {
     smsError: job.smsError,
     securityCheckRequired: Boolean(job.securityCheckRequired),
     canRetry: ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
-    canResume: job.status === "resume_available",
+    canResume: canResumeAuthorization(job),
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
     webSessionCheckAttemptId: manualWebSessionChecks.get(job.id)?.attemptId || null,
     webSessionCheckPending: webSessionCheckPending(job),
+    webSessionMaintenancePause: job.webSessionMaintenancePause || null,
     webSessionCheckStatus: manualWebSessionChecks.get(job.id)?.phase || null,
     webSessionCheckError: manualWebSessionChecks.get(job.id)?.error || null,
     webSessionAvailable: Boolean(job.webSessionAvailable),
@@ -7222,11 +7247,13 @@ function publicSelectionJob(job) {
     canDownload: Boolean(job.resultSaved),
     sub2apiPlanType: sub2ApiStatus.planType,
     canRetry: ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
+    canResume: canResumeAuthorization(job),
     canRegenerate: job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
     webSessionCheckAttemptId: manualWebSessionChecks.get(job.id)?.attemptId || null,
     webSessionCheckPending: webSessionCheckPending(job),
+    webSessionMaintenancePause: job.webSessionMaintenancePause || null,
     webSessionCheckStatus: manualWebSessionChecks.get(job.id)?.phase || null,
     webSessionCheckError: manualWebSessionChecks.get(job.id)?.error || null,
     webSessionStatus: accountAutomationBlocked(job.email) ? "banned" : job.webSessionStatus || "absent",
@@ -7236,6 +7263,11 @@ function publicSelectionJob(job) {
     canReplaceTotp: canReplaceTotp(job),
     canAddPassword: canAddPassword(job),
   };
+}
+
+function canResumeAuthorization(job) {
+  return ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status)
+    && Boolean(job.loginCheckpointAvailable);
 }
 
 function canLogoutAllSessions(job) {
@@ -7499,7 +7531,7 @@ function assertAccountWebActionsAllowed(job) {
 
 function webSessionRepairRetryAt(job) {
   if (!webSessionMonitorSettings.enabled || !webSessionMonitorSettings.autoRelogin || accountAutomationBlocked(job.email)
-    || job.webLoginPreviousState || (job.webSessionStatus !== "expired" && !job.webLoginError)) return null;
+    || job.webSessionMaintenancePause || job.webLoginPreviousState || (!["expired", "absent"].includes(job.webSessionStatus) && !job.webLoginError)) return null;
   const entry = webSessionMonitor.accounts[job.email.toLowerCase()];
   if (!entry?.repairReason || entry.webRecoveryPending) return null;
   const at = Date.parse(entry.lastRepairAt) + webSessionMonitorSettings.retryMinutes * 60_000;
@@ -7902,13 +7934,14 @@ async function syncCompletedOutputs(force = false) {
           ...restoredProxyRiskState(metadata),
           ...restoredAutoRepairState(metadata),
           ...restoredTaskAutoState(metadata),
+          ...restoredWebSessionMaintenanceState(metadata),
           totpSetupError: restoredOperation.totpSetupError,
           passwordAddError: restoredOperation.passwordAddError,
           passwordAddedAt: metadata.password_added_at || passwordRecovery.addedAt || null,
           pendingNewPassword: null,
           totpSetupResumesAuthorization: false,
           passwordAddResumesAuthorization: false,
-          loginCheckpointAvailable: false,
+          loginCheckpointAvailable: await fileExists(checkpointPath),
           securityCheckRequired: Boolean(metadata.security_check_required),
           ...newSmsState(),
         });
@@ -7974,7 +8007,7 @@ async function syncCompletedOutputs(force = false) {
               ? "[restore] 已从中断的添加密码流程恢复并安全保存新密码。\n"
             : `[restore] 已恢复 ${checkpoint.stage || "unknown"} 阶段的登录检查点。\n`,
           lastError: passwordRecovery.recovered || totpRecovery.recovered
-            ? "ChatGPT 登录状态已保留，点击继续流程即可重新开始 Codex 授权"
+            ? "ChatGPT 登录状态已保留，点击“继续授权”即可重新开始 Codex 授权"
             : metadata.last_error || (restoredStatus === "resume_available"
               ? "上次流程在生成授权文件前中断"
               : null),
@@ -8021,6 +8054,7 @@ async function syncCompletedOutputs(force = false) {
           ...restoredProxyRiskState(metadata),
           ...restoredAutoRepairState(metadata),
           ...restoredTaskAutoState(metadata),
+          ...restoredWebSessionMaintenanceState(metadata),
           totpSetupError: totpRecovery.error || null,
           passwordAddError: passwordRecovery.error || metadata.password_add_error || null,
           passwordAddedAt: metadata.password_added_at || passwordRecovery.addedAt || null,
@@ -8134,6 +8168,7 @@ async function syncCompletedOutputs(force = false) {
           ...restoredProxyRiskState(metadata),
           ...restoredAutoRepairState(metadata),
           ...restoredTaskAutoState(metadata),
+          ...restoredWebSessionMaintenanceState(metadata),
           passwordAddError: metadata.password_add_error || null,
           passwordAddedAt: metadata.password_added_at || null,
           pendingNewPassword: null,
@@ -8436,6 +8471,12 @@ function restoredAutoRepairState(metadata = {}) {
     autoRepairPendingBackend: metadata.auto_repair_pending_backend || null,
     autoRepairOperation: null,
   };
+}
+
+function restoredWebSessionMaintenanceState(metadata = {}) {
+  const value = metadata.web_session_maintenance_pause;
+  return { webSessionMaintenancePause: value && ["logout", "canceled"].includes(value.reason)
+    ? { reason: value.reason, at: typeof value.at === "string" && Number.isFinite(Date.parse(value.at)) ? value.at : null } : null };
 }
 
 function restoredTaskAutoState(metadata = {}) {
@@ -9165,6 +9206,7 @@ async function saveJobMetadata(job) {
         web_login_error: job.webLoginError || null,
         web_login_attempt_id: job.webLoginAttemptId || null,
         web_session_monitor_repair: job.webSessionMonitorRepair === true,
+        web_session_maintenance_pause: job.webSessionMaintenancePause || null,
         login_mode: job.loginMode || null,
         mail_api_url: job.mailApiUrl || null,
         mail_request_body: job.mailRequestBody || null,

@@ -76,7 +76,7 @@ try {
 import { seedWebSession } from ${JSON.stringify(new URL("./account-web-fixture.mjs", import.meta.url).href)};
 const email = process.argv[process.argv.indexOf("--email") + 1];
 const output = process.argv[process.argv.indexOf("--sub2api-out") + 1];
-await fs.appendFile(${JSON.stringify(tracePath)}, JSON.stringify({ phase: "login", email, proxy: process.env.CHATGPT_PROXY_URL, fixed: process.env.CHATGPT_PROXY_FIXED }) + "\\n");
+await fs.appendFile(${JSON.stringify(tracePath)}, JSON.stringify({ phase: "login", email, proxy: process.env.CHATGPT_PROXY_URL, helperLoginProxy: JSON.parse(process.env.TOSUB2_WEB_LOGIN_PROXY || "null"), fixed: process.env.CHATGPT_PROXY_FIXED }) + "\\n");
 console.log("[1/5] Start ChatGPT web login");
 console.log("Email OTP (r=resend, q=quit):");
 process.stdin.resume();
@@ -121,6 +121,8 @@ process.disconnect(); process.stdin.destroy();
   for(const j of selected){
     const current=await job(j.id), log=(await trace()).findLast(t=>t.email===j.email&&t.phase==="login");
     assert.equal(log.fixed,"1");
+    assert.equal(log.helperLoginProxy.kind, log.proxy ? "proxy" : "direct");
+    if (current.assignedProxyId) assert.equal(log.helperLoginProxy.name, proxies.find(p => p.id === current.assignedProxyId).name, "spawn receives actual selected proxy name");
     if(j.planType==="free"){assert.equal(log.proxy,"");assert.equal(current.assignedProxyId,null);}
     if(j.planType==="pro"){assert.equal(new URL(log.proxy).hostname,"b.invalid");assert.equal(current.assignedProxyId,3);}
     if(j.planType==="plus")assert([1,2,3].includes(current.assignedProxyId));

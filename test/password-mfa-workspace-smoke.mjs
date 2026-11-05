@@ -49,6 +49,7 @@ try {
     "--checkpoint", checkpointPath,
     "--verbose",
   ], {
+    TOSUB2_WEB_LOGIN_PROXY: JSON.stringify({ kind: "proxy", name: "Original login node", proxyId: "12" }),
     CHATGPT_LOGIN_PASSWORD: "local-test-password",
     CHATGPT_TOTP_SECRET: "JBSWY3DPEHPK3PXP",
   });
@@ -68,12 +69,16 @@ try {
   assert.equal(exported.type, "sub2api-data");
   assert.equal(exported.accounts?.[0]?.credentials?.email, "mfa-test@example.com");
 
+  const loginProxy = JSON.parse(await fs.readFile(path.join(tempRoot, "mfa-test@example.com-web-session.json"), "utf8")).web.helperLoginProxy;
+  assert.equal(loginProxy.name, "Original login node", "successful protocol login records its Helper proxy");
+  assert.equal(loginProxy.proxyId, "12");
+  assert(Number.isFinite(Date.parse(loginProxy.recordedAt)));
   const oauthBeforeWeb = await fs.readFile(outputPath, "utf8");
   const webOnly = await runNode([
     path.join(projectRoot, "src", "protocol-login.mjs"), "--email", "mfa-test@example.com",
     "--chatgpt-base", baseUrl, "--auth-base", baseUrl, "--output-mode", "web", "--sub2api-out", outputPath,
     "--checkpoint", path.join(tempRoot, "web-login-checkpoint.json"),
-  ], { CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "JBSWY3DPEHPK3PXP" });
+  ], { TOSUB2_WEB_LOGIN_PROXY: JSON.stringify({ kind: "proxy", name: "Different current node" }), CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "JBSWY3DPEHPK3PXP" });
   assert.equal(webOnly.code, 0, processFailure(webOnly));
   assert.match(webOnly.output, /Saved web session:/);
   assert.match(webOnly.output, /Reused saved Web session/);
@@ -82,6 +87,7 @@ try {
   assert.equal(await fs.readFile(outputPath, "utf8"), oauthBeforeWeb);
   const webState = JSON.parse(await fs.readFile(path.join(tempRoot, "mfa-test@example.com-web-session.json"), "utf8"));
   assert.match(webState.accessToken, /^web\./);
+  assert.deepEqual(webState.web.helperLoginProxy, loginProxy, "Web reuse must not replace original login proxy with the current route");
   const stateAfterWeb = await fetch(`${baseUrl}/__test/state`).then(response => response.json());
   assert.equal(stateAfterWeb.oauthAuthorizationCount, state.oauthAuthorizationCount, "Web login never visits the Codex authorization endpoint");
   assert.equal(stateAfterWeb.workspaceSelectionCount, state.workspaceSelectionCount);

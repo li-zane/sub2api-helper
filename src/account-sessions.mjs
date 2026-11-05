@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { isIP } from "node:net";
 import { CookieJar, ProtocolClient } from "./protocol-login.mjs";
-import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, setWebSessionState } from "./account-web-session.mjs";
+import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, setWebSessionState, attachHelperLoginProxies } from "./account-web-session.mjs";
 import { uniqueWorkspaceAccounts, webTokenWorkspaceId, workspaceProviderCode, isDeactivatedWorkspaceError } from "./workspace-accounts.mjs";
 
 import {
@@ -59,6 +59,7 @@ export async function probeAccountWebSession(job) {
   const devices = available && !invalidTokenWorkspace ? (await listAccountSessions(job, { refreshOnUnauthorized: false })).devices.map(d => ({
     displayName: d.displayName, platform: d.platform, isCurrentDevice: d.isCurrentDevice,
     lastSignedInTimestamp: d.lastSignedInTimestamp, lastSignedInIp: d.lastSignedInIp,
+    ...(d.helperLoginProxy ? { helperLoginProxy: d.helperLoginProxy } : {}),
   })) : undefined;
   // Compare against issued OAuth context too: publishing the live plan must not
   // erase a still-pending authorization repair on the next check/restart.
@@ -360,7 +361,7 @@ export async function listAccountSessions(job, { refreshOnUnauthorized = true } 
   const result = await requestWithWebSession(job, "GET", "/accounts/sessions?include_trusted_devices=true", undefined, { refreshOnUnauthorized });
   return {
     showSessionManager: result.data?.show_session_manager !== false,
-    devices: normalizeSessionDevices(result.data),
+    devices: result.devices,
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -530,7 +531,11 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
       setWebSessionState(job, "valid", session.validation.verifiedAt);
     }
     loggedOut = method === "POST" && endpoint === "/accounts/logout_all";
-    return { data, status: response.res.status, session };
+    // Attribution runs inside the per-session request lock and is written with
+    // the refreshed cookies below, avoiding a second racy metadata write.
+    const devices = method === "GET" && endpoint.startsWith("/accounts/sessions?")
+      ? attachHelperLoginProxies(normalizeSessionDevices(data), session) : undefined;
+    return { data, status: response.res.status, session, devices };
   } catch (error) {
     if (/^SESSION_WORKSPACE_UNAVAILABLE:/.test(error.message)) {
       invalidateWebWorkspace(job, session, error.providerCode);

@@ -2304,10 +2304,6 @@ select {
   width: 76px;
 }
 
-.op-time-column {
-  width: 84px;
-}
-
 .bound-ip-column {
   width: 118px;
 }
@@ -2338,10 +2334,9 @@ select {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
-.time-cell,
-.operation-time-cell {
+.time-cell {
   white-space: nowrap;
-  vertical-align: middle;
+  vertical-align: bottom;
 }
 
 .time-stack {
@@ -2367,6 +2362,42 @@ select {
   line-height: 1.2;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   letter-spacing: -0.02em;
+}
+
+.table-frame td.recent-operation-cell,
+.table-frame td.added-time-cell {
+  vertical-align: bottom;
+}
+
+.recent-operation-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.recent-operation-result {
+  display: block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.recent-operation-result.error { color: var(--danger); }
+.recent-operation-result.success { color: var(--emerald-strong); }
+
+.recent-operation-cell .recent-operation-time {
+  display: flex;
+  margin-top: 6px;
+}
+
+.added-time-cell .time-stack {
+  display: flex;
 }
 
 .operation-type-badge {
@@ -4104,6 +4135,26 @@ section.workspace-dialog {
   color: var(--muted);
 }
 
+.session-login-proxy {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  font-size: 11px;
+}
+
+.session-proxy-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
 .session-detail-label {
   color: var(--muted);
   font-size: 11px;
@@ -4933,4 +4984,31 @@ section.workspace-dialog {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+.operation-feedback-trigger {
+  cursor: pointer;
+  font-family: inherit;
+  max-width: 180px;
+  height: auto;
+  min-height: 20px;
+  padding: 3px 6px;
+  line-height: 1.2;
+  white-space: normal;
+  text-align: left;
+}
+
+.operation-feedback-trigger:hover { border-color: var(--accent); color: var(--accent); }
+.operation-feedback-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+dialog.operation-detail-dialog {
+  width: min(640px, calc(100vw - 24px));
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+}
+
+.operation-detail-dialog .operation-detail-content {
+  max-height: min(55dvh, 520px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

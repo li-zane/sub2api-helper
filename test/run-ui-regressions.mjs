@@ -42,7 +42,7 @@ try {
   if (!ready) throw new Error(`UI fixture did not start\n${logs}`);
   await cli(["open", base]);
   await cli(["snapshot"]);
-  const output = await cli(["run-code", "--filename", "test/ui-regressions.browser.js", "--raw"]);
+  const output = await cli(["run-code", "--filename", process.env.UI_TEST_SCRIPT || (process.argv.includes("--recent-operation") ? "test/recent-operation.browser.js" : "test/ui-regressions.browser.js"), "--raw"]);
   const line = output.split(/\r?\n/).find(line => line.startsWith('{"passed":'));
   if (!line) throw new Error(output);
   const result = JSON.parse(line);
