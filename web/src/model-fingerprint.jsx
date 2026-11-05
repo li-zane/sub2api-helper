@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Activity, Settings2, X } from "lucide-react";
+import { Activity, RefreshCw, Settings2, X } from "lucide-react";
 import { HelpTip } from "./help-tip.jsx";
 
 const TITLES = { match: "指纹一致", mismatch: "疑似不一致", unknown: "证据不足", error: "请求失败" };
@@ -162,10 +162,14 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
 }
 export function ModelFingerprintCell({ job, token, onError }) {
   const [state, setState] = useState(job.modelFingerprint), [editing, setEditing] = useState(false), [showHistory, setShowHistory] = useState(false), [draft, setDraft] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const [checkPending, setCheckPending] = useState(false);
+  const requestPending = useRef(false);
   useEffect(() => setState(job.modelFingerprint), [job.modelFingerprint]);
   if (!state) return <span className="muted">—</span>;
   async function update(body, check = false) {
-    setBusy(true); setError(""); try { const result = await api(token, `/api/jobs/${job.id}/model-fingerprint${check ? "/check" : ""}`, body); setState(result.job.modelFingerprint); if (!check) setEditing(false); } catch (e) { setError(e.message); onError?.(e.message); } finally { setBusy(false); }
+    if (requestPending.current || check && ["running", "queued"].includes(state.phase)) return;
+    requestPending.current = true;
+    setBusy(true); setCheckPending(check); setError(""); try { const result = await api(token, `/api/jobs/${job.id}/model-fingerprint${check ? "/check" : ""}`, body); setState(result.job.modelFingerprint); if (!check) setEditing(false); } catch (e) { setError(e.message); onError?.(e.message); } finally { requestPending.current = false; setBusy(false); setCheckPending(false); }
   }
   function open() { setDraft({ ...state.override, text: toText(state.override.models ?? state.models), customModels: state.override.models !== null, customInterval: state.override.intervalMinutes !== null, interval: state.override.intervalMinutes ?? state.intervalMinutes }); setError(""); setEditing(true); }
   const result = state.result;
@@ -174,9 +178,13 @@ export function ModelFingerprintCell({ job, token, onError }) {
   const checking = state.phase === "running" || state.phase === "queued";
   return <div className={`fingerprint-cell-body${state.enabled ? "" : " is-disabled"}`}>
     <div className="fingerprint-cell-actions">
+      <div className="overload-control fingerprint-toggle-control"><span>降智</span>
       <button type="button" role="switch" aria-checked={state.enabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${state.enabled ? "on" : ""}`} disabled={!token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
-      <button type="button" className="fingerprint-check-button" disabled={!token || busy || checking || !state.models.length || !job.sub2apiInPool} onClick={() => update({}, true)}>{state.phase === "running" ? "检测中…" : state.phase === "queued" ? "排队中…" : "立即检测"}</button>
+      </div>
+      <div className="fingerprint-action-pair">
+      <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={state.phase === "queued" ? "排队中" : checking || checkPending ? "正在检测" : "立即检测"} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models.length || !job.sub2apiInPool} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
       <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title="独立降智检测设置" onClick={open}><Settings2 size={14} /></button>
+      </div>
     </div>
     <div className="fingerprint-rounds" role="group" aria-label={`${job.email} 最近 6 轮检测结果`}>
       {rounds.map((round, index) => {

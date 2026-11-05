@@ -1,4 +1,5 @@
 async (page) => {
+  const evidenceDir = "__UI_TEST_EVIDENCE_DIR__";
   const results = [], errors = [], consoleErrors = [], saves = [];
   const check = (value, message) => { if (!value) throw Error(message); };
   const run = async (name, fn) => { try { await fn(); results.push({ name, passed: true }); } catch (e) { results.push({ name, passed: false, error: e.message }); } };
@@ -30,10 +31,12 @@ async (page) => {
   await page.reload();
   await page.waitForFunction(() => document.querySelectorAll('tr.job-row').length === 20);
   const rows = page.locator('tr.job-row'), row = rows.first();
-  await run('recent-operation-horizontal', async () => {
+  await run('recent-operation-separate-time-column', async () => {
     const tag = await row.locator('.operation-feedback-trigger').boundingBox(), time = await row.locator('.recent-operation-time').boundingBox();
     check(time.x >= tag.x + tag.width, 'time must be to the right of the operation label');
-    check(Math.abs(time.y - tag.y) < 6, 'time should start beside the label');
+    check(await row.locator('.recent-operation-cell .recent-operation-time').count() === 0, 'time remains inside operation column');
+    const cell = await row.locator('.recent-operation-time-cell').boundingBox();
+    check(Math.abs(time.x + time.width / 2 - cell.x - cell.width / 2) < 1, 'time should be centered in its own column');
   });
   await run('all-binding-states-use-cards', async () => {
     check(await row.locator('.bound-proxy').innerText() === '直连', 'direct connection has no card');
@@ -91,13 +94,13 @@ async (page) => {
     check(page.url() === initialUrl && (await page.title()).length > 0, 'wrong page identity');
     check(await page.locator('vite-error-overlay').count() === 0, 'framework overlay');
     await row.locator('.usage-total-pills').waitFor();
-    await page.screenshot({ path: 'C:/Temp/UserTemp/tosub2-usage-ui-20261105/desktop.png' });
+    await page.screenshot({ path: `${evidenceDir}/account-usage-desktop.png` });
     await page.setViewportSize({ width: 375, height: 812 });
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'mobile document overflow');
     await row.locator('.operation-feedback-trigger').scrollIntoViewIfNeeded();
     const a = await row.locator('.operation-feedback-trigger').boundingBox(), b = await row.locator('.recent-operation-time').boundingBox();
     check(b.x >= a.x + a.width, 'mobile recent-operation layout is stacked');
-    await page.screenshot({ path: 'C:/Temp/UserTemp/tosub2-usage-ui-20261105/mobile.png' });
+    await page.screenshot({ path: `${evidenceDir}/account-usage-mobile.png` });
     check(!errors.length, errors.join('; '));
     check(!consoleErrors.length, consoleErrors.join('; '));
   });

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { buildOverloadChart } from "./overload-chart.mjs";
+import { overloadDashboard, overloadEnergy } from "./codex-dashboard.mjs";
 
 function intervalLabel(point) {
   const format = (value) => new Date(value).toLocaleString("zh-CN", {
@@ -29,6 +30,7 @@ export function OverloadDetection({ job, token, onError }) {
   const cooldown = savedCooldown && (savedCooldown.revision ?? 0) > (cooldownSource?.revision ?? -1) ? savedCooldown : cooldownSource || savedCooldown;
   const cooldownEnabled = cooldown?.enabled === true;
   const points = detection?.points || [];
+  const dashboard = overloadDashboard(detection, cooldown);
   const { positioned, overloadSegments, requestSegments } = buildOverloadChart(points);
   const active = hovered === null ? null : positioned[hovered];
   const errors = [detection?.lastError ? `过载统计：${detection.lastError}` : null,
@@ -68,7 +70,7 @@ export function OverloadDetection({ job, token, onError }) {
   return (
     <div className="overload-detection">
       <div className="overload-controls">
-      <div className="overload-control"><span>检测</span>
+      <div className="overload-control overload-toggle-control"><span>过载</span>
       <button
         type="button" role="switch" aria-checked={enabled}
         aria-label={`${job.email} 过载检测`} aria-busy={busy}
@@ -77,13 +79,15 @@ export function OverloadDetection({ job, token, onError }) {
         disabled={busy || !token || (!detection?.configured && !enabled)} onClick={toggle}
       ><span aria-hidden="true" /></button>
       </div>
-      <div className="overload-control"><span>冷却</span><button type="button" role="switch" aria-checked={cooldownEnabled} aria-busy={cooldownBusy}
+      <div className="overload-control cooldown-toggle-control"><span>冷却</span><button type="button" role="switch" aria-checked={cooldownEnabled} aria-busy={cooldownBusy}
         aria-label={`${job.email} 自动冷却`} className={`overload-switch ${cooldownEnabled ? "enabled" : "disabled"}`}
         title={cooldown?.configured ? (cooldownEnabled ? "关闭自动冷却，并恢复本功能暂停的账号" : "开启过载自动冷却") : "请先配置 Sub2API 后端"}
         disabled={cooldownBusy || !token || (!cooldown?.configured && !cooldownEnabled)} onClick={toggleCooldown}><span aria-hidden="true" /></button></div>
       </div>
       <div className="overload-chart-status">
-      <div className="overload-chart">
+      <div className="overload-dashboard overload-chart">
+      <OverloadEnergy value={dashboard.quarter} enabled={enabled} />
+      <div className="overload-plot">
         <svg viewBox="0 0 164 56" role="group" aria-label="最近六个完整的 15 分钟区间的过载与请求数量，两条线独立缩放">
           <line className="overload-zero" x1="14" x2="156" y1="44" y2="44" />
           <text className="overload-zero-label" x="1" y="48">0</text>
@@ -109,10 +113,22 @@ export function OverloadDetection({ job, token, onError }) {
         </div>}
         {errors && <span className="overload-error" role="img" aria-label={errors} title={errors}>!</span>}
       </div>
-      {cooldown && <span className={`overload-cooldown-status ${cooldown.lastError ? "error" : ""}`} title={cooldown.lastError || (cooldownEnabled ? `最近 ${cooldown.settings.windowMinutes} 分钟 ${cooldown.windowCount ?? "未知"} 次，阈值 ${cooldown.settings.threshold} 次` : "自动冷却已关闭")}>
-        {cooldown.lastError ? "自动冷却异常" : cooldown.phase === "resuming" ? "正在恢复号池…" : cooldown.coolingUntil ? `冷却至 ${new Date(cooldown.coolingUntil).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}` : cooldownEnabled ? `${cooldown.settings.windowMinutes} 分钟 ${cooldown.windowCount ?? "—"}/${cooldown.settings.threshold} 次` : ""}
+      <OverloadEnergy value={dashboard.total} enabled={enabled} />
+      </div>
+      {cooldown && (cooldown.lastError || cooldown.phase === "resuming" || cooldown.coolingUntil) && <span className={`overload-cooldown-status ${cooldown.lastError ? "error" : ""}`} title={cooldown.lastError || "自动冷却状态"}>
+        {cooldown.lastError ? "自动冷却异常" : cooldown.phase === "resuming" ? "正在恢复号池…" : `冷却至 ${new Date(cooldown.coolingUntil).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`}
       </span>}
       </div>
     </div>
   );
+}
+
+function OverloadEnergy({ value, enabled }) {
+  const energy = overloadEnergy(value.count, value.limit, enabled);
+  const title = `${value.period} 过载；${value.source}；${value.count ?? "未统计"} 次 / 阈值 ${value.limit ?? "未知"} 次${enabled ? "" : "；过载检测已关闭"}`;
+  return <div className={`codex-energy ${energy.tone}`} title={title}>
+    <div className="codex-energy-track" role="meter" aria-label={`${value.period} 过载次数`} aria-valuemin={0} aria-valuemax={value.limit ?? undefined} aria-valuenow={energy.known ? Math.min(value.count, value.limit) : undefined} aria-valuetext={title}>
+      <span className="codex-energy-fill" style={{ height: `${energy.ratio * 100}%`, background: energy.color }} />
+    </div>
+  </div>;
 }

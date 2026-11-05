@@ -8,10 +8,10 @@ async (page) => {
   await run("recent-operation-column-order", async () => {
     const headings = await page.locator("thead th").allTextContents();
     check(headings.includes("最近操作") && headings.includes("添加时间"), "merged recent operation and added time headings are missing");
-    check(!headings.some(text => ["当前操作", "开始时间", "最近操作时间"].includes(text)), "old time/operation headings remain");
-    check(headings.indexOf("最近操作") + 1 === headings.indexOf("添加时间"), "recent operation must immediately precede added time");
-    check(headings.length === 14 && await page.locator("colgroup col").count() === 14, "merged table column geometry is inconsistent");
-    check(await page.locator("tr.job-row").first().locator(":scope > td").count() === 14, "row retains a removed column");
+    check(!headings.some(text => ["当前操作", "开始时间"].includes(text)), "old time/operation headings remain");
+    check(headings.indexOf("最近操作") + 1 === headings.indexOf("最近操作时间") && headings.indexOf("最近操作时间") + 1 === headings.indexOf("添加时间"), "operation, operation time and added time must be adjacent");
+    check(headings.length === 12 && await page.locator("colgroup col").count() === 12, "merged table column geometry is inconsistent");
+    check(await page.locator("tr.job-row").first().locator(":scope > td").count() === 12, "row retains a removed column");
   });
   if (!results[0].passed) return { passed: 0, total: 1, results };
   const pattern = /\/api\/jobs(?:\?|$)/;
@@ -36,16 +36,25 @@ async (page) => {
     const tag = await row().locator(".operation-feedback-trigger").boundingBox(), feedback = await result.boundingBox();
     check(tag.y + tag.height <= feedback.y, "operation label and result are not stacked");
     const time = await row().locator(".recent-operation-time").boundingBox();
-    check(time.x >= tag.x + tag.width && Math.abs(time.y - tag.y) < 6, "operation timestamp is not beside the label");
+    const timeCell = await row().locator(".recent-operation-time-cell").boundingBox();
+    check(time.x >= tag.x + tag.width, "operation timestamp is not in the next column");
+    check(await row().locator(".recent-operation-cell .recent-operation-time").count() === 0, "timestamp still appears in operation column");
+    check(Math.abs(time.x + time.width / 2 - timeCell.x - timeCell.width / 2) < 1, "operation timestamp is not centered in its column");
+    const addedCell = await row().locator(".added-time-cell").boundingBox();
     for (const selector of [".time-date", ".time-clock"]) {
-      const a = await row().locator(".recent-operation-time " + selector).boundingBox();
-      const b = await row().locator(".added-time-cell " + selector).boundingBox();
-      check(Math.abs(a.y - b.y) < 1, "recent and added timestamps are vertically misaligned: " + selector);
+      const value = await row().locator(".added-time-cell " + selector).boundingBox();
+      check(Math.abs(value.x + value.width / 2 - addedCell.x - addedCell.width / 2) < 1, "added timestamp is not horizontally centered: " + selector);
     }
     check((await row().locator(".added-time-cell .time-date").innerText()) === "11/01", "added time does not use createdAt");
   });
   await run("operation-feedback-code-dialog", async () => {
     mode = "failed"; await page.reload();
+    await row().locator(".recent-operation-result").getByText("失败", { exact: true }).waitFor();
+    const bounds = await row().boundingBox();
+    for (const selector of [".recent-operation-overview", ".recent-operation-time-cell .time-stack", ".added-time-cell .time-stack"]) {
+      const content = await row().locator(selector).boundingBox();
+      check(Math.abs(content.y + content.height / 2 - bounds.y - bounds.height / 2) < 1, "column content is not centered within its row: " + selector);
+    }
     const tag = row().getByRole("button", { name: "查看重新授权反馈详情", exact: true });
     await tag.click();
     const modal = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
@@ -70,7 +79,7 @@ async (page) => {
     await page.keyboard.press("Escape");
     await page.getByRole("textbox", { name: "搜索账号", exact: true }).fill("no-match-recent-operation");
     await page.waitForFunction(() => !document.querySelector("tr.job-row"));
-    check(await page.locator("td[colspan='14']").count() === 1, "empty state has stale colspan");
+    check(await page.locator("td[colspan='12']").count() === 1, "empty state has stale colspan");
   });
   await page.unrouteAll({ behavior: "wait" });
   check(!errors.length, errors.join("; "));

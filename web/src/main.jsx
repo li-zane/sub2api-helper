@@ -49,10 +49,10 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import { logoutAccountSessions, proxySwitchSelectionState } from "./account-session-actions.mjs";
-import { OverloadDetection } from "./overload-detection.jsx";
 import { ProxyQualityPanel } from "./proxy-quality.jsx";
 import { WebLoginBatch } from "./web-login-batch.jsx";
-import { FingerprintSettingsButton, ModelFingerprintCell } from "./model-fingerprint.jsx";
+import { FingerprintSettingsButton } from "./model-fingerprint.jsx";
+import { CodexStatus } from "./codex-status.jsx";
 import { HelpTip } from "./help-tip.jsx";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
 
@@ -2216,14 +2216,12 @@ function App() {
               <col className="plan-column" />
               <col className="usage-column" />
               <col className="pool-column" />
-              <col className="enabled-column" />
-              <col className="priority-column" />
               <col className="status-column" />
               <col className="step-column" />
               <col className="time-column" />
+              <col className="time-column" />
               <col className="bound-ip-column" />
-              <col className="overload-column" />
-              <col className="fingerprint-column" />
+              <col className="codex-status-column" />
               <col className="actions-column" />
             </colgroup>
             <thead>
@@ -2283,11 +2281,6 @@ function App() {
                       ]}
                       activeLabel={sub2apiPoolFilter ? SUB2API_POOL_FILTER_LABELS[sub2apiPoolFilter] : "全部"}
                     />
-                  </div>
-                </th>
-                <th>
-                  <div className="column-filter-heading">
-                    <span>启用</span>
                     <ColumnHeaderFilter
                       title="启用"
                       value={sub2apiEnabledFilter}
@@ -2300,7 +2293,6 @@ function App() {
                     />
                   </div>
                 </th>
-                <th className="priority-heading">优先级</th>
                 <th>
                   <div className="column-filter-heading">
                     <span>状态</span>
@@ -2317,10 +2309,10 @@ function App() {
                   </div>
                 </th>
                 <th className="recent-operation-heading">最近操作</th>
+                <th className="recent-operation-time-heading">最近操作时间</th>
                 <th className="added-time-heading">添加时间</th>
                 <th className="bound-ip-heading">绑定 IP</th>
-                <th className="overload-heading">过载检测</th>
-                <th className="fingerprint-heading">降智检测</th>
+                <th className="codex-status-heading">Codex 状态</th>
                 <th className="actions-heading">操作</th>
               </tr>
             </thead>
@@ -2474,15 +2466,6 @@ function App() {
                 </HelpTip>
               </div>
               <div className="dialog-header-actions">
-                <a
-                  className="provider-external-link"
-                  href="https://invite.zooproxy.com/share/ez2v2jdb7"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <ExternalLink size={13} aria-hidden="true" />
-                  获取代理 IP
-                </a>
                 <button type="button" className="icon-button" autoFocus data-dialog-initial-focus onClick={() => setProxySettingsOpen(false)} disabled={proxySettingsSaving} title="关闭" aria-label="关闭代理 IP 配置">
                   <X size={18} />
                 </button>
@@ -3350,7 +3333,7 @@ function App() {
 function EmptyState({ filtered = false }) {
   return (
     <tr>
-      <td colSpan="14">
+      <td colSpan="12">
         <div className="empty-state">
           <div className="empty-state-icon"><Mail size={24} /></div>
           <h3>{filtered ? "没有匹配账号" : "暂无授权任务"}</h3>
@@ -3907,45 +3890,48 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
         <AccountUsageCell usage={accountUsage} available={job.canDownload || job.sub2apiInPool === true} enabled={accountUsageAvailable} onRefresh={onRefreshUsage} />
       </td>
       <td className="pool-status-cell">
-        <Sub2ApiPoolBadge inPool={job.sub2apiInPool} remoteStatus={job.sub2apiRemoteStatus} />
-      </td>
-      <td className="pool-enabled-cell">
-        <Sub2ApiEnabledToggle
-          inPool={job.sub2apiInPool}
-          enabled={job.sub2apiEnabled}
-          available={sub2apiToggleAvailable}
-          busy={sub2apiToggleBusy}
-          onChange={onToggleSub2Api}
-        />
-      </td>
-      <td
-        className={`sub2api-priority-cell ${job.sub2apiInPool !== true ? "unknown" : ""}`}
-        title={job.sub2apiInPool !== true ? "尚未同步 Sub2API 优先级" : "离开输入框时自动保存 Sub2API 优先级"}
-      >
-        {job.sub2apiInPool === true ? (
-          <div className="sub2api-priority-editor">
-            <input
-              ref={priorityInputRef}
-              type="number"
-              min="0"
-              max="10000"
-              step="1"
-              inputMode="numeric"
-              value={priorityValue}
-              onChange={(event) => setPriorityValue(event.target.value)}
-              onBlur={savePriority}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  event.currentTarget.blur();
-                }
-              }}
-              disabled={!sub2apiPriorityAvailable || sub2apiPriorityBusy}
-              aria-busy={sub2apiPriorityBusy}
-              aria-label={`编辑 ${job.email} 的 Sub2API 优先级`}
+        <div className="pool-account-controls">
+          <div className="pool-account-status">
+            <Sub2ApiPoolBadge inPool={job.sub2apiInPool} remoteStatus={job.sub2apiRemoteStatus} />
+            <Sub2ApiEnabledToggle
+              inPool={job.sub2apiInPool}
+              enabled={job.sub2apiEnabled}
+              available={sub2apiToggleAvailable}
+              busy={sub2apiToggleBusy}
+              onChange={onToggleSub2Api}
             />
           </div>
-        ) : "—"}
+          <div
+            className={`sub2api-priority-cell ${job.sub2apiInPool !== true ? "unknown" : ""}`}
+            title={job.sub2apiInPool !== true ? "尚未同步 Sub2API 优先级" : "离开输入框时自动保存 Sub2API 优先级"}
+          >
+            <span className="pool-priority-label">优先级</span>
+            {job.sub2apiInPool === true ? (
+              <div className="sub2api-priority-editor">
+                <input
+                  ref={priorityInputRef}
+                  type="number"
+                  min="0"
+                  max="10000"
+                  step="1"
+                  inputMode="numeric"
+                  value={priorityValue}
+                  onChange={(event) => setPriorityValue(event.target.value)}
+                  onBlur={savePriority}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      event.currentTarget.blur();
+                    }
+                  }}
+                  disabled={!sub2apiPriorityAvailable || sub2apiPriorityBusy}
+                  aria-busy={sub2apiPriorityBusy}
+                  aria-label={`编辑 ${job.email} 的 Sub2API 优先级`}
+                />
+              </div>
+            ) : "—"}
+          </div>
+        </div>
       </td>
       <td><StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} /></td>
       <td className="step-cell recent-operation-cell">
@@ -3962,7 +3948,6 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             </button>
             <span className={`recent-operation-result ${operation.tone}`}>{operation.result}</span>
           </div>
-          <OperationTime value={operation.at} className="recent-operation-time" />
         </div>
         {job.currentPhone && ["working", "phone", "phone_otp"].includes(job.status) && (
           <div className="phone-target"><Smartphone size={13} />当前手机号：<strong>{job.currentPhone}</strong></div>
@@ -4042,12 +4027,14 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
           </div>
         )}
       </td>
+      <td className="time-cell recent-operation-time-cell">
+        <OperationTime value={operation.at} className="recent-operation-time" />
+      </td>
       <td className="time-cell added-time-cell">
         <OperationTime value={job.createdAt} />
       </td>
       <BoundProxyCell job={job} />
-      <td className="overload-cell"><OverloadDetection job={job} token={token} onError={onError} /></td>
-      <td className="fingerprint-cell"><ModelFingerprintCell job={job} token={token} onError={onError} /></td>
+      <td className="codex-status-cell"><CodexStatus job={job} token={token} onError={onError} /></td>
       <td className="actions-cell">
         <div className="row-actions">
           {/* Row 1: 管理与数据 (7 buttons) */}
