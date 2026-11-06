@@ -42,22 +42,34 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
   useLayoutEffect(() => {
     if (!open || !menuRef.current) return;
     const menu = menuRef.current;
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    // In the top layer, CSS min-width:100% resolves against the viewport, not
+    // the trigger. Set the anchor width before the first measurement.
+    menu.style.minWidth = `${Math.min(trigger.getBoundingClientRect().width, window.innerWidth - 16)}px`;
     // The top layer avoids clipping by the surrounding dialog's scroll container.
     const popover = typeof menu.showPopover === "function";
     if (popover) menu.showPopover();
     const place = () => {
       const trigger = triggerRef.current;
       if (!trigger || !menu.isConnected) return;
-      const rect = trigger.getBoundingClientRect(), width = Math.max(rect.width, menu.offsetWidth), height = menu.offsetHeight;
+      const rect = trigger.getBoundingClientRect();
+      if (rect.bottom < 8 || rect.top > window.innerHeight - 8) { close(); return; }
+      const minWidth = Math.max(0, Math.min(rect.width, window.innerWidth - 16));
+      menu.style.minWidth = `${minWidth}px`;
+      const width = menu.offsetWidth, height = menu.offsetHeight;
       const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
       const below = rect.bottom + 5;
-      const top = below + height > window.innerHeight - 8 && rect.top - height - 5 >= 8 ? rect.top - height - 5 : below;
-      const next = { position: "fixed", left, top, right: "auto", bottom: "auto", margin: 0, minWidth: rect.width };
-      setPosition(previous => previous?.left === left && previous?.top === top && previous?.minWidth === rect.width ? previous : next);
+      const preferredTop = below + height > window.innerHeight - 8 && rect.top - height - 5 >= 8 ? rect.top - height - 5 : below;
+      const top = Math.max(8, Math.min(preferredTop, window.innerHeight - height - 8));
+      const next = { position: "fixed", left, top, right: "auto", bottom: "auto", margin: 0, minWidth, visibility: "visible" };
+      setPosition(previous => previous?.left === left && previous?.top === top && previous?.minWidth === minWidth ? previous : next);
     };
     place();
     const outside = event => { if (!containerRef.current?.contains(event.target)) close(); };
-    const scroll = event => { if (!menu.contains(event.target)) close(); };
+    // Focusing a partially visible trigger can scroll the modal just after
+    // click. Re-anchor instead of dismissing the menu on that delayed scroll.
+    const scroll = event => { if (!menu.contains(event.target)) place(); };
     document.addEventListener("pointerdown", outside, true);
     window.addEventListener("scroll", scroll, true);
     window.addEventListener("resize", place);
@@ -68,7 +80,17 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
       if (popover && menu.matches(":popover-open")) menu.hidePopover();
     };
   }, [open]);
-  useEffect(() => { if (open && activeIndex >= 0) menuRef.current?.querySelector(`[data-option-index="${activeIndex}"]`)?.scrollIntoView({ block: "nearest" }); }, [open, activeIndex]);
+  useEffect(() => {
+    if (!open || activeIndex < 0) return;
+    const scroller = menuRef.current?.querySelector(".custom-select-options");
+    const option = scroller?.querySelector(`[data-option-index="${activeIndex}"]`);
+    if (!option) return;
+    // scrollIntoView also scrolls the surrounding modal, which can move the
+    // anchor and immediately dismiss a freshly opened top-layer menu.
+    const bounds = scroller.getBoundingClientRect(), item = option.getBoundingClientRect();
+    if (item.top < bounds.top) scroller.scrollTop -= bounds.top - item.top;
+    else if (item.bottom > bounds.bottom) scroller.scrollTop += item.bottom - bounds.bottom;
+  }, [open, activeIndex]);
 
   const handleSelect = val => {
     if (disabled) return;
@@ -123,7 +145,7 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
       aria-activedescendant={open && activeIndex >= 0 ? `${uid}-option-${activeIndex}` : undefined} aria-required={required}>
       <span className="custom-select-value">{displayLabel}</span><ChevronDown size={14} className={`custom-select-chevron ${open ? "rotated" : ""}`} aria-hidden="true" />
     </button>
-    {open && !disabled && <div ref={menuRef} id={listId} popover="manual" className="custom-select-dropdown" style={position || { position: "fixed", margin: 0 }}
+    {open && !disabled && <div ref={menuRef} id={listId} popover="manual" className="custom-select-dropdown" style={position || { position: "fixed", left: 0, top: 0, right: "auto", bottom: "auto", margin: 0, minWidth: 0, visibility: "hidden" }}
       role="listbox" aria-label={ariaLabel || displayLabel}>
       <div className="custom-select-options">{parsedOptions.map((opt, index) => {
         const isSelected = index === selectedIndex;

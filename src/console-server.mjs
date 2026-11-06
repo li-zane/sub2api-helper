@@ -34,6 +34,7 @@ import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
 import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
 import { DEFAULT_MONITORING, normalizeMonitoring } from "../web/src/monitor-settings.mjs";
+import { normalizeTaskUploadActions, isRedundantTaskUpload } from "../web/src/task-auto-actions.mjs";
 import { limitPoolRequests } from "./pool-network.mjs";
 import { createUsageTotalsReader, combineUsageTotals } from "./sub2api-usage-totals.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
@@ -4492,10 +4493,10 @@ function normalizeTaskAutoActions(value) {
     if (actions.some((action) => !TASK_AUTO_ACTIONS.has(action))) {
       throw httpError(400, `PlanType ${planType} 的自动任务包含不支持的命令`);
     }
-    if (actions.length) normalized[planType] = [
+    if (actions.length) normalized[planType] = normalizeTaskUploadActions([
       ...actions.filter((action) => !["enable-overload-detection", "enable-overload-cooldown"].includes(action)),
       ...["enable-overload-detection", "enable-overload-cooldown"].filter((action) => actions.includes(action)),
-    ];
+    ]);
   }
   return normalized;
 }
@@ -9201,7 +9202,9 @@ async function runConfiguredTaskActions(job) {
       job.autoTaskIndex = index;
       touch(job);
       await saveJobMetadata(job);
-      if (action === "upload") {
+      if (isRedundantTaskUpload(action, job.autoTaskActions)) {
+        appendJobLog(job, "[auto] 一键轮换已包含上传，跳过重复的普通上传。\n");
+      } else if (action === "upload") {
         await runConfiguredUploadAction(job);
       } else if (action === "rotate-logout-reauthorize-upload") {
         await runConfiguredRotateAndUploadAction(job);

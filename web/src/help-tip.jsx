@@ -11,7 +11,7 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
   const [focused, setFocused] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const [pinned, setPinned] = useState(false);
-  const [coords, setCoords] = useState({ top: 0, left: 0, placement: "bottom" });
+  const [coords, setCoords] = useState(null);
 
   const open = !dismissed && (hovered || focused || pinned);
   const body = children ?? content;
@@ -48,11 +48,18 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
     });
   }
 
+  function handleBlur(event) {
+    if (triggerRef.current?.contains(event.relatedTarget) || popoverRef.current?.contains(event.relatedTarget)) return;
+    setFocused(false); setPinned(false);
+  }
+
   useLayoutEffect(() => {
     if (!open || !triggerRef.current) return undefined;
     function updatePosition() {
       if (!triggerRef.current) return;
       const rect = triggerRef.current.getBoundingClientRect();
+      const maxHeight = Math.max(0, window.innerHeight - 24);
+      if (popoverRef.current) popoverRef.current.style.maxHeight = `${maxHeight}px`;
       const popWidth = popoverRef.current?.offsetWidth || 280;
       const popHeight = popoverRef.current?.offsetHeight || 96;
       const gap = 8;
@@ -65,7 +72,10 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
         placement = "top";
         top = rect.top - gap - popHeight;
       }
-      setCoords({ top, left, placement });
+      top = Math.max(margin, Math.min(top, window.innerHeight - popHeight - margin));
+      const scrollable = popoverRef.current?.scrollHeight > popoverRef.current?.clientHeight;
+      setCoords(previous => previous?.top === top && previous?.left === left && previous?.maxHeight === maxHeight && previous?.placement === placement && previous?.scrollable === scrollable
+        ? previous : { top, left, placement, maxHeight, scrollable });
     }
     updatePosition();
     window.addEventListener("scroll", updatePosition, true);
@@ -122,7 +132,7 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
         aria-expanded={open}
         aria-describedby={open ? tooltipId : undefined}
         onFocus={() => { setFocused(true); setDismissed(false); }}
-        onBlur={() => { setFocused(false); setPinned(false); }}
+        onBlur={handleBlur}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
@@ -134,10 +144,13 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
           ref={popoverRef}
           id={tooltipId}
           role="tooltip"
-          className={`help-tip-popover ${coords.placement} ${pinned ? "pinned" : ""}`}
-          style={{ top: `${coords.top}px`, left: `${coords.left}px` }}
+          className={`help-tip-popover ${coords?.placement || "bottom"} ${pinned ? "pinned" : ""}`}
+          tabIndex={coords?.scrollable ? 0 : undefined}
+          style={{ top: `${coords?.top ?? 0}px`, left: `${coords?.left ?? 0}px`, maxHeight: coords ? `${coords.maxHeight}px` : undefined, overflowY: "auto", visibility: coords ? undefined : "hidden" }}
           onMouseEnter={handleMouseEnter}
           onMouseLeave={handleMouseLeave}
+          onFocus={() => setFocused(true)}
+          onBlur={handleBlur}
           onClick={(event) => event.stopPropagation()}
         >
           {title && <div className="help-tip-title">{title}</div>}

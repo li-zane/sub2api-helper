@@ -2,6 +2,7 @@ import { CustomSelect } from "./custom-select.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { Activity, Check, ChevronDown, RefreshCw, Settings2, X } from "lucide-react";
 import { HelpTip } from "./help-tip.jsx";
+import { trapModalTab } from "./accessible-dialog.jsx";
 
 const TITLES = { match: "指纹一致", mismatch: "疑似不一致", unknown: "证据不足", error: "请求失败" };
 const toText = models => (models || []).map(m => m.expected === m.model ? m.model : `${m.model} => ${m.expected}`).join("\n");
@@ -40,20 +41,21 @@ async function api(token, url, body) {
   const response = await fetch(url, { method: body === undefined ? "GET" : "POST", headers: { "x-console-token": token, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const data = await response.json(); if (!response.ok) throw new Error(data.error || "指纹检测请求失败"); return data;
 }
-function Dialog({ title, subtitle, onClose, closeDisabled = false, children }) {
+function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRef, children }) {
   const ref = useRef(null);
   useEffect(() => {
-    const previous = document.activeElement;
+    const previous = returnFocusRef?.current || document.activeElement;
     const dialog = ref.current;
     const initialFocus = dialog.querySelector('[data-dialog-initial-focus]:not(:disabled), .dialog-header .icon-button:not(:disabled)');
     initialFocus?.setAttribute("autofocus", "");
     dialog.showModal();
-    return () => { dialog.close(); previous?.focus?.(); };
+    return () => { dialog.close(); if (previous?.isConnected) previous.focus(); };
   }, []);
   return <dialog
     ref={ref}
     className="batch-dialog fingerprint-dialog"
     aria-label={title}
+    onKeyDown={trapModalTab}
     onCancel={event => { event.preventDefault(); if (!closeDisabled) onClose(); }}
     onClick={(event) => {
       if (event.target !== event.currentTarget || closeDisabled) return;
@@ -92,8 +94,9 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
   </section>;
 }
 export function FingerprintSettingsButton({ token, planTypes = [] }) {
+  const returnFocusRef = useRef(null);
   const [data, setData] = useState(null), [error, setError] = useState(""), [busy, setBusy] = useState(false), [newPlan, setNewPlan] = useState(""), [reference, setReference] = useState(null);
-  async function open() { setBusy(true); setError(""); try { setData(await api(token, "/api/model-fingerprint/settings")); } catch (e) { setError(e.message); } finally { setBusy(false); } }
+  async function open(event) { returnFocusRef.current = event.currentTarget; setBusy(true); setError(""); try { setData(await api(token, "/api/model-fingerprint/settings")); } catch (e) { setError(e.message); } finally { setBusy(false); } }
   const patch = changes => setData(current => ({ ...current, settings: { ...current.settings, ...changes } }));
   const plans = data ? [...new Set([...planTypes, ...Object.keys(data.settings.planDefaults), ...data.profiles.flatMap(p => p.planTypes || [])])].sort() : [];
   async function save(event) {
@@ -105,7 +108,7 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
   }
   return <><button type="button" className="secondary-button topbar-action-button" disabled={!token || busy} onClick={open}><Activity size={14} />降智检测设置</button>
     {!data && error && <span role="alert" className="proxy-quality-error">{error}</span>}
-    {data && <Dialog title="降智检测设置" subtitle="通过数字指纹提示词评估模型响应分布是否与参考库一致" closeDisabled={busy} onClose={() => setData(null)}><form onSubmit={save} className="fingerprint-form">
+    {data && <Dialog title="降智检测设置" subtitle="通过数字指纹提示词评估模型响应分布是否与参考库一致" closeDisabled={busy} returnFocusRef={returnFocusRef} onClose={() => setData(null)}><form onSubmit={save} className="fingerprint-form">
       <FingerprintDefaultsFields value={data.settings} onChange={settings => setData(current => ({ ...current, settings }))} disabled={busy} />
       <div className="fingerprint-toolbar-row">
         {data.runtime && (

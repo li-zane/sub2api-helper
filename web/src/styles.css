@@ -6720,11 +6720,31 @@ dialog.operation-detail-dialog {
   text-align: left;
 }
 
+.task-settings-dialog .task-auto-rule .task-auto-action-group {
+  min-width: 0;
+  flex: 1 1 0;
+}
+
 .task-settings-dialog .task-auto-rule .task-auto-action-options {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  flex: 1 1 auto;
+}
+
+.task-settings-dialog .task-auto-rule .task-auto-action-option {
+  min-width: 0;
+  height: auto;
+  min-height: 28px;
+  box-sizing: border-box;
+}
+
+.task-settings-dialog .task-auto-rule .task-auto-action-option input {
+  flex-shrink: 0;
+}
+
+.task-settings-dialog .task-auto-rule .task-auto-action-group > small {
+  display: block;
+  margin-top: 6px;
 }
 
 /* Responsive adjustments */
@@ -6750,6 +6770,12 @@ dialog.operation-detail-dialog {
   .task-settings-dialog .task-auto-rule .settings-field {
     flex: 1 1 auto;
     width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .task-settings-dialog .task-auto-rule .task-auto-action-options {
+    grid-template-columns: 1fr;
   }
 }
 

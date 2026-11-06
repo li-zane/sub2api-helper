@@ -6,6 +6,7 @@ import { shareSnapshot, shareJobList } from "./polling-snapshot.mjs";
 import { recentOperation } from "./recent-operation.mjs";
 import { formatUsageTotal } from "./usage-totals.mjs";
 import { MONITOR_FIELDS, DEFAULT_MONITORING, normalizeMonitoring } from "./monitor-settings.mjs";
+import { normalizeTaskUploadActions, toggleTaskAutoAction } from "./task-auto-actions.mjs";
 import {
   Ban,
   Check,
@@ -57,7 +58,8 @@ import { WebLoginBatch } from "./web-login-batch.jsx";
 import { FingerprintSettingsButton } from "./model-fingerprint.jsx";
 import { CodexStatus } from "./codex-status.jsx";
 import { HelpTip } from "./help-tip.jsx";
-import { AccessibleDialog, useModalFocus } from "./accessible-dialog.jsx";
+import { AccessibleDialog, ModalForm, trapModalTab, useModalFocus } from "./accessible-dialog.jsx";
+import { AnchoredPopover } from "./anchored-popover.jsx";
 import { CustomSelect } from "./custom-select.jsx";
 import { GlobalTooltipProvider } from "./tooltip.jsx";
 
@@ -189,7 +191,7 @@ function ColumnHeaderFilter({ title, value, onChange, options, activeLabel, alig
       </button>
 
       {open && (
-        <div className={`column-filter-dropdown align-${align}`} role="menu" aria-label={`筛选${title}`}>
+        <AnchoredPopover className={`column-filter-dropdown align-${align}`} role="menu" aria-label={`筛选${title}`} anchorRef={containerRef} align={align} onClose={() => setOpen(false)}>
           <div className="column-filter-dropdown-header">
             <span>筛选 {title}</span>
             {active && (
@@ -221,7 +223,7 @@ function ColumnHeaderFilter({ title, value, onChange, options, activeLabel, alig
               );
             })}
           </div>
-        </div>
+        </AnchoredPopover>
       )}
     </div>
   );
@@ -2664,7 +2666,7 @@ function App() {
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget) setSmsSettingsOpen(false);
         }}>
-          <form className="batch-dialog sms-settings-dialog" onSubmit={saveSmsSettings} role="dialog" aria-modal="true" aria-labelledby="sms-settings-title">
+          <ModalForm onClose={() => setSmsSettingsOpen(false)} className="batch-dialog sms-settings-dialog" onSubmit={saveSmsSettings} role="dialog" aria-modal="true" aria-labelledby="sms-settings-title">
             <div className="dialog-header">
               <div>
                 <h2 id="sms-settings-title">接码平台配置</h2>
@@ -2792,14 +2794,14 @@ function App() {
                 <Check size={17} />保存配置
               </button>
             </div>
-          </form>
+          </ModalForm>
         </div>
       )}
       {mailRequestSettingsOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !mailRequestSettingsSaving) setMailRequestSettingsOpen(false);
         }}>
-          <form className="batch-dialog mail-request-settings-dialog" onSubmit={saveMailRequestSettings} role="dialog" aria-modal="true" aria-labelledby="mail-request-settings-title">
+          <ModalForm onClose={() => setMailRequestSettingsOpen(false)} closeDisabled={mailRequestSettingsSaving} className="batch-dialog mail-request-settings-dialog" onSubmit={saveMailRequestSettings} role="dialog" aria-modal="true" aria-labelledby="mail-request-settings-title">
             <div className="dialog-header">
               <div>
                 <h2 id="mail-request-settings-title">邮件 API 请求配置</h2>
@@ -2870,14 +2872,14 @@ function App() {
                 保存配置
               </button>
             </div>
-          </form>
+          </ModalForm>
         </div>
       )}
       {sub2apiSettingsOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setSub2apiSettingsOpen(false);
+          if (event.target === event.currentTarget && !sub2apiSettingsSaving) setSub2apiSettingsOpen(false);
         }}>
-          <form className="batch-dialog sub2api-settings-dialog" onSubmit={saveSub2ApiSettings} role="dialog" aria-modal="true" aria-labelledby="sub2api-settings-title">
+          <ModalForm onClose={() => setSub2apiSettingsOpen(false)} closeDisabled={sub2apiSettingsSaving} className="batch-dialog sub2api-settings-dialog" onSubmit={saveSub2ApiSettings} role="dialog" aria-modal="true" aria-labelledby="sub2api-settings-title">
             <div className="dialog-header">
               <div>
                 <h2 id="sub2api-settings-title">Sub2API 配置</h2>
@@ -2887,7 +2889,7 @@ function App() {
                   <div>Codex 指纹收敛和 WS mode 会写入每个上传或巡检更新的 OpenAI OAuth 账号（需确认 Sub2API 的 gateway.openai_ws.mode_router_v2_enabled 已开启）。</div>
                 </HelpTip>
               </div>
-              <button type="button" className="icon-button" onClick={() => setSub2apiSettingsOpen(false)} title="关闭"><X size={18} /></button>
+              <button type="button" className="icon-button" onClick={() => setSub2apiSettingsOpen(false)} disabled={sub2apiSettingsSaving} title="关闭"><X size={18} /></button>
             </div>
             <div className="provider-config-grid sub2api-config-grid">
               <label className="settings-field wide-settings-field">
@@ -3217,7 +3219,7 @@ function App() {
                 {sub2apiSettingsSaving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存配置
               </button>
             </div>
-          </form>
+          </ModalForm>
         </div>
       )}
       {taskSettingsOpen && taskSettings && (
@@ -3368,7 +3370,7 @@ function App() {
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !batchBusy) setBatchOpen(false);
         }}>
-          <form className="batch-dialog" onSubmit={createBatch} role="dialog" aria-modal="true" aria-labelledby="batch-title">
+          <ModalForm onClose={() => setBatchOpen(false)} closeDisabled={batchBusy} className="batch-dialog" onSubmit={createBatch} role="dialog" aria-modal="true" aria-labelledby="batch-title">
             <div className="dialog-header">
               <div>
                 <h2 id="batch-title">批量添加账号</h2>
@@ -3405,7 +3407,7 @@ function App() {
                 创建 {countBatchLines(batchText) || ""} 条任务
               </button>
             </div>
-          </form>
+          </ModalForm>
         </div>
       )}
       </main>
@@ -3445,10 +3447,6 @@ function RemarkDialog({ token, job, onClose, onSaved }) {
   const [remark, setRemark] = useState(job.remark || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => {
-    const previousFocus = document.activeElement;
-    return () => previousFocus?.focus();
-  }, []);
   async function save(event) {
     event.preventDefault();
     if (saving) return;
@@ -3465,16 +3463,7 @@ function RemarkDialog({ token, job, onClose, onSaved }) {
   }
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
-      <form className="batch-dialog remark-dialog" role="dialog" aria-modal="true" aria-labelledby="remark-title" onSubmit={save} onKeyDown={(event) => {
-        if (event.key === "Escape" && !saving) onClose();
-        if (event.key === "Tab") {
-          const controls = [...event.currentTarget.querySelectorAll("button:not(:disabled), input:not(:disabled), textarea:not(:disabled)")];
-          const first = controls[0];
-          const last = controls.at(-1);
-          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-        }
-      }}>
+      <ModalForm className="batch-dialog remark-dialog" role="dialog" aria-modal="true" aria-labelledby="remark-title" onSubmit={save} onClose={onClose} closeDisabled={saving}>
         <div className="dialog-header">
           <div>
             <div className="section-title-row">
@@ -3494,7 +3483,7 @@ function RemarkDialog({ token, job, onClose, onSaved }) {
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存备注</button>
         </div>
-      </form>
+      </ModalForm>
     </div>
   );
 }
@@ -3601,7 +3590,7 @@ function BulkMoreMenu({
       </button>
 
       {open && (
-        <div className="bulk-dropdown-menu" role="menu">
+        <AnchoredPopover className="bulk-dropdown-menu" role="menu" anchorRef={menuRef} align="right" onClose={() => setOpen(false)}>
           {hasSessionItems && (
             <div className="bulk-dropdown-section">
               <div className="bulk-dropdown-label">会话与网络</div>
@@ -3704,7 +3693,7 @@ function BulkMoreMenu({
               )}
             </div>
           )}
-        </div>
+        </AnchoredPopover>
       )}
     </div>
   );
@@ -4397,6 +4386,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     <dialog
       ref={dialogRef}
       className="batch-dialog task-settings-dialog"
+      onKeyDown={trapModalTab}
       aria-labelledby="task-settings-title"
       onCancel={(event) => {
         event.preventDefault();
@@ -4585,20 +4575,20 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
                     disabled={saving} />
                   {row.planType && <small>{formatPlanTypeLabel(row.planType, planTypeMapping)}</small>}
                 </label>
-                <div className="task-auto-action-options" aria-label={`${row.planType || "PlanType"} 自动命令`}>
-                  {actionOptions.map((option) => (
-                    <label key={option.value} className="task-auto-action-option">
-                      <input type="checkbox" checked={row.actions.includes(option.value)} disabled={saving}
-                        onChange={(event) => setAutoRows((current) => current.map((item, itemIndex) => {
-                          if (itemIndex !== index) return item;
-                          const next = new Set(item.actions);
-                          if (event.target.checked) next.add(option.value);
-                          else next.delete(option.value);
-                          return { ...item, actions: [...next] };
-                        }))} />
-                      <span>{option.label}</span>
-                    </label>
-                  ))}
+                <div className="task-auto-action-group">
+                  <div className="task-auto-action-options" aria-label={`${row.planType || "PlanType"} 自动命令`}>
+                    {actionOptions.map((option) => (
+                      <label key={option.value} className="task-auto-action-option">
+                        <input type="checkbox" checked={row.actions.includes(option.value)} disabled={saving}
+                          onChange={(event) => setAutoRows((current) => current.map((item, itemIndex) => {
+                            if (itemIndex !== index) return item;
+                            return { ...item, actions: toggleTaskAutoAction(item.actions, option.value, event.target.checked) };
+                          }))} />
+                        <span>{option.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <small className="task-auto-empty">一键轮换已包含上传；两种上传方式互斥。</small>
                 </div>
                 <button type="button" className="icon-button danger" title="删除自动任务规则" aria-label="删除自动任务规则" onClick={() => setAutoRows((current) => current.filter((_, itemIndex) => itemIndex !== index))} disabled={saving}>
                   <Trash2 size={15} />
@@ -4625,7 +4615,7 @@ function taskAutoActionRows(autoActions) {
   if (!autoActions || typeof autoActions !== "object" || Array.isArray(autoActions)) return [];
   return Object.entries(autoActions).map(([planType, actions]) => ({
     planType,
-    actions: Array.isArray(actions) ? [...new Set(actions)] : [],
+    actions: Array.isArray(actions) ? normalizeTaskUploadActions([...new Set(actions)]) : [],
   }));
 }
 
@@ -4919,7 +4909,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget && !saving && !replacing) onClose();
     }}>
-      <form className="batch-dialog credential-dialog" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="credential-dialog-title">
+      <ModalForm onClose={onClose} closeDisabled={saving || replacing} className="batch-dialog credential-dialog" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="credential-dialog-title">
         <div className="dialog-header">
           <div>
             <h2 id="credential-dialog-title">账号凭据</h2>
@@ -5066,7 +5056,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
             </div>
           </>
         )}
-      </form>
+      </ModalForm>
     </div>
   );
 }

@@ -48,7 +48,7 @@ try {
   if (!ready) throw new Error(`UI fixture did not start\n${logs}`);
   await cli(["open", base]);
   await cli(["snapshot"]);
-  const scriptPath = process.env.UI_TEST_SCRIPT || (process.argv.includes("--frontend-components") ? "test/frontend-components.browser.js" : process.argv.includes("--frontend-performance") ? "test/frontend-performance.browser.js" : process.argv.includes("--antigravity-review") ? "test/antigravity-review.browser.js" : process.argv.includes("--codex-status") ? "test/codex-status.browser.js" : process.argv.includes("--account-usage") ? "test/account-usage-ui.browser.js" : process.argv.includes("--recent-operation") ? "test/recent-operation.browser.js" : "test/ui-regressions.browser.js");
+  const scriptPath = process.env.UI_TEST_SCRIPT || (process.argv.includes("--popup-audit") ? "test/popup-audit.browser.js" : process.argv.includes("--task-settings-layout") ? "test/task-settings-layout.browser.js" : process.argv.includes("--frontend-components") ? "test/frontend-components.browser.js" : process.argv.includes("--frontend-performance") ? "test/frontend-performance.browser.js" : process.argv.includes("--antigravity-review") ? "test/antigravity-review.browser.js" : process.argv.includes("--codex-status") ? "test/codex-status.browser.js" : process.argv.includes("--account-usage") ? "test/account-usage-ui.browser.js" : process.argv.includes("--recent-operation") ? "test/recent-operation.browser.js" : "test/ui-regressions.browser.js");
   // The CLI sandbox has no Node globals; inject the path as a JavaScript literal.
   const script = await fs.readFile(path.resolve(root, scriptPath), "utf8");
   const resolvedScript = path.join(evidenceDir, "browser-test.js");
