@@ -128,5 +128,16 @@ try {
   const disk = JSON.parse(await fs.readFile(filePath, "utf8"));
   assert.equal(disk.accounts["failed@example.test"], undefined, "concurrent save cannot resurrect a failed switch write");
   assert.equal(disk.accounts["saved@example.test"].enabled, true);
+  let limitedCountRequests = 0, limitedResumes = 0;
+  const limited = new OverloadCooldown({ ...options, filePath: path.join(temp, "limited.json"), isCountBlocked: () => true,
+    request: async (_config, endpoint) => { if (endpoint.includes("/ops/")) limitedCountRequests++; else limitedResumes++; return {}; } });
+  limited.stopped = false;
+  limited.accounts.set(email, { enabled: true, resumeAccountIds: [], phase: "idle" });
+  await limited.checkAccount(email, config, [{ id: "7", enabled: true }]);
+  assert.equal(limitedCountRequests, 0, "429 accounts must not receive cooldown-statistics probes");
+  limited.accounts.set(email, { enabled: true, backend: config.baseUrl, resumeAccountIds: ["7"], phase: "cooling", coolingUntil: new Date(now-1).toISOString() });
+  await limited.checkAccount(email, config, [{ id: "7", enabled: false }]);
+  assert.equal(limitedResumes, 1, "a 429 statistics pause must not deadlock an owned cooldown restore");
+  await limited.stop();
   console.log("PASS: rolling-window boundaries/deduplication, exact threshold pause, durable intent/partial retry, restart/expiry restore, minute scheduling, fresh counting, manual-disable precedence, switch-off restore, backend isolation and missing-data preservation");
 } finally { await service.stop(); await fs.rm(temp, { recursive: true, force: true }); }

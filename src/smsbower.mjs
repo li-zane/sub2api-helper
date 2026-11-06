@@ -1,3 +1,5 @@
+import { smsOrderCost } from "./sms-order-cost.mjs";
+
 const DEFAULT_API_BASE = "https://smsbower.page/stubs/handler_api.php";
 const DEFAULT_TIMEOUT_MS = 12_000;
 
@@ -57,7 +59,24 @@ export function createSmsBowerClient(options = {}) {
     async getNumber(service, country, maxPrice = "") {
       const params = { service, country };
       if (maxPrice !== "") params.maxPrice = maxPrice;
-      const text = await request("getNumber", params);
+      // V2 returns the allocated order's activationCost. Retry a purchase using
+      // legacy V1 ONLY after an explicit unsupported-action response, never
+      // after a timeout, malformed success or ambiguous HTTP error.
+      let text = await request("getNumberV2", params);
+      if (text === "BAD_ACTION") text = await request("getNumber", params);
+      if (text.startsWith("{")) {
+        const order = parseJsonResponse(text, "获取手机号响应格式不正确");
+        const cost = smsOrderCost(order.activationCost, order.currency ?? order.activationCurrency);
+        if (!["string", "number"].includes(typeof order.activationId) || !String(order.activationId).trim()) throw new SmsBowerError("获取手机号响应缺少订单编号");
+        const allocated = { requestId: String(order.activationId), ...(cost ? { cost } : {}) };
+        try { return { ...allocated, number: normalizePhoneNumber(order.phoneNumber ?? "") }; }
+        catch (error) {
+          // Preserve a known paid order even when its phone payload is broken;
+          // the console can log it and durably cancel instead of losing it.
+          error.smsOrder = { ...allocated, number: /^\+?\d{1,20}$/.test(String(order.phoneNumber)) ? String(order.phoneNumber) : "未知" };
+          throw error;
+        }
+      }
       const match = /^ACCESS_NUMBER:([^:]+):(\+?\d+)$/.exec(text);
       if (!match) throw responseError(text, "获取手机号失败");
       return {

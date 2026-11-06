@@ -117,6 +117,14 @@ try {
   const beforeQuota = retryCalls;
   const quota = await retryService.run("a@example.test", "free", { manual: true });
   assert.equal(retryCalls,beforeQuota+1,"quota failures are never retried"); assert.equal(quota.result.status,"error"); assert.equal(retryWrites,0,"failed sampling never changes conditional groups");
+  let quotaNotifications = 0;
+  retryService.onAccountFailure = async (_email, detail) => { assert.equal(detail.httpStatus, 429); quotaNotifications++; };
+  await retryService.saveSettings({ ...settings, models: ["gpt-5.5", "gpt-5.4"] });
+  const beforeMultiQuota = retryCalls;
+  await retryService.run("a@example.test", "free", { manual: true });
+  assert.equal(retryCalls, beforeMultiQuota + 1, "429 must stop remaining models and samples");
+  assert.equal(quotaNotifications, 1, "429 must notify the console to stop related monitoring, never OAuth repair");
+  await retryService.saveSettings(settings);
   retryService.sample = async () => { retryCalls++; throw Object.assign(new Error("secret upstream"),{fingerprintFailure:true,code:"UPSTREAM",httpStatus:503,retryable:true}); };
   const beforeBound = retryCalls;
   await retryService.run("a@example.test", "free", { manual: true }); assert.equal(retryCalls,beforeBound+2,"transient retries stop after the second attempt");

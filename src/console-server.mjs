@@ -45,6 +45,8 @@ import { DEFAULT_MONITORING, normalizeMonitoring } from "../web/src/monitor-sett
 import { normalizeTaskUploadActions, isRedundantTaskUpload } from "../web/src/task-auto-actions.mjs";
 import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "../web/src/login-settings.mjs";
 import { LoginTimeouts } from "./login-timeout.mjs";
+import { accountRateLimit } from "./account-rate-limit.mjs";
+import { smsOrderLog } from "./sms-order-cost.mjs";
 import { SmsCancellations } from "./sms-cancellations.mjs";
 import { normalizeLoginAutomationPause, loginAutomationBlocked, loginAutomationPauseMessage } from "./login-automation-pause.mjs";
 import { limitPoolRequests } from "./pool-network.mjs";
@@ -213,7 +215,7 @@ const smsCancellations = new SmsCancellations({
   },
   onEvent: (record, success) => {
     const job = jobs.get(record.jobId);
-    if (job && !job.deleted) { appendJobLog(job, success ? "[sms] 号码订单已取消。\n" : "[sms] 号码取消待重试，记录已保留。\n"); touch(job); }
+    if (job && !job.deleted) { appendJobLog(job, success ? `[sms] 订单 ${JSON.stringify(record.requestId)} 已取消。\n` : `[sms] 订单 ${JSON.stringify(record.requestId)} 取消待重试，记录已保留。\n`); touch(job); }
   },
 });
 const automationBlockWrites = new Map();
@@ -238,6 +240,7 @@ let accountProxyAssignmentPromise = Promise.resolve();
 const accountProxyReservations = new Map();
 const poolRefreshTimers = new Map();
 const poolRefreshOperations = new Set();
+const accountSecurityChecks = new Set();
 const manualWebSessionChecks = new Map();
 const manualWebSessionCheckOperations = new Set();
 let drainingWebSessionChecks = false;
@@ -350,7 +353,7 @@ const webSessionMonitor = new WebSessionMonitor({
 
 const overloadMonitor = new OverloadMonitor({
   getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadIntervalSeconds * 1000, concurrency: monitoringSettings.overloadConcurrency }),
-  isBlocked: accountAutomationBlocked,
+  isBlocked: codexChecksBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-monitor.json"),
   getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
   backendIdentity: monitorBackendIdentity,
@@ -359,10 +362,11 @@ const overloadMonitor = new OverloadMonitor({
     const listing = await listSub2ApiAccounts(config, { withMeta: true });
     if (!listing.complete) throw new Error("Sub2API 账号列表不完整，过载统计未完成");
     const mapping = new Map();
+    const limited = new Set(listing.accounts.filter(a => accountRateLimit(a).limited).map(sub2ApiAccountEmail));
     for (const account of listing.accounts) {
       const email = sub2ApiAccountEmail(account);
       const id = normalizeSub2ApiAccountId(account.id);
-      if (!email || !id || (account.platform && account.platform !== "openai") || sub2ApiAccountSchedulable(account) !== true) continue;
+      if (!email || !id || (account.platform && account.platform !== "openai") || sub2ApiAccountSchedulable(account) !== true || limited.has(email)) continue;
       mapping.set(email, [...new Set([...(mapping.get(email) || []), id])]);
     }
     return mapping;
@@ -372,6 +376,7 @@ const overloadMonitor = new OverloadMonitor({
 const overloadCooldown = new OverloadCooldown({
   getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadCooldownIntervalSeconds * 1000, concurrency: monitoringSettings.overloadCooldownConcurrency }),
   isBlocked: accountAutomationBlocked,
+  isCountBlocked: codexChecksBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
   getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
   backendIdentity: monitorBackendIdentity,
@@ -386,7 +391,7 @@ const overloadCooldown = new OverloadCooldown({
       const email = sub2ApiAccountEmail(account);
       const id = normalizeSub2ApiAccountId(account.id);
       if (!email || !id || (account.platform && account.platform !== "openai")) continue;
-      mapping.set(email, [...(mapping.get(email) || []), { id, enabled: sub2ApiAccountSchedulable(account) }]);
+      mapping.set(email, [...(mapping.get(email) || []), { id, enabled: sub2ApiAccountSchedulable(account) === true && !accountRateLimit(account).limited }]);
     }
     return mapping;
   },
@@ -401,7 +406,7 @@ const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprin
   testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
 const modelFingerprint = new ModelFingerprintService({
   isBlocked: email => {
-    if (accountAutomationBlocked(email)) return true;
+    if (codexChecksBlocked(email)) return true;
     const job = findJobByEmail(email), state = job && getSub2ApiAccountStatusForJob(job);
     return Boolean(state && state.inPool === true && state.enabled === false);
   },
@@ -413,7 +418,7 @@ const modelFingerprint = new ModelFingerprintService({
   listTargets: async config => {
     const listing = await listSub2ApiAccounts(config, { withMeta: true });
     if (!listing.complete) throw new Error("Sub2API 账号列表不完整");
-    return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && sub2ApiAccountSchedulable(a) === true).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
+    return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && sub2ApiAccountSchedulable(a) === true && !accountRateLimit(a).limited).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
   },
   getAccount: readFingerprintAccount, sample: fingerprintSampler,
   onAccountFailure: recoverFingerprintAuthorization,
@@ -424,6 +429,7 @@ async function recoverFingerprintAuthorization(email, failure) {
   return withEmailJobLock(email, async () => {
     const job = findJobByEmail(email);
     if (!job || shuttingDown || accountAutomationBlocked(email)) return;
+    if (failure.httpStatus === 429) { await stopRateLimitedCodexChecks(email); return; }
     if (failure.code === "BANNED") {
       markAutoRepairBlocked(job, failure.upstreamCode || "account_deactivated");
       await automationBlockWrites.get(email.toLowerCase());
@@ -982,7 +988,7 @@ async function handleApi(req, res, requestUrl) {
     const selected = resolveSelectedJobs(body.ids), started = [], skippedJobs = [];
     for (const job of selected) {
       if (!canLoginWeb(job)) { skippedJobs.push({ id: job.id, email: job.email }); continue; }
-      enqueueWebSessionCheck(job);
+      await withEmailJobLock(job.email, () => enqueueWebSessionCheck(job));
       started.push(job);
     }
     sendJson(res, 200, { jobs: started.map(publicJob), started: started.length, skipped: skippedJobs.length, skippedJobs, failed: [] });
@@ -1556,7 +1562,10 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
   if (req.method === "GET" && action === "usage") {
-    if (!job.resultSaved) throw httpError(409, "账号授权尚未完成，暂时没有可读取的 Sub2API 用量");
+    if (!job.resultSaved && getSub2ApiAccountStatusForJob(job).inPool !== true) {
+      await loadSub2ApiAccountStatus();
+      if (getSub2ApiAccountStatusForJob(job).inPool !== true) throw httpError(409, "账号尚未加入号池，暂时没有可读取的 Sub2API 用量");
+    }
     try {
       const usage = await getAccountUsage(job, requestUrl.searchParams.get("refresh") === "1");
       sendJson(res, 200, { usage });
@@ -1598,8 +1607,8 @@ async function handleApi(req, res, requestUrl) {
   }
   if (req.method === "POST" && action === "web-session-check") {
     await readJson(req);
-    if (!canLoginWeb(job)) throw httpError(409, "账号正在运行、已封禁或已有 Web 检测任务");
-    enqueueWebSessionCheck(job);
+    if (!canLoginWeb(job)) throw httpError(409, "账号正在运行或已有 Web 检测任务");
+    await withEmailJobLock(job.email, () => enqueueWebSessionCheck(job));
     sendJson(res, 200, { job: publicJob(job) });
     return;
   }
@@ -1999,6 +2008,13 @@ async function withWebSessionCheckSlot(_job, operation) {
 async function prepareAndLaunchJob(job, mode, queueRunId) {
   const current = () => !shuttingDown && isActive(job.status) && job.status !== "queued" && job.queueRunId === queueRunId;
   try {
+    const bannedWeb = mode === "web_login" && job.manualBannedWebLogin;
+    if (bannedWeb) {
+      job.proxyUrl = globalProxyUrl;
+      if (job.mailApiUrl) await loadMailboxBaseline(job);
+      if (current()) launchJob(job, { mode, codexAuthMode: "local", loginProxyUrl: globalProxyUrl, loginProxyFixed: false });
+      return;
+    }
     let hasBinding = accountProxyMode === "plan" && hasPlanProxyBinding(job);
     if (accountProxyMode === "plan") {
       const knownPlanType = normalizePlanType(getJobPlanType(job));
@@ -2371,6 +2387,7 @@ function handleChildCloseFailure(job, mode, runId, error) {
 }
 
 async function retryJob(job, options = {}) {
+  if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已封禁，授权已停用，请先手动登录 Web 核查");
   const needsNewPhone = accountLoginPause(job)?.reason === "phone_unverified";
   if (job.webLoginPreviousState) throw httpError(409, "Web 登录仍在运行，请等待完成或取消后再授权");
   if (!["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status)) {
@@ -2430,6 +2447,7 @@ async function retryJob(job, options = {}) {
 }
 
 async function regenerateJob(job, options = {}) {
+  if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已封禁，授权已停用，请先手动登录 Web 核查");
   if (job.webLoginPreviousState) throw httpError(409, "Web 登录仍在运行，请等待完成或取消后再授权");
   if (job.status !== "completed" || !job.resultSaved) {
     throw httpError(409, "只能为已经完成的任务重新生成授权");
@@ -2494,14 +2512,43 @@ async function archivePasswordResult(job, stage) {
   });
 }
 
+function inspectImportedAccountSecurity(job, { allowBanned = false } = {}) {
+  if (shuttingDown || job.deleted || accountAutomationBlocked(job.email) && !allowBanned) return Promise.resolve();
+  const runId = job.runId;
+  if (job.securityInspectionRunId === runId && job.securityInspectionPromise) return job.securityInspectionPromise;
+  const operation = (async () => {
+    if (!await fileExists(webSessionPathForJob(job))) return;
+    try {
+      const state = await readAccountSecurityState(job);
+      if (job.deleted || job.runId !== runId) return;
+      job.securityState = mergeSecurityState(job.securityState, state);
+      appendJobLog(job, "[security] 已在首次 Web 登录后核对密码与 2FA 状态。\n");
+      await saveJobMetadata(job);
+    } catch {
+      if (!job.deleted && job.runId === runId) appendJobLog(job, "[security] 安全状态暂未完成核对，保留上次结果；可手动核对或等待后续巡检。\n");
+    }
+  })();
+  job.securityInspectionRunId = runId;
+  job.securityInspectionPromise = operation;
+  accountSecurityChecks.add(operation);
+  void operation.finally(() => accountSecurityChecks.delete(operation));
+  return operation;
+}
+
 function webSessionCheckPending(job) {
   return ["queued", "checking", "relogin"].includes(manualWebSessionChecks.get(job.id)?.phase);
 }
 
-function enqueueWebSessionCheck(job) {
+async function enqueueWebSessionCheck(job) {
   clearAutomaticLoginPause(job);
-  manualWebSessionChecks.set(job.id, { attemptId: crypto.randomUUID(), phase: "queued", renewed: false, error: null });
-  scheduleQueuedJobs();
+  const task = { attemptId: crypto.randomUUID(), phase: "queued", renewed: false, error: null };
+  manualWebSessionChecks.set(job.id, task);
+  if (accountAutomationBlocked(job.email)) {
+    task.phase = "relogin";
+    task.bannedWebOnly = true;
+    try { await startWebLogin(job, { checkTask: task }); }
+    catch (error) { task.phase = "failed"; task.error = error.message; throw error; }
+  } else scheduleQueuedJobs();
 }
 
 function drainWebSessionChecks() {
@@ -2570,7 +2617,7 @@ async function reconcilePlanAutomations(job, planType) {
 async function startWebLogin(job, { maintenance = false, checkTask = null } = {}) {
   if (maintenance && automaticLoginBlocked(job, "web")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
   const checking = Boolean(checkTask && manualWebSessionChecks.get(job.id) === checkTask);
-  if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新开始授权");
+  await automationBlockWrites.get(job.email.toLowerCase());
   if (!canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
   await reloadMissingJobCredentials(job);
   if (!canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号当前不能登录 Web");
@@ -2579,6 +2626,7 @@ async function startWebLogin(job, { maintenance = false, checkTask = null } = {}
     "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount",
     "webSessionAvailable", "webSessionStatus", "webSessionVerifiedAt", "webSessionReadError", "webSessionContext"];
   const previousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
+  job.manualBannedWebLogin = !maintenance && accountAutomationBlocked(job.email);
   job.webLoginError = null;
   job.webLoginPlanType = null;
   job.webLoginAttemptId = crypto.randomUUID();
@@ -2652,6 +2700,7 @@ async function finishWebLogin(job, code, signal, message = null) {
     await automationBlockWrites.get(job.email.toLowerCase());
   }
   if (success) {
+    await inspectImportedAccountSecurity(job, { allowBanned: job.manualBannedWebLogin });
     job.webLoginCompletedAt = new Date().toISOString();
     job.webSessionAvailable = true;
     const plan = webSession?.web?.planType || job.webLoginPlanType;
@@ -2661,12 +2710,13 @@ async function finishWebLogin(job, code, signal, message = null) {
       catch (error) { appendJobLog(job, `[web-login] IP 绑定同步待号池巡检重试：${error.message}\n`); }
     }
     // Schedule a follow-up even for manual/Web-only entry points, without waiting 15 minutes.
-    await webSessionMonitor.repairFinished(job.email, { success: true, webOnly: true });
+    if (!accountAutomationBlocked(job.email)) await webSessionMonitor.repairFinished(job.email, { success: true, webOnly: true });
   }
   if (accountAutomationBlocked(job.email)) job.status = "banned";
   job.prompt = accountAutomationBlocked(job.email) ? job.banProxyReleasePending ? "账号已确认封禁，IP 解绑待重试" : "账号已确认封禁，已停止自动化并解除 IP 绑定"
     : success ? "Web 登录成功，登录态已保存；原 Codex 授权保持不变" : `Web 登录未完成：${failure}`;
   job.webLoginPreviousState = null;
+  job.manualBannedWebLogin = false;
   job.webLoginResultSaved = false;
   if (job.webSessionMonitorRepair) {
     job.webSessionMonitorRepair = false;
@@ -2683,7 +2733,7 @@ async function finishWebLogin(job, code, signal, message = null) {
   appendJobLog(job, success ? "[web-login] Web 登录态已保存，已核对套餐、IP 绑定及自动开关；未重签 Codex 凭据。\n" : `[web-login] ${failure}\n`);
   const check = manualWebSessionChecks.get(job.id);
   if (check?.phase === "relogin" && check.loginAttemptId === job.webLoginAttemptId) {
-    check.phase = success ? "queued" : "failed";
+    check.phase = success ? check.bannedWebOnly ? "success" : "queued" : "failed";
     check.error = success ? null : failure;
   }
   touch(job);
@@ -2693,6 +2743,7 @@ async function finishWebLogin(job, code, signal, message = null) {
 
 function restoreWebLoginState(job, metadata) {
   job.webSessionMonitorRepair = metadata.web_session_monitor_repair === true;
+  job.manualBannedWebLogin = metadata.manual_banned_web_login === true;
   job.webLoginAttemptId = metadata.web_login_attempt_id || null;
   job.webLoginOriginalHash = metadata.web_login_original_hash;
   job.webLoginCompletedAt = metadata.web_login_completed_at || null;
@@ -2856,8 +2907,9 @@ async function startTotpSetup(job, options = {}) {
   job.totpSetupUri = null;
   job.totpSetupError = null;
   job.totpSetupReplaceExisting = replaceExisting;
-  job.totpRotationRemoteDisabled = resumeDisabledRotation;
-  job.totpRotationStage = resumeDisabledRotation ? "disabled" : (replaceExisting ? "starting" : null);
+  const previousRotation = resumeDisabledRotation ? await privateJsonIfPresent(job.totpResultPath) : null;
+  job.totpRotationRemoteDisabled = previousRotation?.remote_disabled === true && previousRotation?.disable_uncertain !== true;
+  job.totpRotationStage = job.totpRotationRemoteDisabled ? "disabled" : (replaceExisting ? "starting" : null);
   job.totpRotationIncomplete = replaceExisting;
   job.totpSetupAttempt = (job.totpSetupAttempt || 0) + 1;
   job.totpManualOverride = false;
@@ -2887,7 +2939,7 @@ async function hasIncompleteRemoteTotpRotation(resultPath, metadataFlag = false)
     return result?.version === 1
       && result?.operation === "replace_totp"
       && result?.activation_succeeded !== true
-      && (result?.remote_disabled === true || result?.stage === "disabling");
+      && (result?.remote_disabled === true || ["disabling", "disable_unconfirmed"].includes(result?.stage));
   } catch {
     return false;
   }
@@ -3511,6 +3563,7 @@ function consumeOutput(job, rawText) {
   }
   if (scan.includes("[ok] Saved web session:")) {
     job.webSessionAvailable = true;
+    if (job.runMode !== "web_login") void inspectImportedAccountSecurity(job);
     if (job.runMode === "web_login") {
       job.webLoginResultSaved = true;
       setStage(job, "finalizing", "Web 登录成功，正在保存会话");
@@ -3840,10 +3893,13 @@ async function acquireSmsNumber(job, providerId, config) {
   job.smsError = null;
   touch(job);
 
-  let order;
+  let order, cancellationQueued = false;
   try {
     order = await smsClient.getNumber();
-    if (job.status !== "phone" || !job.child || job.runId !== runId || job.child !== child) {
+    const late = job.status !== "phone" || !job.child || job.runId !== runId || job.child !== child;
+    appendJobLog(job, smsOrderLog(smsClient.name, order, { maxPrice: config?.maxPrice, late }));
+    if (late) {
+      cancellationQueued = true;
       void smsCancellations.cancel({ jobId: job.id, providerId: smsClient.id, requestId: order.requestId }, smsClient).catch(() => {});
       throw httpError(409, "任务已经不在手机号输入步骤，已提交号码取消请求");
     }
@@ -3855,7 +3911,12 @@ async function acquireSmsNumber(job, providerId, config) {
     appendJobLog(job, `[sms] 已从 ${smsClient.name} 获取手机号并提交，等待短信发送结果。\n`);
     await submitJobInput(job, { action: "phone", value: order.number }, { source: "sms-provider" });
   } catch (error) {
+    if (!order && error.smsOrder) {
+      order = error.smsOrder;
+    }
     if (order?.requestId && job.smsOrderId === order.requestId) releaseSmsNumber(job, "error");
+    else if (order?.requestId && !cancellationQueued) void smsCancellations.cancel({ jobId: job.id, providerId: smsClient.id, requestId: order.requestId }, smsClient).catch(() => {});
+    if (error.smsOrder) appendJobLog(job, smsOrderLog(smsClient.name, order, { maxPrice: config?.maxPrice, invalid: true }));
     if (job.status === "phone" && job.runId === runId && job.child === child) {
       job.smsStatus = "error";
       job.smsError = safeSmsProviderError(error, smsClient.apiKey);
@@ -4033,7 +4094,7 @@ function completeSmsNumber(job) {
   job.smsLastSubmittedCode = null;
   job.smsStatus = "completed";
   job.smsError = null;
-  appendJobLog(job, `[sms] 手机验证码已通过，正在完成 ${smsClient.name} 订单。\n`);
+  appendJobLog(job, `[sms] 手机验证码已通过，正在完成 ${smsClient.name} 订单 ${JSON.stringify(requestId)}。\n`);
   if (smsClient.complete) {
     void smsClient.complete(requestId).catch((error) => {
       appendJobLog(job, `[sms] ${smsClient.name} 完成订单失败：${safeSmsProviderError(error)}\n`);
@@ -4141,6 +4202,7 @@ async function submitJobInput(job, body, options = {}) {
     requireStage(job, "phone");
     if (!/^\+[1-9]\d{6,14}$/.test(value)) throw httpError(400, "Phone number must use E.164 format, for example +60123456789");
     if (options.source !== "sms-provider") releaseSmsNumber(job, "idle");
+    if (options.source !== "sms-provider") appendJobLog(job, smsOrderLog("手动号码", { number: value }));
     job.currentPhone = value;
     job.phoneError = null;
     inputValue = value;
@@ -6342,6 +6404,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
     await listSub2ApiProxies(config).catch(() => []);
     await importSub2ApiPoolOnlyAccounts(remoteAccounts);
     await reconcileSub2ApiAccountBans(config, remoteAccounts);
+    for (const email of new Set(remoteAccounts.filter(a => a.platform === "openai" && a.type === "oauth" && accountRateLimit(a).limited).map(sub2ApiAccountEmail))) await stopRateLimitedCodexChecks(email);
     await syncImportDatePriorities(config, listing);
     await pullSub2ApiRemarks(listing, config, versions);
     const accounts = new Map();
@@ -6355,6 +6418,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       if (!email || !accountId) continue;
       const groupIds = sub2ApiAccountGroupIds(remoteAccount);
       const enabled = sub2ApiAccountSchedulable(remoteAccount);
+      const rateLimit = accountRateLimit(remoteAccount);
       const priority = sub2ApiAccountPriority(remoteAccount);
       const usage = normalizeSub2ApiUsage(remoteAccount, fetchedAt);
       const remoteStatus = String(remoteAccount?.status || "").trim().toLowerCase() || null;
@@ -6371,6 +6435,8 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
           priority,
           planType: extractPlanTypeFromAccount(remoteAccount, { preferJwt: false }) || null,
           remoteStatus,
+          rateLimited: rateLimit.limited,
+          rateLimitUntil: rateLimit.limited ? rateLimit.until : null,
           usage: mergeSub2ApiUsage(previous?.usage || null, usage),
           fetchedAt,
         });
@@ -6380,6 +6446,8 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       current.proxyIds = [...new Set([...current.proxyIds, normalizeStoredProxyId(remoteAccount.proxy_id)].filter(Boolean))];
       current.groupIds = [...new Set([...current.groupIds, ...groupIds])];
       current.enabled = mergeSub2ApiBoolean(current.enabled, enabled);
+      current.rateLimited ||= rateLimit.limited;
+      if (rateLimit.limited && rateLimit.until && (!current.rateLimitUntil || rateLimit.until > current.rateLimitUntil)) current.rateLimitUntil = rateLimit.until;
       current.priority = mergeSub2ApiPriority(current.priority, priority);
       current.planType ||= extractPlanTypeFromAccount(remoteAccount, { preferJwt: false }) || null;
       if (remoteStatus === "error") current.remoteStatus = "error";
@@ -6534,6 +6602,8 @@ function publicSub2ApiAccountStatusEntry(entry) {
     planType: entry.planType || null,
     groupIds: [...(entry.groupIds || [])],
     remoteStatus: entry.remoteStatus || null,
+    rateLimited: entry.rateLimited === true,
+    rateLimitUntil: entry.rateLimitUntil || null,
     accountBlocked: blocked,
     accountBlockReason: blocked ? job?.autoRepairBlockedReason || null : null,
     boundProxyStatus: blocked && !job?.banProxyReleasePending ? "unbound" : entry.proxyIds?.length ? "bound" : "direct",
@@ -6744,6 +6814,8 @@ function getSub2ApiAccountStatusForJob(job, state = sub2ApiAccountStatusCache) {
     groupIds: [...(entry.groupIds || [])],
     remoteStatus: entry.remoteStatus || null,
     planType: entry.planType || null,
+    rateLimited: entry.rateLimited === true,
+    rateLimitUntil: entry.rateLimitUntil || null,
     usage: entry.usage || null,
   };
 }
@@ -7360,13 +7432,24 @@ function isAutoRepairCoolingDown(job) {
   return Date.now() - new Date(job.autoRepairLastAttemptAt).getTime() < monitoringSettings.poolRepairRetrySeconds * 1000;
 }
 
+function codexChecksBlocked(email) {
+  return accountAutomationBlocked(email) || sub2ApiAccountStatusCache.accounts.get(String(email).toLowerCase())?.rateLimited === true;
+}
+async function stopRateLimitedCodexChecks(email) {
+  if (!email) return;
+  modelFingerprint.invalidateAccount(email);
+  if (overloadMonitor.snapshot(email).enabled) await overloadMonitor.setEnabled(email, false);
+  const override = modelFingerprint.snapshot(email).override;
+  if (override.enabled !== false) await modelFingerprint.saveOverride(email, { ...override, enabled: false });
+}
+
 function codexMonitoringAllowed(job) {
   const state = getSub2ApiAccountStatusForJob(job);
-  return !accountAutomationBlocked(job.email) && state.inPool === true && state.enabled === true;
+  return !accountAutomationBlocked(job.email) && !state.rateLimited && state.inPool === true && state.enabled === true;
 }
 async function assertCodexMonitoringAllowed(job) {
   await loadSub2ApiAccountStatus({ forceRefresh: true });
-  if (!codexMonitoringAllowed(job)) throw httpError(409, "账号需先加入 Sub2API 号池并启用，才能开启 Codex 检测");
+  if (!codexMonitoringAllowed(job)) throw httpError(409, "账号需已加入号池、启用且不处于 429 限流中，才能开启 Codex 检测");
 }
 
 function accountLoginPause(job) {
@@ -7589,7 +7672,7 @@ function publicJob(job) {
   const autoRepair = getAutoRepairEligibility(job);
   const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
   const blocked = accountAutomationBlocked(job.email);
-  const codexEligible = !blocked && sub2ApiStatus.inPool === true && sub2ApiStatus.enabled === true;
+  const codexEligible = !blocked && !sub2ApiStatus.rateLimited && sub2ApiStatus.inPool === true && sub2ApiStatus.enabled === true;
   const overloadState = overloadMonitor.snapshot(job.email), cooldownState = overloadCooldown.snapshot(job.email);
   const fingerprintState = modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown");
   return {
@@ -7619,6 +7702,7 @@ function publicJob(job) {
     sub2apiPlanType: sub2ApiStatus.planType,
     sub2apiUsage: publicSub2ApiUsage(sub2ApiStatus.usage),
     codexStatusEligible: codexEligible,
+    sub2apiRateLimited: sub2ApiStatus.rateLimited === true,
     overloadDetection: { ...overloadState, enabled: codexEligible && overloadState.enabled },
     overloadAutoCooldown: { ...cooldownState, enabled: codexEligible && cooldownState.enabled },
     modelFingerprint: { ...fingerprintState, enabled: codexEligible && fingerprintState.enabled },
@@ -7651,9 +7735,9 @@ function publicJob(job) {
     smsPendingCancellationCount: smsCancellations.count(job.id),
     smsError: job.smsError,
     securityCheckRequired: Boolean(job.securityCheckRequired),
-    canRetry: ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
+    canRetry: !accountAutomationBlocked(job.email) && ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
     canResume: canResumeAuthorization(job),
-    canRegenerate: job.status === "completed" && job.resultSaved,
+    canRegenerate: !accountAutomationBlocked(job.email) && job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
     webSessionCheckAttemptId: manualWebSessionChecks.get(job.id)?.attemptId || null,
@@ -7714,11 +7798,11 @@ async function getAccountUsage(job, forceRefresh = false) {
   if (!job?.email) throw new Error("ACCOUNT_USAGE_CREDENTIALS_UNAVAILABLE: 账号标识无效");
   const state = await loadSub2ApiAccountStatus({ forceRefresh });
   let status = getSub2ApiAccountStatusForJob(job, state);
-  if (forceRefresh && !accountAutomationBlocked(job.email) && status.inPool === true && status.accountIds.length) {
+  if (forceRefresh && status.inPool === true && status.accountIds.length) {
     const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
     const [refreshed, totals] = await Promise.all([
       refreshSub2ApiAccountUsage(config, status.accountIds),
-      readUsageTotals(config, status.accountIds, { forceRefresh: true }),
+      readUsageTotals(config, status.accountIds, { forceRefresh: true, manual: true }),
     ]);
     if (refreshed || totals.size) {
       const entry = state.accounts.get(String(job.email || "").toLowerCase());
@@ -7932,9 +8016,9 @@ function publicSelectionJob(job) {
     sub2apiAccountIds: sub2ApiStatus.accountIds,
     canDownload: Boolean(job.resultSaved),
     sub2apiPlanType: sub2ApiStatus.planType,
-    canRetry: ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
+    canRetry: !accountAutomationBlocked(job.email) && ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
     canResume: canResumeAuthorization(job),
-    canRegenerate: job.status === "completed" && job.resultSaved,
+    canRegenerate: !accountAutomationBlocked(job.email) && job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job),
     canLoginWeb: canLoginWeb(job),
     webSessionCheckAttemptId: manualWebSessionChecks.get(job.id)?.attemptId || null,
@@ -7953,7 +8037,7 @@ function publicSelectionJob(job) {
 }
 
 function canResumeAuthorization(job) {
-  return ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status)
+  return !accountAutomationBlocked(job.email) && ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status)
     && Boolean(job.loginCheckpointAvailable);
 }
 
@@ -7966,12 +8050,16 @@ function canLoginWeb(job, { maintenance = false, checking = false } = {}) {
   // unchanged, but let maintenance re-check it under the existing retry cooldown.
   const failedRefresh = maintenance && !job.child && !job.poolRefreshReady && Boolean(job.poolRefreshError)
     && ["failed", "mfa_failed", "reauth_required", "resume_available"].includes(job.status);
-  return (checking || !webSessionCheckPending(job)) && !accountAutomationBlocked(job.email) && canForceRelogin(job) && (!job.poolRefreshAction || failedRefresh) && !job.autoRepairOperation
+  return (checking || !webSessionCheckPending(job)) && (!maintenance || !accountAutomationBlocked(job.email)) && canStartAccountTask(job) && (!job.poolRefreshAction || failedRefresh || accountAutomationBlocked(job.email)) && !job.autoRepairOperation
     && !["queued", "running"].includes(job.autoTaskStatus);
 }
 
-function canForceRelogin(job) {
+function canStartAccountTask(job) {
   return !job.webLoginPreviousState && ["completed", "failed", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available"].includes(job.status);
+}
+
+function canForceRelogin(job) {
+  return !accountAutomationBlocked(job.email) && canStartAccountTask(job);
 }
 
 function canSetupTotp(job) {
@@ -8109,12 +8197,13 @@ function markAutoRepairBlocked(job, reason, context = {}) {
       related.autoRepairBlocked = true;
       related.autoRepairBlockedReason = job.autoRepairBlockedReason;
       related.autoRepairBlockedAt = job.autoRepairBlockedAt;
-      if (!isTerminalStatus(related.status)) {
+      const manualWeb = related.manualBannedWebLogin && (related.runMode === "web_login" || related.queuedMode === "web_login");
+      if (!manualWeb && !isTerminalStatus(related.status)) {
         related.child?.kill("SIGTERM");
         related.queuedMode = null;
         related.queueRunId = null;
       }
-      related.status = "banned";
+      if (!manualWeb) related.status = "banned";
       related.banProxyReleasePending = true;
       related.banProxyReleaseError = null;
       related.assignedProxyId = null;
@@ -8123,7 +8212,7 @@ function markAutoRepairBlocked(job, reason, context = {}) {
       related.boundIp = null;
       related.boundProxyName = null;
       related.fixedProxy = false;
-      related.prompt = "账号已确认封禁，已停止自动化；正在解除 IP 绑定";
+      if (!manualWeb) related.prompt = "账号已确认封禁，已停止自动化；正在解除 IP 绑定";
       clearPoolRefreshTimer(related);
       related.poolRefreshAction = null; related.poolRefreshDueAt = null; related.poolRefreshReady = false;
       if (["pending", "running"].includes(related.autoTaskStatus)) {
@@ -9954,6 +10043,7 @@ async function saveJobMetadata(job) {
         web_login_attempt_id: job.webLoginAttemptId || null,
         web_login_original_hash: job.webLoginOriginalHash,
         web_session_monitor_repair: job.webSessionMonitorRepair === true,
+        manual_banned_web_login: job.manualBannedWebLogin === true,
         web_session_maintenance_pause: job.webSessionMaintenancePause || null,
         login_mode: job.loginMode || null,
         mail_api_url: job.mailApiUrl || null,
@@ -10336,6 +10426,7 @@ async function shutdown() {
       proxyQualityService.close(),
       sub2ApiMonitorPromise,
       ...accountDataSyncOperations,
+      ...accountSecurityChecks,
       taskSettingsWritePromise,
       ...sub2ApiRequestPromises,
       ...sub2ApiAutoRepairPromises,

@@ -36,4 +36,12 @@ assert.equal(normalizeUsageTotals({ data: { total_actual_cost: 1, total_cost: 99
 assert.throws(() => normalizeUsageTotals({ data: { total_account_cost: null, total_actual_cost: false, total_tokens: "" } }, "now"));
 for (const [value, expected] of [[0,"0"],[999,"999"],[999499,"999K"],[999500,"1M"],[999500000,"1B"],[1234567890,"1.23B"],[1234,"1.23K"],[null,"—"],[NaN,"—"]]) assert.equal(formatUsageTotal(value, { tokens: true }), expected);
 assert.equal(formatUsageTotal(0.00123456), "0.00123"); assert.equal(formatUsageTotal(12.3456), "12.3");
-console.log("USAGE_TOTALS_PASS all-history A/U/T semantics; unique account aggregation; concurrency/dedup/cache; stale/unknown isolation; forced refresh; three significant digits and K/M/B boundaries");
+let manualReads = 0;
+const blockedRead = createUsageTotalsReader({ isBlocked: () => true, request: async () => {
+  manualReads++; return { total_account_cost: 1, total_actual_cost: 2, total_tokens: 3 };
+} });
+assert.equal((await blockedRead(config, [1], { forceRefresh: true })).get("1"), null);
+assert.equal(manualReads, 0, "background force refresh must still skip banned accounts");
+assert.equal((await blockedRead(config, [1], { forceRefresh: true, manual: true })).get("1").tokens, 3);
+assert.equal(manualReads, 1, "explicit authenticated manual read bypasses automation-only exclusion");
+console.log("USAGE_TOTALS_PASS all-history A/U/T semantics; unique account aggregation; concurrency/dedup/cache; stale/unknown isolation; forced refresh; manual blocked-account reads; three significant digits and K/M/B boundaries");

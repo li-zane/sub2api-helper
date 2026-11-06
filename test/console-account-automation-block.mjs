@@ -80,12 +80,11 @@ try {
   assert.equal((await job(1)).canDownload, true, "Web-only failure keeps existing authorization artifacts");
   await stop(); await start();
   assert(off(await job(0)) && off(await job(1)), "disabled switches survive restart");
-  await fs.writeFile(path.join(root, "protocol.mjs"), `import fs from 'node:fs/promises'; const f=process.argv[process.argv.indexOf('--sub2api-out')+1]; await fs.writeFile(f,${JSON.stringify(JSON.stringify({ type: "sub2api-data", accounts: [{ credentials: { email: emails[1], access_token: "renewed", refresh_token: "renewed" } }] }))}); console.log('[ok] Saved sub2api import: '+f);`);
-  assert.equal((await api(`/api/jobs/${ids[1]}/relogin`, {})).status, 200);
-  await wait(async () => { const j = await job(1); return j.status === "completed" && !j.webLoginError && !j.autoRepairBlocked; });
+  assert.equal((await api(`/api/jobs/${ids[1]}/relogin`, {})).status, 409, "banned OAuth must not clear the ban");
+  assert.equal((await job(1)).canLoginWeb, true, "manual Web remains the available inspection entry point");
   await stop(); await start();
-  assert.equal((await job(1)).autoRepairBlocked, false, "a successful manual recovery must not be reblocked by a stale Web-only error");
-  assert(off(await job(1)), "recovered accounts do not silently re-enable automation");
+  assert.equal((await job(1)).autoRepairBlocked, true);
+  assert(off(await job(1)), "a blocked OAuth click silently re-enabled automation");
   console.log("ACCOUNT_AUTOMATION_BLOCK_PASS startup migration; Web-only ban; switches off; re-enable rejected; WebSession skipped; cooldown never resumes; transient/workspace preserved; restart");
 } catch (error) { console.error("ACCOUNT_AUTOMATION_BLOCK_FAIL: " + error.message); process.exitCode = 1; }
 finally { await stop(); await new Promise(r => pool.close(r)); await fs.rm(root, { recursive: true, force: true }); }

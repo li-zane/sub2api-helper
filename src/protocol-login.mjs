@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { confirmTotpDisable, confirmedTotpState } from "./totp-disable-confirmation.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -425,78 +426,22 @@ async function run() {
       const newPassword = validateNewAccountPassword(process.env.CHATGPT_NEW_PASSWORD || "");
       const rl = readline.createInterface({ input, output });
       try {
-        let client = null;
-        let web = null;
-        let checkpoint = null;
-        let email = args.email || "";
         const checkpointPath = args.resumeCheckpoint ? path.resolve(args.resumeCheckpoint) : null;
-        if (checkpointPath) {
-          try {
-            checkpoint = await readProtocolCheckpoint(checkpointPath);
-            if (email && checkpoint.email.toLowerCase() !== email.toLowerCase()) {
-              throw new Error("CHECKPOINT_INVALID: checkpoint email does not match the requested account");
-            }
-            email = checkpoint.email;
-            client = new ProtocolClient({
-              verbose: args.verbose,
-              jar: CookieJar.fromJSON(checkpoint.cookies),
-              transport,
-            });
-            web = checkpoint.web || null;
-            console.log(`[password-add] Reusing verified login checkpoint from ${checkpoint.stage}.`);
-          } catch (error) {
-            if (error?.code !== "ENOENT") {
-              console.log(`[password-add] Saved login checkpoint cannot be reused: ${error.message}`);
-            }
-            checkpoint = null;
-            client = null;
-          }
-        }
-        email = email || (await ask(rl, "Email: "));
-        if (!email) throw new Error("Email is required");
-        if (client) {
-          try {
-            console.log("[2/4] Start post-login add-password flow with saved login state");
+        const { client, web, email } = await runSavedWebSecurityTask({
+          args, transport, chatgptBase, authBase, webSessionPath, checkpointPath, rl,
+          label: "password-add",
+          loginMessage: "[1/4] Sign in to the existing account before adding a password",
+          action: async ({ client, web, email }) => {
+            console.log("[2/4] Start post-login add-password flow");
             await addChatgptPassword(client, {
-              chatgptBase,
-              authBase,
-              email,
-              rl,
-              deviceId: web?.deviceId || client.jar.value("oai-did", `${chatgptBase}/`) || crypto.randomUUID(),
+              chatgptBase, authBase, email, rl,
+              deviceId: client.browserIdentity?.deviceId || web?.deviceId,
               password: newPassword,
               previousPassword: process.env.CHATGPT_LOGIN_PASSWORD || "",
               resultPath,
             });
-          } catch (error) {
-            if (!isExpiredCheckpointError(error)) throw error;
-            console.log("[password-add] Saved login state expired; falling back to a fresh account login.");
-            checkpoint = null;
-            client = null;
-          }
-        }
-        if (!client) {
-          client = new ProtocolClient({ verbose: args.verbose, transport });
-          console.log("[1/4] Sign in to the existing account before adding a password");
-          web = await loginChatgptWeb(client, {
-            chatgptBase,
-            authBase,
-            email,
-            rl,
-            password: process.env.CHATGPT_LOGIN_PASSWORD || "",
-            totpSecret: process.env.CHATGPT_TOTP_SECRET || "",
-          });
-          console.log("[2/4] Start post-login add-password flow");
-          await addChatgptPassword(client, {
-            chatgptBase,
-            authBase,
-            email,
-            rl,
-            deviceId: web.deviceId,
-            password: newPassword,
-            previousPassword: process.env.CHATGPT_LOGIN_PASSWORD || "",
-            resultPath,
-          });
-        }
+          },
+        });
         if (checkpointPath) {
           const saveCheckpoint = createCheckpointWriter(checkpointPath, {
             client,
@@ -508,7 +453,7 @@ async function run() {
           await saveCheckpoint("email_verified", {});
           console.log("[checkpoint] Updated verified login state after adding the password.");
         }
-        await saveProtocolWebSession(webSessionPath, client, web);
+        await saveSecurityTaskWebSession({ file: webSessionPath, client, web, email, chatgptBase, label: "password-add" });
       } finally {
         rl.close();
       }
@@ -519,69 +464,17 @@ async function run() {
       const resultPath = path.resolve(args.totpResult || DEFAULT_TOTP_RESULT);
       const rl = readline.createInterface({ input, output });
       try {
-        let client = null;
-        let web = null;
-        let email = args.email || "";
         const checkpointPath = args.resumeCheckpoint ? path.resolve(args.resumeCheckpoint) : null;
-        if (checkpointPath) {
-          try {
-            const checkpoint = await readProtocolCheckpoint(checkpointPath);
-            if (email && checkpoint.email.toLowerCase() !== email.toLowerCase()) {
-              throw new Error("CHECKPOINT_INVALID: checkpoint email does not match the requested account");
-            }
-            email = checkpoint.email;
-            client = new ProtocolClient({
-              verbose: args.verbose,
-              jar: CookieJar.fromJSON(checkpoint.cookies),
-              transport,
-            });
-            web = checkpoint.web || null;
-            console.log(`[2fa] Reusing verified login checkpoint from ${checkpoint.stage}.`);
-          } catch (error) {
-            if (error?.code !== "ENOENT") {
-              console.log(`[2fa] Saved login checkpoint cannot be reused: ${error.message}`);
-            }
-            client = null;
-          }
-        }
-        email = email || (await ask(rl, "Email: "));
-        if (!email) throw new Error("Email is required");
-        if (client) {
-          try {
-            await setupChatgptTotp(client, {
-              chatgptBase,
-              email,
-              rl,
-              deviceId: web?.deviceId || client.jar.value("oai-did", `${chatgptBase}/`) || crypto.randomUUID(),
-              resultPath,
-              replaceExisting,
-            });
-          } catch (error) {
-            if (!isExpiredCheckpointError(error)) throw error;
-            console.log("[2fa] Saved login state expired; falling back to a fresh account login.");
-            client = null;
-          }
-        }
-        if (!client) {
-          client = new ProtocolClient({ verbose: args.verbose, transport });
-          console.log("[1/3] Sign in to verify the account before setting 2FA");
-          web = await loginChatgptWeb(client, {
-            chatgptBase,
-            authBase,
-            email,
-            rl,
-            password: process.env.CHATGPT_LOGIN_PASSWORD || "",
-            totpSecret: process.env.CHATGPT_TOTP_SECRET || "",
-          });
-          await setupChatgptTotp(client, {
-            chatgptBase,
-            email,
-            rl,
-            deviceId: web.deviceId,
-            resultPath,
-            replaceExisting,
-          });
-        }
+        const { client, web, email } = await runSavedWebSecurityTask({
+          args, transport, chatgptBase, authBase, webSessionPath, checkpointPath, rl,
+          label: "2fa",
+          loginMessage: "[1/3] Sign in to verify the account before setting 2FA",
+          action: ({ client, web, email }) => setupChatgptTotp(client, {
+            chatgptBase, email, rl,
+            deviceId: client.browserIdentity?.deviceId || web?.deviceId,
+            resultPath, replaceExisting,
+          }),
+        });
         console.log(
           hasChatgptSessionCookie(client, chatgptBase)
             ? "[ok] ChatGPT web session cookie received"
@@ -598,7 +491,7 @@ async function run() {
           await saveCheckpoint("email_verified", {});
           console.log("[checkpoint] Updated verified login state after setting 2FA.");
         }
-        await saveProtocolWebSession(webSessionPath, client, web);
+        await saveSecurityTaskWebSession({ file: webSessionPath, client, web, email, chatgptBase, label: "2fa" });
       } finally {
         rl.close();
       }
@@ -976,6 +869,77 @@ async function verifyAddPasswordEmailOtp(client, { authBase, rl, deviceId, refer
   }
 }
 
+// Security tasks use the same durable Web credential as OAuth. A stale
+// checkpoint must not force a new login when the retained Web session is valid.
+// Only checkpoint-expiry can retry an action after a fresh login; errors from a
+// validated Web session (including recent_auth_required) propagate unchanged.
+async function runSavedWebSecurityTask({
+  args, transport, chatgptBase, authBase, webSessionPath, checkpointPath, rl,
+  label, loginMessage, action,
+}) {
+  async function readCheckpoint() {
+    if (!checkpointPath) return null;
+    try { return await readProtocolCheckpoint(checkpointPath); }
+    catch (error) {
+      if (error?.code !== "ENOENT") console.log(`[${label}] Saved login checkpoint cannot be reused: ${error.message}`);
+      return null;
+    }
+  }
+  let checkpoint = args.email ? null : await readCheckpoint();
+  const email = args.email || checkpoint?.email || await ask(rl, "Email: ");
+  if (!email) throw new Error("Email is required");
+  const previous = await reuseSavedWebLogin({ file: webSessionPath, email, transport, chatgptBase, verbose: args.verbose });
+  if (previous?.reused) {
+    console.log(`[${label}] Reused saved Web session; account login skipped.`);
+    const login = { client: previous.client, web: previous.web, email };
+    await action(login);
+    return login;
+  }
+  checkpoint ||= await readCheckpoint();
+  let checkpointClient = null;
+  if (checkpoint) {
+    if (checkpoint.email.trim().toLowerCase() !== email.trim().toLowerCase()) {
+      throw new Error("CHECKPOINT_INVALID: checkpoint email does not match the requested account");
+    }
+    checkpointClient = new ProtocolClient({ verbose: args.verbose, jar: CookieJar.fromJSON(checkpoint.cookies), transport });
+    const login = { client: checkpointClient, web: checkpoint.web || null, email };
+    console.log(`[${label}] Reusing verified login checkpoint from ${checkpoint.stage}.`);
+    try {
+      await action(login);
+      return login;
+    } catch (error) {
+      if (!isExpiredCheckpointError(error)) throw error;
+      console.log(`[${label}] Saved login state expired; falling back to a fresh account login.`);
+    }
+  }
+  const client = previous?.client || checkpointClient || new ProtocolClient({ verbose: args.verbose, transport });
+  console.log(loginMessage);
+  const web = await loginChatgptWeb(client, { chatgptBase, authBase, email, rl,
+    password: process.env.CHATGPT_LOGIN_PASSWORD || "", totpSecret: process.env.CHATGPT_TOTP_SECRET || "" });
+  const login = { client, web, email };
+  await action(login);
+  return login;
+}
+
+// A successful password/2FA mutation does not guarantee that its resulting
+// browser jar is still authenticated. Keep the retained file if proof fails;
+// the mutation result and candidate credential were already saved durably.
+async function saveSecurityTaskWebSession({ file, client, web, email, chatgptBase, label }) {
+  let data;
+  try {
+    ({ data } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` }));
+    const token = data?.accessToken || data?.access_token;
+    if (typeof token !== "string" || !token || String(data.user?.email || "").trim().toLowerCase() !== email.trim().toLowerCase()) {
+      throw new Error("Web identity not confirmed");
+    }
+  } catch {
+    console.log(`[${label}] Security task completed; retained Web credential file was not replaced by an unverified session.`);
+    return;
+  }
+  await saveProtocolWebSession(file, client, web, { accessToken: data.accessToken || data.access_token, expiresAt: data.expires || null });
+  console.log(`[ok] Saved web session: ${file}`);
+}
+
 async function runPasswordReplacement({ args, transport, chatgptBase, authBase, webSessionPath }) {
   const email = String(args.email || "").trim().toLowerCase();
   if (!email) throw new Error("PASSWORD_REPLACE_EMAIL_REQUIRED: An account email is required");
@@ -1175,9 +1139,9 @@ async function setupChatgptTotp(
       // The process can stop after the remote disable succeeds but before the
       // follow-up result write. In that window the durable marker is still
       // `stage=disabling`; mfa_info is the source of truth on the next run.
-      || previousRotation?.stage === "disabling"
+      || ["disabling", "disable_unconfirmed"].includes(previousRotation?.stage)
     )
-    && !hasEnabledTotp(currentInfo),
+    && confirmedTotpState(currentInfo) === false,
   );
   if (hasEnabledTotp(currentInfo) && !replaceExisting) {
     await writePrivateJson(resultPath, { version: 1, already_enabled: true, email });
@@ -1212,21 +1176,14 @@ async function setupChatgptTotp(
     };
     await writePrivateJson(resultPath, rotationState);
     console.log("[2/4] Disable the current TOTP factor");
-    await disableChatgptTotp(client, chatgptBase, mfaContext, currentFactorId);
-    rotationState = {
-      ...rotationState,
-      remote_disabled: true,
-      disabled_at: new Date().toISOString(),
-      stage: "disabled",
-    };
-    await writePrivateJson(resultPath, rotationState);
-
-    const { data: afterDisable } = await getChatgptMfaInfo(client, infoUrl, mfaContext, { raw: true });
-    if (hasEnabledTotp(afterDisable)) {
-      rotationState = { ...rotationState, stage: "disable_unconfirmed", remote_disabled: false, disable_uncertain: true };
-      await writePrivateJson(resultPath, rotationState);
-      throw new Error("TOTP_REPLACE_DISABLE_UNCONFIRMED: mfa_info still reports an enabled TOTP factor; replacement has not started");
-    }
+    await confirmTotpDisable({
+      disable: () => disableChatgptTotp(client, chatgptBase, mfaContext, currentFactorId),
+      readInfo: () => getChatgptMfaInfo(client, infoUrl, mfaContext),
+      persist: async patch => {
+        rotationState = { ...rotationState, ...patch };
+        await writePrivateJson(resultPath, rotationState);
+      },
+    });
   } else if (canResumeDisabledRotation) {
     rotationState = {
       ...rotationState,
@@ -1370,7 +1327,7 @@ async function disableChatgptTotp(client, chatgptBase, context, factorId) {
   assertOk(result, "POST /backend-api/accounts/mfa/user/disable_in_house");
   let data;
   try { data = JSON.parse(result.text); } catch {}
-  if (result.res.status !== 204 && data?.success !== true) throw new Error("TOTP_REPLACE_DISABLE_REJECTED: disable response did not confirm success");
+  return { acknowledged: result.res.status === 204 || data?.success === true };
 }
 
 function chatgptMfaHeaders({ chatgptBase, accessToken, deviceId }, targetPath) {

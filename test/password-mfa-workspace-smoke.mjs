@@ -346,6 +346,23 @@ try {
     const state = await fetch(`${baseUrl}/__test/state`).then(r => r.json());
     assert(!state.replacementRequestLog.some(e => e.operation === "enroll"), "enrollment followed an unconfirmed disable");
   }
+  for (const email of ["replace-totp-200-no-success@example.com", "replace-totp-resume-disabling@example.com", "replace-totp-unknown-after-disable@example.com"]) {
+    const file = path.join(tempRoot, email + ".json");
+    if (email.includes("resume-disabling")) await fs.writeFile(file, JSON.stringify({ version: 1, operation: "replace_totp", stage: "disabling", remote_disabled: false, activation_succeeded: false, email }));
+    const result = await runNode([path.join(projectRoot, "src/protocol-login.mjs"), "--email", email, "--replace-totp", "--totp-result", file,
+      "--chatgpt-base", baseUrl, "--auth-base", baseUrl], { CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "GEZDGNBVGY3TQOJQ" });
+    const state = await fetch(`${baseUrl}/__test/state`).then(r => r.json());
+    const record = JSON.parse(await fs.readFile(file, "utf8"));
+    if (email.includes("unknown-after")) {
+      assert.equal(result.code, 1); assert.match(result.output, /TOTP_REPLACE_DISABLE_UNCONFIRMED/);
+      assert.equal(record.remote_disabled, false); assert(!state.replacementRequestLog.some(e => e.operation === "enroll"));
+    } else {
+      assert.equal(result.code, 0, processFailure(result)); assert.equal(record.activation_succeeded, true);
+      assert.equal(state.replacementRequestLog.filter(e => e.operation === "disable").length, email.includes("resume") ? 0 : 1);
+      assert(state.replacementRequestLog.some(e => e.operation === "enroll"));
+    }
+  }
+  console.log("TOTP_DISABLE_HTTP_PASS 200-empty response followed by confirmed disabled state continues enrollment; interrupted disabling marker resumes without second disable; unknown confirmation never enrolls");
   console.log("TOTP_HISTORY_PROTOCOL_PASS durable old/new candidate; business-200 rejection; enabled-factor confirmation rejection; no false disabled/activation claims");
   console.log("REVOKED_WEB_LOGIN_PASS cached-200/workspace-401 -> real sign-in; Web-only; checkpoint; bounded retry; 403/503 stop; identity/OAuth preserved");
   console.log("WORKSPACE_TOKEN_LOGIN_PASS explicit-402 and mismatched-token -> real sign-in; personal fallback; actual token verified; bounded failure; generic-402 no reauth");

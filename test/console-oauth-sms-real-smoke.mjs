@@ -19,7 +19,7 @@ const calls = [], upstream = http.createServer(async (req, res) => {
   const json = (data, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
   if (u.pathname === "/sms") {
     assert.equal(u.searchParams.get("api_key"), "fixture-sms-key");
-    const a = u.searchParams.get("action"); if (a === "getNumber") { smsCount++; return res.end(`ACCESS_NUMBER:real-fixture-order-${smsCount}:1202555${String(smsCount).padStart(4, "0")}`); }
+    const a = u.searchParams.get("action"); if (a === "getNumber" || a === "getNumberV2") { smsCount++; return res.end(`ACCESS_NUMBER:real-fixture-order-${smsCount}:1202555${String(smsCount).padStart(4, "0")}`); }
     return res.end(a === "getStatus" ? "STATUS_OK:654321" : "ACCESS_READY");
   }
   if (u.pathname === "/api/auth/session") return json({ user: { email }, accessToken, expires: "2030-01-01T00:00:00Z" });

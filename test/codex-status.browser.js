@@ -16,7 +16,7 @@ async (page) => {
   await page.route('**/api/sub2api/account-status*', route => route.fulfill({ json: { configured: false, accounts: {} } }));
   await page.route(/\/api\/jobs(?:\?|$)/, async route => {
     const response = await route.fetch(), data = await response.json();
-    data.jobs = data.jobs.map((job, i) => ({ ...job, status: 'completed', autoRepairBlocked: false, sub2apiInPool: i !== 8, sub2apiEnabled: i !== 7, sub2apiPriority: 3,
+    data.jobs = data.jobs.map((job, i) => ({ ...job, status: 'completed', autoRepairBlocked: false, sub2apiInPool: i !== 8, sub2apiEnabled: i !== 7, codexStatusEligible: i !== 7 && i !== 8 && i !== 9, sub2apiRateLimited: i === 9, sub2apiPriority: 3,
       lastOperationType: 'relogin', lastOperationAt: '2026-11-05T04:05:06Z', createdAt: '2026-11-01T01:02:03Z',
       overloadDetection: { ...detectionState(), enabled: i === 4 ? false : overload, points: i === 3 ? points.map(p => ({ ...p, count: null })) : points },
       overloadAutoCooldown: { ...cooldownState(), windowCount: i === 1 ? 0 : i === 2 ? 5 : i === 3 ? null : 2 },
@@ -142,7 +142,7 @@ async (page) => {
     await page.keyboard.press('Escape');
   });
   await run('codex-controls-require-pool-enabled-and-member', async () => {
-    for (const i of [7, 8]) {
+    for (const i of [7, 8, 9]) {
       const cell = rows.nth(i).locator('.codex-status-cell');
       for (const control of await cell.getByRole('switch').all()) {
         check(await control.isDisabled(), 'pool-disabled/missing switch remained interactive');

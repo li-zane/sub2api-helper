@@ -110,7 +110,7 @@ await fs.writeFile(f,JSON.stringify(s));console.log('[ok] Saved web session: '+f
     await wait(async () => (await job(blocker.data.job.id))?.status === "email_otp");
     const batch = await api("/api/jobs/web-session-check-batch", { ids });
     assert.equal(batch.status, 200, "manual Web-session batch endpoint must exist");
-    assert.equal(batch.data.started, 4); assert.equal(batch.data.skipped, 1);
+    assert.equal(batch.data.started, 5); assert.equal(batch.data.skipped, 0);
     assert.equal(requests.length, 0, "full shared pool must queue manual checks");
     assert.equal((await api(`/api/jobs/${ids[0]}/web-session-check`, {})).status, 409);
     const attempts = batch.data.jobs.map(j => ({ id: j.id, attemptId: j.webSessionCheckAttemptId }));
@@ -130,7 +130,7 @@ await fs.writeFile(f,JSON.stringify(s));console.log('[ok] Saved web session: '+f
     assert.equal(finished.progress.find(p => p.id === ids[4]).renewed, true, "confirmed workspace loss must renew even if discovery returns 200");
     assert.equal(requests.filter(r => r.name === "trouble" && r.route === "/api/auth/session").length, 3, "non-401 must retry exactly twice even when scheduled monitor disabled");
     assert.equal(requests.filter(r => r.name === "expired" && r.route === "/api/auth/session").length, 2, "401 must proceed straight to renewal then one successful recheck");
-    assert.equal(await fs.readFile(trace,"utf8"), "expired@example.test\nunavailable@example.test\n", "only confirmed expiry may log in");
+    assert.equal(await fs.readFile(trace,"utf8"), "banned@example.test\nexpired@example.test\nunavailable@example.test\n", "only confirmed expiry or an explicit banned-Web request may log in");
     let current = await job(ids[0]);
     assert.equal(current.planType, "free"); assert.equal(current.overloadDetection.enabled, false); assert.equal(current.overloadAutoCooldown.enabled, false); assert.equal(current.modelFingerprint.enabled, false);
     plan = "business";
@@ -153,8 +153,8 @@ await fs.writeFile(f,JSON.stringify(s));console.log('[ok] Saved web session: '+f
     assert.equal((await job(ids[0])).planType, "free");
     assert.equal((await api("/api/web-session-monitor")).data.accounts[emailFor("valid")].repairReason, "plan_changed");
     assert.equal((await api("/api/jobs/web-session-check-progress", { attempts })).data.progress[0].phase, "failed", "restart must expose interrupted batches");
-    assert.equal(await fs.readFile(trace,"utf8"), "expired@example.test\nunavailable@example.test\n");
-    console.log("WEB_SESSION_CHECK_PASS shared queue; valid no login; 401/workspace-loss renew once/recheck; 503 three attempts; ban/busy skips; PlanType switches; manual-off preserved; scheduled reconciliation; pending OAuth drift/restart");
+    assert.equal(await fs.readFile(trace,"utf8"), "banned@example.test\nexpired@example.test\nunavailable@example.test\n");
+    console.log("WEB_SESSION_CHECK_PASS shared queue; valid no login; 401/workspace-loss renew once/recheck; 503 three attempts; banned Web-only/manual progress and busy skips; PlanType switches; manual-off preserved; scheduled reconciliation; pending OAuth drift/restart");
   }
   assert.equal(updates.length,0,"checks must not repeat uploads/rotations or mutate pool credentials");
   for (const [id, contents] of originals) assert.equal(await fs.readFile(resultFile(id),"utf8"),contents,"checks preserve Codex files");

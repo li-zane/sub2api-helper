@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useMemo } from "react";
 import { buildOverloadChart } from "./overload-chart.mjs";
 import { overloadDashboard, overloadEnergy } from "./codex-dashboard.mjs";
-import { codexStatusEligible } from "./codex-eligibility.mjs";
+import { codexStatusEligible, codexStatusBlockReason } from "./codex-eligibility.mjs";
 
 function intervalLabel(point) {
   const format = (value) => new Date(value).toLocaleString("zh-CN", {
@@ -97,14 +97,14 @@ export function OverloadDetection({ job, token, onError }) {
       <button
         type="button" role="switch" aria-checked={enabled}
         aria-label={`${job.email} 过载检测`} aria-busy={busy}
-        title={detection?.configured ? (enabled ? "停止过载检测" : "开启过载检测") : "请先配置 Sub2API 后端"}
+        title={!eligible ? codexStatusBlockReason(job) : detection?.configured ? (enabled ? "停止过载检测" : "开启过载检测") : "请先配置 Sub2API 后端"}
         className={`overload-switch ${enabled ? "enabled" : "disabled"}`}
         disabled={!eligible || busy || !token || (!detection?.configured && !enabled)} onClick={toggle}
       ><span aria-hidden="true" /></button>
       </div>
       <div className="overload-control cooldown-toggle-control"><span>冷却</span><button type="button" role="switch" aria-checked={cooldownEnabled} aria-busy={cooldownBusy}
         aria-label={`${job.email} 自动冷却`} className={`overload-switch ${cooldownEnabled ? "enabled" : "disabled"}`}
-        title={cooldown?.configured ? (cooldownEnabled ? "关闭自动冷却，并恢复本功能暂停的账号" : "开启过载自动冷却") : "请先配置 Sub2API 后端"}
+        title={!eligible ? codexStatusBlockReason(job) : cooldown?.configured ? (cooldownEnabled ? "关闭自动冷却，并恢复本功能暂停的账号" : "开启过载自动冷却") : "请先配置 Sub2API 后端"}
         disabled={!eligible || cooldownBusy || !token || (!cooldown?.configured && !cooldownEnabled)} onClick={toggleCooldown}><span aria-hidden="true" /></button></div>
       </div>
       <div className="overload-chart-status">

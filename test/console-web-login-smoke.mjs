@@ -15,6 +15,8 @@ const originals = new Map();
 const upstream = http.createServer((req, res) => {
   assert.match(req.headers.authorization, /^Bearer web\./);
   res.setHeader("content-type", "application/json");
+  if (req.url.endsWith("/accounts/mfa_info")) return res.end('{"mfa_enabled_v2":false}');
+  if (req.url.endsWith("/accounts/change_password/eligibility")) return res.end('{"eligible":true}');
   if (req.url.startsWith("/backend-api/accounts/check/")) return res.end(JSON.stringify({ accounts: [{ id: "fixture-workspace", plan_type: "free", name: "Personal", structure: "personal" }] }));
   if (req.url.startsWith("/backend-api/accounts/sessions")) return res.end(JSON.stringify({ devices: [{ session_id: "web", is_current_device: true, app_sessions: [{ client_name: "ChatGPT Web" }] }] }));
   assert.fail(`Unexpected upstream call ${req.url}`);

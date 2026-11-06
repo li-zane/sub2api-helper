@@ -1,3 +1,4 @@
+import { totpRotationView } from "./totp-rotation-state.mjs";
 import React, { useLayoutEffect, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { readJsonResponse, workspaceFailureTooltip } from "./response-errors.js";
@@ -3856,7 +3857,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
     if (workflowBusy || submitting) return;
     setSubmitting(true);
     try {
-      await apiFetch(token, `/api/jobs/${job.id}/web-session-check`, { method: "POST", body: JSON.stringify({}) });
+      await apiFetch(token, `/api/jobs/${job.id}/${isBlockedAccount(job) ? "web-login" : "web-session-check"}`, { method: "POST", body: JSON.stringify({}) });
       onError("");
     } catch (requestError) { onError(requestError.message); }
     finally { setSubmitting(false); }
@@ -4141,8 +4142,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             className="secondary-button icon-only-action"
             onClick={loginWeb}
             disabled={!webLoginAvailable || rowBusy || !job.canLoginWeb}
-            title={job.autoRepairBlocked ? "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新开始授权" : rowBusy || !job.canLoginWeb ? mutationReason || "当前账号尚不具备 Web 检测条件" : `${WEB_STATES[job.webSessionStatus || "absent"]}：检测会话；缺失或失效后自动补登 Web，保留 Codex 授权`}
-            aria-label="检测 Web 会话"
+            title={isBlockedAccount(job) ? "账号已封禁：可手动尝试登录 Web；不执行 Codex 授权，也不自动恢复号池及检测" : rowBusy || !job.canLoginWeb ? mutationReason || "当前账号尚不具备 Web 检测条件" : `${WEB_STATES[job.webSessionStatus || "absent"]}：检测会话；缺失或失效后自动补登 Web，保留 Codex 授权`}
+            aria-label={isBlockedAccount(job) ? "登录 Web" : "检测 Web 会话"}
           >
             {submitting || job.webSessionCheckPending ? <LoaderCircle className="spin" size={13} /> : <Globe2 size={13} />}
           </button>
@@ -4743,6 +4744,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
   const [dialogError, setDialogError] = useState("");
   const [notice, setNotice] = useState("");
   const credentialBusy = saving || replacing || passwordReplacing;
+  const rotationView = totpRotationView(job, replacing);
 
   useEffect(() => {
     let stopped = false;
@@ -4883,10 +4885,11 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     try {
       const body = {};
 
-      await apiFetch(token, `/api/jobs/${job.id}/replace-2fa`, {
+      const data = await apiFetch(token, `/api/jobs/${job.id}/replace-2fa`, {
         method: "POST",
         body: JSON.stringify(body),
       });
+      if (data.job) onJobUpdate?.(data.job);
       setNotice("2FA 轮换已排队，请等待任务完成后重新读取凭据");
       onError("");
     } catch (error) {
@@ -5101,10 +5104,11 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
             </section>
             {readOnlyReason && <p className="prompt-line" role="status">{readOnlyReason}；当前仅查看凭据。</p>}
             <div className="credential-meta">
-              <span>当前状态：{job.status}</span>
+              <span>当前状态：{rotationView.label}</span>
               {details?.persisted === false && <span className="credential-warning">系统未提供持久凭据存储</span>}
             </div>
-            {job.totpRotationIncomplete && (
+            {rotationView.state === "running" && <div className="prompt-line" role="status">2FA 轮换进行中，请等待当前流程结束；原授权文件保留。</div>}
+            {rotationView.state === "incomplete" && (
               <div className="credential-warning credential-warning-block">上次 2FA 轮换未完成；有效 Web 会话仍可用于授权。清空并保存仅删除本地密钥，历史保留，远端 MFA 状态不变。</div>
             )}
             {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{dialogError}</div>}

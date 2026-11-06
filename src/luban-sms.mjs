@@ -1,3 +1,5 @@
+import { smsOrderCost } from "./sms-order-cost.mjs";
+
 const DEFAULT_API_BASE = "https://lubansms.com/v2/api/";
 const DEFAULT_TIMEOUT_MS = 12_000;
 
@@ -55,6 +57,7 @@ export function createLubanSmsClient(options = {}) {
       return {
         number: normalizePhoneNumber(data.number),
         requestId: String(data.request_id),
+        ...(smsOrderCost(data.price ?? data.cost, data.currency) ? { cost: smsOrderCost(data.price ?? data.cost, data.currency) } : {}),
       };
     },
 

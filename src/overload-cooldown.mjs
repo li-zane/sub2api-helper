@@ -17,8 +17,8 @@ export function normalizeOverloadCooldown(value = DEFAULT_OVERLOAD_COOLDOWN) {
 }
 
 export class OverloadCooldown {
-  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, onChange = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, onChange, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, isCountBlocked, onChange, now, setTimer, clearTimer });
     this.request = limitPoolRequests(request, () => this.getMonitoringSettings().concurrency);
     this.accounts = new Map();
     this.locks = new Map();
@@ -198,12 +198,12 @@ export class OverloadCooldown {
       }
       return;
     }
-    if (!entry.enabled || !records.some(record => record.enabled === true)) return;
+    if (this.isCountBlocked(email) || !entry.enabled || !records.some(record => record.enabled === true)) return;
     const settings = this.getSettings();
     const end = this.now();
     const start = Math.max(end - settings.windowMinutes * 60_000, Date.parse(entry.lastResumedAt || "") || 0);
     if (start >= end) return;
-    const valid = () => !this.stopped && !this.isBlocked(email) && this.accounts.get(email)?.enabled && this.backendIdentity(this.getConfig()) === backend;
+    const valid = () => !this.stopped && !this.isBlocked(email) && !this.isCountBlocked(email) && this.accounts.get(email)?.enabled && this.backendIdentity(this.getConfig()) === backend;
     const count = await collectOverloadWindow({ start, end, accountIds: records.filter(record => record.enabled === true).map(record => record.id), config, request: this.request, isEnabled: valid });
     if (count === null || !valid()) return;
     entry = await this.update(email, { windowCount: count, lastCheckedAt: new Date(end).toISOString(), lastError: null });

@@ -44,18 +44,19 @@ export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency =
       Promise.resolve().then(task.action).then(task.resolve, task.reject).finally(() => { active--; pump(); });
     }
   }
-  async function read(config, accountIds, { forceRefresh = false } = {}) {
+  async function read(config, accountIds, { forceRefresh = false, manual = false } = {}) {
     const identity = createHash("sha256").update(`${config.baseUrl}\n${config.adminApiKey}`).digest("hex");
     if (identity !== backend) { backend = identity; cache = new Map(); inflight = new Map(); }
     const currentCache = cache, currentInflight = inflight;
     const ids = [...new Set(accountIds.map(String).filter(id => /^[1-9]\d*$/.test(id)))];
     return new Map(await Promise.all(ids.map(async id => {
-      if (isBlocked(id)) return [id, null];
+      if (!manual && isBlocked(id)) return [id, null];
       const saved = currentCache.get(id);
       if (!forceRefresh && saved && now() - saved.checkedAt < getSettings().ttlMs) return [id, saved.value];
-      if (!currentInflight.has(id)) {
+      const key = manual ? `manual:${id}` : id;
+      if (!currentInflight.has(key)) {
         const task = schedule(async () => {
-          if (isBlocked(id)) return null;
+          if (!manual && isBlocked(id)) return null;
           let value;
           try {
             const query = new URLSearchParams({ account_id: id, start_date: "1970-01-01", end_date: new Date(now()).toISOString().slice(0, 10), timezone: "UTC" });
@@ -67,10 +68,10 @@ export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency =
           }
           currentCache.set(id, { checkedAt: now(), value });
           return value;
-        }).finally(() => currentInflight.delete(id));
-        currentInflight.set(id, task);
+        }).finally(() => currentInflight.delete(key));
+        currentInflight.set(key, task);
       }
-      return [id, await currentInflight.get(id)];
+      return [id, await currentInflight.get(key)];
     })));
   }
   read.refreshSettings = pump;

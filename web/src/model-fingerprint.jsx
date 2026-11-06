@@ -1,4 +1,4 @@
-import { codexStatusEligible } from "./codex-eligibility.mjs";
+import { codexStatusEligible, codexStatusBlockReason } from "./codex-eligibility.mjs";
 import { CustomSelect } from "./custom-select.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { Activity, Check, ChevronDown, RefreshCw, Settings2, X } from "lucide-react";
@@ -417,7 +417,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
       </div>
       <div className="fingerprint-action-pair">
       <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={state.phase === "queued" ? "排队中" : checking || checkPending ? "正在检测" : "立即检测"} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models.length || !eligible} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
-      <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title={eligible ? "独立降智检测设置" : "账号需先加入号池并启用"} disabled={!eligible || !token} onClick={open}><Settings2 size={14} /></button>
+      <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title={eligible ? "独立降智检测设置" : codexStatusBlockReason(job)} disabled={!eligible || !token} onClick={open}><Settings2 size={14} /></button>
       </div>
     </div>
     <div className="fingerprint-rounds" role="group" aria-label={`${job.email} 最近 6 轮检测结果`}>

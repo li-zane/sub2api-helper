@@ -99,7 +99,7 @@ const server = http.createServer(async (req, res) => {
     chatgptLoginComplete = false;
     selectedEmail = url.searchParams.get("login_hint") || selectedEmail;
     if (isReplacementEmail() && selectedEmail !== replacementSessionEmail) {
-      replacementTotpEnabled = true;
+      replacementTotpEnabled = selectedEmail !== "replace-totp-resume-disabling@example.com";
       replacementCurrentFactorId = replacementOldFactorId;
       replacementRequestLog = [];
       replacementSessionEmail = selectedEmail;
@@ -144,6 +144,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/backend-api/accounts/mfa_info") {
     if (isReplacementEmail()) {
       recordReplacementRequest(req, "mfa_info");
+      if (selectedEmail === "replace-totp-unknown-after-disable@example.com" && !replacementTotpEnabled) return sendJson(res, 200, {});
       return sendJson(res, 200, replacementMfaInfo());
     }
     if (selectedEmail === "setup-totp@example.com" && totpEnabled) {
@@ -208,6 +209,7 @@ const server = http.createServer(async (req, res) => {
       if (selectedEmail === "replace-totp-business-rejected@example.com") return sendJson(res, 200, { success: false });
       if (selectedEmail === "replace-totp-unconfirmed@example.com") return sendJson(res, 200, { success: true });
       replacementTotpEnabled = false;
+      if (["replace-totp-200-no-success@example.com", "replace-totp-unknown-after-disable@example.com"].includes(selectedEmail)) return sendJson(res, 200, {});
       res.writeHead(204);
       res.end();
       return;
@@ -321,10 +323,7 @@ function mfaPayload() {
 }
 
 function isReplacementEmail() {
-  return selectedEmail === "replace-totp@example.com"
-    || selectedEmail === "replace-totp-business-rejected@example.com"
-    || selectedEmail === "replace-totp-unconfirmed@example.com"
-    || selectedEmail === "replace-totp-enroll-failure@example.com";
+  return selectedEmail.startsWith("replace-totp");
 }
 
 function replacementMfaInfo() {

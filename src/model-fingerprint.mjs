@@ -270,7 +270,7 @@ export class ModelFingerprintService {
             controller.signal.throwIfAborted();
             const detail = fingerprintFailure(error);
             results.push({ accountId: String(target.id), ...model, status: "error", error: detail.message, failure: detail, sampleFailures, completedSamples: outputs.length, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })) });
-            if (account.type === "oauth" && fingerprintRecovery(detail)) { recoveryFailure = detail; break sampling; }
+            if (detail.httpStatus === 429 || account.type === "oauth" && fingerprintRecovery(detail)) { recoveryFailure = detail; break sampling; }
           }
         }
       }

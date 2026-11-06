@@ -7,10 +7,12 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+const baseline = process.argv.includes("--baseline");
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-sms-provider-"));
 const smsActions = [];
 let smsChecks = 0;
+let malformedOrder = false;
 let customInboxChecks = 0;
 const smsServer = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -27,9 +29,10 @@ const smsServer = http.createServer((req, res) => {
     return;
   }
   const action = url.searchParams.get("action");
-  smsActions.push({ action, status: url.searchParams.get("status"), maxPrice: url.searchParams.get("maxPrice") });
+  smsActions.push({ action, id: url.searchParams.get("id"), status: url.searchParams.get("status"), maxPrice: url.searchParams.get("maxPrice") });
   let body = "BAD_ACTION";
   if (action === "getNumber") body = "ACCESS_NUMBER:mock-activation:60123456789";
+  if (action === "getNumberV2") body = JSON.stringify(malformedOrder ? { activationId: "broken-paid-order", activationCost: 0.2, currency: 840 } : { activationId: "mock-activation", phoneNumber: "60123456789", activationCost: 0.18, currency: 840 });
   if (action === "getStatus") body = ++smsChecks < 2 ? "STATUS_WAIT_CODE" : "STATUS_OK:654321";
   if (action === "getPrices") body = JSON.stringify({
     1001: { dr: { cost: 0.42, count: 12 } },
@@ -49,7 +52,7 @@ await listen(smsServer);
 
 const consolePort = await findAvailablePort();
 const baseUrl = `http://127.0.0.1:${consolePort}`;
-const child = spawn(process.execPath, [path.join(projectRoot, "src", "console-server.mjs"), "--host", "127.0.0.1", "--port", String(consolePort)], {
+const child = spawn(process.execPath, [process.env.SMS_PROVIDER_TEST_SERVER || path.join(projectRoot, "src", "console-server.mjs"), "--host", "127.0.0.1", "--port", String(consolePort)], {
   cwd: projectRoot,
   env: {
     ...process.env,
@@ -106,11 +109,23 @@ try {
   const completed = await waitForJob(headers, created.job.id, (job) => job.status === "completed");
   assert.equal(completed.smsProviderName, "SMSBower");
   assert.equal(completed.smsStatus, "completed");
-  assert.ok(smsActions.some((item) => item.action === "getNumber"));
+  assert.ok(smsActions.some((item) => item.action === (baseline ? "getNumber" : "getNumberV2")));
   assert.ok(smsActions.some((item) => item.action === "getStatus"));
   assert.ok(smsActions.some((item) => item.action === "setStatus" && item.status === "1"));
   assert.ok(smsActions.some((item) => item.action === "setStatus" && item.status === "6"));
-  assert.ok(smsActions.some((item) => item.action === "getNumber" && item.maxPrice === "0.42"));
+  assert.ok(smsActions.some((item) => item.action === (baseline ? "getNumber" : "getNumberV2") && item.maxPrice === "0.42"));
+
+  const orderLog = await fetch(`${baseUrl}/api/jobs/${created.job.id}/logs?full=1`, { headers }).then(r => r.json());
+  if (baseline) {
+    assert(!orderLog.logs.includes("[sms-order]")); assert(!orderLog.logs.includes("金额 0.18 USD"));
+  } else {
+  assert.match(orderLog.logs, /手机号 \+60123456789/); assert.match(orderLog.logs, /金额 0\.18 USD/);
+  assert.match(orderLog.logs, /价格上限 0\.42（非实际金额）/); assert.match(orderLog.logs, /订单 mock-activation/);
+  assert.equal((orderLog.logs.match(/\[sms-order\]/g) || []).length, 1);
+  assert((await fs.readFile(path.join(outputRoot, created.job.id, "account.log"), "utf8")).includes("金额 0.18 USD"), "order amount not durably recorded");
+  assert(!logs.includes("test-api-key") && !logs.includes("60123456789"), "order/private key leaked to service stdout");
+
+  }
 
   const completedOrderCount = smsActions.filter((item) => item.action === "setStatus" && item.status === "6").length;
   const releasedOrderCount = smsActions.filter((item) => item.action === "setStatus" && item.status === "8").length;
@@ -174,7 +189,18 @@ try {
   assert.equal(customCompleted.currentPhone, "+8613711111111");
   assert.equal(customCompleted.smsStatus, "completed");
   assert.ok(customInboxChecks >= 2);
-  console.log("sms provider console tests passed");
+  if (!baseline) {
+    malformedOrder = true;
+    const broken = await fetch(`${baseUrl}/api/jobs`, { method: "POST", headers, body: JSON.stringify({ email: "manual-phone-automation@example.com" }) }).then(r => r.json());
+    await waitForJob(headers, broken.job.id, j => j.status === "phone");
+    const result = await fetch(`${baseUrl}/api/jobs/${broken.job.id}/sms-number`, { method: "POST", headers, body: JSON.stringify({ providerId: "smsbower", config: { apiKey: "test-api-key", service: "dr", country: "1001", maxPrice: "0.42" } }) });
+    assert.equal(result.status, 502);
+    await waitForJob(headers, broken.job.id, j => j.smsPendingCancellationCount === 0 && smsActions.some(a => a.id === "broken-paid-order" && a.status === "8"));
+    const retained = await fetch(`${baseUrl}/api/jobs/${broken.job.id}/logs?full=1`, { headers }).then(r => r.json());
+    assert.match(retained.logs, /订单 broken-paid-order/); assert.match(retained.logs, /金额 0\.2 USD/);
+  }
+  if (baseline) { console.log("BASELINE_SMS_ORDER_LOG_REPRODUCED structured_phone_amount_record=false"); process.exitCode = 1; }
+  else console.log("sms provider console tests passed: durable phone/order/actual amount+currency; upper price labeled; no service stdout leak");
 } catch (error) {
   error.message = `${error.message}\nConsole output:\n${logs}`;
   throw error;

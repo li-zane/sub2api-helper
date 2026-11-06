@@ -65,9 +65,9 @@ try{
  await start();
  let all=await jobs(),known=all.find(j=>j.email===emails[0]);
  assert.equal(known.webSessionStatus,"banned","confirmed ban must override Web expiry");
- assert.equal(known.status,"banned");assert.equal(known.canLoginWeb,false);assert.equal(known.assignedProxyId,null);
+ assert.equal(known.status,"banned");assert.equal(known.canLoginWeb,true);assert.equal(known.assignedProxyId,null);
  assert.equal(known.banProxyReleasePending,true);assert.match(known.banProxyReleaseError,/503/);assert.equal(rows[0].proxy_id,8,"failed unbind retains real pool binding for retry");
- assert.equal((await api(`/api/jobs/${ids[0]}/web-login`,{})).status,409);
+ assert.equal((await api(`/api/jobs/${ids[0]}/relogin`,{})).status,409);
  for(const route of ["sessions","workspaces","sessions/logout","sessions/logout-all","workspaces/switch"]){
    const result=await api(`/api/jobs/${ids[0]}/${route}`,route.includes("/")?{}:undefined);
    assert.equal(result.status,409);assert.match(result.data.error,/账号已封禁/);assert.match(result.data.error,/account_deactivated/);
@@ -82,13 +82,13 @@ try{
  assert.equal(known.banProxyReleasePending,false);assert.equal(known.boundProxyStatus,"unbound");assert.equal(known.proxyConfigured,false);
  for(const id of [10,11,12,15]){assert.equal(rows.find(r=>r.id===id).proxy_id,0);assert.equal(rows.find(r=>r.id===id).schedulable,false);}
  for(const id of [13,14,16,17])assert.equal(rows.find(r=>r.id===id).proxy_id,id<15?9:8,"transient/workspace/other-platform/API-key records keep their bindings");
- for(const email of [emails[1],emails[4]]){const j=all.find(j=>j.email===email);assert.equal(j.status,"banned");assert.equal(j.webSessionStatus,"banned");assert.equal(j.canLoginWeb,false);}
+ for(const email of [emails[1],emails[4]]){const j=all.find(j=>j.email===email);assert.equal(j.status,"banned");assert.equal(j.webSessionStatus,"banned");assert.equal(j.canLoginWeb,true);}
  for(const email of [emails[2],emails[3]])assert.equal(all.find(j=>j.email===email).autoRepairBlocked,false);
  const credentials=await store.load(emails[0]);assert.equal(credentials.password,"saved-password");assert.equal(credentials.totpSecret,"JBSWY3DPEHPK3PXP");assert.equal(credentials.proxyUrl,"");
  assert.equal(await fs.readFile(path.join(root,ids[0],"sub2api-import-oauth.json"),"utf8"),beforeOAuth);
  assert.equal(await fs.readFile(path.join(root,"unexpected-login"),"utf8").catch(()=>null),null,"unexpected login worker arguments");
  const count=writes.length;await api("/api/sub2api/account-status?refresh=1");assert.equal(writes.length,count,"successful unbind is idempotent");
  await stop();await start();known=(await jobs()).find(j=>j.email===emails[0]);assert.equal(known.webSessionStatus,"banned");assert.equal(known.boundProxyStatus,"unbound");
- console.log("BAN_PROXY_PASS ban display; Web/device/workspace actions blocked before upstream; automatic retry time; local/pool unbind; durable retry/restart; duplicate OAuth rows; credentials preserved; transient/workspace/API-key isolation; no login or rebind");
+ console.log("BAN_PROXY_PASS ban display; OAuth/device/workspace actions blocked before upstream; explicit Web available; automatic retry time; local/pool unbind; durable retry/restart; duplicate OAuth rows; credentials preserved; transient/workspace/API-key isolation; no login or rebind");
 }catch(error){console.error("BAN_PROXY_FAIL "+error.stack);process.exitCode=1;}
 finally{await stop();await new Promise(r=>pool.close(r));await fs.rm(root,{recursive:true,force:true});}
