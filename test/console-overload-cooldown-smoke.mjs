@@ -70,7 +70,7 @@ try {
   assert.equal(cooling.assignedProxyId, before.assignedProxyId);
   assert.equal(cooling.status, before.status, "pool pause does not restart account login");
   await stop(); await start();
-  assert.equal((await job()).overloadAutoCooldown.enabled, true);
+  assert.equal((await job()).overloadAutoCooldown.enabled, false, "pool is cooling: effective control stays off while durable resume remains armed");
   assert.deepEqual((await get("/api/task-settings")).settings.overloadAutoCooldown, rule);
   assert.equal((await job()).overloadAutoCooldown.coolingUntil, cooling.overloadAutoCooldown.coolingUntil);
   await stop();

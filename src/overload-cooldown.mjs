@@ -198,13 +198,13 @@ export class OverloadCooldown {
       }
       return;
     }
-    if (!entry.enabled) return;
+    if (!entry.enabled || !records.some(record => record.enabled === true)) return;
     const settings = this.getSettings();
     const end = this.now();
     const start = Math.max(end - settings.windowMinutes * 60_000, Date.parse(entry.lastResumedAt || "") || 0);
     if (start >= end) return;
     const valid = () => !this.stopped && !this.isBlocked(email) && this.accounts.get(email)?.enabled && this.backendIdentity(this.getConfig()) === backend;
-    const count = await collectOverloadWindow({ start, end, accountIds: records.map(record => record.id), config, request: this.request, isEnabled: valid });
+    const count = await collectOverloadWindow({ start, end, accountIds: records.filter(record => record.enabled === true).map(record => record.id), config, request: this.request, isEnabled: valid });
     if (count === null || !valid()) return;
     entry = await this.update(email, { windowCount: count, lastCheckedAt: new Date(end).toISOString(), lastError: null });
     if (count < settings.threshold) return;

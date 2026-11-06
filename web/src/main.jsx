@@ -7,7 +7,7 @@ import { recentOperation } from "./recent-operation.mjs";
 import { formatUsageTotal } from "./usage-totals.mjs";
 import { MONITOR_FIELDS, DEFAULT_MONITORING, normalizeMonitoring } from "./monitor-settings.mjs";
 import { normalizeTaskUploadActions, toggleTaskAutoAction } from "./task-auto-actions.mjs";
-import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes } from "./login-settings.mjs";
+import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "./login-settings.mjs";
 import {
   Ban,
   Check,
@@ -4270,6 +4270,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const dialogRef = useRef(null);
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
   const [loginTimeout, setLoginTimeout] = useState(() => String(settings.loginTimeoutMinutes ?? DEFAULT_LOGIN_TIMEOUT_MINUTES));
+  const [smsTimeout, setSmsTimeout] = useState(() => String(settings.smsTimeoutMinutes ?? DEFAULT_SMS_TIMEOUT_MINUTES));
   const [monitoring, setMonitoring] = useState(() => Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
   const [fingerprintDefaults, setFingerprintDefaults] = useState(() => ({ intervalMinutes: String(settings.modelFingerprint?.intervalMinutes ?? 360), maxConcurrentAccounts: String(settings.modelFingerprint?.maxConcurrentAccounts ?? 3) }));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
@@ -4309,8 +4310,8 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       return;
     }
     const cooldownValue = Number(cooldownMinutes);
-    let loginTimeoutMinutes;
-    try { loginTimeoutMinutes = normalizeLoginTimeoutMinutes(Number(loginTimeout)); }
+    let loginTimeoutMinutes, smsTimeoutMinutes;
+    try { loginTimeoutMinutes = normalizeLoginTimeoutMinutes(Number(loginTimeout)); smsTimeoutMinutes = normalizeSmsTimeoutMinutes(Number(smsTimeout)); }
     catch (error) { setError(error.message); return; }
     if (!Number.isInteger(cooldownValue) || cooldownValue < 1 || cooldownValue > 43_200) {
       setError("冷却时长必须是 1 到 43200 分钟的整数");
@@ -4361,7 +4362,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
+        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4434,9 +4435,15 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           <div className="task-auth-mode-fields">
             <label className="settings-field" htmlFor="task-login-timeout">
               <span className="field-label-row">登录超时
-                <HelpTip label="登录超时说明">Web、Codex 及相关登录任务共用此上限，默认 3 分钟。任务开始执行后计时，包含验证码等待，不含排队，自动重试不重置预算；超时终止本次尝试并释放并发，保留已有凭据。修改后按已经运行的时长重新计算。</HelpTip>
+                <HelpTip label="登录超时说明">Web、Codex 登录默认限时 3 分钟，包含邮箱和 2FA 等待、不含排队。进入手机号验证后改用独立接码时限，换号、重发和授权收尾都不重置或切回登录时限。超时保留原凭据；2FA 未通过时暂停自动登录，手动触发可恢复。</HelpTip>
               </span>
               <div><input id="task-login-timeout" type="number" min="1" max="1440" step="1" required value={loginTimeout} disabled={saving} onChange={event => setLoginTimeout(event.target.value)} /><span>分钟</span></div>
+            </label>
+            <label className="settings-field" htmlFor="task-sms-timeout">
+              <span className="field-label-row">接码时限
+                <HelpTip label="接码时限说明">默认 10 分钟。从首次进入手机号验证开始，覆盖取号、等待短信、换号、验证码验证和后续授权收尾；仅切换一次，不因重发或换号重置，也不在验证码通过后切回登录时限。超时终止本次尝试并取消号码订单；未完成手机验证的账号暂停自动 OAuth，等待手动触发。</HelpTip>
+              </span>
+              <div><input id="task-sms-timeout" aria-label="接码时限（分钟）" type="number" min="1" max="1440" step="1" required value={smsTimeout} onChange={event => setSmsTimeout(event.target.value)} disabled={saving} /><span>分钟</span></div>
             </label>
             <label className="settings-field task-auth-mode-field" htmlFor="task-proxy-mode">
               <span className="field-label-row">

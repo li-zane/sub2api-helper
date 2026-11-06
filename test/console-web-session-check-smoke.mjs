@@ -35,7 +35,7 @@ const pool = http.createServer(async (req, res) => {
   const chunks = []; for await (const chunk of req) chunks.push(chunk);
   if (req.method !== "GET") updates.push(req.url);
   res.setHeader("content-type", "application/json");
-  if (req.url.startsWith("/api/v1/admin/accounts")) return res.end(JSON.stringify({ data: { items: [], total: 0, pages: 1 } }));
+  if (req.url.startsWith("/api/v1/admin/accounts")) return res.end(JSON.stringify({ data: { items: [{ id: 42, platform: "openai", type: "oauth", name: emailFor("valid"), status: "active", schedulable: true, credentials: { email: emailFor("valid"), plan_type: "business" } }], total: 1, pages: 1 } }));
   res.end(JSON.stringify({ data: [] }));
 });
 await new Promise(r => upstream.listen(0, "127.0.0.1", r));

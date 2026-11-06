@@ -135,7 +135,9 @@ try {
   const returnedToPhone = await waitForJob(
     headers,
     rejected.job.id,
-    (job) => job.status === "phone" && /\u8fd1\u671f\u5df2\u88ab\u4f7f\u7528/.test(job.phoneError || ""),
+    (job) => job.status === "phone" && /\u8fd1\u671f\u5df2\u88ab\u4f7f\u7528/.test(job.phoneError || "")
+      && job.smsPendingCancellationCount === 0
+      && smsActions.filter(item => item.action === "setStatus" && item.status === "8").length === releasedOrderCount + 1,
   );
   assert.equal(returnedToPhone.smsStatus, "error");
   assert.equal(smsChecks - smsChecksBeforeRejectedNumber, 1);

@@ -43,8 +43,10 @@ import { ProxyQualityService } from "./proxy-quality.mjs";
 import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
 import { DEFAULT_MONITORING, normalizeMonitoring } from "../web/src/monitor-settings.mjs";
 import { normalizeTaskUploadActions, isRedundantTaskUpload } from "../web/src/task-auto-actions.mjs";
-import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes } from "../web/src/login-settings.mjs";
+import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "../web/src/login-settings.mjs";
 import { LoginTimeouts } from "./login-timeout.mjs";
+import { SmsCancellations } from "./sms-cancellations.mjs";
+import { normalizeLoginAutomationPause, loginAutomationBlocked, loginAutomationPauseMessage } from "./login-automation-pause.mjs";
 import { limitPoolRequests } from "./pool-network.mjs";
 import { createUsageTotalsReader, combineUsageTotals } from "./sub2api-usage-totals.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
@@ -144,8 +146,10 @@ const monitoringDefaults = {
 };
 let monitoringSettings = { ...monitoringDefaults };
 let loginTimeoutMinutes = DEFAULT_LOGIN_TIMEOUT_MINUTES;
+let smsTimeoutMinutes = DEFAULT_SMS_TIMEOUT_MINUTES;
 const loginTimeouts = new LoginTimeouts({
   getMinutes: () => loginTimeoutMinutes,
+  getSmsMinutes: () => smsTimeoutMinutes,
   minuteMs: process.env.NODE_ENV === "test" && Number(process.env.TOSUB2_LOGIN_TIMEOUT_MINUTE_MS) > 0
     ? Number(process.env.TOSUB2_LOGIN_TIMEOUT_MINUTE_MS) : 60_000,
   onTimeout: (job, entry) => { void expireLogin(job, entry).catch(error => {
@@ -174,7 +178,8 @@ const FORBIDDEN_MAIL_REQUEST_HEADERS = new Set([
   "upgrade",
 ]);
 const SMS_POLL_INTERVAL_MS = Number(process.env.SMS_POLL_INTERVAL_MS || process.env.LUBAN_SMS_POLL_INTERVAL_MS || 3_000);
-const SMS_POLL_TIMEOUT_MS = Number(process.env.SMS_POLL_TIMEOUT_MS || process.env.LUBAN_SMS_POLL_TIMEOUT_MS || 10 * 60_000);
+const SMS_POLL_TIMEOUT_MS = process.env.SMS_POLL_TIMEOUT_MS || process.env.LUBAN_SMS_POLL_TIMEOUT_MS
+  ? Number(process.env.SMS_POLL_TIMEOUT_MS || process.env.LUBAN_SMS_POLL_TIMEOUT_MS) : null;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_ROOT = path.resolve(__dirname, "..");
 const WEB_ROOT = path.join(TOOL_ROOT, "web");
@@ -199,6 +204,18 @@ const proxyQualityService = new ProxyQualityService({
 });
 const consoleToken = crypto.randomBytes(24).toString("base64url");
 const jobs = new Map();
+const smsCancellations = new SmsCancellations({
+  filePath: path.join(OUTPUT_ROOT, "sms-cancellations.json"),
+  retryMs: process.env.NODE_ENV === "test" ? Number(process.env.TOSUB2_SMS_CANCEL_RETRY_MS || 30_000) : 30_000,
+  getClient: providerId => {
+    const config = smsProviderSettingsState.settings.configs[providerId];
+    return config ? createSmsProvider(providerId, config, { lubanApiBase: process.env.LUBAN_SMS_API_BASE, smsBowerApiBase: process.env.SMSBOWER_API_BASE, acquireCustomSmsEntry }) : null;
+  },
+  onEvent: (record, success) => {
+    const job = jobs.get(record.jobId);
+    if (job && !job.deleted) { appendJobLog(job, success ? "[sms] 号码订单已取消。\n" : "[sms] 号码取消待重试，记录已保留。\n"); touch(job); }
+  },
+});
 const automationBlockWrites = new Map();
 const automationBlockRunning = new Set();
 const customSmsPoolPositions = new Map();
@@ -319,6 +336,7 @@ const webSessionMonitor = new WebSessionMonitor({
   lock: (job, fn) => withEmailJobLock(job.email, fn),
   repair: async (job, { reason }) => {
     const webOnly = !job.resultSaved || ["expired", "web_workspace_unavailable", "missing"].includes(reason);
+    if (automaticLoginBlocked(job, webOnly ? "web" : "oauth")) return false;
     if (webOnly) {
       job.webSessionMonitorRepair = true;
       await startWebLogin(job, { maintenance: true });
@@ -344,7 +362,7 @@ const overloadMonitor = new OverloadMonitor({
     for (const account of listing.accounts) {
       const email = sub2ApiAccountEmail(account);
       const id = normalizeSub2ApiAccountId(account.id);
-      if (!email || !id || (account.platform && account.platform !== "openai")) continue;
+      if (!email || !id || (account.platform && account.platform !== "openai") || sub2ApiAccountSchedulable(account) !== true) continue;
       mapping.set(email, [...new Set([...(mapping.get(email) || []), id])]);
     }
     return mapping;
@@ -382,16 +400,20 @@ async function readFingerprintAccount(config, id) {
 const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprintAccount, getProxies: listSub2ApiProxies,
   testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
 const modelFingerprint = new ModelFingerprintService({
-  isBlocked: accountAutomationBlocked,
+  isBlocked: email => {
+    if (accountAutomationBlocked(email)) return true;
+    const job = findJobByEmail(email), state = job && getSub2ApiAccountStatusForJob(job);
+    return Boolean(state && state.inPool === true && state.enabled === false);
+  },
   filePath: path.join(OUTPUT_ROOT, "model-fingerprint.json"),
   getContext: () => ({ config: sub2ApiSettingsConfig, backend: sub2ApiSettingsConfig ? monitorBackendIdentity(sub2ApiSettingsConfig) : null,
     profiles: [...sub2ApiProfiles.values()].map(p => ({ id: p.id, name: p.name, groupIds: p.groupIds || [], planTypes: Object.keys(sub2ApiPlanTypeBindings).filter(t => sub2ApiPlanTypeBindings[t] === p.id) })),
     routing: JSON.stringify({ bindings: sub2ApiPlanTypeBindings, profiles: [...sub2ApiProfiles.values()].map(p => [p.id, p.groupIds]) }),
-    jobs: listUniqueJobs().filter(j => !j.deleted && !isActive(j.status)).map(j => ({ email: j.email, planType: getJobPlanType(j) || "unknown" })) }),
+    jobs: listUniqueJobs().filter(j => !j.deleted && !isActive(j.status) && codexMonitoringAllowed(j)).map(j => ({ email: j.email, planType: getJobPlanType(j) || "unknown" })) }),
   listTargets: async config => {
     const listing = await listSub2ApiAccounts(config, { withMeta: true });
     if (!listing.complete) throw new Error("Sub2API 账号列表不完整");
-    return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a)).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
+    return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && sub2ApiAccountSchedulable(a) === true).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
   },
   getAccount: readFingerprintAccount, sample: fingerprintSampler,
   onAccountFailure: recoverFingerprintAuthorization,
@@ -418,7 +440,7 @@ async function recoverFingerprintAuthorization(email, failure) {
     if (!listing.complete) throw new Error("号池列表不完整，等待重试授权修复");
     await reconcileSub2ApiAccountBans(config, listing.accounts);
     if (accountAutomationBlocked(email)) return;
-    const accounts = listing.accounts.filter(a => sub2ApiAccountEmail(a) === email && a.platform === "openai" && a.type === "oauth");
+    const accounts = listing.accounts.filter(a => sub2ApiAccountEmail(a) === email && a.platform === "openai" && a.type === "oauth" && sub2ApiAccountSchedulable(a) === true);
     if (!accounts.length) return;
     const operation = createSub2ApiAutoRepairOperation(config, accounts, snapshotSub2ApiProfileState());
     await forceReloginJob(job, {}, { autoRepair: operation, webSessionMonitorRepair: true });
@@ -455,6 +477,7 @@ if (!Number.isInteger(requestedPort) || requestedPort < 1 || requestedPort > 655
 
 await fs.mkdir(OUTPUT_ROOT, { recursive: true });
 smsProviderSettingsState = await loadSmsSettings(SMS_SETTINGS_PATH);
+await smsCancellations.load();
 await loadTaskSettings();
 await loadPlanTypeLabelMapping();
 await loadSub2ApiSettingsConfiguration();
@@ -464,6 +487,40 @@ await overloadCooldown.load();
 await modelFingerprint.load();
 await syncCompletedOutputs(true);
 await webSessionMonitor.load();
+// Restore durable per-account login restrictions before starting any automation.
+const restoredLoginMetadata = new Map();
+for (const job of jobs.values()) {
+  let metadata = {};
+  try { metadata = JSON.parse(await fs.readFile(path.join(path.dirname(job.outputPath), "job-meta.json"), "utf8")); } catch {}
+  restoredLoginMetadata.set(job.id, metadata);
+  job.loginAutomationPause = normalizeLoginAutomationPause(metadata.login_automation_pause);
+  job.phoneVerificationPending = metadata.phone_verification_pending === true;
+  job.phoneVerifiedAt = typeof metadata.phone_verified_at === "string" && Number.isFinite(Date.parse(metadata.phone_verified_at)) ? metadata.phone_verified_at : null;
+}
+// Load every same-email entry before propagating/writing a pause; otherwise a
+// migration write could overwrite a sibling's not-yet-read restriction.
+for (const job of jobs.values()) {
+  const metadata = restoredLoginMetadata.get(job.id);
+  const interruptedOrder = job.smsOrderId || metadata.sms_order_id;
+  const interruptedProvider = job.smsProviderId || metadata.sms_provider_id;
+  if (interruptedOrder && interruptedProvider && metadata.sms_status !== "completed" && !isActive(job.status)) {
+    void smsCancellations.cancel({ jobId: job.id, providerId: interruptedProvider, requestId: interruptedOrder }).catch(() => {});
+    job.smsOrderId = null; job.smsClient = null;
+  }
+  const mfaLog = job.logs || "";
+  const unresolvedMfa = /LOGIN_TIMEOUT/.test(job.lastError || job.webLoginError || "")
+    && Math.max(mfaLog.lastIndexOf("2FA OTP (6 digits"), mfaLog.lastIndexOf("[mfa] TOTP 2FA challenge reached."))
+      > Math.max(mfaLog.lastIndexOf("[ok] 2FA verification accepted"), mfaLog.lastIndexOf("[ok] Phone OTP validated"), mfaLog.lastIndexOf("Phone number, E.164 format"));
+  if (job.status === "mfa_failed" || metadata.login_waiting_mfa === true || unresolvedMfa || job.loginAutomationPause?.reason === "mfa_failed") pauseAutomaticLogin(job, "mfa_failed");
+  else {
+    let checkpoint;
+    if (!isActive(job.status) && (!job.resultSaved || job.status !== "completed")) {
+      try { checkpoint = JSON.parse(await fs.readFile(job.checkpointPath, "utf8")); } catch {}
+    }
+    if (job.phoneVerificationPending || job.loginAutomationPause?.reason === "phone_unverified"
+      || !job.phoneVerifiedAt && ["phone_required", "phone_otp"].includes(checkpoint?.stage)) pauseAutomaticLogin(job, "phone_unverified");
+  }
+}
 // Migrate both existing bans and Web-only failures before starting any timers.
 for (const job of jobs.values()) {
   const failure = [job.lastError, job.webLoginError].find(isPermanentAccountFailure);
@@ -479,6 +536,7 @@ for (const job of jobs.values()) {
       : 0);
   }
 }
+smsCancellations.start();
 resumePendingTaskAutoActions();
 scheduleQueuedJobs();
 scheduleSub2ApiMonitor();
@@ -652,12 +710,14 @@ async function handleApi(req, res, requestUrl) {
     if (fingerprintMatch[2]) {
       if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认永久停用，降智检测已停止");
       if (isActive(job.status)) throw httpError(409, "账号任务正在执行，请完成后再检测");
+      await assertCodexMonitoringAllowed(job);
       void modelFingerprint.run(job.email, planType, { manual: true }).catch(() => {});
       sendJson(res, 202, { job: publicJob(job) }); return;
     }
     else {
       const body = await readJson(req);
       if (accountAutomationBlocked(job.email) && body.enabled !== false) throw httpError(409, "账号已确认永久停用，请先手动恢复账号后再启用自动化");
+      if (body.enabled !== false) await assertCodexMonitoringAllowed(job);
       await modelFingerprint.saveOverride(job.email, body);
     }
     sendJson(res, 200, { job: publicJob(job) }); return;
@@ -1163,6 +1223,7 @@ async function handleApi(req, res, requestUrl) {
     if (typeof body.enabled !== "boolean") throw httpError(400, "自动冷却状态必须是布尔值");
     if (body.enabled && accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认永久停用，自动冷却已关闭");
     if (body.enabled && !overloadCooldown.snapshot(job.email).configured) throw httpError(409, "请先配置 Sub2API 后端地址和管理员 API Key");
+    if (body.enabled) await assertCodexMonitoringAllowed(job);
     await overloadCooldown.setEnabled(job.email, body.enabled);
     sendJson(res, 200, { job: publicJob(job) });
     return;
@@ -1178,6 +1239,7 @@ async function handleApi(req, res, requestUrl) {
     if (body.enabled && !overloadMonitor.snapshot(job.email).configured) {
       throw httpError(409, "请先配置 Sub2API 后端地址和管理员 API Key");
     }
+    if (body.enabled) await assertCodexMonitoringAllowed(job);
     await withEmailJobLock(job.email, () => overloadMonitor.setEnabled(job.email, body.enabled));
     if (body.enabled) overloadMonitor.trigger();
     sendJson(res, 200, { job: publicJob(job) });
@@ -1224,6 +1286,7 @@ async function handleApi(req, res, requestUrl) {
       fetchedAt: new Date().toISOString(),
     };
     state.accounts.set(job.email.toLowerCase(), nextEntry);
+    if (!body.enabled) modelFingerprint.invalidateAccount(job.email);
     state.fetchedAt = new Date().toISOString();
     sendJson(res, 200, { status: publicSub2ApiAccountStatusEntry(nextEntry) });
     return;
@@ -1982,8 +2045,12 @@ async function prepareAndLaunchJob(job, mode, queueRunId) {
 
 async function expireLogin(job, entry) {
   if (shuttingDown || job.deleted || !occupiesActiveSlot(job)) return;
-  const message = `LOGIN_TIMEOUT: 登录超时（${entry.minutes} 分钟），已停止本次尝试，可手动重试`;
+  const message = entry.phase === "sms"
+    ? `SMS_TIMEOUT: 接码超时（${entry.minutes} 分钟），已停止本次尝试并提交号码取消请求，可手动重试`
+    : `LOGIN_TIMEOUT: 登录超时（${entry.minutes} 分钟），已停止本次尝试，可手动重试`;
   const mode = job.runMode || entry.mode;
+  if (job.status === "mfa_otp" || job.awaitingMfa) pauseAutomaticLogin(job, "mfa_failed");
+  else if (job.phoneVerificationPending) pauseAutomaticLogin(job, "phone_unverified");
   const child = job.child;
   // Invalidate first: a late child event or preparation result cannot revive
   // this attempt. Kill outside the email lock even if an upstream call holds it.
@@ -1996,9 +2063,9 @@ async function expireLogin(job, entry) {
   stopMailPolling(job);
   stopSmsPolling(job);
   releaseSmsNumber(job, "idle");
-  const mfaPending = job.status === "mfa_otp";
+  const mfaPending = job.status === "mfa_otp" || job.awaitingMfa === true;
   job.status = mfaPending ? "mfa_failed" : "failed";
-  job.prompt = "登录超时，本次尝试已停止";
+  job.prompt = entry.phase === "sms" ? "接码超时，已停止任务并提交号码取消请求" : "登录超时，本次尝试已停止";
   job.lastError = message;
   if (mode === "web_login") job.webLoginError = message;
   if (mode === "totp_setup") job.totpSetupError = message;
@@ -2183,6 +2250,8 @@ function launchJob(job, options = {}) {
 async function handleChildClose(job, { code, signal, mode, runId }) {
   if (job.runId !== runId) return;
   loginTimeouts.pause(job);
+  if (code !== 0 && (job.status === "mfa_otp" || job.awaitingMfa)) pauseAutomaticLogin(job, "mfa_failed");
+  if (code !== 0 && job.phoneVerificationPending) pauseAutomaticLogin(job, "phone_unverified");
   stopMailPolling(job);
   job.child = null;
   if (mode === "web_login") {
@@ -2217,6 +2286,13 @@ async function handleChildClose(job, { code, signal, mode, runId }) {
       completeAuthorizationAutomationAttempt(job);
       // A successful new login supersedes an old Web-only ban diagnostic.
       job.webLoginError = null;
+    }
+    if (job.phoneVerificationPending) {
+      // A completed OAuth export also resolves a pending phone gate, even if
+      // an older protocol build omitted the OTP-accepted stdout marker.
+      job.phoneVerificationPending = false;
+      job.phoneVerifiedAt ||= new Date().toISOString();
+      if (accountLoginPause(job)?.reason === "phone_unverified") clearAutomaticLoginPause(job);
     }
     job.loginCheckpointAvailable = false;
     job.status = "completed";
@@ -2295,6 +2371,7 @@ function handleChildCloseFailure(job, mode, runId, error) {
 }
 
 async function retryJob(job, options = {}) {
+  const needsNewPhone = accountLoginPause(job)?.reason === "phone_unverified";
   if (job.webLoginPreviousState) throw httpError(409, "Web 登录仍在运行，请等待完成或取消后再授权");
   if (!["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status)) {
     throw httpError(409, "当前任务不需要重新授权");
@@ -2335,6 +2412,8 @@ async function retryJob(job, options = {}) {
   job.proxyAttemptParserTail = "";
   job.mailCandidateCounts.clear();
   clearAutoRepairBlock(job);
+  clearAutomaticLoginPause(job);
+  job.smsResumeNeedsNewNumber = needsNewPhone;
   job.autoRepairOperation = null;
   job.autoRepairPendingAccountIds = [];
   job.autoRepairPendingBackend = null;
@@ -2356,6 +2435,7 @@ async function regenerateJob(job, options = {}) {
     throw httpError(409, "只能为已经完成的任务重新生成授权");
   }
   job.webSessionMaintenancePause = null;
+  clearAutomaticLoginPause(job);
   job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
   if (Object.hasOwn(options, "proxyUrl")) {
     job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl, String(options.proxyUrl || "").trim() ? normalizeProxyUrl(options.proxyUrl) : null);
@@ -2419,6 +2499,7 @@ function webSessionCheckPending(job) {
 }
 
 function enqueueWebSessionCheck(job) {
+  clearAutomaticLoginPause(job);
   manualWebSessionChecks.set(job.id, { attemptId: crypto.randomUUID(), phase: "queued", renewed: false, error: null });
   scheduleQueuedJobs();
 }
@@ -2487,12 +2568,13 @@ async function reconcilePlanAutomations(job, planType) {
 }
 
 async function startWebLogin(job, { maintenance = false, checkTask = null } = {}) {
+  if (maintenance && automaticLoginBlocked(job, "web")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
   const checking = Boolean(checkTask && manualWebSessionChecks.get(job.id) === checkTask);
   if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新开始授权");
   if (!canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
   await reloadMissingJobCredentials(job);
   if (!canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号当前不能登录 Web");
-  if (!maintenance) job.webSessionMaintenancePause = null;
+  if (!maintenance) { job.webSessionMaintenancePause = null; clearAutomaticLoginPause(job); }
   const preserved = ["status", "prompt", "lastError", "completedAt", "startedAt", "attempt", "loginCheckpointAvailable",
     "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount",
     "webSessionAvailable", "webSessionStatus", "webSessionVerifiedAt", "webSessionReadError", "webSessionContext"];
@@ -2634,12 +2716,14 @@ function restoreWebLoginState(job, metadata) {
 }
 
 async function forceReloginJob(job, options = {}, context = {}) {
+  const automatic = context.autoRepair || context.webSessionMonitorRepair || context.automatic;
+  if (automatic && automaticLoginBlocked(job, "oauth")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
   await automationBlockWrites.get(job.email.toLowerCase());
   if (!canForceRelogin(job)) {
     throw httpError(409, "当前任务正在进行中，不能重新登录");
   }
   await reloadMissingJobCredentials(job);
-  if (!context.autoRepair && !context.webSessionMonitorRepair) job.webSessionMaintenancePause = null;
+  if (!automatic) { job.webSessionMaintenancePause = null; clearAutomaticLoginPause(job); }
   job.webSessionMonitorRepair = context.webSessionMonitorRepair === true;
   job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
   if (!canForceRelogin(job)) {
@@ -3176,7 +3260,7 @@ function consumeOutput(job, rawText) {
     return true;
   };
   if (scan.includes("[ok] Password accepted")) job.securityState = mergeSecurityState(job.securityState, { passwordEnabled: true });
-  if (scan.includes("[ok] 2FA verification accepted")) job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true });
+  if (scan.includes("[ok] 2FA verification accepted")) { job.awaitingMfa = false; job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true }); }
 
   if (scan.includes("[3/5] Password login page reached.")) {
     markAuthorizationRequirement(job, "password");
@@ -3320,18 +3404,30 @@ function consumeOutput(job, rawText) {
   const mfaReachedIndex = scan.lastIndexOf("[mfa] TOTP 2FA challenge reached.");
   const mfaPromptIndex = scan.lastIndexOf("2FA OTP (6 digits, q=quit):");
   if (mfaReachedIndex > mfaPromptIndex) {
+    job.awaitingMfa = Math.max(mfaReachedIndex, mfaPromptIndex) > scan.lastIndexOf("[ok] 2FA verification accepted");
     markAuthorizationRequirement(job, "mfa");
     setStage(job, "working", job.totpSecret ? "正在自动完成 2FA 验证" : "正在准备 2FA 验证");
   } else if (mfaPromptIndex > mfaReachedIndex) {
+    job.awaitingMfa = Math.max(mfaReachedIndex, mfaPromptIndex) > scan.lastIndexOf("[ok] 2FA verification accepted");
     markAuthorizationRequirement(job, "mfa");
     setStage(job, "mfa_otp", "请输入 6 位 2FA 验证码");
   }
   if (scan.includes("[mfa] Generated a 6-digit code from the configured 2FA key.")) {
     markAuthorizationAutomatic(job, "mfa");
   }
+  if (job.phonePhaseRunId !== job.runId && (scan.includes("[4/5] Phone binding is required")
+    || scan.includes("Phone number, E.164 format") || scan.includes("Phone OTP (r=resend, p=change phone, q=quit):"))) {
+    job.phonePhaseRunId = job.runId;
+    job.awaitingMfa = false;
+    job.phoneVerificationPending = true;
+    job.phoneVerifiedAt = null;
+    pauseAutomaticLogin(job, "phone_unverified");
+    if (loginTimeouts.enterSms(job)) appendJobLog(job, `[login-timeout] 已切换到接码时限 ${smsTimeoutMinutes} 分钟，后续换号、验证码验证和授权收尾不重置或切回登录时限。\n`);
+  }
   const phoneNumberPromptIndex = scan.lastIndexOf("Phone number, E.164 format");
   const phoneOtpPromptIndex = scan.lastIndexOf("Phone OTP (r=resend, p=change phone, q=quit):");
   if (phoneNumberPromptIndex > phoneOtpPromptIndex) {
+    job.smsResumeNeedsNewNumber = false;
     stopMailPolling(job);
     const automatic = smsProviderSettingsState.settings.autoAcquire === true;
     setStage(job, "phone", job.phoneError
@@ -3346,7 +3442,10 @@ function consumeOutput(job, rawText) {
       "phone_otp",
       job.currentPhone ? `短信验证码已发送至 ${job.currentPhone}` : "请输入手机短信验证码",
     );
-    if (job.smsOrderId && job.smsNumber === job.currentPhone) void beginSmsPolling(job);
+    if (job.smsResumeNeedsNewNumber && !job.smsOrderId) {
+      job.smsResumeNeedsNewNumber = false;
+      void submitJobInput(job, { action: "change_phone", value: "" }).catch(error => failJob(job, error.message));
+    } else if (job.smsOrderId && job.smsNumber === job.currentPhone) void beginSmsPolling(job);
   }
 
   const sendFailures = [...scan.matchAll(/\[warn\] Could not send SMS to (\+\d+):[^\S\r\n]*([^\r\n]+)\r?\n/g)];
@@ -3394,6 +3493,9 @@ function consumeOutput(job, rawText) {
     }
   }
   if (scan.includes("[ok] Phone OTP validated")) {
+    job.phoneVerificationPending = false;
+    job.phoneVerifiedAt ||= new Date().toISOString();
+    if (accountLoginPause(job)?.reason === "phone_unverified") clearAutomaticLoginPause(job);
     completeSmsNumber(job);
   }
   if (scan.includes("[5/5] Select workspace") || scan.includes("[6/6] Convert OAuth callback")) {
@@ -3742,8 +3844,8 @@ async function acquireSmsNumber(job, providerId, config) {
   try {
     order = await smsClient.getNumber();
     if (job.status !== "phone" || !job.child || job.runId !== runId || job.child !== child) {
-      void smsClient.release(order.requestId).catch(() => {});
-      throw httpError(409, "任务已经不在手机号输入步骤，平台号码已释放");
+      void smsCancellations.cancel({ jobId: job.id, providerId: smsClient.id, requestId: order.requestId }, smsClient).catch(() => {});
+      throw httpError(409, "任务已经不在手机号输入步骤，已提交号码取消请求");
     }
     job.smsOrderId = order.requestId;
     job.smsNumber = order.number;
@@ -3835,7 +3937,8 @@ async function beginSmsPolling(job) {
       job.smsOrderId === requestId &&
       job.status === "phone_otp" &&
       job.child &&
-      Date.now() - startedAt < SMS_POLL_TIMEOUT_MS
+      (SMS_POLL_TIMEOUT_MS === null || Date.now() - startedAt < SMS_POLL_TIMEOUT_MS) &&
+      (loginTimeouts.remaining(job) ?? smsTimeoutMinutes * 60_000) > 0
     ) {
       try {
         const result = await smsClient.getSms(requestId);
@@ -3906,9 +4009,9 @@ function releaseSmsNumber(job, nextStatus = "idle", errorMessage = null) {
     job.smsServiceLabel = null;
   }
   if (requestId && smsClient) {
-    const pending = smsClient.release(requestId).catch(() => {
+    const pending = smsCancellations.cancel({ jobId: job.id, providerId: smsClient.id, requestId }, smsClient).catch(() => {
       job.smsAutoStopped = true;
-      appendJobLog(job, `[sms] ${providerName} 号码释放请求失败，已暂停自动换号，请在平台控制台检查订单。\n`);
+      appendJobLog(job, `[sms] ${providerName} 号码取消请求未完成，已暂停自动换号并保留记录，后台继续重试取消。\n`);
     }).finally(() => {
       if (job.smsReleasePending === pending) {
         job.smsReleasePending = null;
@@ -4084,6 +4187,7 @@ async function submitJobInput(job, body, options = {}) {
 
 async function cancelJob(job) {
   if (!isActive(job.status)) return;
+  if (job.status === "mfa_otp" || job.awaitingMfa) pauseAutomaticLogin(job, "mfa_failed");
   if (job.webLoginPreviousState && (job.runMode === "web_login" || job.queuedMode === "web_login")) {
     job.runId = null;
     job.child?.kill("SIGTERM");
@@ -4127,7 +4231,7 @@ async function cancelJob(job) {
   stopMailPolling(job);
   releaseSmsNumber(job, "idle");
   if (!shuttingDown) job.webSessionMaintenancePause = { reason: "canceled", at: new Date().toISOString() };
-  const mfaPending = job.status === "mfa_otp";
+  const mfaPending = job.status === "mfa_otp" || job.awaitingMfa === true;
   job.status = mfaPending ? "mfa_failed" : "canceled";
   job.prompt = mfaPending ? "2FA 未通过，流程已停止" : "流程已取消";
   if (mfaPending) job.lastError = "任务在 2FA 验证阶段停止，验证码未完成校验";
@@ -4849,6 +4953,7 @@ function publicTaskSettings(includeProxy = true) {
   return {
     maxActiveJobs,
     loginTimeoutMinutes,
+    smsTimeoutMinutes,
     ...(includeProxy ? { proxyUrl: globalProxyUrl || "" } : {}),
     accountProxyMode,
     codexAuthMode,
@@ -4871,6 +4976,7 @@ async function loadTaskSettings() {
     const saved = JSON.parse(await fs.readFile(TASK_SETTINGS_PATH, "utf8"));
     maxActiveJobs = validateMaxActiveJobs(saved.maxActiveJobs);
     loginTimeoutMinutes = normalizeLoginTimeoutMinutes(saved.loginTimeoutMinutes);
+    smsTimeoutMinutes = normalizeSmsTimeoutMinutes(saved.smsTimeoutMinutes);
     taskAutoActions = normalizeTaskAutoActions(saved.autoActions);
     globalProxyUrl = saved.proxyUrl ? normalizeProxyUrl(saved.proxyUrl) : null;
     allowDirectFallback = saved.allowDirectFallback === true;
@@ -4890,6 +4996,10 @@ async function loadTaskSettings() {
 
 async function saveTaskSettings(body) {
   const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  if (Object.hasOwn(source, "smsTimeoutMinutes")) {
+    try { normalizeSmsTimeoutMinutes(source.smsTimeoutMinutes); }
+    catch (error) { throw httpError(400, error.message); }
+  }
   if (Object.hasOwn(source, "loginTimeoutMinutes")) {
     try { normalizeLoginTimeoutMinutes(source.loginTimeoutMinutes); }
     catch (error) { throw httpError(400, error.message); }
@@ -4944,6 +5054,7 @@ async function saveTaskSettings(body) {
     const nextFingerprint = fingerprintPatch ? normalizeFingerprintSettings({ ...modelFingerprint.settings, ...fingerprintPatch }) : null;
     const effectiveLimit = Object.hasOwn(source, "maxActiveJobs") ? nextLimit : maxActiveJobs;
     const effectiveLoginTimeout = Object.hasOwn(source, "loginTimeoutMinutes") ? normalizeLoginTimeoutMinutes(source.loginTimeoutMinutes) : loginTimeoutMinutes;
+    const effectiveSmsTimeout = Object.hasOwn(source, "smsTimeoutMinutes") ? normalizeSmsTimeoutMinutes(source.smsTimeoutMinutes) : smsTimeoutMinutes;
     const effectiveAutoActions = Object.hasOwn(source, "autoActions") ? nextAutoActions : taskAutoActions;
     const effectiveProxyUrl = Object.hasOwn(source, "proxyUrl") ? nextProxyUrl : globalProxyUrl;
     const effectiveFallback = Object.hasOwn(source, "allowDirectFallback") ? nextAllowDirectFallback : allowDirectFallback;
@@ -4958,6 +5069,7 @@ async function saveTaskSettings(body) {
         version: 2,
         maxActiveJobs: effectiveLimit,
         loginTimeoutMinutes: effectiveLoginTimeout,
+        smsTimeoutMinutes: effectiveSmsTimeout,
         autoActions: Object.fromEntries(Object.entries(effectiveAutoActions).map(([key, actions]) => [key, [...actions]])),
         proxyUrl: effectiveProxyUrl || "",
         allowDirectFallback: effectiveFallback,
@@ -4979,6 +5091,7 @@ async function saveTaskSettings(body) {
     }
     maxActiveJobs = effectiveLimit;
     loginTimeoutMinutes = effectiveLoginTimeout;
+    smsTimeoutMinutes = effectiveSmsTimeout;
     loginTimeouts.reschedule();
     taskAutoActions = effectiveAutoActions;
     globalProxyUrl = effectiveProxyUrl;
@@ -7247,8 +7360,48 @@ function isAutoRepairCoolingDown(job) {
   return Date.now() - new Date(job.autoRepairLastAttemptAt).getTime() < monitoringSettings.poolRepairRetrySeconds * 1000;
 }
 
+function codexMonitoringAllowed(job) {
+  const state = getSub2ApiAccountStatusForJob(job);
+  return !accountAutomationBlocked(job.email) && state.inPool === true && state.enabled === true;
+}
+async function assertCodexMonitoringAllowed(job) {
+  await loadSub2ApiAccountStatus({ forceRefresh: true });
+  if (!codexMonitoringAllowed(job)) throw httpError(409, "账号需先加入 Sub2API 号池并启用，才能开启 Codex 检测");
+}
+
+function accountLoginPause(job) {
+  const entries = [...jobs.values()].filter(j => !j.deleted && j.email.toLowerCase() === job.email.toLowerCase());
+  return entries.map(j => normalizeLoginAutomationPause(j.loginAutomationPause)).find(p => p?.reason === "mfa_failed")
+    || entries.map(j => normalizeLoginAutomationPause(j.loginAutomationPause)).find(Boolean) || null;
+}
+function automaticLoginBlocked(job, kind) {
+  return loginAutomationBlocked(accountLoginPause(job), kind);
+}
+function pauseAutomaticLogin(job, reason) {
+  const old = accountLoginPause(job);
+  const pause = old?.reason === "mfa_failed" || old?.reason === reason ? old : { reason, at: new Date().toISOString() };
+  for (const related of jobs.values()) {
+    if (related.deleted || related.email.toLowerCase() !== job.email.toLowerCase()) continue;
+    if (JSON.stringify(related.loginAutomationPause) === JSON.stringify(pause)) continue;
+    related.loginAutomationPause = pause;
+    if (reason === "phone_unverified") related.phoneVerificationPending = true;
+    appendJobLog(related, `[login-pause] ${loginAutomationPauseMessage(pause)}\n`);
+    void saveJobMetadata(related).catch(() => {});
+  }
+}
+function clearAutomaticLoginPause(job) {
+  for (const related of jobs.values()) {
+    if (related.deleted || related.email.toLowerCase() !== job.email.toLowerCase()) continue;
+    related.loginAutomationPause = null;
+    related.awaitingMfa = false;
+    related.phoneVerificationPending = false;
+    void saveJobMetadata(related).catch(() => {});
+  }
+}
+
 function getAutoRepairEligibility(job) {
   if (job.autoRepairBlocked) return { eligible: false, reason: "账号已确认封禁、删除或永久停用" };
+  if (automaticLoginBlocked(job, "oauth")) return { eligible: false, reason: loginAutomationPauseMessage(accountLoginPause(job)) };
   if (!job.lastAuthAutomated) return { eligible: false, reason: job.lastAuthAutomationReason || "上次授权不是全自动完成" };
   const requirements = job.lastAuthRequirements || {};
   if (requirements.password && !job.password) return { eligible: false, reason: "已保存的密码无法读取" };
@@ -7436,6 +7589,9 @@ function publicJob(job) {
   const autoRepair = getAutoRepairEligibility(job);
   const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
   const blocked = accountAutomationBlocked(job.email);
+  const codexEligible = !blocked && sub2ApiStatus.inPool === true && sub2ApiStatus.enabled === true;
+  const overloadState = overloadMonitor.snapshot(job.email), cooldownState = overloadCooldown.snapshot(job.email);
+  const fingerprintState = modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown");
   return {
     id: job.id,
     email: job.email,
@@ -7462,15 +7618,18 @@ function publicJob(job) {
     sub2apiRemoteStatus: sub2ApiStatus.remoteStatus,
     sub2apiPlanType: sub2ApiStatus.planType,
     sub2apiUsage: publicSub2ApiUsage(sub2ApiStatus.usage),
-    overloadDetection: overloadMonitor.snapshot(job.email),
-    overloadAutoCooldown: overloadCooldown.snapshot(job.email),
-    modelFingerprint: modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown"),
+    codexStatusEligible: codexEligible,
+    overloadDetection: { ...overloadState, enabled: codexEligible && overloadState.enabled },
+    overloadAutoCooldown: { ...cooldownState, enabled: codexEligible && cooldownState.enabled },
+    modelFingerprint: { ...fingerprintState, enabled: codexEligible && fingerprintState.enabled },
     lastError: oauthErrorMessage(job.lastError),
     canDownload: Boolean(job.resultSaved),
     poolOnly: Boolean(job.poolOnly),
     loginMode: job.loginMode || (job.mailApiUrl ? "email_otp" : "manual"),
     hasTotpKey: hasJobTotpKey(job),
     securityState: publicSecurityState(job),
+    loginAutomationPause: accountLoginPause(job),
+    phoneVerificationPending: job.phoneVerificationPending === true,
     autoEmailOtp: Boolean(job.mailApiUrl),
     mailStatus: job.mailStatus,
     mailApiError: job.mailApiError,
@@ -7489,6 +7648,7 @@ function publicJob(job) {
     smsProviderName: job.smsProviderName,
     smsServiceLabel: job.smsServiceLabel,
     smsStatus: job.smsStatus,
+    smsPendingCancellationCount: smsCancellations.count(job.id),
     smsError: job.smsError,
     securityCheckRequired: Boolean(job.securityCheckRequired),
     canRetry: ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
@@ -7860,6 +8020,7 @@ function failJob(job, message) {
 }
 
 function markMfaFailed(job, reason = "2FA 验证未完成") {
+  pauseAutomaticLogin(job, "mfa_failed");
   stopMailPolling(job);
   releaseSmsNumber(job, "idle");
   job.status = "mfa_failed";
@@ -8068,6 +8229,7 @@ function assertAccountWebActionsAllowed(job) {
 
 function webSessionRepairRetryAt(job) {
   if (!webSessionMonitorSettings.enabled || !webSessionMonitorSettings.autoRelogin || accountAutomationBlocked(job.email)
+    || automaticLoginBlocked(job, "web")
     || job.webSessionMaintenancePause || job.webLoginPreviousState || (!["expired", "absent"].includes(job.webSessionStatus) && !job.webLoginError)) return null;
   const entry = webSessionMonitor.accounts[job.email.toLowerCase()];
   if (!entry?.repairReason || entry.webRecoveryPending) return null;
@@ -8154,6 +8316,7 @@ async function runPoolRefresh(job) {
     await synchronizePoolRefresh(job);
     return;
   }
+  if (automaticLoginBlocked(job, "oauth")) return;
   if (job.poolRefreshAction === "cooldown" && job.poolRefreshDueAt) {
     const remaining = Date.parse(job.poolRefreshDueAt) - Date.now();
     if (remaining > 0) {
@@ -8164,10 +8327,10 @@ async function runPoolRefresh(job) {
       schedulePoolRefresh(job, 60_000);
       return;
     }
-    await forceReloginJob(job, {}, { poolRefreshAction: "cooldown" });
+    await forceReloginJob(job, {}, { poolRefreshAction: "cooldown", automatic: true });
     await saveJobMetadata(job);
   } else if (!job.poolRefreshReady && !job.poolRefreshError && canForceRelogin(job)) {
-    await forceReloginJob(job, {}, { poolRefreshAction: job.poolRefreshAction });
+    await forceReloginJob(job, {}, { poolRefreshAction: job.poolRefreshAction, automatic: true });
     await saveJobMetadata(job);
   }
 }
@@ -9617,6 +9780,7 @@ async function runConfiguredUploadAction(job) {
 }
 
 async function runConfiguredRotateAndUploadAction(job) {
+  if (automaticLoginBlocked(job, "oauth")) throw new Error(loginAutomationPauseMessage(accountLoginPause(job)));
   const config = sub2ApiSettingsConfig;
   if (!config?.baseUrl || !config?.adminApiKey) throw new Error("尚未配置 Sub2API 后端地址和管理员 API Key");
   await withEmailJobLock(job.email, async () => {
@@ -9629,7 +9793,7 @@ async function runConfiguredRotateAndUploadAction(job) {
   });
   await withEmailJobLock(job.email, async () => {
     if (!canForceRelogin(job)) throw new Error("轮换 2FA 后账号当前不能重新授权");
-    await forceReloginJob(job, {});
+    await forceReloginJob(job, {}, { automatic: true });
   });
   await waitForConfiguredTaskJob(job, isReauthorizationComplete, "重新授权");
   // The login completion already synchronizes fresh credentials to the pool
@@ -9797,6 +9961,10 @@ async function saveJobMetadata(job) {
         has_stored_credentials: Boolean(job.password || job.totpSecret),
         has_password: Boolean(job.password || job.hasPasswordCredential),
         security_state: publicSecurityState(job),
+        login_automation_pause: accountLoginPause(job),
+        phone_verification_pending: job.phoneVerificationPending === true,
+        phone_verified_at: job.phoneVerifiedAt || null,
+        login_waiting_mfa: job.awaitingMfa === true,
         password_manual_override: Boolean(job.passwordManualOverride),
         password_replace_existing: Boolean(job.passwordReplaceExisting),
         has_totp_key: hasJobTotpKey(job),
@@ -10180,6 +10348,7 @@ async function shutdown() {
       .filter(Boolean)
       .map((child) => waitForChildExit(child, 3_000));
     await Promise.allSettled(activeJobs.map((job) => cancelJob(job)));
+    await smsCancellations.stop();
     await Promise.allSettled([
       ...childWaits,
       ...[...jobs.values()].map((job) => job.metadataWritePromise).filter(Boolean),

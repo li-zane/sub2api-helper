@@ -206,7 +206,12 @@ process.disconnect();
   // 503 while refreshing a Web token must NOT initiate a login or alter binding.
   authStatus = 503;
   await api("/api/task-settings", { webSessionMonitor: { enabled: true, autoRelogin: true, intervalMinutes: 15, retryMinutes: 60 } });
-  await api("/api/web-session-monitor/check", {});
+  // A startup settings-triggered scan may still be finishing admission. Wait
+  // for an actual probe rather than assuming its empty snapshot is a result.
+  await wait(async () => {
+    await api("/api/web-session-monitor/check", {});
+    return (await api("/api/web-session-monitor")).body.accounts[email]?.status === "check_failed";
+  });
   assert.equal((await api("/api/web-session-monitor")).body.accounts[email].status, "check_failed");
   assert.equal(await fs.stat(traceFile).then(() => true, () => false), false);
   assert.equal(remoteAccount.proxy_id, stableOAuth || samePlanSpace || pendingOAuth ? 0 : 1);

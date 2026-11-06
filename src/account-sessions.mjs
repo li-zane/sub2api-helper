@@ -48,9 +48,27 @@ export async function listAccountWorkspaces(job, { forceWebRefresh = false, refr
 }
 
 export async function readAccountSecurityState(job) {
-  const result = await requestWithWebSession(job, "GET", "/accounts/mfa_info", undefined, { refreshOnUnauthorized: false });
-  const state = normalizeSecurityState({ ...result.data, checkedAt: new Date().toISOString() });
-  if (state.totpEnabled === null && state.passwordEnabled === null) throw new Error("SECURITY_STATE_UNAVAILABLE: 上游未返回可确认的安全状态");
+  const state = normalizeSecurityState();
+  const checkedAt = new Date().toISOString();
+  let firstError;
+  try {
+    const { data } = await requestWithWebSession(job, "GET", "/accounts/mfa_info", undefined, { refreshOnUnauthorized: false });
+    state.totpEnabled = normalizeSecurityState(data).totpEnabled;
+    if (state.totpEnabled !== null) state.totpCheckedAt = checkedAt;
+  } catch (error) { firstError = error; }
+  try {
+    const { data } = await requestWithWebSession(job, "GET", "/accounts/change_password/eligibility", undefined, { refreshOnUnauthorized: false });
+    if (data?.eligible === true) state.passwordEnabled = true;
+    else if (data?.eligible === false) {
+      // The live security page also checks Add: both false can mean SSO or
+      // restricted eligibility, not proof that a password does not exist.
+      const add = await requestWithWebSession(job, "GET", "/accounts/add_password/eligibility", undefined, { refreshOnUnauthorized: false });
+      if (add.data?.eligible === true) state.passwordEnabled = false;
+    }
+    if (state.passwordEnabled !== null) state.passwordCheckedAt = checkedAt;
+  } catch (error) { firstError ||= error; }
+  if (state.totpEnabled === null && state.passwordEnabled === null) throw firstError || new Error("SECURITY_STATE_UNAVAILABLE: 上游未返回可确认的安全状态");
+  state.checkedAt = checkedAt;
   return state;
 }
 

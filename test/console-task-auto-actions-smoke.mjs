@@ -58,6 +58,7 @@ try {
     version: 2,
     maxActiveJobs: 6,
     loginTimeoutMinutes: 3,
+    smsTimeoutMinutes: 10,
     proxyUrl: "",
     allowDirectFallback: false,
     accountProxyMode: "global",

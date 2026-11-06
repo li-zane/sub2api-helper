@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import { normalizeLoginAutomationPause, loginAutomationBlocked } from "../src/login-automation-pause.mjs";
+import { codexStatusEligible } from "../web/src/codex-eligibility.mjs";
+assert.equal(loginAutomationBlocked(null), false);
+assert.equal(loginAutomationBlocked({ reason: "phone_unverified" }, "oauth"), true);
+assert.equal(loginAutomationBlocked({ reason: "phone_unverified" }, "web"), false);
+for (const kind of ["oauth", "web"]) assert.equal(loginAutomationBlocked({ reason: "mfa_failed" }, kind), true);
+assert.equal(normalizeLoginAutomationPause({ reason: "unknown" }), null);
+assert.equal(codexStatusEligible({ sub2apiInPool: true, sub2apiEnabled: true }), true);
+for (const j of [{}, { sub2apiInPool: true }, { sub2apiEnabled: true }, { sub2apiInPool: true, sub2apiEnabled: false }, { sub2apiInPool: true, sub2apiEnabled: true, status: "banned" }]) assert.equal(codexStatusEligible(j), false);
+console.log("LOGIN_PAUSE_PASS MFA blocks Web+OAuth; phone blocks OAuth only; unknown never enabled; Codex requires confirmed pool membership+enabled");

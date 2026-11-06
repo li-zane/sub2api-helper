@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { LoginTimeouts } from "../src/login-timeout.mjs";
-import { normalizeLoginTimeoutMinutes } from "../web/src/login-settings.mjs";
+import { normalizeLoginTimeoutMinutes, normalizeSmsTimeoutMinutes } from "../web/src/login-settings.mjs";
 
 assert.equal(normalizeLoginTimeoutMinutes(), 3);
 for (const value of [0, 1441, 1.5, null, "3", false, NaN, Infinity]) assert.throws(() => normalizeLoginTimeoutMinutes(value));
@@ -26,3 +26,21 @@ clock.pause(job); tick(3600000); clock.resume(job, "full"); oldPhase();
 assert.equal(expired.length, 2, "stale timer crossed a queue pause");
 tick(3719999); assert.equal(expired.length, 2); tick(3720000); assert.equal(expired.length, 3, "automatic retry received a fresh budget");
 console.log("LOGIN_TIMEOUT_PASS default 3 minutes; strict validation; exact deadline; no stage reset; live grow/shrink; stale attempt isolation; completion/cancel/shutdown cleanup");
+
+assert.equal(normalizeSmsTimeoutMinutes(), 10);
+for (const v of [0, 1441, 1.5, null, "10", true]) assert.throws(() => normalizeSmsTimeoutMinutes(v));
+now = 0; minutes = 3; let smsMinutes = 10;
+const smsClock = new LoginTimeouts({ getMinutes: () => minutes, getSmsMinutes: () => smsMinutes, now: () => now,
+  onTimeout: (j, e) => expired.push({ id: j.id, phase: e.phase }),
+  setTimer: (fn, delay) => { const id = ++nextId; timers.set(id, { fn, due: now + delay }); return id; }, clearTimer: id => timers.delete(id) });
+smsClock.start(job, "full"); tick(120000); const loginTimer = [...timers.values()][0].fn;
+assert.equal(smsClock.enterSms(job), true); assert.equal(smsClock.remaining(job), 600000); loginTimer();
+const before = expired.length; tick(300000); assert.equal(expired.length, before);
+assert.equal(smsClock.enterSms(job), false); assert.equal(smsClock.remaining(job), 420000);
+minutes = 1; smsClock.reschedule(); tick(400000); assert.equal(expired.length, before, "login settings switched SMS phase back");
+smsClock.pause(job); tick(900000); smsClock.resume(job, "full");
+assert.equal(smsClock.entries.get(job.id).phase, "sms"); assert.equal(smsClock.remaining(job), 320000);
+tick(1219999); assert.equal(expired.length, before); tick(1220000); assert.equal(expired.at(-1).phase, "sms");
+now=0; smsClock.start(job,"full"); smsClock.enterSms(job); tick(60000); smsMinutes=2; smsClock.reschedule(); tick(120000);
+assert.equal(expired.at(-1).phase,"sms"); smsClock.close();
+console.log("SMS_DEADLINE_PASS default10; one-time latch; no return after OTP; no resend/replacement reset; queue pause; live setting changes preserve phase; canceled login callbacks cannot expire SMS");

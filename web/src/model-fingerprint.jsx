@@ -1,3 +1,4 @@
+import { codexStatusEligible } from "./codex-eligibility.mjs";
 import { CustomSelect } from "./custom-select.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { Activity, Check, ChevronDown, RefreshCw, Settings2, X } from "lucide-react";
@@ -396,9 +397,11 @@ export function ModelFingerprintCell({ job, token, onError }) {
   const [checkPending, setCheckPending] = useState(false);
   const requestPending = useRef(false);
   useEffect(() => setState(job.modelFingerprint), [job.modelFingerprint]);
+  const eligible = codexStatusEligible(job);
+  const effectiveEnabled = eligible && state?.enabled === true;
   if (!state) return <span className="muted">—</span>;
   async function update(body, check = false) {
-    if (requestPending.current || check && ["running", "queued"].includes(state.phase)) return;
+    if (!eligible || requestPending.current || check && ["running", "queued"].includes(state.phase)) return;
     requestPending.current = true;
     setBusy(true); setCheckPending(check); setError(""); try { const result = await api(token, `/api/jobs/${job.id}/model-fingerprint${check ? "/check" : ""}`, body); setState(result.job.modelFingerprint); if (!check) setEditing(false); } catch (e) { setError(e.message); onError?.(e.message); } finally { requestPending.current = false; setBusy(false); setCheckPending(false); }
   }
@@ -407,20 +410,20 @@ export function ModelFingerprintCell({ job, token, onError }) {
   const recent = (state.recentResults || (result || state.previousResult ? [result || state.previousResult] : [])).slice(0, 6).reverse();
   const rounds = [...Array(6 - recent.length).fill(null), ...recent];
   const checking = state.phase === "running" || state.phase === "queued";
-  return <div className={`fingerprint-cell-body${state.enabled ? "" : " is-disabled"}`}>
+  return <div className={`fingerprint-cell-body${effectiveEnabled ? "" : " is-disabled"}`}>
     <div className="fingerprint-cell-actions">
       <div className="overload-control fingerprint-toggle-control"><span>降智</span>
-      <button type="button" role="switch" aria-checked={state.enabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${state.enabled ? "on" : ""}`} disabled={!token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
+      <button type="button" role="switch" aria-checked={effectiveEnabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${effectiveEnabled ? "on" : ""}`} disabled={!eligible || !token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
       </div>
       <div className="fingerprint-action-pair">
-      <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={state.phase === "queued" ? "排队中" : checking || checkPending ? "正在检测" : "立即检测"} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models.length || !job.sub2apiInPool} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
-      <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title="独立降智检测设置" onClick={open}><Settings2 size={14} /></button>
+      <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={state.phase === "queued" ? "排队中" : checking || checkPending ? "正在检测" : "立即检测"} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models.length || !eligible} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
+      <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title={eligible ? "独立降智检测设置" : "账号需先加入号池并启用"} disabled={!eligible || !token} onClick={open}><Settings2 size={14} /></button>
       </div>
     </div>
     <div className="fingerprint-rounds" role="group" aria-label={`${job.email} 最近 6 轮检测结果`}>
       {rounds.map((round, index) => {
         const status = !round ? "empty" : round.status === "match" ? "match" : round.status === "mismatch" ? "mismatch" : "error";
-        const label = `${state.enabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${new Date(round.checkedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`}`;
+        const label = `${effectiveEnabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${new Date(round.checkedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`}`;
         return <button key={round?.checkedAt || `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
       })}
     </div>

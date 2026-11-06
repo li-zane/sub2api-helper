@@ -12,7 +12,7 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-overload-http-"));
 const output = path.join(temp, "output");
 const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
 const emails = ["overload@example.test", "paused@example.test"];
-const records = [7, 8, 9].map((id, index) => ({ id, platform: "openai", type: "oauth", name: emails[index === 2 ? 1 : 0], status: "active", credentials: { email: emails[index === 2 ? 1 : 0] }, extra: {}, group_ids: [] }));
+const records = [7, 8, 9].map((id, index) => ({ id, platform: "openai", type: "oauth", name: emails[index === 2 ? 1 : 0], status: "active", schedulable: true, credentials: { email: emails[index === 2 ? 1 : 0] }, extra: {}, group_ids: [] }));
 const counts = [0, 2, 5, 1, 3, 0];
 const requestCounts = [198, 204, 210, 202, 196, 200];
 const logRequests = [];
@@ -183,6 +183,22 @@ try {
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.equal((await job(ids[1])).overloadAutoCooldown.enabled, false);
+  for (const row of records) row.schedulable = false;
+  const gatingRoutes = ["overload-detection", "overload-auto-cooldown", "model-fingerprint", "model-fingerprint/check"];
+  for (const route of gatingRoutes) {
+    const r = await fetch(`${base}/api/jobs/${ids[0]}/${route}`, { method: "POST", headers, body: JSON.stringify({ enabled: true }) });
+    assert.equal(r.status, 409, "disabled pool account accepted " + route);
+  }
+  const disabled = await job();
+  assert.equal(disabled.codexStatusEligible, false); assert.equal(disabled.overloadAutoCooldown.enabled, false); assert.equal(disabled.overloadDetection.enabled, false); assert.equal(disabled.modelFingerprint.enabled, false);
+  const originals = records.splice(0, records.length);
+  await toggle(true, { expected: 409 });
+  assert.equal((await job()).sub2apiInPool, false);
+  records.push(...originals); for (const row of records) row.schedulable = true;
+  await fetch(`${base}/api/sub2api/account-status?refresh=1`, { headers });
+  assert.equal((await job()).codexStatusEligible, true);
+  assert.equal((await job()).overloadAutoCooldown.enabled, true, "pool gating erased stored cooldown preference");
+  console.log("CODEX_GATE_HTTP_PASS disabled/missing pool account rejects overload/cooldown/fingerprint/check; public effective switches off; re-enable retains stored preferences");
   console.log("PASS: overload HTTP counts/history; PlanType presets auto-enable cooldown and detection independently; imported-account isolation, durable per-account switch and restart recovery");
   if (process.argv.includes("--serve")) {
     const metadata = { url: base, output, emails, ids };

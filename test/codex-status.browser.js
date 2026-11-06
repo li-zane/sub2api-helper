@@ -16,7 +16,7 @@ async (page) => {
   await page.route('**/api/sub2api/account-status*', route => route.fulfill({ json: { configured: false, accounts: {} } }));
   await page.route(/\/api\/jobs(?:\?|$)/, async route => {
     const response = await route.fetch(), data = await response.json();
-    data.jobs = data.jobs.map((job, i) => ({ ...job, status: 'completed', autoRepairBlocked: false, sub2apiInPool: true, sub2apiEnabled: true, sub2apiPriority: 3,
+    data.jobs = data.jobs.map((job, i) => ({ ...job, status: 'completed', autoRepairBlocked: false, sub2apiInPool: i !== 8, sub2apiEnabled: i !== 7, sub2apiPriority: 3,
       lastOperationType: 'relogin', lastOperationAt: '2026-11-05T04:05:06Z', createdAt: '2026-11-01T01:02:03Z',
       overloadDetection: { ...detectionState(), enabled: i === 4 ? false : overload, points: i === 3 ? points.map(p => ({ ...p, count: null })) : points },
       overloadAutoCooldown: { ...cooldownState(), windowCount: i === 1 ? 0 : i === 2 ? 5 : i === 3 ? null : 2 },
@@ -140,6 +140,18 @@ async (page) => {
     await row.locator('.fingerprint-round').last().click();
     await page.getByRole('dialog').getByText('指纹一致', { exact: true }).waitFor();
     await page.keyboard.press('Escape');
+  });
+  await run('codex-controls-require-pool-enabled-and-member', async () => {
+    for (const i of [7, 8]) {
+      const cell = rows.nth(i).locator('.codex-status-cell');
+      for (const control of await cell.getByRole('switch').all()) {
+        check(await control.isDisabled(), 'pool-disabled/missing switch remained interactive');
+        check(await control.getAttribute('aria-checked') === 'false', 'pool gate left switch visibly on');
+      }
+      check(await cell.locator('.fingerprint-check-button').isDisabled(), 'manual sample allowed for disabled/missing pool row');
+      check(await cell.getByRole('button', { name: /独立降智检测设置/ }).isDisabled(), 'settings allowed before pool enabled');
+      check(await cell.locator('.fingerprint-cell-body.is-disabled').count() === 1, 'disabled fingerprint did not use existing gray state');
+    }
   });
   await run('desktop-mobile-identity-console-and-screenshots', async () => {
     check(page.url() === initialUrl && (await page.title()).length > 0, 'wrong page identity');

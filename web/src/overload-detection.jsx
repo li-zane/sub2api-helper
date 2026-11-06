@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useMemo } from "react";
 import { buildOverloadChart } from "./overload-chart.mjs";
 import { overloadDashboard, overloadEnergy } from "./codex-dashboard.mjs";
+import { codexStatusEligible } from "./codex-eligibility.mjs";
 
 function intervalLabel(point) {
   const format = (value) => new Date(value).toLocaleString("zh-CN", {
@@ -43,13 +44,14 @@ export function OverloadDetection({ job, token, onError }) {
   // Keep the latest switch revision even after its poll acknowledgement: an older
   // request may still complete later and must never undo the visible saved state.
   const detection = saved && (saved.revision ?? 0) > (source?.revision ?? -1) ? saved : source || saved;
-  const enabled = detection?.enabled === true;
+  const eligible = codexStatusEligible(job);
+  const enabled = eligible && detection?.enabled === true;
   const cooldownSource = job.overloadAutoCooldown;
   useEffect(() => {
     if (cooldownSource) setSavedCooldown(current => !current || cooldownSource.revision >= current.revision ? cooldownSource : current);
   }, [cooldownSource?.revision, cooldownSource?.settings]);
   const cooldown = savedCooldown && (savedCooldown.revision ?? 0) > (cooldownSource?.revision ?? -1) ? savedCooldown : cooldownSource || savedCooldown;
-  const cooldownEnabled = cooldown?.enabled === true;
+  const cooldownEnabled = eligible && cooldown?.enabled === true;
   const points = detection?.points || [];
   const dashboard = useMemo(() => overloadDashboard(detection, cooldown), [detection, cooldown]);
   const { positioned, overloadSegments, requestSegments } = useMemo(() => buildOverloadChart(points), [points]);
@@ -58,7 +60,7 @@ export function OverloadDetection({ job, token, onError }) {
     detection?.requestError ? `请求统计：${detection.requestError}` : null].filter(Boolean).join("；");
 
   async function toggle() {
-    if (busy) return;
+    if (busy || !eligible) return;
     setBusy(true);
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/overload-detection`, {
@@ -74,7 +76,7 @@ export function OverloadDetection({ job, token, onError }) {
   }
 
   async function toggleCooldown() {
-    if (cooldownBusy) return;
+    if (cooldownBusy || !eligible) return;
     setCooldownBusy(true);
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/overload-auto-cooldown`, {
@@ -97,13 +99,13 @@ export function OverloadDetection({ job, token, onError }) {
         aria-label={`${job.email} 过载检测`} aria-busy={busy}
         title={detection?.configured ? (enabled ? "停止过载检测" : "开启过载检测") : "请先配置 Sub2API 后端"}
         className={`overload-switch ${enabled ? "enabled" : "disabled"}`}
-        disabled={busy || !token || (!detection?.configured && !enabled)} onClick={toggle}
+        disabled={!eligible || busy || !token || (!detection?.configured && !enabled)} onClick={toggle}
       ><span aria-hidden="true" /></button>
       </div>
       <div className="overload-control cooldown-toggle-control"><span>冷却</span><button type="button" role="switch" aria-checked={cooldownEnabled} aria-busy={cooldownBusy}
         aria-label={`${job.email} 自动冷却`} className={`overload-switch ${cooldownEnabled ? "enabled" : "disabled"}`}
         title={cooldown?.configured ? (cooldownEnabled ? "关闭自动冷却，并恢复本功能暂停的账号" : "开启过载自动冷却") : "请先配置 Sub2API 后端"}
-        disabled={cooldownBusy || !token || (!cooldown?.configured && !cooldownEnabled)} onClick={toggleCooldown}><span aria-hidden="true" /></button></div>
+        disabled={!eligible || cooldownBusy || !token || (!cooldown?.configured && !cooldownEnabled)} onClick={toggleCooldown}><span aria-hidden="true" /></button></div>
       </div>
       <div className="overload-chart-status">
       <div className="overload-dashboard overload-chart">

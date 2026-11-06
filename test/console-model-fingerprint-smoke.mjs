@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-fingerprint-console-")), output = path.join(temp, "output");
 let child, headers, logs = "", samples = 0;
@@ -33,7 +33,7 @@ const inference = http.createServer(async (req, res) => {
 await Promise.all([listen(pool), listen(inference)]);
 const port = await freePort(), base = `http://127.0.0.1:${port}`;
 async function start() {
-  child = spawn(process.execPath, ["src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: temp, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_FINGERPRINT_TEST_URL: `http://127.0.0.1:${inference.address().port}/responses`, SUB2API_MONITOR_ENABLED: "0" } });
+  child = spawn(process.execPath, ["--import", pathToFileURL(path.join(root, "test/fingerprint-console-reference-loader.mjs")).href, "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: temp, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_FINGERPRINT_TEST_URL: `http://127.0.0.1:${inference.address().port}/responses`, SUB2API_MONITOR_ENABLED: "0" } });
   child.stdout.on("data", c => logs += c); child.stderr.on("data", c => logs += c);
   await waitFor(async () => { try { const r = await fetch(base + "/api/bootstrap"); const b = await r.json(); headers = { "x-console-token": b.token, "content-type": "application/json" }; return b.features.modelFingerprint; } catch { return false; } });
 }
@@ -54,7 +54,7 @@ try {
   const started = await post(`/api/jobs/${job.id}/model-fingerprint/check`, {}); assert.equal(started.status, 202, JSON.stringify(started.data));
   let checked;
   await waitFor(async () => { const data = await get('/api/jobs'); checked = { data: { job: data.jobs.find(j => j.id === job.id) } }; return checked.data.job.modelFingerprint.phase === 'idle' && checked.data.job.modelFingerprint.result; });
-  assert.equal(samples, 6, "two requested models receive three individual SDK prompts each");
+  assert.equal(samples, 6, "two requested models receive three individual SDK prompts each: " + JSON.stringify({ error: checked.data.job.modelFingerprint.lastError, result: checked.data.job.modelFingerprint.result?.failure, models: checked.data.job.modelFingerprint.result?.models?.map(m => ({ error: m.error, failure: m.failure })) }));
   assert.equal(checked.data.job.modelFingerprint.result.models.length, 2);
   assert.equal(checked.data.job.modelFingerprint.result.status, "unknown", "non-model numeric fixtures are not treated as genuine identity evidence");
   assert(!JSON.stringify(checked.data).includes("private-fixture-token"));

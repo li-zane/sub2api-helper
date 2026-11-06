@@ -66,7 +66,8 @@ try {
   assert(off(banned), "all banned account switches must be explicitly disabled");
   assert.equal((await job(2)).autoRepairBlocked, false, "403 must not imply a permanent ban");
   assert.equal((await job(3)).autoRepairBlocked, false, "workspace deactivation must not imply an account ban");
-  assert.equal((await job(2)).overloadDetection.enabled, true, "unrelated account settings preserved");
+  assert.equal((await job(2)).overloadDetection.enabled, false, "unpooled account is effectively disabled");
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, "overload-monitor.json"), "utf8")).accounts[emails[2]].enabled, true, "unrelated stored preference preserved");
   for (const suffix of ["overload-detection", "overload-auto-cooldown", "model-fingerprint"]) assert.equal((await api(`/api/jobs/${ids[0]}/${suffix}`, { enabled: true })).status, 409);
   assert.equal((await api(`/api/jobs/${ids[0]}/model-fingerprint/check`, {})).status, 409);
   const checked = await api("/api/web-session-monitor/check", {});
