@@ -12,9 +12,12 @@ const npmCli = process.env.npm_execpath || path.join(path.dirname(process.execPa
 const npxCli = path.join(path.dirname(npmCli), "npx-cli.js");
 await fs.access(npxCli);
 const listener = http.createServer();
-await new Promise(resolve => listener.listen(0, "127.0.0.1", resolve));
-const port = listener.address().port;
-await new Promise(resolve => listener.close(resolve));
+let port;
+do {
+  await new Promise(resolve => listener.listen(0, "127.0.0.1", resolve));
+  port = listener.address().port;
+  await new Promise(resolve => listener.close(resolve));
+} while (port <= 10080);
 const base = `http://127.0.0.1:${port}`;
 const session = `ui-regression-${process.pid}`;
 const fixture = spawn(process.execPath, ["test/ui-fixture-server.mjs"], {
@@ -45,16 +48,17 @@ try {
   if (!ready) throw new Error(`UI fixture did not start\n${logs}`);
   await cli(["open", base]);
   await cli(["snapshot"]);
-  const scriptPath = process.env.UI_TEST_SCRIPT || (process.argv.includes("--antigravity-review") ? "test/antigravity-review.browser.js" : process.argv.includes("--codex-status") ? "test/codex-status.browser.js" : process.argv.includes("--account-usage") ? "test/account-usage-ui.browser.js" : process.argv.includes("--recent-operation") ? "test/recent-operation.browser.js" : "test/ui-regressions.browser.js");
+  const scriptPath = process.env.UI_TEST_SCRIPT || (process.argv.includes("--frontend-components") ? "test/frontend-components.browser.js" : process.argv.includes("--frontend-performance") ? "test/frontend-performance.browser.js" : process.argv.includes("--antigravity-review") ? "test/antigravity-review.browser.js" : process.argv.includes("--codex-status") ? "test/codex-status.browser.js" : process.argv.includes("--account-usage") ? "test/account-usage-ui.browser.js" : process.argv.includes("--recent-operation") ? "test/recent-operation.browser.js" : "test/ui-regressions.browser.js");
   // The CLI sandbox has no Node globals; inject the path as a JavaScript literal.
   const script = await fs.readFile(path.resolve(root, scriptPath), "utf8");
   const resolvedScript = path.join(evidenceDir, "browser-test.js");
-  await fs.writeFile(resolvedScript, script.replaceAll('"__UI_TEST_EVIDENCE_DIR__"', () => JSON.stringify(evidenceDir)));
+  await fs.writeFile(resolvedScript, script.replaceAll('"__UI_TEST_EVIDENCE_DIR__"', () => JSON.stringify(evidenceDir)).replaceAll('"__UI_TEST_ROOT__"', () => JSON.stringify(root.replaceAll('\\', '/'))));
   const output = await cli(["run-code", "--filename", resolvedScript, "--raw"]);
   const line = output.split(/\r?\n/).find(line => line.startsWith('{"passed":'));
   if (!line) throw new Error(output);
   const result = JSON.parse(line);
   for (const item of result.results) console.log(`${item.passed ? "PASS" : "FAIL"}: ${item.name}${item.error ? ` — ${item.error}` : ""}`);
+  if (result.metrics) console.log(`UI_METRICS ${JSON.stringify(result.metrics)}`);
   console.log(`UI_REGRESSIONS ${result.passed}/${result.total}`);
   process.exitCode = result.passed === result.total ? 0 : 1;
 } finally {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DEFAULT_POOL_SYNC_CONCURRENCY } from "./pool-network.mjs";
 
 const amount = value => value === null || value === undefined || typeof value === "boolean" || String(value).trim() === ""
   ? null : Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
@@ -28,7 +29,7 @@ export function combineUsageTotals(ids, records) {
 
 // All-history accounting is separate from upstream 5h/7d quota snapshots.
 // Bound concurrency and cache both successful and failed attempts to avoid fan-out on list polling.
-export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency = 4, now = Date.now }) {
+export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, isBlocked = () => false, getSettings = () => ({ ttlMs, concurrency }), now = Date.now }) {
   let backend = "", cache = new Map(), inflight = new Map(), active = 0;
   const queue = [];
   function schedule(action) {
@@ -38,21 +39,23 @@ export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency =
     });
   }
   function pump() {
-    while (active < concurrency && queue.length) {
+    while (active < getSettings().concurrency && queue.length) {
       const task = queue.shift(); active++;
       Promise.resolve().then(task.action).then(task.resolve, task.reject).finally(() => { active--; pump(); });
     }
   }
-  return async function read(config, accountIds, { forceRefresh = false } = {}) {
+  async function read(config, accountIds, { forceRefresh = false } = {}) {
     const identity = createHash("sha256").update(`${config.baseUrl}\n${config.adminApiKey}`).digest("hex");
     if (identity !== backend) { backend = identity; cache = new Map(); inflight = new Map(); }
     const currentCache = cache, currentInflight = inflight;
     const ids = [...new Set(accountIds.map(String).filter(id => /^[1-9]\d*$/.test(id)))];
     return new Map(await Promise.all(ids.map(async id => {
+      if (isBlocked(id)) return [id, null];
       const saved = currentCache.get(id);
-      if (!forceRefresh && saved && now() - saved.checkedAt < ttlMs) return [id, saved.value];
+      if (!forceRefresh && saved && now() - saved.checkedAt < getSettings().ttlMs) return [id, saved.value];
       if (!currentInflight.has(id)) {
         const task = schedule(async () => {
+          if (isBlocked(id)) return null;
           let value;
           try {
             const query = new URLSearchParams({ account_id: id, start_date: "1970-01-01", end_date: new Date(now()).toISOString().slice(0, 10), timezone: "UTC" });
@@ -69,5 +72,7 @@ export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency =
       }
       return [id, await currentInflight.get(id)];
     })));
-  };
+  }
+  read.refreshSettings = pump;
+  return read;
 }

@@ -1,7 +1,7 @@
 import { TlsFingerprintTransport } from "./tls-transport.mjs";
 
 const FAILURE_MESSAGES = {
-  AUTH: "模型凭据失效或无权限，请刷新授权", QUOTA: "账号额度已用尽或受到请求频率限制",
+  BANNED: "账号已封禁或永久停用", AUTH: "模型凭据失效或无权限，请刷新授权", QUOTA: "账号额度已用尽或受到请求频率限制",
   OVERLOADED: "模型上游过载", UPSTREAM: "模型上游服务异常", HTTP: "模型接口拒绝请求",
   TIMEOUT: "模型请求超时", NETWORK: "代理或网络连接失败", INCOMPLETE: "模型流式响应中断或未完成",
   EMPTY: "模型未返回可评分文本", ACCOUNT_PAUSED: "账号已暂停或状态异常，本轮跳过",
@@ -17,11 +17,17 @@ export function fingerprintFailure(error) {
   const code = /timed?\s*out|timeout|超时/i.test(message) ? "TIMEOUT" : /代理/.test(message) ? "PROXY" : /connect|curl|tls|socket|network|fetch failed|econn|enotfound/i.test(message) ? "NETWORK" : /已暂停|状态异常/.test(message) ? "ACCOUNT_PAUSED" : /尚未加入/.test(message) ? "ACCOUNT_MISSING" : /凭据/.test(message) ? "CREDENTIALS" : /参考库/.test(message) ? "REFERENCE" : "UNKNOWN";
   return { code, message: FAILURE_MESSAGES[code], httpStatus: null, retryable: ["TIMEOUT", "NETWORK"].includes(code), upstreamCode: null };
 }
+export function fingerprintRecovery(detail) {
+  if (detail?.code === "BANNED") return "banned";
+  if (detail?.code === "AUTH" && (detail.httpStatus === 401
+    || ["invalid_api_key", "invalid_token", "token_expired"].includes(detail.upstreamCode))) return "authorization";
+  return null;
+}
 function upstreamFailure(event, httpStatus = null) {
   const error = event?.error || event?.response?.error || {};
   const raw = `${error.code || ""} ${error.type || ""} ${error.message || ""}`;
-  const upstreamCode = ["usage_limit_reached", "rate_limit_exceeded", "insufficient_quota", "server_error", "server_is_overloaded", "overloaded", "service_unavailable_error", "invalid_api_key", "token_expired", "model_not_found"].find(code => error.code === code || error.type === code) || null;
-  const code = /overload/i.test(raw) ? "OVERLOADED" : /usage.limit|rate.limit|quota|limit.*reached/i.test(raw) || httpStatus === 429 ? "QUOTA" : /expired|invalid.*token|unauthoriz/i.test(raw) || [401, 403].includes(httpStatus) ? "AUTH" : httpStatus >= 500 ? "UPSTREAM" : httpStatus ? "HTTP" : "INCOMPLETE";
+  const upstreamCode = ["usage_limit_reached", "rate_limit_exceeded", "insufficient_quota", "server_error", "server_is_overloaded", "overloaded", "service_unavailable_error", "invalid_api_key", "token_expired", "invalid_token", "account_deactivated", "account_suspended", "account_banned", "user_deactivated", "user_deleted", "model_not_found"].find(code => error.code === code || error.type === code) || null;
+  const code = /account_(?:deactivated|suspended|banned)|user_(?:deactivated|deleted)|account has been deactivated/i.test(raw) ? "BANNED" : /overload/i.test(raw) ? "OVERLOADED" : /usage.limit|rate.limit|quota|limit.*reached/i.test(raw) || httpStatus === 429 ? "QUOTA" : /expired|invalid.*token|unauthoriz/i.test(raw) || [401, 403].includes(httpStatus) ? "AUTH" : httpStatus >= 500 ? "UPSTREAM" : httpStatus ? "HTTP" : "INCOMPLETE";
   return failure(code, { httpStatus, upstreamCode, retryable: ["OVERLOADED", "UPSTREAM", "INCOMPLETE"].includes(code) });
 }
 

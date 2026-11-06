@@ -99,7 +99,9 @@ const wait = async fn => {
   throw new Error("fixture timed out\n" + logs + "\n" + JSON.stringify(details));
 };
 async function start() {
-  const l = http.createServer(); await new Promise(r => l.listen(0, "127.0.0.1", r)); const port = l.address().port; await new Promise(r => l.close(r));
+  // Windows can allocate fetch-blocked ports (e.g. 6665) for listen(0).
+  let port;
+  do { const l = http.createServer(); await new Promise(r => l.listen(0, "127.0.0.1", r)); port = l.address().port; await new Promise(r => l.close(r)); } while (port <= 10080);
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, [process.env.WEB_MONITOR_TEST_SERVER || "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], {
     windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: root, TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(root, "creds"), TOSUB2_MAC_CREDENTIAL_ROOT: path.join(root, "creds"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), TOSUB2_SESSION_NATIVE_HTTP: "1", CHATGPT_BASE: webUrl, SUB2API_MONITOR_ENABLED: "0", ONBOARDING_PROTOCOL_SCRIPT: wrapper },
@@ -211,7 +213,7 @@ process.disconnect();
   authStatus = 200;
   const started = await api("/api/web-session-monitor/check", {});
   assert(started.body.accounts[email].lastRepairAt, "confirmed failure must enqueue recovery; a fast repair may already have advanced the snapshot");
-  if (webOnly) await wait(async () => (await api(`/api/jobs/${id}/logs`)).body.logs?.includes("[web-login] Web 登录态已保存，未执行 Codex 授权或更新号池。"));
+  if (webOnly) await wait(async () => (await api(`/api/jobs/${id}/logs`)).body.logs?.includes("[web-login] Web 登录态已保存，"));
   else if (!stableOAuth && scenario !== "expired") await wait(async () => remoteAccount.proxy_id === 0 && remoteAccount.credentials.plan_type === "free");
   if (retrySync) {
     await wait(async () => {

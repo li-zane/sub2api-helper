@@ -384,7 +384,7 @@ async function run() {
   transport.accountIdentityRoot = browserIdentityRoot;
   async function prepareLoginProxy(url) {
     if (planProxyBound) transport.rotateProxySessions = false;
-    if (process.env.TOSUB2_PHASED_PROXY === "1" && process.connected) process.send({ type: "web-proxy-phase", fixed: planProxyBound });
+    if (process.env.TOSUB2_PHASED_PROXY === "1" && process.connected) process.send({ type: "web-proxy-phase", fixed: planProxyBound || process.env.CHATGPT_PROXY_FIXED === "1" });
     try {
       await transport.prepareProxy(proxyTemplate, url);
     } catch (error) {
@@ -627,7 +627,7 @@ async function run() {
     async function selectCodexProxy() {
       const identity = await identifyWebPlan(client, { chatgptBase, web,
         allowPersonalFallback: true, preferTeam: true, verifyTokenWorkspace: true });
-      web = { ...web, workspaceId: identity.workspaceId };
+      web = { ...web, workspaceId: identity.workspaceId, planType: identity.planType };
       codexOptions.currentWorkspaceId = identity.workspaceId || undefined;
       codexOptions.allowedWorkspaceIds = identity.workspaceId ? [identity.workspaceId] : undefined;
       if (process.env.TOSUB2_PHASED_PROXY !== "1") return;
@@ -673,7 +673,7 @@ async function run() {
       try {
         await selectCodexProxy();
         codex = await resumeCodexOauth(client, { ...codexOptions, expectedEmail: email, saveCheckpoint }, checkpoint);
-        web = checkpoint.web || null;
+        // Keep the live workspace/plan selected above, not the checkpoint context.
       } catch (error) {
         if (isSecurityCheckRequiredError(error)) throw error;
         if (!isExpiredCheckpointError(error)) throw error;
@@ -725,8 +725,7 @@ async function run() {
 
       try {
         if (args.webOnly) {
-          const identity = await identifyWebPlan(client, { chatgptBase, web, allowPersonalFallback: true, preferTeam: true, verifyTokenWorkspace: true });
-          web = { ...web, workspaceId: identity.workspaceId };
+          await selectCodexProxy();
         } else {
           console.log("[2/5] Start Codex OAuth flow");
           await selectCodexProxy();

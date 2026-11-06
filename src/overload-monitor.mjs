@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_POOL_SYNC_CONCURRENCY, limitPoolRequests } from "./pool-network.mjs";
 
 export const OVERLOAD_MESSAGE = "Our servers are currently overloaded. Please try again later.";
 export const OVERLOAD_INTERVAL_MS = 15 * 60_000;
@@ -149,8 +150,12 @@ export async function collectRequestIntervals({ config, accountIds, request, now
 }
 
 export class OverloadMonitor {
-  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: OVERLOAD_INTERVAL_MS }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, concurrency, getMonitoringSettings, now, setTimer, clearTimer });
+    this.request = limitPoolRequests((config, url, { isEnabled, ...options } = {}) => {
+      if (isEnabled && !isEnabled()) throw new Error("过载统计已停止");
+      return request(config, url, options);
+    }, () => this.getMonitoringSettings().concurrency);
     this.backend = null;
     this.accounts = new Map();
     this.writePromise = Promise.resolve();
@@ -249,13 +254,14 @@ export class OverloadMonitor {
   refresh() {
     if (this.running) return this.running;
     this.clearTimer(this.timer);
-    const startedInterval = Math.floor(this.now() / OVERLOAD_INTERVAL_MS);
+    const intervalMs = this.getMonitoringSettings().intervalMs;
+    const startedInterval = Math.floor(this.now() / intervalMs);
     this.running = this.run().finally(() => {
       this.running = null;
       if (this.stopped) return;
-      if (Math.floor(this.now() / OVERLOAD_INTERVAL_MS) !== startedInterval) this.rerun = true;
+      if (Math.floor(this.now() / intervalMs) !== startedInterval) this.rerun = true;
       if (this.rerun) { this.trigger(); return; }
-      const nextInterval = OVERLOAD_INTERVAL_MS - (this.now() % OVERLOAD_INTERVAL_MS);
+      const nextInterval = intervalMs - (this.now() % intervalMs);
       const failed = [...this.accounts.values()].some((entry) => entry.enabled && (entry.lastError || entry.requestError));
       this.timer = this.setTimer(() => this.trigger(), failed ? Math.min(60_000, nextInterval) : nextInterval);
       this.timer.unref?.();
@@ -289,7 +295,7 @@ export class OverloadMonitor {
         try {
           const accountIds = mapping.get(email) || [];
           if (!accountIds.length) throw new Error("该账号尚未加入 Sub2API 号池");
-          const options = { config, accountIds, request: this.request, now, isEnabled };
+          const options = { config, accountIds, request: (config, url) => this.request(config, url, { isEnabled }), now, isEnabled };
           const [overloads, requests] = await Promise.allSettled([collectOverloadIntervals(options), collectRequestIntervals(options)]);
           if (!isEnabled()) continue;
           const previous = new Map((entry.points || []).filter(point => Date.parse(point.end) - Date.parse(point.start) === OVERLOAD_INTERVAL_MS).map((point) => [point.start, point]));
@@ -307,7 +313,7 @@ export class OverloadMonitor {
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(3, entries.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(this.getMonitoringSettings().concurrency, entries.length) }, worker));
     if (this.backendIdentity(this.getConfig()) === backend) await this.persist();
   }
 

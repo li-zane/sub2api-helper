@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { generateChallenges, loadDetector, parseNumbers } from "lmfpd-sdk";
 import { setTimeout as delay } from "node:timers/promises";
-import { fingerprintFailure } from "./model-fingerprint-request.mjs";
+import { fingerprintFailure, fingerprintRecovery } from "./model-fingerprint-request.mjs";
 
 const invalid = message => Object.assign(new Error(message), { status: 400 });
 export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, planDefaults: {}, groupPolicies: {} });
@@ -77,8 +77,8 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked = () => false, onChange = () => {}, now = Date.now, detectorLoader, challenges = generateChallenges }) {
-    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked, onChange, now, challenges });
+  constructor({ filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges }) {
+    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked, onChange, onAccountFailure, now, challenges });
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
     this.detectorLoader = detectorLoader || (() => loadDetector({ source: "https://lm.ikale.io/data/", cache: path.join(path.dirname(filePath), "model-fingerprint-data.bin") }));
   }
@@ -233,13 +233,14 @@ export class ModelFingerprintService {
     const previous = this.accounts.get(email) || { override: normalizeFingerprintOverride() };
     const entry = { ...previous, lastAttemptAt: new Date(this.now()).toISOString(), nextCheckAt: new Date(this.now() + config.intervalMinutes * 60000).toISOString(), lastError: null };
     this.accounts.set(email, entry);
+    let recoveryFailure = null;
     try {
       await this.mutate(async () => { controller.signal.throwIfAborted(); await this.persist(); });
       const targets = (await this.listTargets(context.config)).filter(item => label(item.email) === email);
       if (!targets.length) throw new Error("账号尚未加入 Sub2API 号池");
       const detector = await this.detector(controller.signal);
       const results = [], identities = {}, routingIdentities = {};
-      for (const target of targets) {
+      sampling: for (const target of targets) {
         const account = await this.getAccount(context.config, target.id);
         identities[target.id] = fingerprintAccountIdentity(account);
         routingIdentities[target.id] = fingerprintRoutingIdentity(account);
@@ -269,6 +270,7 @@ export class ModelFingerprintService {
             controller.signal.throwIfAborted();
             const detail = fingerprintFailure(error);
             results.push({ accountId: String(target.id), ...model, status: "error", error: detail.message, failure: detail, sampleFailures, completedSamples: outputs.length, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })) });
+            if (account.type === "oauth" && fingerprintRecovery(detail)) { recoveryFailure = detail; break sampling; }
           }
         }
       }
@@ -278,6 +280,7 @@ export class ModelFingerprintService {
         controller.signal.throwIfAborted();
         if (revision !== this.revision || backend !== this.getContext().backend || this.accounts.get(email) !== entry) return;
         for (const target of targets) {
+          if (!Object.hasOwn(identities, target.id)) continue;
           if (identities[target.id] !== fingerprintAccountIdentity(await this.getAccount(context.config, target.id))) throw new Error("检测期间账号配置已变更");
           controller.signal.throwIfAborted();
         }
@@ -296,7 +299,14 @@ export class ModelFingerprintService {
         });
       }
       if (manual && !controller.signal.aborted) throw Object.assign(new Error(entry.lastError || "指纹检测未完成"), { status: [400, 409].includes(error.status) ? error.status : 502 });
-    } finally { this.active.delete(email); this.onChange(); }
+    } finally {
+      this.active.delete(email); this.onChange();
+      // Dispatch after releasing sampling/mutation state; recovery may cancel checks.
+      if (recoveryFailure && !controller.signal.aborted && revision === this.revision && !this.isBlocked(email)) {
+        try { await this.onAccountFailure(email, recoveryFailure); }
+        catch { entry.lastError = "授权修复未能入队，等待下次检测重试"; await this.persist(); }
+      }
+    }
     return this.snapshot(email, planType);
   }
   reconcile(email, planType, targets, revision = this.revision) {
@@ -325,7 +335,11 @@ export class ModelFingerprintService {
     } catch { entry.groupSyncError = "检测结果已保存，条件分组同步失败；稍后自动重试"; }
     await this.persist();
   }
-  start() { this.closing = false; this.stopped = false; this.timer = setInterval(() => this.trigger(), 60000); this.timer.unref?.(); this.trigger(); }
+  setTickMs(ms) {
+    this.tickMs = ms;
+    if (this.timer) { clearInterval(this.timer); this.timer = setInterval(() => this.trigger(), ms); this.timer.unref?.(); }
+  }
+  start() { this.closing = false; this.stopped = false; this.timer = setInterval(() => this.trigger(), this.tickMs || 60000); this.timer.unref?.(); this.trigger(); }
   trigger() { if (!this.stopped && !this.ticking) this.ticking = this.tick().catch(() => {}).finally(() => { this.ticking = null; }); }
   async tick() {
     const context = this.getContext(), scheduled = [];

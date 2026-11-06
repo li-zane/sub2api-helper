@@ -75,8 +75,9 @@ try {
   assert.deepEqual(await readResponse(new Response('{"ok":true}')), { ok: true });
   assert.match(main, /title=\{failureTooltip\}/, "disabled workspace card must expose its diagnostic on hover");
   const protocol = await fs.readFile(path.join(root, "src/protocol-login.mjs"), "utf8");
-  assert.match(protocol, /if \(args\.webOnly\) \{\s*const identity = await identifyWebPlan[\s\S]*?preferTeam: true/, "ordinary Web login uses team preference too");
+  assert.match(protocol, /if \(args\.webOnly\) \{\s*await selectCodexProxy\(\)/, "ordinary Web login uses team preference too");
   const selection = protocol.slice(protocol.indexOf("async function selectCodexProxy()"), protocol.indexOf("let resumedOAuth"));
+  assert.match(selection, /identifyWebPlan[\s\S]*?preferTeam: true/, "shared selector prefers available team");
   assert(!/if \(process\.env\.TOSUB2_PHASED_PROXY !== "1"[^\n]*return;\s*const identity/.test(selection), "non-phased logins must select the workspace too");
 
   const server = await fs.readFile(path.join(root, "src/console-server.mjs"), "utf8");

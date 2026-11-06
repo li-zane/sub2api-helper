@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {DEFAULT_MONITORING} from "../web/src/monitor-settings.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-task-settings-"));
@@ -18,6 +19,18 @@ let logs = "";
 try {
   await start("");
   assert.equal((await readSettings()).maxActiveJobs, 4);
+  assert.deepEqual((await readSettings()).monitoring, DEFAULT_MONITORING);
+  for (const monitoring of [null, [], {missing:1}, {usageTotalsConcurrency:0}, {overloadIntervalSeconds:1.5}, {poolMonitorIntervalSeconds:"3"}]) assert.equal((await saveSettings({monitoring})).status,400);
+  const patch={usageTotalsConcurrency:7,overloadConcurrency:9,poolMonitorIntervalSeconds:120,usageTotalsIntervalSeconds:90};
+  assert.equal((await saveSettings({monitoring:patch})).status,200);
+  assert.deepEqual((await readSettings()).monitoring,{...DEFAULT_MONITORING,...patch});
+  await Promise.all([saveSettings({monitoring:{profileSyncConcurrency:6}}),saveSettings({monitoring:{overloadCooldownConcurrency:8}})]);
+  assert.equal((await readSettings()).monitoring.profileSyncConcurrency,6);
+  assert.equal((await readSettings()).monitoring.overloadCooldownConcurrency,8);
+  assert.equal((await saveSettings({modelFingerprint:{models:["fixture"],minProbability:0.93}})).status,200);
+  assert.equal((await saveSettings({modelFingerprint:{intervalMinutes:9,maxConcurrentAccounts:5}})).status,200);
+  const fp=(await readSettings()).modelFingerprint;assert.equal(fp.models[0].model,"fixture");assert.equal(fp.minProbability,0.93);assert.equal(fp.maxConcurrentAccounts,5);
+  assert.equal((await saveSettings({modelFingerprint:{maxConcurrentAccounts:17}})).status,400);
   assert.equal((await readSettings()).codexAuthMode, "local");
   assert.equal((await readSettings()).accountProxyMode, "global");
   assert.equal((await saveSettings({ accountProxyMode: "invalid" })).status, 400);
@@ -62,8 +75,10 @@ try {
   // must recover rather than inheriting the rejected write promise.
   await fs.rename(settingsPath, `${settingsPath}.backup`);
   await fs.mkdir(settingsPath);
-  assert.equal((await saveSettings({ maxActiveJobs: 8, accountProxyCooldownMinutes: 3 })).status, 500);
+  assert.equal((await saveSettings({ maxActiveJobs: 8, accountProxyCooldownMinutes: 3, monitoring:{usageTotalsConcurrency:2},modelFingerprint:{maxConcurrentAccounts:9} })).status, 500);
   assert.equal((await readSettings()).maxActiveJobs, 2);
+  assert.equal((await readSettings()).monitoring.usageTotalsConcurrency,7);
+  assert.equal((await readSettings()).modelFingerprint.maxConcurrentAccounts,5);
   await fs.rmdir(settingsPath);
   await fs.rename(`${settingsPath}.backup`, settingsPath);
   assert.equal((await save(20)).status, 200);
@@ -77,6 +92,8 @@ try {
   await start("20");
   assert.equal((await readSettings()).maxActiveJobs, 3, "saved UI limit overrides environment on restart");
   assert.equal((await readSettings()).accountProxyCooldownMinutes, 3);
+  assert.equal((await readSettings()).monitoring.usageTotalsConcurrency,7);
+  assert.equal((await readSettings()).modelFingerprint.maxConcurrentAccounts,5);
   assert.equal((await pageData()).taskSettings.maxActiveJobs, 3);
   console.log("console task settings smoke passed: validation, live queue limits, write recovery, persistence");
 } catch (error) {

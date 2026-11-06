@@ -33,6 +33,8 @@ import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-trans
 import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
 import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
+import { DEFAULT_MONITORING, normalizeMonitoring } from "../web/src/monitor-settings.mjs";
+import { limitPoolRequests } from "./pool-network.mjs";
 import { createUsageTotalsReader, combineUsageTotals } from "./sub2api-usage-totals.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService, normalizeFingerprintSettings } from "./model-fingerprint.mjs";
@@ -124,6 +126,16 @@ const SUB2API_ACCOUNT_NAME_TEMPLATE_KEYS = new Set([
 ]);
 const SUB2API_MONITOR_INTERVAL_MS = readDurationEnv("SUB2API_MONITOR_INTERVAL_MS", 5 * 60_000, 1_000);
 const SUB2API_AUTO_REPAIR_COOLDOWN_MS = readDurationEnv("SUB2API_AUTO_REPAIR_COOLDOWN_MS", 5 * 60_000, 0);
+const monitoringDefaults = {
+  ...DEFAULT_MONITORING,
+  accountStatusIntervalSeconds: SUB2API_ACCOUNT_STATUS_CACHE_TTL_MS / 1000,
+  poolMonitorIntervalSeconds: SUB2API_MONITOR_INTERVAL_MS / 1000,
+  poolRepairRetrySeconds: SUB2API_AUTO_REPAIR_COOLDOWN_MS / 1000,
+};
+let monitoringSettings = { ...monitoringDefaults };
+const requestProfileSync = limitPoolRequests(requestSub2Api, () => monitoringSettings.profileSyncConcurrency);
+let accountDataSyncTimers = [], accountDataSyncGeneration = 0;
+const accountDataSyncOperations = new Set();
 const MAIL_POLL_INTERVAL_MS = 2_500;
 const MAIL_POLL_TIMEOUT_MS = 10 * 60_000;
 const MAX_MAIL_REQUEST_BODY_BYTES = 64 * 1024;
@@ -201,7 +213,10 @@ let planTypeLabelMappingConfigured = false;
 let sub2ApiMonitorTimer = null;
 let sub2ApiMonitorPromise = null;
 let sub2ApiAccountStatusPromise = null;
-const readUsageTotals = createUsageTotalsReader({ request: (...args) => shuttingDown
+const readUsageTotals = createUsageTotalsReader({
+  getSettings: () => ({ ttlMs: monitoringSettings.usageTotalsIntervalSeconds * 1000, concurrency: monitoringSettings.usageTotalsConcurrency }),
+  isBlocked: id => [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
+  request: (...args) => shuttingDown
   ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args) });
 let sub2ApiAccountStatusCache = {
   backend: null,
@@ -290,6 +305,7 @@ const webSessionMonitor = new WebSessionMonitor({
 });
 
 const overloadMonitor = new OverloadMonitor({
+  getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadIntervalSeconds * 1000, concurrency: monitoringSettings.overloadConcurrency }),
   isBlocked: accountAutomationBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-monitor.json"),
   getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
@@ -310,6 +326,7 @@ const overloadMonitor = new OverloadMonitor({
 });
 
 const overloadCooldown = new OverloadCooldown({
+  getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadCooldownIntervalSeconds * 1000, concurrency: monitoringSettings.overloadCooldownConcurrency }),
   isBlocked: accountAutomationBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
   getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
@@ -351,9 +368,38 @@ const modelFingerprint = new ModelFingerprintService({
     return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a)).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
   },
   getAccount: readFingerprintAccount, sample: fingerprintSampler,
+  onAccountFailure: recoverFingerprintAuthorization,
   updateGroups: async (config, id, ids) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ group_ids: ids.map(Number) }) }),
   onChange: invalidateSub2ApiAccountStatusCache,
 });
+async function recoverFingerprintAuthorization(email, failure) {
+  return withEmailJobLock(email, async () => {
+    const job = findJobByEmail(email);
+    if (!job || shuttingDown || accountAutomationBlocked(email)) return;
+    if (failure.code === "BANNED") {
+      markAutoRepairBlocked(job, failure.upstreamCode || "account_deactivated");
+      await automationBlockWrites.get(email.toLowerCase());
+      return;
+    }
+    if (isActive(job.status) || job.autoRepairOperation || job.poolRefreshAction || job.webSessionMaintenancePause || isAutoRepairCoolingDown(job)) return;
+    await reloadMissingJobCredentials(job);
+    if (!getAutoRepairEligibility(job).eligible) {
+      appendJobLog(job, "[fingerprint] 授权失效，但自动登录资料不完整，等待人工处理。\n");
+      return;
+    }
+    const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
+    const listing = await listSub2ApiAccounts(config, { withMeta: true });
+    if (!listing.complete) throw new Error("号池列表不完整，等待重试授权修复");
+    await reconcileSub2ApiAccountBans(config, listing.accounts);
+    if (accountAutomationBlocked(email)) return;
+    const accounts = listing.accounts.filter(a => sub2ApiAccountEmail(a) === email && a.platform === "openai" && a.type === "oauth");
+    if (!accounts.length) return;
+    const operation = createSub2ApiAutoRepairOperation(config, accounts, snapshotSub2ApiProfileState());
+    await forceReloginJob(job, {}, { autoRepair: operation, webSessionMonitorRepair: true });
+    appendJobLog(job, "[fingerprint] 检测凭据已失效，已加入共享授权修复队列；先验证 Web，再恢复 OAuth。\n");
+    await saveJobMetadata(job);
+  });
+}
 function fingerprintGroupIds(config, account, groups, currentAccount = null) {
   return modelFingerprint.filterGroups(sub2ApiAccountEmail(account), extractPlanTypeFromAccount(account, { preferJwt: false }) || "unknown", config.profileId || "default", groups, currentAccount);
 }
@@ -411,8 +457,11 @@ scheduleQueuedJobs();
 scheduleSub2ApiMonitor();
 overloadMonitor.start();
 overloadCooldown.start();
+modelFingerprint.setTickMs(monitoringSettings.fingerprintScanIntervalSeconds * 1000);
 modelFingerprint.start();
+webSessionMonitor.setTickMs(monitoringSettings.webSessionScanIntervalSeconds * 1000);
 webSessionMonitor.start();
+scheduleAccountDataSync();
 
 const production = process.env.NODE_ENV === "production";
 const vite = production ? null : await (async () => {
@@ -1838,8 +1887,8 @@ async function prepareAndLaunchJob(job, mode, queueRunId) {
       job.runProxyFixed = hasBinding;
     } else await refreshJobProxyBinding(job);
     if (!job.proxyFallbackActive && accountProxyMode !== "plan") job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
-    const oauthSettings = accountProxyMode === "plan" && mode === "full" && (!hasBinding || job.webSessionMonitorRepair)
-      ? { codexAuthMode, phasedProxy: true, loginProxyUrl: hasBinding ? job.proxyUrl : globalProxyUrl }
+    const oauthSettings = accountProxyMode === "plan" && ["full", "web_login"].includes(mode)
+      ? { codexAuthMode, phasedProxy: true, loginProxyFixed: hasBinding, loginProxyUrl: hasBinding ? job.proxyUrl : globalProxyUrl }
       : ["full", "refresh"].includes(mode) ? await codexOAuthSettingsForJob(job)
         : { codexAuthMode: "local", ...(accountProxyMode === "plan" && !hasBinding ? { phasedProxy: true, loginProxyUrl: globalProxyUrl } : {}) };
     if (["full", "web_login", "totp_setup", "password_add"].includes(mode) && job.mailApiUrl) await loadMailboxBaseline(job);
@@ -1888,7 +1937,7 @@ function launchJob(job, options = {}) {
   if (options.phasedProxy) job.runLoginProxyUrl = options.loginProxyUrl;
   else if (Object.hasOwn(options, "loginProxyUrl")) job.proxyUrl = options.loginProxyUrl;
   else if (!job.proxyFallbackActive) job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
-  job.runProxyFixed = !options.phasedProxy && (accountProxyMode === "sub2api" || Boolean(options.sub2ApiOAuth?.proxyId) || job.fixedProxy);
+  job.runProxyFixed = options.loginProxyFixed === true || !options.phasedProxy && (accountProxyMode === "sub2api" || Boolean(options.sub2ApiOAuth?.proxyId) || job.fixedProxy);
   const mode = options.mode || "full";
   if (mode === "full" && !job.authAutomationAttempt) {
     beginAuthorizationAutomationAttempt(job, "login");
@@ -1983,7 +2032,10 @@ function launchJob(job, options = {}) {
       try {
         if (job.proxyPhaseSelecting) throw httpError(409, "授权代理正在选择中");
         job.proxyPhaseSelecting = true;
-        const route = await preparePlanCodexProxy(job, message.planType, message.workspaceId, { reapply: job.webSessionMonitorRepair === true });
+        job.planAutomationPlanType ||= getJobPlanType(job);
+        const route = await preparePlanCodexProxy(job, message.planType, message.workspaceId, { reapply: true });
+        await reconcilePlanAutomations(job, message.planType);
+        if (mode === "web_login") job.webLoginPlanType = message.planType;
         if (job.runId !== runId || job.child !== child || !isActive(job.status)) return;
         job.runProxyFixed = true;
         child.send({ type: "codex-proxy-response", id: message.id, route });
@@ -2051,6 +2103,7 @@ async function handleChildClose(job, { code, signal, mode, runId }) {
   }
   if (!isTerminalStatus(job.status) && code === 0 && job.runResultSaved && (await fileExists(job.outputPath))) {
     job.planType = await readPlanTypeFromOutput(job.outputPath);
+    await reconcilePlanAutomations(job, job.planType);
     if (job.webSessionMonitorRepair) {
       job.workspacePlanType = job.planType || null;
       job.webSessionMonitorRepair = false;
@@ -2309,6 +2362,7 @@ async function startWebLogin(job, { maintenance = false } = {}) {
     "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount"];
   job.webLoginPreviousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
   job.webLoginError = null;
+  job.webLoginPlanType = null;
   job.webLoginAttemptId = crypto.randomUUID();
   job.webLoginResultSaved = false;
   job.lastError = null;
@@ -2330,11 +2384,27 @@ async function startWebLogin(job, { maintenance = false } = {}) {
   await saveJobMetadata(job);
 }
 
+async function synchronizeWebLoginProxy(job) {
+  const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
+  if (!config?.baseUrl || !hasPlanProxyBinding(job)) return;
+  const listing = await listSub2ApiAccounts(config, { withMeta: true });
+  if (!listing.complete) throw new Error("号池列表不完整");
+  await reconcileSub2ApiAccountBans(config, listing.accounts);
+  for (const account of listing.accounts) {
+    if (accountAutomationBlocked(job.email)) return;
+    if (account.platform !== "openai" || account.type !== "oauth" || sub2ApiAccountEmail(account) !== job.email.toLowerCase()) continue;
+    const proxyId = normalizeStoredProxyId(job.assignedProxyId) || 0;
+    if (Number(account.proxy_id || 0) === proxyId) continue;
+    await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(account.id)}`, { method: "PUT", body: JSON.stringify({ proxy_id: proxyId }) });
+  }
+  invalidateSub2ApiAccountStatusCache();
+}
 async function finishWebLogin(job, code, signal, message = null) {
   stopMailPolling(job);
   let success = code === 0 && job.webLoginResultSaved;
+  let webSession;
   if (success) {
-    try { await readAccountWebSession(job); }
+    try { webSession = await readAccountWebSession(job); }
     catch (error) { success = false; message = error.message; }
   }
   const failure = message || job.lastError || (signal ? `Web 登录被 ${signal} 中断` : `Web 登录未完成，退出代码 ${code ?? "未知"}`);
@@ -2348,6 +2418,14 @@ async function finishWebLogin(job, code, signal, message = null) {
   if (success) {
     job.webLoginCompletedAt = new Date().toISOString();
     job.webSessionAvailable = true;
+    const plan = webSession?.web?.planType || job.webLoginPlanType;
+    await reconcilePlanAutomations(job, plan);
+    if (plan && accountProxyMode === "plan" && !accountAutomationBlocked(job.email)) {
+      try { await synchronizeWebLoginProxy(job); }
+      catch (error) { appendJobLog(job, `[web-login] IP 绑定同步待号池巡检重试：${error.message}\n`); }
+    }
+    // Schedule a follow-up even for manual/Web-only entry points, without waiting 15 minutes.
+    await webSessionMonitor.repairFinished(job.email, { success: true, webOnly: true });
   }
   if (accountAutomationBlocked(job.email)) job.status = "banned";
   job.prompt = accountAutomationBlocked(job.email) ? job.banProxyReleasePending ? "账号已确认封禁，IP 解绑待重试" : "账号已确认封禁，已停止自动化并解除 IP 绑定"
@@ -2365,7 +2443,7 @@ async function finishWebLogin(job, code, signal, message = null) {
   job.queuedAt = null;
   job.child = null;
   await removePrivateFile(webLoginCheckpointPath(job));
-  appendJobLog(job, success ? "[web-login] Web 登录态已保存，未执行 Codex 授权或更新号池。\n" : `[web-login] ${failure}\n`);
+  appendJobLog(job, success ? "[web-login] Web 登录态已保存，已核对套餐、IP 绑定及自动开关；未重签 Codex 凭据。\n" : `[web-login] ${failure}\n`);
   const check = manualWebSessionChecks.get(job.id);
   if (check?.phase === "relogin" && check.loginAttemptId === job.webLoginAttemptId) {
     check.phase = success ? "queued" : "failed";
@@ -4114,6 +4192,7 @@ function accountImportDay(account) {
 function importDatePriorities(accounts, config, profileState) {
   const groups = new Map();
   for (const account of accounts) {
+    if (accountSyncBlocked(account)) continue;
     if (account.platform && account.platform !== "openai" || account.type && account.type !== "oauth") continue;
     const accountConfig = resolveSub2ApiConfigForAccount(config, account, profileState);
     const profileId = accountConfig.profileId || "default";
@@ -4138,9 +4217,9 @@ async function syncImportDatePriorities(config, listing, profileState = snapshot
   const priorities = importDatePriorities(listing.accounts, config, profileState);
   for (const [account, priority] of priorities) {
     const id = normalizeSub2ApiAccountId(account.id);
-    if (!id || sub2ApiAccountPriority(account) === priority) continue;
+    if (!id || accountSyncBlocked(account) || sub2ApiAccountPriority(account) === priority) continue;
     try {
-      await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ priority }) });
+      await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ priority }) });
       account.priority = priority;
       result.updated += 1;
     } catch (error) {
@@ -4438,6 +4517,7 @@ function publicTaskSettings(includeProxy = true) {
     overloadAutoCooldown: { ...overloadAutoCooldownSettings },
     webSessionMonitor: { ...webSessionMonitorSettings },
     modelFingerprint: modelFingerprint.settings,
+    monitoring: { ...monitoringSettings },
     allowDirectFallback,
     min: 1,
     max: MAX_ACTIVE_JOBS_LIMIT,
@@ -4459,6 +4539,7 @@ async function loadTaskSettings() {
     accountProxyCooldownMinutes = normalizeCooldownMinutes(saved.accountProxyCooldownMinutes);
     overloadAutoCooldownSettings = normalizeOverloadCooldown(saved.overloadAutoCooldown);
     webSessionMonitorSettings = normalizeWebSessionMonitor(saved.webSessionMonitor);
+    monitoringSettings = normalizeMonitoring(saved.monitoring, monitoringDefaults);
   } catch (error) {
     if (error?.code !== "ENOENT") {
       throw new Error(`任务设置读取失败：${error.message}`);
@@ -4469,13 +4550,21 @@ async function loadTaskSettings() {
 
 async function saveTaskSettings(body) {
   const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  if (Object.hasOwn(source, "monitoring")) {
+    try { normalizeMonitoring(source.monitoring, monitoringSettings); }
+    catch (error) { throw httpError(400, error.message); }
+  }
   let nextWebSessionMonitor = webSessionMonitorSettings;
   if (Object.hasOwn(source, "webSessionMonitor")) {
     try { nextWebSessionMonitor = normalizeWebSessionMonitor(source.webSessionMonitor); }
     catch (error) { throw httpError(400, error.message); }
   }
   if (Object.hasOwn(source, "modelFingerprint") && (!source.modelFingerprint || typeof source.modelFingerprint !== "object" || Array.isArray(source.modelFingerprint))) throw httpError(400, "降智检测默认规则必须为对象");
-  const nextFingerprint = Object.hasOwn(source, "modelFingerprint") ? normalizeFingerprintSettings({ ...modelFingerprint.settings, models: source.modelFingerprint.models, intervalMinutes: source.modelFingerprint.intervalMinutes, minProbability: source.modelFingerprint.minProbability }) : null;
+  const fingerprintPatch = Object.hasOwn(source, "modelFingerprint") ? Object.fromEntries(["models", "intervalMinutes", "minProbability", "maxConcurrentAccounts"].filter(key => Object.hasOwn(source.modelFingerprint, key)).map(key => [key, source.modelFingerprint[key]])) : null;
+  if (fingerprintPatch) {
+    try { normalizeFingerprintSettings({ ...modelFingerprint.settings, ...fingerprintPatch }); }
+    catch (error) { throw httpError(400, error.message); }
+  }
   let nextCodexAuthMode = codexAuthMode;
   if (Object.hasOwn(source, "codexAuthMode")) {
     try { nextCodexAuthMode = normalizeCodexAuthMode(source.codexAuthMode); }
@@ -4507,6 +4596,8 @@ async function saveTaskSettings(body) {
   }
   // Serialize writes so memory and the last persisted setting always agree.
   const operation = taskSettingsWritePromise.catch(() => {}).then(async () => {
+    const effectiveMonitoring = Object.hasOwn(source, "monitoring") ? normalizeMonitoring(source.monitoring, monitoringSettings) : monitoringSettings;
+    const nextFingerprint = fingerprintPatch ? normalizeFingerprintSettings({ ...modelFingerprint.settings, ...fingerprintPatch }) : null;
     const effectiveLimit = Object.hasOwn(source, "maxActiveJobs") ? nextLimit : maxActiveJobs;
     const effectiveAutoActions = Object.hasOwn(source, "autoActions") ? nextAutoActions : taskAutoActions;
     const effectiveProxyUrl = Object.hasOwn(source, "proxyUrl") ? nextProxyUrl : globalProxyUrl;
@@ -4529,6 +4620,7 @@ async function saveTaskSettings(body) {
         accountProxyCooldownMinutes: effectiveCooldownMinutes,
         overloadAutoCooldown: effectiveOverloadAutoCooldown,
         webSessionMonitor: effectiveWebSessionMonitor,
+        monitoring: effectiveMonitoring,
       }, null, 2)}\n`, { mode: 0o600 });
       const previousSettingsBytes = nextFingerprint ? await fs.readFile(TASK_SETTINGS_PATH).catch(error => { if (error.code === "ENOENT") return null; throw error; }) : null;
       await fs.rename(tempPath, TASK_SETTINGS_PATH);
@@ -4548,6 +4640,9 @@ async function saveTaskSettings(body) {
     accountProxyCooldownMinutes = effectiveCooldownMinutes;
     overloadAutoCooldownSettings = effectiveOverloadAutoCooldown;
     webSessionMonitorSettings = effectiveWebSessionMonitor;
+    const previousMonitoring = monitoringSettings;
+    monitoringSettings = effectiveMonitoring;
+    applyMonitoringSettings(previousMonitoring);
     webSessionMonitor.trigger(Object.hasOwn(source, "webSessionMonitor"));
     overloadCooldown.trigger();
     // Reducing the limit leaves running jobs alone; they drain before new work
@@ -4819,8 +4914,9 @@ function publicSub2ApiMonitorState() {
     profiles: [...sub2ApiProfiles.values()].map((profile) => ({ ...profile })),
     planTypeBindings: { ...sub2ApiPlanTypeBindings },
     activeProfileId: sub2ApiActiveProfileId,
-    intervalMinutes: Math.max(1, Math.round(SUB2API_MONITOR_INTERVAL_MS / 60_000)),
-    cooldownMinutes: Math.max(1, Math.round(SUB2API_AUTO_REPAIR_COOLDOWN_MS / 60_000)),
+    intervalMinutes: monitoringSettings.poolMonitorIntervalSeconds / 60,
+    intervalSeconds: monitoringSettings.poolMonitorIntervalSeconds,
+    cooldownMinutes: monitoringSettings.poolRepairRetrySeconds / 60,
     running: sub2ApiMonitorState.running,
     lastCheckAt: sub2ApiMonitorState.lastCheckAt,
     nextCheckAt: sub2ApiMonitorState.nextCheckAt,
@@ -4879,9 +4975,7 @@ function scheduleSub2ApiMonitor() {
   }
   sub2ApiMonitorState.nextCheckAt = null;
   if (!sub2ApiMonitorConfig?.enabled || shuttingDown) return;
-  const interval = Number.isFinite(SUB2API_MONITOR_INTERVAL_MS) && SUB2API_MONITOR_INTERVAL_MS >= 1_000
-    ? SUB2API_MONITOR_INTERVAL_MS
-    : 5 * 60_000;
+  const interval = monitoringSettings.poolMonitorIntervalSeconds * 1000;
   sub2ApiMonitorState.nextCheckAt = new Date(Date.now() + interval).toISOString();
   sub2ApiMonitorTimer = setInterval(() => {
     sub2ApiMonitorState.nextCheckAt = new Date(Date.now() + interval).toISOString();
@@ -4945,6 +5039,7 @@ async function runSub2ApiMonitor(trigger = "scheduled") {
           : Object.create(null);
         const nextPlanTypes = Object.create(null);
         for (const account of allRemoteAccounts) {
+          if (accountSyncBlocked(account)) continue;
           const accountId = normalizeSub2ApiAccountId(account?.id);
           if (!accountId) continue;
           summary.planTypeChecked += 1;
@@ -5071,7 +5166,6 @@ const SUB2API_PROFILE_FIELD_LABELS = {
   autoResetCredit7dThresholdPercent: "7d 自动用卡阈值",
   wsMode: "WS mode",
 };
-const SUB2API_PROFILE_SYNC_CONCURRENCY = 4;
 const SUB2API_PROXY_STATE_TTL_MS = 60_000;
 const sub2ApiProxyStateCache = new Map();
 
@@ -5159,7 +5253,7 @@ async function fallBackExpiredSub2ApiProxies(config, profileState, accounts, sum
     for (const account of accounts) {
       if (shuttingDown) return;
       const job = findJobByEmail(sub2ApiAccountEmail(account));
-      if (accountAutomationBlocked(sub2ApiAccountEmail(account))) continue;
+      if (accountSyncBlocked(account)) continue;
       if (accountProxyMode === "plan" && !hasPlanProxyBinding(job)) continue;
       const accountId = normalizeSub2ApiAccountId(account?.id);
       const assignedProxyId = normalizeStoredProxyId(job?.assignedProxyId);
@@ -5172,7 +5266,7 @@ async function fallBackExpiredSub2ApiProxies(config, profileState, accounts, sum
         }
         const proxyId = assignedProxyId || 0;
         if (Number(account?.proxy_id) === Number(proxyId)) continue;
-        await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
+        await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
           method: "PUT",
           body: JSON.stringify({ proxy_id: proxyId }),
         });
@@ -5194,10 +5288,10 @@ async function fallBackExpiredSub2ApiProxies(config, profileState, accounts, sum
     if (target === proxyId) continue;
     for (const account of accounts) {
       const accountId = normalizeSub2ApiAccountId(account?.id);
-      if (accountAutomationBlocked(sub2ApiAccountEmail(account))) continue;
+      if (accountSyncBlocked(account)) continue;
       if (!accountId || Number(account?.proxy_id) !== proxyId) continue;
       try {
-        await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
+        await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
           method: "PUT",
           body: JSON.stringify({ proxy_id: target === SUB2API_PROXY_DIRECT ? 0 : target }),
         });
@@ -5340,6 +5434,7 @@ async function syncSub2ApiProfileChanges(config, targets, profileState) {
   result.incomplete = !listing.complete;
   const work = [];
   for (const account of listing.accounts) {
+    if (accountSyncBlocked(account)) continue;
     const accountId = normalizeSub2ApiAccountId(account?.id);
     const planType = normalizePlanType(extractPlanTypeFromAccount(account, { preferJwt: false }) || "");
     const target = planType ? pushTargets.get(planType.toLowerCase()) : null;
@@ -5354,8 +5449,8 @@ async function syncSub2ApiProfileChanges(config, targets, profileState) {
       cursor += 1;
       try {
         const body = await buildSub2ApiProfileSyncUpdate(account, target.accountConfig, target.fields);
-        if (!Object.keys(body).length) continue;
-        await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
+        if (!Object.keys(body).length || accountSyncBlocked(account)) continue;
+        await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
           method: "PUT",
           body: JSON.stringify(body),
         });
@@ -5366,12 +5461,13 @@ async function syncSub2ApiProfileChanges(config, targets, profileState) {
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(SUB2API_PROFILE_SYNC_CONCURRENCY, work.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(monitoringSettings.profileSyncConcurrency, work.length) }, worker));
   if (result.updated) invalidateSub2ApiAccountStatusCache();
   return result;
 }
 
 async function updateSub2ApiAccountFromProfile(globalConfig, remoteAccount, profile) {
+  if (accountSyncBlocked(remoteAccount)) return false;
   const accountId = normalizeSub2ApiAccountId(remoteAccount?.id);
   if (!accountId) return false;
   const accountConfig = await resolveSub2ApiWriteConfig(profileConfig(profile, globalConfig));
@@ -5390,7 +5486,8 @@ async function updateSub2ApiAccountFromProfile(globalConfig, remoteAccount, prof
       model_mapping: Object.fromEntries(accountConfig.modelWhitelist.map((model) => [model, model])),
     };
   }
-  await requestSub2Api(globalConfig, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
+  if (accountSyncBlocked(remoteAccount)) return false;
+  await requestProfileSync(globalConfig, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
     method: "PUT",
     body: JSON.stringify(body),
   });
@@ -5505,7 +5602,7 @@ async function updateJobRemark(job, value) {
 async function synchronizeSub2ApiRemark(job, context = {}) {
   const config = context.config || sub2ApiSettingsConfig || sub2ApiMonitorConfig;
   const result = { configured: Boolean(config?.baseUrl && config?.adminApiKey), matched: 0, updated: 0, failed: 0, error: null };
-  if (!result.configured) return result;
+  if (!result.configured || accountAutomationBlocked(job.email)) return result;
   const remark = job.remark || "";
   const revision = job.remarkRevision;
   try {
@@ -5518,9 +5615,9 @@ async function synchronizeSub2ApiRemark(job, context = {}) {
     result.matched = matching.size;
     for (const [id, account] of matching) {
       const notes = remark;
-      if (notes === account.notes) continue;
+      if (notes === account.notes || accountSyncBlocked(account)) continue;
       try {
-        await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, {
+        await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, {
           method: "PUT", body: JSON.stringify({ notes }),
         });
         result.updated += 1;
@@ -5558,7 +5655,7 @@ async function pullSub2ApiRemarks(listing, config, versions) {
   for (const [email, remote] of grouped) {
     // Status refresh can run inside a workspace/delete operation holding this
     // same lock. Defer busy accounts until the next refresh instead of nesting.
-    if (emailJobLocks.has(email)) continue;
+    if (emailJobLocks.has(email) || accountAutomationBlocked(email)) continue;
     await withEmailJobLock(email, async () => {
       const job = findJobByEmail(email);
       if (!job || job.remarkRevision !== versions.get(job.id)) return;
@@ -5772,7 +5869,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
   const cacheAge = sub2ApiAccountStatusCache.fetchedAt
     ? Date.now() - Date.parse(sub2ApiAccountStatusCache.fetchedAt)
     : Number.POSITIVE_INFINITY;
-  if (!forceRefresh && sub2ApiAccountStatusCache.backend === backend && cacheAge < SUB2API_ACCOUNT_STATUS_CACHE_TTL_MS) {
+  if (!forceRefresh && sub2ApiAccountStatusCache.backend === backend && cacheAge < monitoringSettings.accountStatusIntervalSeconds * 1000) {
     return sub2ApiAccountStatusCache;
   }
   if (sub2ApiAccountStatusPromise) return sub2ApiAccountStatusPromise;
@@ -5780,11 +5877,11 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
     const versions = new Map([...jobs.values()].map((job) => [job.id, job.remarkRevision]));
     const listing = await listSub2ApiAccounts(config, { withMeta: true });
     if (!listing.complete) throw new Error("Sub2API 账号列表不完整，已保留本地备注和状态");
-    await syncImportDatePriorities(config, listing);
     const remoteAccounts = listing.accounts;
     await listSub2ApiProxies(config).catch(() => []);
     await importSub2ApiPoolOnlyAccounts(remoteAccounts);
     await reconcileSub2ApiAccountBans(config, remoteAccounts);
+    await syncImportDatePriorities(config, listing);
     await pullSub2ApiRemarks(listing, config, versions);
     const accounts = new Map();
     const fetchedAt = new Date().toISOString();
@@ -5829,26 +5926,69 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       current.usage = mergeSub2ApiUsage(current.usage, usage);
     }
     sub2ApiAccountStatusCache = { backend, fetchedAt, accounts };
-    // Accounting queries do not block the task list or quota synchronization.
-    const usageIds = remoteAccounts.filter(account => account.platform === "openai" && account.type === "oauth" && sub2ApiAccountEmail(account))
+    sub2ApiAccountStatusCache.usageIds = remoteAccounts.filter(account => account.platform === "openai" && account.type === "oauth" && sub2ApiAccountEmail(account) && !accountSyncBlocked(account))
       .map(account => normalizeSub2ApiAccountId(account.id)).filter(Boolean);
-    const eligibleIds = new Set(usageIds);
     for (const [email, entry] of accounts) {
       const previous = previousAccounts.get(email);
       if (previous && entry.accountIds.join(",") !== previous.accountIds.join(",") && entry.usage) entry.usage.totals = null;
     }
-    void readUsageTotals(config, usageIds).then(records => {
-      if (sub2ApiAccountStatusCache.backend !== backend) return;
-      for (const entry of sub2ApiAccountStatusCache.accounts.values()) {
-        if (!entry.accountIds.every(id => eligibleIds.has(id) && records.has(String(id)))) continue;
-        entry.usage = { ...entry.usage, totals: combineUsageTotals(entry.accountIds, records) };
-      }
-    }).catch(() => {});
+    void synchronizeCachedUsageTotals(config, sub2ApiAccountStatusCache).catch(() => {});
     return sub2ApiAccountStatusCache;
   })().finally(() => {
     sub2ApiAccountStatusPromise = null;
   });
   return sub2ApiAccountStatusPromise;
+}
+
+async function synchronizeCachedUsageTotals(config, state, options = {}) {
+  const ids = state.usageIds || [];
+  if (!config?.baseUrl || !ids.length || monitorBackendIdentity(config) !== state.backend) return;
+  const records = await readUsageTotals(config, ids, options);
+  if (sub2ApiAccountStatusCache !== state) return;
+  const eligible = new Set(ids);
+  for (const [email, entry] of state.accounts) {
+    if (accountAutomationBlocked(email) || !entry.accountIds.every(id => eligible.has(id) && records.has(String(id)))) continue;
+    entry.usage = { ...entry.usage, totals: combineUsageTotals(entry.accountIds, records) };
+  }
+}
+function scheduleAccountDataSync() {
+  accountDataSyncGeneration++;
+  for (const timer of accountDataSyncTimers) clearTimeout(timer);
+  accountDataSyncTimers = [];
+  if (shuttingDown) return;
+  const generation = accountDataSyncGeneration;
+  const schedule = (totals) => {
+    if (shuttingDown || generation !== accountDataSyncGeneration) return;
+    const seconds = totals ? monitoringSettings.usageTotalsIntervalSeconds : monitoringSettings.accountStatusIntervalSeconds;
+    const timer = setTimeout(() => {
+      if (shuttingDown || generation !== accountDataSyncGeneration) return;
+      const operation = (async () => {
+        const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
+        const state = await loadSub2ApiAccountStatus();
+        if (totals) await synchronizeCachedUsageTotals(config, state, { forceRefresh: true });
+      })().catch(() => {}).finally(() => {
+        accountDataSyncOperations.delete(operation);
+        schedule(totals);
+      });
+      accountDataSyncOperations.add(operation);
+    }, seconds * 1000);
+    timer.unref?.();
+    accountDataSyncTimers[totals ? 1 : 0] = timer;
+  };
+  // Independent cadences: 25s status + 60s totals must not turn into 75s totals.
+  schedule(false); schedule(true);
+}
+function applyMonitoringSettings(previous) {
+  webSessionMonitor.setTickMs(monitoringSettings.webSessionScanIntervalSeconds * 1000);
+  modelFingerprint.setTickMs(monitoringSettings.fingerprintScanIntervalSeconds * 1000);
+  readUsageTotals.refreshSettings();
+  requestProfileSync.drain();
+  if (previous.poolMonitorIntervalSeconds !== monitoringSettings.poolMonitorIntervalSeconds) scheduleSub2ApiMonitor();
+  if (previous.overloadIntervalSeconds !== monitoringSettings.overloadIntervalSeconds || previous.overloadConcurrency !== monitoringSettings.overloadConcurrency) {
+    overloadMonitor.request.drain(); overloadMonitor.trigger();
+  }
+  overloadCooldown.request.drain();
+  scheduleAccountDataSync();
 }
 
 function invalidateSub2ApiAccountStatusCache() {
@@ -6755,8 +6895,8 @@ function legacyMonitorBackendIdentity(config) {
 }
 
 function isAutoRepairCoolingDown(job) {
-  if (!job.autoRepairLastAttemptAt || !Number.isFinite(SUB2API_AUTO_REPAIR_COOLDOWN_MS) || SUB2API_AUTO_REPAIR_COOLDOWN_MS <= 0) return false;
-  return Date.now() - new Date(job.autoRepairLastAttemptAt).getTime() < SUB2API_AUTO_REPAIR_COOLDOWN_MS;
+  if (!job.autoRepairLastAttemptAt || monitoringSettings.poolRepairRetrySeconds <= 0) return false;
+  return Date.now() - new Date(job.autoRepairLastAttemptAt).getTime() < monitoringSettings.poolRepairRetrySeconds * 1000;
 }
 
 function getAutoRepairEligibility(job) {
@@ -6796,10 +6936,8 @@ async function performSub2ApiAutoRepairSuccess(job) {
     for (const remoteAccount of operation.accounts) {
       const accountId = Number(remoteAccount.id);
       if (!Number.isSafeInteger(accountId) || accountId <= 0) continue;
-      // An error account can have a different PlanType from the monitor's active
-      // profile. Resolve the bound profile per remote account before writing the
-      // repaired credentials, otherwise auto-repair silently applies the active
-      // profile to every account in the operation.
+      // Prefer the newly issued OAuth plan; the remote error row may still carry
+      // the old Team plan after a workspace downgrade.
       const remotePlanType = extractPlanTypeFromAccount(remoteAccount, { preferJwt: false });
       const localPlanType = extractPlanTypeFromAccount(localAccount, { preferJwt: false });
       const profileAccount = {
@@ -6816,7 +6954,7 @@ async function performSub2ApiAutoRepairSuccess(job) {
           ...(remoteAccount.extra && typeof remoteAccount.extra === "object" ? remoteAccount.extra : {}),
         },
       };
-      if (remotePlanType || localPlanType) profileAccount.plan_type = remotePlanType || localPlanType;
+      if (localPlanType || remotePlanType) profileAccount.plan_type = localPlanType || remotePlanType;
       const accountConfig = await resolveSub2ApiWriteConfig(resolveSub2ApiConfigForAccount(operation.config, profileAccount, operation.profileState));
       const credentials = {
         ...(remoteAccount.credentials && typeof remoteAccount.credentials === "object" ? remoteAccount.credentials : {}),
@@ -6880,7 +7018,7 @@ async function finishSub2ApiAutoRepairFailure(job) {
   job.autoRepairLastError = job.autoRepairBlockedReason || job.lastError || "自动重新登录并授权未完成";
   appendJobLog(job, job.autoRepairBlocked
     ? "[monitor] 自动授权确认账号已永久不可用，已停止后续巡检。\n"
-    : `[monitor] 本次自动授权未完成，${Math.max(1, Math.round(SUB2API_AUTO_REPAIR_COOLDOWN_MS / 60_000))} 分钟内不会重复启动。\n`);
+    : `[monitor] 本次自动授权未完成，${monitoringSettings.poolRepairRetrySeconds} 秒内不会重复启动。\n`);
   if (!job.autoRepairBlocked) {
     job.autoRepairPendingAccountIds = [];
     job.autoRepairPendingBackend = operation.backend;
@@ -7066,7 +7204,7 @@ async function getAccountUsage(job, forceRefresh = false) {
   if (!job?.email) throw new Error("ACCOUNT_USAGE_CREDENTIALS_UNAVAILABLE: 账号标识无效");
   const state = await loadSub2ApiAccountStatus({ forceRefresh });
   let status = getSub2ApiAccountStatusForJob(job, state);
-  if (forceRefresh && status.inPool === true && status.accountIds.length) {
+  if (forceRefresh && !accountAutomationBlocked(job.email) && status.inPool === true && status.accountIds.length) {
     const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
     const [refreshed, totals] = await Promise.all([
       refreshSub2ApiAccountUsage(config, status.accountIds),
@@ -7531,6 +7669,10 @@ async function releaseBlockedAccountProxies(email, { config = sub2ApiSettingsCon
     const cached = sub2ApiAccountStatusCache.accounts.get(email);
     if (cached) { cached.proxyIds = []; cached.enabled = false; }
   }
+}
+
+function accountSyncBlocked(account) {
+  return accountAutomationBlocked(sub2ApiAccountEmail(account)) || Boolean(sub2ApiPermanentAccountFailure(account));
 }
 
 function sub2ApiPermanentAccountFailure(account) {
@@ -9598,6 +9740,8 @@ async function shutdown() {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
     shuttingDown = true;
+    accountDataSyncGeneration++;
+    for (const timer of accountDataSyncTimers) clearTimeout(timer);
     for (const timer of poolRefreshTimers.values()) clearTimeout(timer);
     poolRefreshTimers.clear();
     queueSchedulingPaused = true;
@@ -9614,6 +9758,7 @@ async function shutdown() {
       ...manualWebSessionCheckOperations,
       proxyQualityService.close(),
       sub2ApiMonitorPromise,
+      ...accountDataSyncOperations,
       taskSettingsWritePromise,
       ...sub2ApiRequestPromises,
       ...sub2ApiAutoRepairPromises,

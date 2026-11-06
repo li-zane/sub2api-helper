@@ -56,11 +56,25 @@ export async function probeAccountWebSession(job) {
   const tokenWorkspaceId = webTokenWorkspaceId(session.accessToken);
   const tokenWorkspace = listing.workspaces.find(w => w.id === tokenWorkspaceId);
   const invalidTokenWorkspace = Boolean(tokenWorkspaceId && !isAccountWorkspaceAvailable(tokenWorkspace));
-  const devices = available && !invalidTokenWorkspace ? (await listAccountSessions(job, { refreshOnUnauthorized: false })).devices.map(d => ({
-    displayName: d.displayName, platform: d.platform, isCurrentDevice: d.isCurrentDevice,
-    lastSignedInTimestamp: d.lastSignedInTimestamp, lastSignedInIp: d.lastSignedInIp,
-    ...(d.helperLoginProxy ? { helperLoginProxy: d.helperLoginProxy } : {}),
-  })) : undefined;
+  let devices, deviceSyncError = null;
+  if (available && !invalidTokenWorkspace) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        devices = (await listAccountSessions(job, { refreshOnUnauthorized: false })).devices.map(d => ({
+          displayName: d.displayName, platform: d.platform, isCurrentDevice: d.isCurrentDevice,
+          lastSignedInTimestamp: d.lastSignedInTimestamp, lastSignedInIp: d.lastSignedInIp,
+          ...(d.helperLoginProxy ? { helperLoginProxy: d.helperLoginProxy } : {}),
+        }));
+        break;
+      } catch (error) {
+        // Genuine authentication/ban evidence still belongs to account recovery.
+        if ([error.status, error.remoteStatus].some(status => Number(status) === 401)
+          || /^SESSION_(?:TOKEN_EXPIRED|WORKSPACE_UNAVAILABLE):/.test(error.message || "")
+          || /account_(?:deactivated|suspended|banned)|user_(?:deactivated|deleted)|account has been deactivated/i.test(error.message || "")) throw error;
+        if (attempt === 3) deviceSyncError = "设备同步失败：网络、权限或上游异常；空间与套餐检查已完成";
+      }
+    }
+  }
   // Compare against issued OAuth context too: publishing the live plan must not
   // erase a still-pending authorization repair on the next check/restart.
   const account = bundle?.data?.accounts?.[0];
@@ -69,7 +83,7 @@ export async function probeAccountWebSession(job) {
     planType: w.planType, current: w.current, canAccess: w.canAccess, deactivated: w.deactivated,
     availabilityReason: w.availabilityReason }));
   return {
-    devices, workspaces, currentWorkspaceId: savedId,
+    devices, deviceSyncError, workspaces, currentWorkspaceId: savedId,
     planType: available ? selected.planType : null,
     repairReason: invalidTokenWorkspace ? "web_workspace_unavailable"
       : !available ? "workspace_unavailable"

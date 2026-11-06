@@ -66,7 +66,12 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: "not found" }));
 });
 
-await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+// Avoid browser/fetch-blocked low ports selected by Windows listen(0).
+do {
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  if (server.address().port > 10080) break;
+  await new Promise(resolve => server.close(resolve));
+} while (true);
 const port = server.address().port;
 process.env.TOSUB2_SESSION_NATIVE_HTTP = "1";
 process.env.CHATGPT_BASE = `http://127.0.0.1:${port}`;

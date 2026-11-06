@@ -781,6 +781,7 @@ try {
     ],
     proxies: [{ id: 3, name: "测试代理", protocol: "http", host: "proxy.example", port: 8080, ipAddress: "203.0.113.10", status: "active", accountCount: 0 }],
     directAccountCount: 0,
+    directIp: null,
   });
 
   openaiGroupsMode = "empty";
@@ -2107,15 +2108,17 @@ async function waitForJson(url) {
 
 async function waitForJob(headers, jobId, predicate) {
   const deadline = Date.now() + 10_000;
+  let lastState;
   while (Date.now() < deadline) {
     const response = await fetch(`${baseUrl}/api/jobs`, { headers });
     assert.equal(response.status, 200);
     const page = await response.json();
     const job = page.jobs.find((item) => item.id === jobId);
+    lastState = job ? { status: job.status, canForceRelogin: job.canForceRelogin, poolRefreshAction: job.poolRefreshAction, poolRefreshError: job.poolRefreshError } : null;
     if (job && predicate(job)) return job;
     await delay(100);
   }
-  throw new Error(`job ${jobId} did not reach the expected state`);
+  throw new Error(`job ${jobId} did not reach the expected state: ${JSON.stringify(lastState)}`);
 }
 
 async function submitEmailOtp(headers, jobId) {
@@ -2146,6 +2149,7 @@ function findAvailablePort() {
       const address = server.address();
       server.close((error) => {
         if (error) reject(error);
+        else if (address.port <= 10080) resolve(findAvailablePort());
         else resolve(address.port);
       });
     });

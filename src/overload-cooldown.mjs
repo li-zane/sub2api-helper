@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_POOL_SYNC_CONCURRENCY, limitPoolRequests } from "./pool-network.mjs";
 import { collectOverloadWindow } from "./overload-monitor.mjs";
 
 export const DEFAULT_OVERLOAD_COOLDOWN = Object.freeze({ windowMinutes: 15, threshold: 10, cooldownMinutes: 60 });
@@ -16,8 +17,9 @@ export function normalizeOverloadCooldown(value = DEFAULT_OVERLOAD_COOLDOWN) {
 }
 
 export class OverloadCooldown {
-  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, isBlocked = () => false, onChange = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, isBlocked, onChange, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, onChange = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, onChange, now, setTimer, clearTimer });
+    this.request = limitPoolRequests(request, () => this.getMonitoringSettings().concurrency);
     this.accounts = new Map();
     this.locks = new Map();
     this.writePromise = Promise.resolve();
@@ -149,7 +151,7 @@ export class OverloadCooldown {
       if (this.stopped) return;
       if (this.rerun) { this.trigger(); return; }
       const due = [...this.accounts.values()].filter(entry => entry.resumeAccountIds?.length && entry.phase !== "resuming").map(entry => Date.parse(entry.coolingUntil)).filter(time => Number.isFinite(time) && time > this.now());
-      const delay = Math.max(100, Math.min(60_000, ...due.map(time => time - this.now())));
+      const delay = Math.max(100, Math.min(this.getMonitoringSettings().intervalMs, ...due.map(time => time - this.now())));
       this.timer = this.setTimer(() => this.trigger(), delay);
       this.timer.unref?.();
     });
@@ -168,13 +170,17 @@ export class OverloadCooldown {
       for (const [email] of active) await this.lock(email, () => this.update(email, { lastError: String(error.message).slice(0, 300) }));
       return;
     }
-    for (const [email] of active) {
-      if (this.stopped) break;
-      await this.lock(email, async () => {
-        try { await this.checkAccount(email, config, mapping.get(email) || []); }
-        catch (error) { await this.update(email, { lastError: String(error.message).slice(0, 300) }); }
-      });
-    }
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < active.length && !this.stopped) {
+        const [email] = active[cursor++];
+        await this.lock(email, async () => {
+          try { await this.checkAccount(email, config, mapping.get(email) || []); }
+          catch (error) { await this.update(email, { lastError: String(error.message).slice(0, 300) }); }
+        });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(active.length, this.getMonitoringSettings().concurrency) }, worker));
   }
 
   async checkAccount(email, config, records) {

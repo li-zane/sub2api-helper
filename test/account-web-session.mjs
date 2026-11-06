@@ -74,7 +74,12 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname.endsWith("/accounts/logout_all")) return res.end("{}");
   res.statusCode = 404; res.end("{}");
 });
-await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+// Avoid browser/fetch-blocked low ports selected by Windows listen(0).
+do {
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  if (server.address().port > 10080) break;
+  await new Promise(resolve => server.close(resolve));
+} while (true);
 const base = `http://127.0.0.1:${server.address().port}`;
 process.env.CHATGPT_BASE = base;
 const outputPath = path.join(root, "sub2api-import-oauth.json");

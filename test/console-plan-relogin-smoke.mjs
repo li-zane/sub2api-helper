@@ -152,7 +152,19 @@ process.disconnect(); process.stdin.destroy();
   await post(`/api/jobs/${free.id}/web-login`,{});await waitFor(async()=> (await job(free.id)).status==="email_otp");
   assert.equal((await job(free.id)).assignedProxyId,null,"current direct plan clears an expired historical proxy");
   await post(`/api/jobs/${free.id}/input`,{action:"email_otp",value:"123456"});await waitFor(async()=> !(await job(free.id)).webLoginPending);
-  await stop();await start();assert.equal((await job(free.id)).assignedProxyId,null);
+  // A Web-only login must rebind on a newly discovered plan, not the cached free plan.
+  proxies.find(p=>p.id===3).status="active";profiles[2].proxyId="3";await settings();
+  const exportBefore=await fs.readFile(path.join(output,free.id,"sub2api-import-oauth.json"),"utf8");
+  await fs.writeFile(planOverrides,JSON.stringify({[free.email]:"pro"}));
+  await post(`/api/jobs/${free.id}/web-login`,{});await waitFor(async()=> (await job(free.id)).status==="email_otp");
+  assert.equal((await job(free.id)).assignedProxyId,null,"login begins on previous verified direct route");
+  await post(`/api/jobs/${free.id}/input`,{action:"email_otp",value:"123456"});await waitFor(async()=> !(await job(free.id)).webLoginPending);
+  assert.equal((await job(free.id)).assignedProxyId,3,"live pro plan immediately binds proxy B");
+  assert.equal((await job(free.id)).planType,"pro");
+  assert.equal(accounts.find(a=>a.credentials.email===free.email).proxy_id,3,"Web login updates pool binding without rewriting OAuth");
+  assert.equal(await fs.readFile(path.join(output,free.id,"sub2api-import-oauth.json"),"utf8"),exportBefore);
+  await stop();await start();assert.equal((await job(free.id)).assignedProxyId,3);
+
   console.log("KNOWN PLAN RELOGIN PASS: imported Web/Codex use current direct/fixed/balanced/keep route before login; no dynamic proxy required; Web preserves exports; invalid target stops; direct clears stale binding; restart persists");
 } catch(error){error.message += `\n${logs}`;throw error;}
 finally{await stop();remote.closeAllConnections();await new Promise(r=>remote.close(r));sessionUpstream.closeAllConnections();await new Promise(r=>sessionUpstream.close(r));await fs.rm(temp,{recursive:true,force:true});}

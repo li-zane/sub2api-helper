@@ -15,12 +15,13 @@ const account=(id,email,error,proxy=8,type="oauth",platform="openai")=>({id,plat
 const rows=[account(10,emails[0],"Token revoked (401)"),account(11,emails[1],ban),account(12,emails[0],"Token revoked (401)",9),account(13,emails[2],"Token revoked (401)",9),account(14,emails[3],"HTTP402 deactivated_workspace",9),account(15,emails[4],"account_suspended"),account(16,emails[0],ban,8,"apikey"),account(17,emails[0],ban,8,"oauth","anthropic")];
 let rejectRelease=true,child,exited,base,headers,logs="",webReads=0;
 const repairAt=new Date().toISOString(),retryAt=new Date(Date.parse(repairAt)+60*60_000).toISOString();
-const writes=[];
+const writes=[],usageReads=[];
 const pool=http.createServer(async(req,res)=>{
  const chunks=[];for await(const b of req)chunks.push(b);
  const url=new URL(req.url,"http://fixture"),body=chunks.length?JSON.parse(Buffer.concat(chunks).toString()):{};
  res.setHeader("content-type","application/json");
  const send=(status,data)=>{res.statusCode=status;res.end(JSON.stringify({data}));};
+ if(url.pathname==="/api/v1/admin/usage/stats")usageReads.push(Number(url.searchParams.get("account_id")));
  if(url.pathname.startsWith("/api/auth/")||url.pathname.startsWith("/backend-api/")){webReads++;return send(200,{});}
  if(url.pathname==="/api/v1/admin/accounts"){
    // Make startup ordering deterministic: the monitor must await pool bans before restoring missing sessions.
@@ -71,6 +72,7 @@ try{
    const result=await api(`/api/jobs/${ids[0]}/${route}`,route.includes("/")?{}:undefined);
    assert.equal(result.status,409);assert.match(result.data.error,/账号已封禁/);assert.match(result.data.error,/account_deactivated/);
  }
+ assert(!usageReads.some(id=>[10,11,12,15].includes(id)),"banned OAuth rows excluded from usage sync");
  assert.equal(webReads,0,"blocked device/workspace actions never contact upstream");
  assert.equal(all.find(j=>j.email===emails[2]).webSessionRepairRetryAt,retryAt,"show the persisted automatic login cooldown");
  assert.equal(known.webSessionRepairRetryAt,null,"banned accounts have no retry schedule");

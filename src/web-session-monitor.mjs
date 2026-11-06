@@ -29,6 +29,10 @@ export class WebSessionMonitor {
     } catch (e) { if (e.code !== "ENOENT") throw e; }
   }
   snapshot() { return { running: Boolean(this.running), settings: this.getSettings(), accounts: structuredClone(this.accounts) }; }
+  setTickMs(ms) {
+    this.tickMs = ms;
+    if (this.timer) { clearInterval(this.timer); this.timer = setInterval(() => { void this.run().catch(() => {}); }, ms); this.timer.unref?.(); }
+  }
   start() {
     this.stopped = false;
     if (this.retryAbort.signal.aborted) this.retryAbort = new AbortController();
@@ -38,7 +42,7 @@ export class WebSessionMonitor {
   trigger(force = false) { if (!this.stopped) void this.run({ force }).catch(() => {}); }
   async stop() { this.stopped = true; this.retryAbort.abort(); clearInterval(this.timer); this.timer = null; await this.running; await this.writes; }
   async repairFinished(email, { success = true, webOnly = false } = {}) {
-    const entry = this.accounts[email.toLowerCase()];
+    const entry = this.accounts[email.toLowerCase()] ||= {};
     if (entry) {
       entry.status = success ? "pending_check" : "needs_attention";
       entry.lastError = success ? null : "自动重登未完成；将在冷却限制内重新巡检";
@@ -80,7 +84,8 @@ export class WebSessionMonitor {
           // while this check waited for admission. Only confirmed ENOENT is missing.
           if (!hasSession) throw new Error("SESSION_CREDENTIALS_MISSING: Web 会话文件缺失");
           const result = await this.probeWithRetries(job, entry);
-          if (Array.isArray(result.devices)) entry.devices = result.devices;
+          if (Array.isArray(result.devices)) { entry.devices = result.devices; entry.devicesUpdatedAt = at; }
+          entry.deviceSyncError = result.deviceSyncError || null;
           entry.workspaces = result.workspaces || [];
           entry.currentWorkspaceId = result.currentWorkspaceId || null;
           entry.planType = result.planType || null;

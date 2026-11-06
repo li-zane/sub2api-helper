@@ -1,9 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useLayoutEffect, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { readJsonResponse, workspaceFailureTooltip } from "./response-errors.js";
 import { accountMutationBlockReason } from "./account-action-state.mjs";
+import { shareSnapshot, shareJobList } from "./polling-snapshot.mjs";
 import { recentOperation } from "./recent-operation.mjs";
 import { formatUsageTotal } from "./usage-totals.mjs";
+import { MONITOR_FIELDS, DEFAULT_MONITORING, normalizeMonitoring } from "./monitor-settings.mjs";
 import {
   Ban,
   Check,
@@ -55,7 +57,9 @@ import { WebLoginBatch } from "./web-login-batch.jsx";
 import { FingerprintSettingsButton } from "./model-fingerprint.jsx";
 import { CodexStatus } from "./codex-status.jsx";
 import { HelpTip } from "./help-tip.jsx";
-import { AccessibleDialog } from "./accessible-dialog.jsx";
+import { AccessibleDialog, useModalFocus } from "./accessible-dialog.jsx";
+import { CustomSelect } from "./custom-select.jsx";
+import { GlobalTooltipProvider } from "./tooltip.jsx";
 
 const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效", unavailable: "Web 凭据读取失败", banned: "账号已封禁" };
 const BATCH_KEY = "tosub2.web-session-check-batch";
@@ -315,6 +319,8 @@ function App() {
   const [planTypeMappingDraft, setPlanTypeMappingDraft] = useState(() => planTypeMappingRows(readPlanTypeMapping()));
   const [planTypeMappingError, setPlanTypeMappingError] = useState("");
   const [planTypeMappingSaving, setPlanTypeMappingSaving] = useState(false);
+  const planTypeMappingRef = useRef(null);
+  useModalFocus(planTypeMappingRef, planTypeMappingOpen);
   const [credentialJob, setCredentialJob] = useState(null);
   const [remarkJob, setRemarkJob] = useState(null);
   const [sessionJob, setSessionJob] = useState(null);
@@ -476,6 +482,7 @@ function App() {
     if (!token) return undefined;
     let stopped = false;
     let timer;
+    const controller = new AbortController();
     const poll = async () => {
       try {
         const filters = {
@@ -491,6 +498,7 @@ function App() {
         const data = emailFilter.length
           ? await apiFetch(token, "/api/jobs/query", {
               method: "POST",
+              signal: controller.signal,
               body: JSON.stringify({ page, emails: emailFilter, ...filters }),
             })
           : await apiFetch(token, `/api/jobs?${new URLSearchParams({
@@ -503,16 +511,16 @@ function App() {
               ...(filters.planType ? { planType: filters.planType } : {}),
               ...(filters.sub2apiPool ? { sub2apiPool: filters.sub2apiPool } : {}),
               ...(filters.sub2apiEnabled ? { sub2apiEnabled: filters.sub2apiEnabled } : {}),
-            }).toString()}`);
+            }).toString()}`, { signal: controller.signal });
         if (!stopped) {
-          setJobs(data.jobs);
-          setCredentialJob((current) => data.jobs.find((job) => job.id === current?.id) || current);
-          setSessionJob((current) => data.jobs.find((job) => job.id === current?.id) || current);
-          setWorkspaceJob((current) => data.jobs.find((job) => job.id === current?.id) || current);
-          setJobSelectionIndex(data.selection || data.jobs);
-          setPagination(data.pagination || { page, pageSize: 20, total: data.jobs.length, totalPages: 1 });
-          setStats(data.stats || { active: 0, queued: 0, completed: 0 });
-          if (data.taskSettings) setTaskSettings(data.taskSettings);
+          setJobs(current => shareJobList(current, data.jobs));
+          setCredentialJob(current => shareSnapshot(current, data.jobs.find(job => job.id === current?.id) || current));
+          setSessionJob(current => shareSnapshot(current, data.jobs.find(job => job.id === current?.id) || current));
+          setWorkspaceJob(current => shareSnapshot(current, data.jobs.find(job => job.id === current?.id) || current));
+          setJobSelectionIndex(current => shareJobList(current, data.selection || data.jobs));
+          setPagination(current => shareSnapshot(current, data.pagination || { page, pageSize: 20, total: data.jobs.length, totalPages: 1 }));
+          setStats(current => shareSnapshot(current, data.stats || { active: 0, queued: 0, completed: 0 }));
+          if (data.taskSettings) setTaskSettings(current => shareSnapshot(current, data.taskSettings));
           const nextPlanTypeOptions = Array.isArray(data.filterOptions?.planTypes) ? data.filterOptions.planTypes : [];
           const nextPlanTypeUnknown = data.filterOptions?.planTypeUnknown === true;
           const nextStatusOptions = Array.isArray(data.filterOptions?.statuses)
@@ -524,11 +532,11 @@ function App() {
           const nextEnabledOptions = Array.isArray(data.filterOptions?.sub2apiEnabled)
             ? data.filterOptions.sub2apiEnabled.filter((value) => Object.hasOwn(SUB2API_ENABLED_FILTER_LABELS, value))
             : [];
-          setPlanTypeOptions(nextPlanTypeOptions);
+          setPlanTypeOptions(current => shareSnapshot(current, nextPlanTypeOptions));
           setPlanTypeUnknown(nextPlanTypeUnknown);
-          setStatusOptions(nextStatusOptions);
-          setSub2apiPoolOptions(nextPoolOptions);
-          setSub2apiEnabledOptions(nextEnabledOptions);
+          setStatusOptions(current => shareSnapshot(current, nextStatusOptions));
+          setSub2apiPoolOptions(current => shareSnapshot(current, nextPoolOptions));
+          setSub2apiEnabledOptions(current => shareSnapshot(current, nextEnabledOptions));
           if (statusFilter && !nextStatusOptions.includes(statusFilter)) setStatusFilter("");
           if (planTypeFilter && (planTypeFilter === "__unknown__"
             ? !nextPlanTypeUnknown
@@ -547,6 +555,7 @@ function App() {
     poll();
     return () => {
       stopped = true;
+      controller.abort();
       window.clearTimeout(timer);
     };
   }, [token, page, searchQuery, lockedOnly, webSessionFilter, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter]);
@@ -558,8 +567,8 @@ function App() {
       try {
         const data = await apiFetch(token, "/api/sub2api/monitor");
         if (!stopped) {
-          setSub2apiMonitorStatus(data);
-          setSub2apiSettings((current) => mergeServerSub2ApiSettings(current, data));
+          setSub2apiMonitorStatus(current => shareSnapshot(current, data));
+          setSub2apiSettings((current) => shareSnapshot(current, mergeServerSub2ApiSettings(current, data)));
         }
       } catch {}
     };
@@ -576,7 +585,7 @@ function App() {
     let stopped = false;
     apiFetch(token, "/api/sub2api/settings")
       .then((data) => {
-        if (!stopped) setSub2apiSettings((current) => mergeServerSub2ApiSettings(current, data));
+        if (!stopped) setSub2apiSettings((current) => shareSnapshot(current, mergeServerSub2ApiSettings(current, data)));
       })
       .catch(() => {});
     return () => {
@@ -595,12 +604,12 @@ function App() {
       }
     };
     void load();
-    const timer = window.setInterval(load, 15_000);
+    const timer = window.setInterval(load, (taskSettings?.monitoring?.accountStatusIntervalSeconds || 15) * 1000);
     return () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [token, features.sub2apiAccountStatus, sub2apiSettings.baseUrl, sub2apiSettings.hasStoredAdminApiKey]);
+  }, [token, features.sub2apiAccountStatus, sub2apiSettings.baseUrl, sub2apiSettings.hasStoredAdminApiKey, taskSettings?.monitoring?.accountStatusIntervalSeconds]);
 
   useEffect(() => {
     if (!token || !features.accountUsage) return undefined;
@@ -617,7 +626,7 @@ function App() {
           ? { status: "ready", ...job.sub2apiUsage }
           : { status: "ready", source: "sub2api", primary: null, secondary: null, credits: null, allowed: null, limitReached: null };
       }
-      return next;
+      return shareSnapshot(current, next);
     });
   }, [token, features.accountUsage, accountUsageJobKey]);
 
@@ -886,9 +895,9 @@ function App() {
 
   async function refreshSub2ApiAccountStatus(forceRefresh = false) {
     const data = await apiFetch(token, `/api/sub2api/account-status${forceRefresh ? "?refresh=1" : ""}`);
-    setSub2apiAccountStatus(data);
-    setJobs((current) => current.map((job) => mergeSub2ApiStatusIntoJob(job, data)));
-    setJobSelectionIndex((current) => current.map((job) => mergeSub2ApiStatusIntoJob(job, data)));
+    setSub2apiAccountStatus(current => shareSnapshot(current, data));
+    setJobs((current) => shareJobList(current, current.map(job => mergeSub2ApiStatusIntoJob(job, data))));
+    setJobSelectionIndex((current) => shareJobList(current, current.map(job => mergeSub2ApiStatusIntoJob(job, data))));
     return data;
   }
 
@@ -963,7 +972,7 @@ function App() {
     setSub2apiSettingsError("");
     try {
       const data = await apiFetch(token, "/api/sub2api/monitor/check", { method: "POST" });
-      setSub2apiMonitorStatus(data);
+      setSub2apiMonitorStatus(current => shareSnapshot(current, data));
       setUploadNotice(formatMonitorResult(data.result));
       setError("");
     } catch (requestError) {
@@ -1753,6 +1762,7 @@ function App() {
 
   return (
     <div className={`app-layout ${batchAction ? "workflow-busy" : ""}`}>
+      <GlobalTooltipProvider />
       <header className="topbar">
         <div className="topbar-inner">
           <div className="brand-block">
@@ -2341,7 +2351,7 @@ function App() {
             <tbody>
               {!jobs.length && <EmptyState filtered={hasJobFilters} />}
               {jobs.map((job) => (
-                <JobRow
+                <JobRowBoundary
                   key={job.id}
                   job={job}
                   token={token}
@@ -2712,7 +2722,7 @@ function App() {
                         <div className="price-select-row">
                           <div className="price-select-box">
                             <Settings2 size={15} />
-                            <select
+                            <CustomSelect
                               value={draftSmsProvider.config.country || ""}
                               onChange={(event) => {
                                 const selected = smsNumberOptions.find((option) => option.country === event.target.value);
@@ -2734,7 +2744,7 @@ function App() {
                               {smsNumberOptions.map((option) => (
                                 <option key={option.country} value={option.country}>{formatSmsPriceOption(option)}</option>
                               ))}
-                            </select>
+                            </CustomSelect>
                           </div>
                           <button
                             type="button"
@@ -2929,9 +2939,9 @@ function App() {
                 <div className="sub2api-profile-controls">
                   <label className="settings-field">
                     <span>当前方案</span>
-                    <select value={sub2apiSettingsDraft.activeProfileId} onChange={(event) => selectSub2ApiProfile(event.target.value)}>
+                    <CustomSelect value={sub2apiSettingsDraft.activeProfileId} onChange={(event) => selectSub2ApiProfile(event.target.value)} aria-label="当前方案">
                       {sub2apiSettingsDraft.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
-                    </select>
+                    </CustomSelect>
                   </label>
                   <label className="settings-field sub2api-profile-name-field">
                     <span>方案名称</span>
@@ -2956,18 +2966,18 @@ function App() {
                   <div className="sub2api-binding-list">
                     {activeProfileBindings.map(([planType, profileId]) => (
                       <div className="sub2api-binding-row" key={planType}>
-                        <select value={planType} onChange={(event) => {
+                        <CustomSelect value={planType} onChange={(event) => {
                           const next = event.target.value;
                           removeSub2ApiPlanTypeBinding(planType);
                           if (next) updateSub2ApiPlanTypeBinding(next, profileId);
-                        }}>
+                        }} aria-label={`PlanType 绑定 ${planType}`}>
                           <option value={planType}>{formatPlanTypeLabel(planType, planTypeMapping)} ({planType})</option>
                           {availablePlanTypes.filter((value) => value !== planType).map((value) => <option key={value} value={value}>{formatPlanTypeLabel(value, planTypeMapping)} ({value})</option>)}
-                        </select>
+                        </CustomSelect>
                         <span aria-hidden="true">→</span>
-                        <select value={profileId} onChange={(event) => updateSub2ApiPlanTypeBinding(planType, event.target.value)}>
+                        <CustomSelect value={profileId} onChange={(event) => updateSub2ApiPlanTypeBinding(planType, event.target.value)} aria-label={`方案绑定 ${profileId}`}>
                           {sub2apiSettingsDraft.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
-                        </select>
+                        </CustomSelect>
                         <button type="button" className="icon-button danger" onClick={() => removeSub2ApiPlanTypeBinding(planType)} title="删除绑定" aria-label="删除绑定"><Trash2 size={15} /></button>
                       </div>
                     ))}
@@ -3049,27 +3059,29 @@ function App() {
                     “均衡分配”由 toSub2 按出口 IP 的账号数分配；在任务设置中启用“动态登录 + 按 PlanType 授权”后生效。
                   </HelpTip>
                 </span>
-                <select
+                <CustomSelect
                   value={sub2apiSettingsDraft.proxyId}
                   onChange={(event) => updateSub2ApiDraftProfile({ proxyId: event.target.value })}
+                  aria-label="方案代理 IP"
                 >
                   <option value="">使用账号原配置</option>
                   <option value="direct">直连（无代理）</option>
                   <option value="balanced">均衡分配（toSub2）</option>
                   {sub2apiProxies.map((proxy) => <option key={proxy.id} value={String(proxy.id)}>{formatSub2ApiProxy(proxy)}</option>)}
-                </select>
+                </CustomSelect>
               </label>
               <label className="settings-field">
                 <span>Codex 指纹收敛</span>
-                <select
+                <CustomSelect
                   value={sub2apiSettingsDraft.codexFingerprintMode}
                   onChange={(event) => updateSub2ApiDraftProfile({ codexFingerprintMode: event.target.value })}
+                  aria-label="Codex 指纹收敛"
                 >
                   <option value="off">关闭（透传）</option>
                   <option value="device">仅设备</option>
                   <option value="session">设备+会话（推荐）</option>
                   <option value="full">完全收敛</option>
-                </select>
+                </CustomSelect>
               </label>
               <div className="settings-field wide-settings-field">
                 <div className="field-label-row">
@@ -3104,12 +3116,13 @@ function App() {
               </div>
               <label className="settings-field wide-settings-field">
                 <span>WS mode</span>
-                <select
+                <CustomSelect
                   value={sub2apiSettingsDraft.wsMode}
                   onChange={(event) => updateSub2ApiDraftProfile({ wsMode: event.target.value })}
+                  aria-label="WS mode"
                 >
                   {SUB2API_WS_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </select>
+                </CustomSelect>
               </label>
               <div className="sub2api-three-fields wide-settings-field">
                 <label className="settings-field">
@@ -3226,9 +3239,13 @@ function App() {
       )}
       {planTypeMappingOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setPlanTypeMappingOpen(false);
+          if (event.target === event.currentTarget && !planTypeMappingSaving) setPlanTypeMappingOpen(false);
+        }} onClick={(event) => {
+          if (event.target === event.currentTarget && !planTypeMappingSaving) setPlanTypeMappingOpen(false);
         }}>
-          <form className="batch-dialog plan-type-mapping-dialog" onSubmit={savePlanTypeMapping} role="dialog" aria-modal="true" aria-labelledby="plan-type-mapping-title">
+          <form ref={planTypeMappingRef} className="batch-dialog plan-type-mapping-dialog" onSubmit={savePlanTypeMapping} role="dialog" aria-modal="true" aria-labelledby="plan-type-mapping-title" onKeyDown={(event) => {
+            if (event.key === "Escape" && !planTypeMappingSaving) setPlanTypeMappingOpen(false);
+          }}>
             <div className="dialog-header">
               <div>
                 <h2 id="plan-type-mapping-title">PlanType 映射</h2>
@@ -3237,7 +3254,7 @@ function App() {
                   把 OAuth 原始参数转换为账号列表中的显示标签。保存后即时同步至服务端并生效。
                 </HelpTip>
               </div>
-              <button type="button" className="icon-button" onClick={() => setPlanTypeMappingOpen(false)} title="关闭">
+              <button type="button" className="icon-button" onClick={() => setPlanTypeMappingOpen(false)} disabled={planTypeMappingSaving} title="关闭">
                 <X size={18} />
               </button>
             </div>
@@ -3259,9 +3276,10 @@ function App() {
                 <div className="task-auto-empty">暂无映射项，可点击下方“添加映射项”或“恢复默认”</div>
               ) : (
                 planTypeMappingDraft.map((row, index) => (
-                  <div className="plan-type-mapping-row" key={`${row.raw || "new"}-${index}`}>
+                  <div className="plan-type-mapping-row" key={index}>
                     <div className="mapping-input-wrapper raw-wrapper">
                       <input
+                        disabled={planTypeMappingSaving}
                         value={row.raw}
                         onChange={(event) => setPlanTypeMappingDraft((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, raw: event.target.value } : item))}
                         placeholder="例如：self_serve_business"
@@ -3274,6 +3292,7 @@ function App() {
                     </span>
                     <div className="mapping-input-wrapper label-wrapper">
                       <input
+                        disabled={planTypeMappingSaving}
                         value={row.label}
                         onChange={(event) => setPlanTypeMappingDraft((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))}
                         placeholder="例如：Business"
@@ -3288,6 +3307,7 @@ function App() {
                     <button
                       type="button"
                       className="icon-button danger mapping-delete-btn"
+                      disabled={planTypeMappingSaving}
                       onClick={() => setPlanTypeMappingDraft((current) => current.filter((_, itemIndex) => itemIndex !== index))}
                       title="删除此项映射"
                       aria-label={`删除第 ${index + 1} 行映射`}
@@ -3302,6 +3322,7 @@ function App() {
             <button
               type="button"
               className="mapping-add-button"
+              disabled={planTypeMappingSaving}
               onClick={() => setPlanTypeMappingDraft((current) => [...current, { raw: "", label: "" }])}
             >
               <Plus size={15} />
@@ -3311,12 +3332,12 @@ function App() {
             {planTypeMappingError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{planTypeMappingError}</div>}
 
             <div className="dialog-footer">
-              <button type="button" className="selection-text-button" onClick={resetPlanTypeMapping} title="重置为默认官方方案映射">
+              <button type="button" className="selection-text-button" disabled={planTypeMappingSaving} onClick={resetPlanTypeMapping} title="重置为默认官方方案映射">
                 <RotateCcw size={13} />
                 恢复默认
               </button>
               <span className="dialog-actions-spacer" />
-              <button type="button" className="cancel-button" onClick={() => setPlanTypeMappingOpen(false)}>取消</button>
+              <button type="button" className="cancel-button" disabled={planTypeMappingSaving} onClick={() => setPlanTypeMappingOpen(false)}>取消</button>
               <button type="submit" className="primary-button" disabled={planTypeMappingSaving || !token}>
                 {planTypeMappingSaving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
                 {planTypeMappingSaving ? "保存中…" : "保存映射"}
@@ -3687,6 +3708,16 @@ function BulkMoreMenu({
       )}
     </div>
   );
+}
+
+// The boundary keeps event handlers fresh without invalidating unchanged memoized rows.
+const MemoizedJobRow = React.memo(JobRow);
+const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
+function JobRowBoundary(props) {
+  const latest = useRef(props);
+  useLayoutEffect(() => { latest.current = props; });
+  const callbacks = useMemo(() => Object.fromEntries(JOB_ROW_CALLBACKS.map(name => [name, (...args) => latest.current[name]?.(...args)])), []);
+  return <MemoizedJobRow {...props} {...callbacks} />;
 }
 
 function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onError, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, forceReloginAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
@@ -4264,6 +4295,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
 function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSaved }) {
   const dialogRef = useRef(null);
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
+  const [monitoring, setMonitoring] = useState(() => Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
+  const [fingerprintDefaults, setFingerprintDefaults] = useState(() => ({ intervalMinutes: String(settings.modelFingerprint?.intervalMinutes ?? 360), maxConcurrentAccounts: String(settings.modelFingerprint?.maxConcurrentAccounts ?? 3) }));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
   const [webMonitor, setWebMonitor] = useState(() => ({ enabled: settings.webSessionMonitor?.enabled === true, autoRelogin: settings.webSessionMonitor?.autoRelogin !== false, intervalMinutes: String(settings.webSessionMonitor?.intervalMinutes || 15), retryMinutes: String(settings.webSessionMonitor?.retryMinutes || 60) }));
@@ -4335,12 +4368,22 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       setError("WebSession 检测间隔需为 1–1440 分钟，重登重试间隔需为 15–1440 分钟");
       return;
     }
+    let monitoringValues;
+    try {
+      if (Object.values(monitoring).some(value => !String(value).trim())) throw new Error("请填写全部自动监控参数");
+      monitoringValues = normalizeMonitoring(Object.fromEntries(Object.entries(monitoring).map(([key, value]) => [key, Number(value)])));
+    } catch (error) { setError(error.message); return; }
+    const modelFingerprint = Object.fromEntries(Object.entries(fingerprintDefaults).map(([key, value]) => [key, Number(value)]));
+    if (!Number.isInteger(modelFingerprint.intervalMinutes) || modelFingerprint.intervalMinutes < 5 || modelFingerprint.intervalMinutes > 43200
+      || !Number.isInteger(modelFingerprint.maxConcurrentAccounts) || modelFingerprint.maxConcurrentAccounts < 1 || modelFingerprint.maxConcurrentAccounts > 16) {
+      setError("降智检测间隔需为 5–43200 分钟，并发需为 1–16 个账号"); return;
+    }
     setSaving(true);
     setError("");
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor }),
+        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4359,6 +4402,12 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         event.preventDefault();
         if (!saving) onClose();
       }}
+      onClick={(event) => {
+        if (event.target !== event.currentTarget || saving) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (event.clientX < rect.left || event.clientX > rect.right
+          || event.clientY < rect.top || event.clientY > rect.bottom) onClose();
+      }}
     >
       <form onSubmit={save} className="task-settings-form" noValidate>
         <div className="dialog-header">
@@ -4370,91 +4419,143 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           </div>
           <button type="button" className="icon-button" data-dialog-initial-focus onClick={onClose} disabled={saving} aria-label="关闭任务设置"><X size={18} /></button>
         </div>
-        <div className="task-two-fields">
-          <label className="settings-field task-limit-field" htmlFor="task-limit">
-            <span className="field-label-row">
-              同时运行任务数
-              <HelpTip label="同时运行任务数说明">
-                可设置 {settings.min}–{settings.max} 条，默认 {settings.default} 条。超过上限的任务自动排队，并发越高服务器和代理负载越大。调高后立即启动排队任务；调低后等待当前任务完成再按新上限调度。
-              </HelpTip>
-            </span>
-            <div>
-              <input id="task-limit" type="number" min={settings.min} max={settings.max} step="1" required
-                value={limit} onChange={(event) => setLimit(event.target.value)} disabled={saving}
-                aria-invalid={Boolean(error)} />
-              <span>条</span>
-            </div>
-          </label>
-          <label className="settings-field task-cooldown-field" htmlFor="task-cooldown-minutes">
-            <span className="field-label-row">
-              一键冷却时长
-              <HelpTip label="一键冷却时长说明">
-                批量工具栏中点击“一键冷却”时，暂停号池分配的默认时长（1–43200 分钟）。
-              </HelpTip>
-            </span>
-            <div>
-              <input id="task-cooldown-minutes" type="number" min="1" max="43200" step="1" required
-                value={cooldownMinutes} onChange={(event) => setCooldownMinutes(event.target.value)} disabled={saving} />
-              <span>分钟</span>
-            </div>
-          </label>
-        </div>
-        <div className="task-two-fields">
-          <label className="settings-field task-auth-mode-field" htmlFor="task-proxy-mode">
-            <span className="field-label-row">
-              账号代理分配
-              <HelpTip label="账号代理分配说明">
-                {accountProxyMode === "plan"
-                  ? "仅首次网页登录使用全局动态代理；识别 PlanType 后按对应方案分配并绑定 IP。后续网页登录、Codex 授权、刷新与号池同步均复用该绑定，服务重启后保留。只有选择“均衡分配（toSub2）”的方案参与自动均衡。"
-                  : accountProxyMode === "sub2api"
-                  ? "导入任务开始时按出口 IP 负载分配并绑定，登录、授权和号池同步沿用同一代理。需先在代理 IP 配置中读取可用代理。"
-                  : "所有任务使用代理 IP 配置中的全局代理；未配置时使用账号原代理或服务器出口。"}
-              </HelpTip>
-            </span>
-            <select id="task-proxy-mode" value={accountProxyMode} onChange={(event) => setAccountProxyMode(event.target.value)} disabled={saving}>
-              <option value="global">全局代理</option>
-              <option value="sub2api">Sub2API 均衡分配（登录前绑定）</option>
-              <option value="plan">动态登录 + 按 PlanType 授权</option>
-            </select>
-          </label>
-          <label className="settings-field task-auth-mode-field" htmlFor="task-codex-auth-mode">
-            <span className="field-label-row">
-              Codex 授权方式
-              <HelpTip label="Codex 授权方式说明">
-                {codexAuthMode === "sub2api"
-                  ? "使用已保存的 Sub2API 后端和管理员 Key，由号池生成授权链接、兑换和刷新令牌；toSub2 完成登录并保存凭据。需要先配置 Sub2API。"
-                  : "由 toSub2 生成授权链接并直接兑换、刷新令牌，沿用当前授权流程。"}
-              </HelpTip>
-            </span>
-            <select id="task-codex-auth-mode" value={codexAuthMode} onChange={(event) => setCodexAuthMode(event.target.value)} disabled={saving}>
-              <option value="local">本地授权（toSub2 生成链接和凭据）</option>
-              <option value="sub2api">Sub2API 授权（号池生成链接和凭据）</option>
-            </select>
-          </label>
-        </div>
+        <section className="task-auto-settings task-basic-section" aria-labelledby="task-basic-title">
+          <div className="section-title-row">
+            <h3 id="task-basic-title">基础并发与代理</h3>
+          </div>
+          <div className="task-two-fields">
+            <label className="settings-field task-limit-field" htmlFor="task-limit">
+              <span className="field-label-row">
+                同时运行任务数
+                <HelpTip label="同时运行任务数说明">
+                  登录、OAuth 授权及 Web 会话检测共用此并发。可设置 {settings.min}–{settings.max} 条，默认 {settings.default} 条。超过上限的任务自动排队，并发越高服务器和代理负载越大。调高后立即启动排队任务；调低后等待当前任务完成再按新上限调度。
+                </HelpTip>
+              </span>
+              <div>
+                <input id="task-limit" type="number" min={settings.min} max={settings.max} step="1" required
+                  value={limit} onChange={(event) => setLimit(event.target.value)} disabled={saving}
+                  aria-invalid={Boolean(error)} />
+                <span>条</span>
+              </div>
+            </label>
+            <label className="settings-field task-cooldown-field" htmlFor="task-cooldown-minutes">
+              <span className="field-label-row">
+                一键冷却时长
+                <HelpTip label="一键冷却时长说明">
+                  批量工具栏中点击“一键冷却”时，暂停号池分配的默认时长（1–43200 分钟）。
+                </HelpTip>
+              </span>
+              <div>
+                <input id="task-cooldown-minutes" type="number" min="1" max="43200" step="1" required
+                  value={cooldownMinutes} onChange={(event) => setCooldownMinutes(event.target.value)} disabled={saving} />
+                <span>分钟</span>
+              </div>
+            </label>
+          </div>
+          <div className="task-auth-mode-fields">
+            <label className="settings-field task-auth-mode-field" htmlFor="task-proxy-mode">
+              <span className="field-label-row">
+                账号代理分配
+                <HelpTip label="账号代理分配说明">
+                  {accountProxyMode === "plan"
+                    ? "仅首次网页登录使用全局动态代理；识别 PlanType 后按对应方案分配并绑定 IP。后续网页登录、Codex 授权、刷新与号池同步均复用该绑定，服务重启后保留。只有选择“均衡分配（toSub2）”的方案参与自动均衡。"
+                    : accountProxyMode === "sub2api"
+                    ? "导入任务开始时按出口 IP 负载分配并绑定，登录、授权和号池同步沿用同一代理。需先在代理 IP 配置中读取可用代理。"
+                    : "所有任务使用代理 IP 配置中的全局代理；未配置时使用账号原代理或服务器出口。"}
+                </HelpTip>
+              </span>
+              <CustomSelect
+                id="task-proxy-mode"
+                value={accountProxyMode}
+                onChange={(event) => setAccountProxyMode(event.target.value)}
+                disabled={saving}
+                aria-label="账号代理分配"
+                options={[
+                  { value: "global", label: "全局代理" },
+                  { value: "sub2api", label: "Sub2API 均衡分配（登录前绑定）" },
+                  { value: "plan", label: "动态登录 + 按 PlanType 授权" },
+                ]}
+              />
+            </label>
+            <label className="settings-field task-auth-mode-field" htmlFor="task-codex-auth-mode">
+              <span className="field-label-row">
+                Codex 授权方式
+                <HelpTip label="Codex 授权方式说明">
+                  {codexAuthMode === "sub2api"
+                    ? "使用已保存的 Sub2API 后端和管理员 Key，由号池生成授权链接、兑换和刷新令牌；toSub2 完成登录并保存凭据。需要先配置 Sub2API。"
+                    : "由 toSub2 生成授权链接并直接兑换、刷新令牌，沿用当前授权流程。"}
+                </HelpTip>
+              </span>
+              <CustomSelect
+                id="task-codex-auth-mode"
+                value={codexAuthMode}
+                onChange={(event) => setCodexAuthMode(event.target.value)}
+                disabled={saving}
+                aria-label="Codex 授权方式"
+                options={[
+                  { value: "local", label: "本地授权（toSub2 生成链接和凭据）" },
+                  { value: "sub2api", label: "Sub2API 授权（号池生成链接和凭据）" },
+                ]}
+              />
+            </label>
+          </div>
+        </section>
         <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">
           <div className="section-title-row">
             <h3 id="web-session-monitor-title">WebSession 定时巡检</h3>
             <HelpTip label="WebSession 定时巡检说明">由服务端执行，关闭页面后仍运行。使用原设备身份和账号代理检查会话、设备与空间；确认会话失效或空间/PlanType 变化后，通过共享登录队列重新登录授权，并应用新方案、同步号池。网络、403 或上游故障只记录失败，不当作掉线。会话检测成功后按当前套餐核对过载检测、过载冷却及继承套餐规则的降智检测。已有 Web 登录态会定期测活；本地已授权或曾成功登录 Web 的账号缺失会话时可自动补登。主动登出或取消任务会暂停维护，手动检测或登录可恢复。</HelpTip>
           </div>
-          <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.enabled} disabled={saving} onChange={e => setWebMonitor(v => ({ ...v, enabled: e.target.checked }))} /><span>启用 WebSession 定时检测</span></label>
-          <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.autoRelogin} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, autoRelogin: e.target.checked }))} /><span>确认失效或空间变化后自动重登并授权</span></label>
-          <div className="overload-rule-fields">
+          <div className="task-checkbox-group">
+            <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.enabled} disabled={saving} onChange={e => setWebMonitor(v => ({ ...v, enabled: e.target.checked }))} /><span>启用 WebSession 定时检测</span></label>
+            <label className="task-auto-action-option"><input type="checkbox" checked={webMonitor.autoRelogin} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, autoRelogin: e.target.checked }))} /><span>确认失效或空间变化后自动重登并授权</span></label>
+          </div>
+          <div className="task-two-fields">
             <label className="settings-field" htmlFor="web-session-check-interval"><span>检测间隔（分钟）</span><input id="web-session-check-interval" type="number" min="1" max="1440" value={webMonitor.intervalMinutes} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, intervalMinutes: e.target.value }))} /></label>
             <label className="settings-field" htmlFor="web-session-retry-interval"><span>重登重试间隔（分钟）</span><input id="web-session-retry-interval" type="number" min="15" max="1440" value={webMonitor.retryMinutes} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, retryMinutes: e.target.value }))} /></label>
           </div>
           <div className="task-auto-empty">默认关闭；默认每 15 分钟检测，60 分钟内最多自动重登一次。需要验证码时保留在现有任务队列中等待处理。</div>
         </section>
+        {Array.from(new Set(MONITOR_FIELDS.map(field => field.group))).map(group => (
+          <section className="task-auto-settings" key={group} aria-label={group}>
+            <div className="section-title-row">
+              <h3>{group}</h3>
+            </div>
+            <div className="task-two-fields">
+              {MONITOR_FIELDS.filter(field => field.group === group).map(field => (
+                <label key={field.key} className="settings-field" htmlFor={`monitor-${field.key}`}>
+                  <span>{field.label}（{field.unit}）</span>
+                  <input id={`monitor-${field.key}`} type="number" min={field.min} max={field.max} step="1" required
+                    value={monitoring[field.key]} disabled={saving}
+                    onChange={event => setMonitoring(current => ({ ...current, [field.key]: event.target.value }))} />
+                </label>
+              ))}
+            </div>
+            <div className="task-auto-empty">{group === "巡检调度" ? "扫描到期任务的频率，不是每个账号的检测间隔。Web 检测共用上方任务并发；降智使用独立账号并发。"
+              : group === "过载监控" ? "刷新频率不改变折线图每格 15 分钟、总计 90 分钟的统计口径。冷却到期仍及时唤醒恢复。"
+              : group === "号池异常恢复" ? "默认 300 秒（5 分钟）。重新授权仍进入共享登录队列；重试间隔为 0 时不设失败冷却。"
+              : "仅请求号池，默认网络并发 100；由服务端定时同步，关闭页面后继续运行，不会主动刷新上游额度。"}</div>
+          </section>
+        ))}
+        <section className="task-auto-settings" aria-label="降智检测默认调度">
+          <div className="section-title-row">
+            <h3>降智检测默认调度</h3>
+          </div>
+          <div className="task-two-fields">
+            <label className="settings-field" htmlFor="fingerprint-default-interval"><span>降智检测间隔（分钟）</span><input id="fingerprint-default-interval" type="number" min="5" max="43200" step="1" required value={fingerprintDefaults.intervalMinutes} disabled={saving} onChange={e => setFingerprintDefaults(v => ({ ...v, intervalMinutes: e.target.value }))} /></label>
+            <label className="settings-field" htmlFor="fingerprint-default-concurrency"><span>降智检测并发（账号）</span><input id="fingerprint-default-concurrency" type="number" min="1" max="16" step="1" required value={fingerprintDefaults.maxConcurrentAccounts} disabled={saving} onChange={e => setFingerprintDefaults(v => ({ ...v, maxConcurrentAccounts: e.target.value }))} /></label>
+          </div>
+          <div className="task-auto-empty">复用全局降智检测设置，不更改检测模型、判定阈值、分组或账号独立覆盖规则。</div>
+        </section>
         <section className="task-auto-settings overload-cooldown-settings" aria-labelledby="overload-auto-cooldown-title">
           <div className="section-title-row">
             <h3 id="overload-auto-cooldown-title">过载自动冷却</h3>
             <HelpTip label="过载自动冷却说明">
-              每分钟检查最近一段时间的过载次数，达到阈值后暂停号池分配，到期自动恢复（在账号的“过载检测”列单独开启）。当前规则：最近 {overloadRule.windowMinutes || "—"} 分钟内过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟。恢复后重新计数，服务重启后继续计时。
+              按上方冷却检查间隔统计最近一段时间的过载次数，达到阈值后暂停号池分配，到期自动恢复（在账号的“过载检测”列单独开启）。当前规则：最近 {overloadRule.windowMinutes || "—"} 分钟内过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟。恢复后重新计数，服务重启后继续计时。
             </HelpTip>
           </div>
           <div className="overload-rule-fields">
             {[{ key: "windowMinutes", label: "过载统计窗口", unit: "分钟", max: 1440 }, { key: "threshold", label: "过载触发阈值", unit: "次", max: 100000 }, { key: "cooldownMinutes", label: "自动冷却时长", unit: "分钟", max: 43200 }].map(field => <label key={field.key} className="settings-field" htmlFor={`overload-rule-${field.key}`}>
-              <span>{field.label}</span><div><input id={`overload-rule-${field.key}`} type="number" min="1" max={field.max} step="1" value={overloadRule[field.key]} disabled={saving} onChange={event => setOverloadRule(current => ({ ...current, [field.key]: event.target.value }))} /><span>{field.unit}</span></div>
+              <span>{field.label}</span><div><input id={`overload-rule-${field.key}`} type="number" min={1} max={field.max} step="1" value={overloadRule[field.key]} disabled={saving} onChange={event => setOverloadRule(current => ({ ...current, [field.key]: event.target.value }))} /><span>{field.unit}</span></div>
             </label>)}
           </div>
         </section>
@@ -4476,7 +4577,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           {autoRows.length === 0 && <div className="task-auto-empty">暂未配置自动任务</div>}
           <div className="task-auto-rule-list">
             {autoRows.map((row, index) => (
-              <div className="task-auto-rule" key={`${row.planType || "new"}-${index}`}>
+              <div className="task-auto-rule" key={index}>
                 <label className="settings-field task-auto-plan-field">
                   <span>PlanType</span>
                   <input list="task-plan-type-suggestions" value={row.planType} placeholder="例如 self_serve_business_prolite"
@@ -4508,7 +4609,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
-          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
+          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setFingerprintDefaults({ intervalMinutes: "360", maxConcurrentAccounts: "3" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>
@@ -6626,7 +6727,7 @@ function mergeSub2ApiStatusIntoJob(job, state) {
   // fallback for legacy jobs that never persisted a local PlanType.
   const localPlanType = String(job.workspacePlanType || job.planType || "").trim();
   if (!localPlanType && fields.sub2apiPlanType) fields.planType = fields.sub2apiPlanType;
-  return { ...job, ...fields };
+  return shareSnapshot(job, { ...job, ...fields });
 }
 
 function mergeJobs(...groups) {

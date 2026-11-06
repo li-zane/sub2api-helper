@@ -1,3 +1,4 @@
+import { CustomSelect } from "./custom-select.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { Activity, Check, ChevronDown, RefreshCw, Settings2, X } from "lucide-react";
 import { HelpTip } from "./help-tip.jsx";
@@ -39,7 +40,7 @@ async function api(token, url, body) {
   const response = await fetch(url, { method: body === undefined ? "GET" : "POST", headers: { "x-console-token": token, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const data = await response.json(); if (!response.ok) throw new Error(data.error || "指纹检测请求失败"); return data;
 }
-function Dialog({ title, subtitle, onClose, children }) {
+function Dialog({ title, subtitle, onClose, closeDisabled = false, children }) {
   const ref = useRef(null);
   useEffect(() => {
     const previous = document.activeElement;
@@ -49,13 +50,24 @@ function Dialog({ title, subtitle, onClose, children }) {
     dialog.showModal();
     return () => { dialog.close(); previous?.focus?.(); };
   }, []);
-  return <dialog ref={ref} className="batch-dialog fingerprint-dialog" aria-label={title} onCancel={event => { event.preventDefault(); onClose(); }}>
+  return <dialog
+    ref={ref}
+    className="batch-dialog fingerprint-dialog"
+    aria-label={title}
+    onCancel={event => { event.preventDefault(); if (!closeDisabled) onClose(); }}
+    onClick={(event) => {
+      if (event.target !== event.currentTarget || closeDisabled) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right
+        || event.clientY < rect.top || event.clientY > rect.bottom) onClose();
+    }}
+  >
     <div className="dialog-header">
       <div>
         <h2>{title}</h2>
         {subtitle && <HelpTip title={title} label={`${title}说明`}>{subtitle}</HelpTip>}
       </div>
-      <button type="button" className="icon-button" data-dialog-initial-focus aria-label={`关闭${title}`} onClick={onClose}><X size={18} /></button>
+      <button type="button" className="icon-button" data-dialog-initial-focus aria-label={`关闭${title}`} disabled={closeDisabled} onClick={onClose}><X size={18} /></button>
     </div>
     {children}
   </dialog>;
@@ -93,7 +105,7 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
   }
   return <><button type="button" className="secondary-button topbar-action-button" disabled={!token || busy} onClick={open}><Activity size={14} />降智检测设置</button>
     {!data && error && <span role="alert" className="proxy-quality-error">{error}</span>}
-    {data && <Dialog title="降智检测设置" subtitle="通过数字指纹提示词评估模型响应分布是否与参考库一致" onClose={() => setData(null)}><form onSubmit={save} className="fingerprint-form">
+    {data && <Dialog title="降智检测设置" subtitle="通过数字指纹提示词评估模型响应分布是否与参考库一致" closeDisabled={busy} onClose={() => setData(null)}><form onSubmit={save} className="fingerprint-form">
       <FingerprintDefaultsFields value={data.settings} onChange={settings => setData(current => ({ ...current, settings }))} disabled={busy} />
       <div className="fingerprint-toolbar-row">
         {data.runtime && (
@@ -119,8 +131,8 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
             未配置的 PlanType 默认关闭；账号独立设置优先。新账号识别订阅类型后自动继承对应开关状态。
           </HelpTip>
         </div>
-        <div className="fingerprint-plan-list">{plans.map(plan => <label key={plan} className="plan-check-pill"><input type="checkbox" checked={data.settings.planDefaults[plan] === true} onChange={e => patch({ planDefaults: { ...data.settings.planDefaults, [plan]: e.target.checked } })} /><span>{plan}</span></label>)}</div>
-        <div className="fingerprint-add-plan"><input aria-label="添加检测 PlanType" value={newPlan} onChange={e => setNewPlan(e.target.value)} placeholder="输入自定义原始 PlanType" /><button type="button" className="secondary-button" disabled={!newPlan.trim()} onClick={() => { patch({ planDefaults: { ...data.settings.planDefaults, [newPlan.trim().toLowerCase()]: false } }); setNewPlan(""); }}>添加类型</button></div>
+        <div className="fingerprint-plan-list">{plans.map(plan => <label key={plan} className="plan-check-pill"><input type="checkbox" disabled={busy} checked={data.settings.planDefaults[plan] === true} onChange={e => patch({ planDefaults: { ...data.settings.planDefaults, [plan]: e.target.checked } })} /><span>{plan}</span></label>)}</div>
+        <div className="fingerprint-add-plan"><input aria-label="添加检测 PlanType" disabled={busy} value={newPlan} onChange={e => setNewPlan(e.target.value)} placeholder="输入自定义原始 PlanType" /><button type="button" className="secondary-button" disabled={busy || !newPlan.trim()} onClick={() => { patch({ planDefaults: { ...data.settings.planDefaults, [newPlan.trim().toLowerCase()]: false } }); setNewPlan(""); }}>添加类型</button></div>
       </section>
       <section className="fingerprint-section">
         <div className="section-title-row">
@@ -129,12 +141,12 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
             读取各 PlanType 所绑定方案的默认分组。默认加入始终保留；不降智加入要求全部指定模型指纹一致。明确不一致时移出条件组；未知结果不改已有分组，新上传账号需通过后才加入条件组。不改其它分组。
           </HelpTip>
         </div>
-        {data.profiles.map(profile => <fieldset key={profile.id} className="fingerprint-profile"><legend>{profile.name} · {(profile.planTypes || []).join(" / ") || "未绑定 PlanType"}</legend>
+        {data.profiles.map(profile => <fieldset key={profile.id} className="fingerprint-profile" disabled={busy}><legend>{profile.name} · {(profile.planTypes || []).join(" / ") || "未绑定 PlanType"}</legend>
           {!profile.groupIds.length && <p className="empty-inline-note">此方案未指定分组，请先在 Sub2API 配置中选择号池</p>}
-          {profile.groupIds.map(id => <label className="fingerprint-group-rule" key={id}><span>{data.groups.find(g => String(g.id) === String(id))?.name || `分组 ${id}`}</span><select aria-label={`${profile.name} 分组 ${id} 加入规则`} value={data.settings.groupPolicies[profile.id]?.[id] || "default"} onChange={e => patch({ groupPolicies: { ...data.settings.groupPolicies, [profile.id]: { ...data.settings.groupPolicies[profile.id], [id]: e.target.value } } })}><option value="default">默认加入</option><option value="verified">不降智加入（指纹一致）</option></select></label>)}
+          {profile.groupIds.map(id => <label className="fingerprint-group-rule" key={id}><span>{data.groups.find(g => String(g.id) === String(id))?.name || `分组 ${id}`}</span><CustomSelect disabled={busy} aria-label={`${profile.name} 分组 ${id} 加入规则`} value={data.settings.groupPolicies[profile.id]?.[id] || "default"} onChange={e => patch({ groupPolicies: { ...data.settings.groupPolicies, [profile.id]: { ...data.settings.groupPolicies[profile.id], [id]: e.target.value } } })}><option value="default">默认加入</option><option value="verified">不降智加入（指纹一致）</option></CustomSelect></label>)}
         </fieldset>)}
       </section>
-      {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" onClick={() => setData(null)}>取消</button><button className="primary-button" disabled={busy}>{busy ? "保存中…" : "保存降智检测设置"}</button></div>
+      {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" disabled={busy} onClick={() => setData(null)}>取消</button><button className="primary-button" disabled={busy}>{busy ? "保存中…" : "保存降智检测设置"}</button></div>
     </form></Dialog>}
   </>;
 }
@@ -410,14 +422,14 @@ export function ModelFingerprintCell({ job, token, onError }) {
       })}
     </div>
     {showHistory && <FingerprintHistoryDialog job={job} token={token} onClose={() => setShowHistory(false)} />}
-    {editing && <Dialog title={`${job.email} 降智检测`} onClose={() => setEditing(false)}><form className="fingerprint-form" onSubmit={e => { e.preventDefault(); update({ enabled: draft.enabled, models: draft.customModels ? fromText(draft.text) : null, intervalMinutes: draft.customInterval ? draft.interval : null }); }}>
-      <label className="settings-field"><span>账号检测开关</span><select aria-label="账号检测开关" value={draft.enabled == null ? "inherit" : String(draft.enabled)} onChange={e => setDraft({ ...draft, enabled: e.target.value === "inherit" ? null : e.target.value === "true" })}><option value="inherit">继承 PlanType</option><option value="true">独立开启</option><option value="false">独立关闭</option></select></label>
+    {editing && <Dialog title={`${job.email} 降智检测`} closeDisabled={busy} onClose={() => setEditing(false)}><form className="fingerprint-form" onSubmit={e => { e.preventDefault(); update({ enabled: draft.enabled, models: draft.customModels ? fromText(draft.text) : null, intervalMinutes: draft.customInterval ? draft.interval : null }); }}>
+      <label className="settings-field"><span>账号检测开关</span><CustomSelect disabled={busy} aria-label="账号检测开关" value={draft.enabled == null ? "inherit" : String(draft.enabled)} onChange={e => setDraft({ ...draft, enabled: e.target.value === "inherit" ? null : e.target.value === "true" })}><option value="inherit">继承 PlanType</option><option value="true">独立开启</option><option value="false">独立关闭</option></CustomSelect></label>
       <label className="fingerprint-checkbox"><input type="checkbox" checked={draft.customModels} onChange={e => setDraft({ ...draft, customModels: e.target.checked })} />使用独立检测模型</label>
       <label className="settings-field"><span>账号检测模型</span><textarea aria-label="账号检测模型" rows={4} value={draft.text} disabled={!draft.customModels} onChange={e => setDraft({ ...draft, text: e.target.value })} /></label>
       <label className="fingerprint-checkbox"><input type="checkbox" checked={draft.customInterval} onChange={e => setDraft({ ...draft, customInterval: e.target.checked })} />使用独立检测间隔</label>
       <label className="settings-field"><span>账号检测间隔（分钟）</span><input aria-label="账号检测间隔（分钟）" type="number" min="5" max="43200" disabled={!draft.customInterval} value={draft.interval} onChange={e => setDraft({ ...draft, interval: e.target.value })} /></label>
       {result && <section className="fingerprint-section"><h3>最近模型归因</h3>{result.models.map((r, i) => <p key={i}>{r.model} → {r.predictionName || r.prediction || r.error || "未知"} · {TITLES[r.status]} {r.probability != null ? `(${(r.probability * 100).toFixed(1)}%)` : ""}<small className="fingerprint-reference">期望：{r.expected}；参考库：{r.referenceBuiltAt || "—"}</small></p>)}</section>}
-      {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" onClick={() => setEditing(false)}>取消</button><button className="primary-button" disabled={busy}>保存账号检测设置</button></div>
+      {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" disabled={busy} onClick={() => setEditing(false)}>取消</button><button className="primary-button" disabled={busy}>保存账号检测设置</button></div>
     </form></Dialog>}
   </div>;
 }

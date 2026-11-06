@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef, useMemo } from "react";
 import { buildOverloadChart } from "./overload-chart.mjs";
 import { overloadDashboard, overloadEnergy } from "./codex-dashboard.mjs";
 
@@ -15,6 +15,27 @@ export function OverloadDetection({ job, token, onError }) {
   const [saved, setSaved] = useState(null);
   const [cooldownBusy, setCooldownBusy] = useState(false);
   const [savedCooldown, setSavedCooldown] = useState(null);
+  const plotRef = useRef(null);
+
+  useEffect(() => {
+    if (hovered === null) return;
+    function handleClickOutside(event) {
+      if (plotRef.current && !plotRef.current.contains(event.target)) {
+        setHovered(null);
+      }
+    }
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        setHovered(null);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [hovered !== null]);
   const source = job.overloadDetection;
   useEffect(() => {
     if (source) setSaved((current) => !current || (source.revision ?? 0) > (current.revision ?? 0) ? source : current);
@@ -30,8 +51,8 @@ export function OverloadDetection({ job, token, onError }) {
   const cooldown = savedCooldown && (savedCooldown.revision ?? 0) > (cooldownSource?.revision ?? -1) ? savedCooldown : cooldownSource || savedCooldown;
   const cooldownEnabled = cooldown?.enabled === true;
   const points = detection?.points || [];
-  const dashboard = overloadDashboard(detection, cooldown);
-  const { positioned, overloadSegments, requestSegments } = buildOverloadChart(points);
+  const dashboard = useMemo(() => overloadDashboard(detection, cooldown), [detection, cooldown]);
+  const { positioned, overloadSegments, requestSegments } = useMemo(() => buildOverloadChart(points), [points]);
   const active = hovered === null ? null : positioned[hovered];
   const errors = [detection?.lastError ? `过载统计：${detection.lastError}` : null,
     detection?.requestError ? `请求统计：${detection.requestError}` : null].filter(Boolean).join("；");
@@ -87,7 +108,7 @@ export function OverloadDetection({ job, token, onError }) {
       <div className="overload-chart-status">
       <div className="overload-dashboard overload-chart">
       <OverloadEnergy value={dashboard.quarter} enabled={enabled} />
-      <div className="overload-plot">
+      <div className="overload-plot" ref={plotRef}>
         <svg viewBox="0 0 164 56" role="group" aria-label="最近六个完整的 15 分钟区间的过载与请求数量，两条线独立缩放">
           <line className="overload-zero" x1="10" x2="156" y1="44" y2="44" />
           {overloadSegments.map((values, index) => <polyline key={index} className="overload-line" points={values} />)}
