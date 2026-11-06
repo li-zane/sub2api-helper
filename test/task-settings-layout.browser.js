@@ -54,7 +54,7 @@ async (page) => {
   await test('auto-task-options-two-aligned-columns', async () => {
     await first.scrollIntoViewIfNeeded();
     const boxes = await first.locator('.task-auto-action-option').evaluateAll(nodes => nodes.map(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width }; }));
-    check(boxes.length === 4, 'missing options');
+    check(boxes.length === 5, 'missing options including Codex prerequisite');
     check(Math.abs(boxes[0].x - boxes[2].x) < 1 && Math.abs(boxes[1].x - boxes[3].x) < 1, 'option columns not aligned: ' + JSON.stringify(boxes));
     check(Math.max(...boxes.map(b => b.width)) - Math.min(...boxes.map(b => b.width)) < 1, 'unequal option widths');
     check(boxes[0].y === boxes[1].y && boxes[2].y === boxes[3].y, 'option rows not aligned');
@@ -68,7 +68,7 @@ async (page) => {
     await first.getByRole('checkbox', { name: '自动开启过载检测', exact: true }).check();
     await rotate.check();
     check(await first.getByRole('checkbox', { name: '自动开启过载检测', exact: true }).isChecked(), 'upload change clears independent task');
-    check(await first.getByText('一键轮换已包含上传；两种上传方式互斥。', { exact: true }).isVisible(), 'upload relationship not explained');
+    check(await first.getByText('新账号先登录 Web；上传需先完成 Codex 授权。一键轮换已包含上传。', { exact: true }).isVisible(), 'upload relationship not explained');
   });
   await test('exclusive-upload-values-save-and-reopen', async () => {
     await modal.locator('.task-auto-rule').nth(1).getByRole('checkbox', { name: '上传到 Sub2API', exact: true }).check();
@@ -77,7 +77,7 @@ async (page) => {
     const response = await reply, body = response.request().postDataJSON();
     check(response.ok(), 'save failed: ' + await response.text());
     check(body.autoActions.team.includes('rotate-logout-reauthorize-upload') && !body.autoActions.team.includes('upload'), 'duplicate upload in request');
-    check(body.autoActions.free.length === 1 && body.autoActions.free[0] === 'upload', 'plain upload lost');
+    check(body.autoActions.free.length === 2 && body.autoActions.free.includes('authorize-codex') && body.autoActions.free.includes('upload'), 'plain upload lost its OAuth prerequisite');
     await modal.waitFor({ state: 'hidden' });
     await page.getByRole('button', { name: '任务设置', exact: true }).click();
     await modal.waitFor();
@@ -96,7 +96,7 @@ async (page) => {
     check(b.x >= 0 && b.y >= 0 && b.x + b.width <= 376 && b.y + b.height <= 812, 'first-open mobile menu outside viewport');
     await page.keyboard.press('Escape');
   });
-  await modal.getByRole('button', { name: '取消', exact: true }).click();
+  if (await modal.count()) await modal.getByRole('button', { name: '取消', exact: true }).click();
   await test('no-runtime-errors', async () => check(!errors.length, errors.join('; ')));
   return { passed: results.filter(r => r.passed).length, total: results.length, results };
 }

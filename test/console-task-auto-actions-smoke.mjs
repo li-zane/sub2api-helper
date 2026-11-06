@@ -20,6 +20,7 @@ try {
   const bootstrap = await get("/api/bootstrap");
   assert.deepEqual(bootstrap.taskSettings.autoActions, {});
   assert.deepEqual(bootstrap.taskSettings.autoActionOptions.map((item) => item.value), [
+    "authorize-codex",
     "upload",
     "rotate-logout-reauthorize-upload",
     "enable-overload-detection",
@@ -51,11 +52,12 @@ try {
   });
   assert.equal(valid.status, 200);
   assert.deepEqual(valid.body.settings.autoActions, {
-    self_serve_business_prolite: ["rotate-logout-reauthorize-upload"],
-    SELF_SERVE_PRO: ["upload", "enable-overload-detection", "enable-overload-cooldown"],
+    self_serve_business_prolite: ["authorize-codex", "rotate-logout-reauthorize-upload"],
+    SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown"],
   });
   assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, "utf8")), {
     version: 2,
+    displayTimeZone: "Asia/Shanghai",
     maxActiveJobs: 6,
     loginTimeoutMinutes: 3,
     smsTimeoutMinutes: 10,
@@ -68,8 +70,8 @@ try {
     webSessionMonitor: { enabled: false, intervalMinutes: 15, autoRelogin: true, retryMinutes: 60 },
     monitoring: DEFAULT_MONITORING,
     autoActions: {
-      self_serve_business_prolite: ["rotate-logout-reauthorize-upload"],
-      SELF_SERVE_PRO: ["upload", "enable-overload-detection", "enable-overload-cooldown"],
+      self_serve_business_prolite: ["authorize-codex", "rotate-logout-reauthorize-upload"],
+      SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown"],
     },
   });
   await stop();
@@ -79,8 +81,8 @@ try {
   await fs.writeFile(settingsPath, JSON.stringify(legacy));
   await start();
   assert.deepEqual((await get("/api/task-settings")).settings.autoActions, {
-    self_serve_business_prolite: ["rotate-logout-reauthorize-upload"],
-    SELF_SERVE_PRO: ["upload", "enable-overload-detection", "enable-overload-cooldown"],
+    self_serve_business_prolite: ["authorize-codex", "rotate-logout-reauthorize-upload"],
+    SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown"],
   });
   console.log("console task auto-actions smoke passed: validation, file persistence, restart recovery, legacy upload exclusivity");
 } finally {

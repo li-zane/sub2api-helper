@@ -2,15 +2,18 @@ import React, { useEffect, useState, useRef, useMemo } from "react";
 import { buildOverloadChart } from "./overload-chart.mjs";
 import { overloadDashboard, overloadEnergy } from "./codex-dashboard.mjs";
 import { codexStatusEligible, codexStatusBlockReason } from "./codex-eligibility.mjs";
+import { displayDateTime } from "./display-time.mjs";
+import { useDisplayTimeZone } from "./use-display-time.jsx";
 
 function intervalLabel(point) {
-  const format = (value) => new Date(value).toLocaleString("zh-CN", {
+  const format = (value) => displayDateTime(value, {
     month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
   });
   return `${format(point.start)} – ${format(point.end)}`;
 }
 
 export function OverloadDetection({ job, token, onError }) {
+  useDisplayTimeZone();
   const [busy, setBusy] = useState(false);
   const [hovered, setHovered] = useState(null);
   const [saved, setSaved] = useState(null);
@@ -138,7 +141,7 @@ export function OverloadDetection({ job, token, onError }) {
       <OverloadEnergy value={dashboard.total} enabled={enabled} />
       </div>
       {cooldown && (cooldown.lastError || cooldown.phase === "resuming" || cooldown.coolingUntil) && <span className={`overload-cooldown-status ${cooldown.lastError ? "error" : ""}`} title={cooldown.lastError || "自动冷却状态"}>
-        {cooldown.lastError ? "自动冷却异常" : cooldown.phase === "resuming" ? "正在恢复号池…" : `冷却至 ${new Date(cooldown.coolingUntil).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`}
+        {cooldown.lastError ? "自动冷却异常" : cooldown.phase === "resuming" ? "正在恢复号池…" : `冷却至 ${displayDateTime(cooldown.coolingUntil, { hour: "2-digit", minute: "2-digit" })}`}
       </span>}
       </div>
     </div>

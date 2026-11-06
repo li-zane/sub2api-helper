@@ -1,3 +1,4 @@
+import "./legacy-import-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -637,7 +638,7 @@ try {
   const passwordSourceParts = passwordSourceText.replace(/^\uFEFF/, "").trim().split("----");
   assert.equal(passwordSourceParts[0], "cross-platform@example.com");
   assert.equal(passwordSourceParts[2], "NB2W45DFOIZAQWER");
-  assert.equal(passwordSourceParts[1].length, 18);
+  assert.equal(passwordSourceParts[1].length, 12);
   assert.match(passwordSourceParts[1], /[a-z]/);
   assert.match(passwordSourceParts[1], /[A-Z]/);
   assert.match(passwordSourceParts[1], /\d/);

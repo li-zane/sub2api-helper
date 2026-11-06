@@ -7086,3 +7086,30 @@ select option {
     transform: translate(-50%, 0) scale(1);
   }
 }
+
+/* Scoped task/history browser: other dialogs and the account table are unchanged. */
+.account-log-dialog .log-dialog-body { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.account-log-tabs { display: flex; gap: 8px; }
+.account-log-tabs .is-active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
+.account-log-workspace { display: grid; grid-template-columns: 230px minmax(0, 1fr); height: min(58vh, 560px); min-height: 260px; gap: 12px; }
+.account-log-menu { overflow-y: auto; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 6px; background: var(--surface-subtle); }
+.account-log-entry { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; min-height: 66px; padding: 10px 12px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--ink); cursor: pointer; }
+.account-log-entry + .account-log-entry { margin-top: 4px; }
+.account-log-entry:hover { background: var(--surface-muted); }
+.account-log-entry.is-selected { background: var(--accent-soft); border-color: var(--accent-line); }
+.account-log-entry strong { overflow-wrap: anywhere; font-size: 13px; }
+.account-log-entry time, .account-log-entry small { font-size: 11px; color: var(--muted); }
+.account-log-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 8px; }
+.account-log-content-heading { font-size: 13px; font-weight: 600; }
+.account-log-workspace .log-dialog-viewer { flex: 1; min-width: 0; min-height: 0; height: auto; max-height: none; margin: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.account-log-placeholder, .account-log-empty { color: var(--muted); padding: 24px 12px; font-size: 13px; }
+.account-log-placeholder { display: grid; place-items: center; height: 100%; border: 1px dashed var(--line-strong); border-radius: var(--radius-md); }
+@media (max-width: 640px) {
+  .account-log-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: 130px minmax(160px, 1fr); height: 57vh; }
+  .account-log-dialog .dialog-header-actions { flex-wrap: wrap; }
+  .account-log-dialog .dialog-header { align-items: flex-start; }
+}
+
+.account-log-dialog { width: min(1100px, calc(100vw - 32px)); max-width: none; }
+.account-log-dialog .dialog-header > div:first-child { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; gap: 8px; }
+.account-log-dialog .dialog-header > div:first-child > span { max-width: 100%; overflow-wrap: anywhere; }

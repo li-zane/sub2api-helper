@@ -171,14 +171,14 @@ export class ModelFingerprintService {
       this.onChange(); this.drain(); this.trigger(); return this.publicSettings();
     });
   }
-  saveOverride(email, raw) {
+  saveOverride(email, raw, { notify = true } = {}) {
     email = label(email); const override = normalizeFingerprintOverride(raw); this.invalidateAccount(email);
     return this.mutate(async () => {
       this.invalidateAccount(email);
       const previous = this.accounts.get(email);
       this.accounts.set(email, { ...previous, override, nextCheckAt: null, lastError: null });
       try { await this.persist(); } catch (error) { if (previous) this.accounts.set(email, previous); else this.accounts.delete(email); throw error; }
-      this.onChange(); this.trigger();
+      if (notify) this.onChange(); this.trigger();
     });
   }
   publicSettings() { return { settings: this.settings, profiles: this.getContext().profiles, runtime: { activeAccounts: this.active.size, queuedAccounts: this.queued.size, maxConcurrentAccounts: this.settings.maxConcurrentAccounts } }; }
@@ -270,7 +270,7 @@ export class ModelFingerprintService {
             controller.signal.throwIfAborted();
             const detail = fingerprintFailure(error);
             results.push({ accountId: String(target.id), ...model, status: "error", error: detail.message, failure: detail, sampleFailures, completedSamples: outputs.length, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })) });
-            if (detail.httpStatus === 429 || account.type === "oauth" && fingerprintRecovery(detail)) { recoveryFailure = detail; break sampling; }
+            if (detail.code === "QUOTA" || detail.httpStatus === 429 || account.type === "oauth" && fingerprintRecovery(detail)) { recoveryFailure = detail; break sampling; }
           }
         }
       }

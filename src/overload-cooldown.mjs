@@ -99,10 +99,18 @@ export class OverloadCooldown {
       const config = this.getConfig();
       if (enabled && (!config?.baseUrl || !config?.adminApiKey)) throw new Error("请先配置 Sub2API 后端地址和管理员 API Key");
       const entry = this.accounts.get(email);
-      await this.update(email, { enabled, ...(!enabled && entry?.resumeAccountIds?.length ? { phase: "resuming" } : {}), lastError: null });
+      await this.update(email, { enabled, restrictionPaused: false, ...(!enabled && entry?.resumeAccountIds?.length ? { phase: "resuming" } : {}), lastError: null });
     });
     this.trigger();
     return this.snapshot(email);
+  }
+
+  // A quota/rate restriction stops counting without turning an existing
+  // cooldown into an early pool resume or losing its durable restore intent.
+  async stopDetection(email) {
+    email = email.toLowerCase();
+    await this.lock(email, () => this.update(email, { enabled: false, restrictionPaused: true, lastError: null }));
+    this.trigger();
   }
 
   // Unlike a normal disable, a permanent block must never resume the pool row.
@@ -190,7 +198,7 @@ export class OverloadCooldown {
     if (this.backendIdentity(this.getConfig()) !== backend) return;
     if (entry.resumeAccountIds?.length) {
       if (entry.backend !== backend) throw new Error("Sub2API 后端已变化，原冷却记录待恢复原后端后处理");
-      if (!entry.enabled || entry.phase === "resuming" || Date.parse(entry.coolingUntil) <= this.now()) {
+      if (!entry.enabled && !entry.restrictionPaused || entry.phase === "resuming" || Date.parse(entry.coolingUntil) <= this.now()) {
         await this.resume(email, config, records);
       } else {
         // Reassert the pause if an unrelated credential repair enabled the pool row.
@@ -198,17 +206,18 @@ export class OverloadCooldown {
       }
       return;
     }
-    if (this.isCountBlocked(email) || !entry.enabled || !records.some(record => record.enabled === true)) return;
+    const eligibleRecords = records.filter(record => record.enabled === true && record.canCount !== false);
+    if (this.isCountBlocked(email) || !entry.enabled || !eligibleRecords.length) return;
     const settings = this.getSettings();
     const end = this.now();
     const start = Math.max(end - settings.windowMinutes * 60_000, Date.parse(entry.lastResumedAt || "") || 0);
     if (start >= end) return;
     const valid = () => !this.stopped && !this.isBlocked(email) && !this.isCountBlocked(email) && this.accounts.get(email)?.enabled && this.backendIdentity(this.getConfig()) === backend;
-    const count = await collectOverloadWindow({ start, end, accountIds: records.filter(record => record.enabled === true).map(record => record.id), config, request: this.request, isEnabled: valid });
+    const count = await collectOverloadWindow({ start, end, accountIds: eligibleRecords.map(record => record.id), config, request: this.request, isEnabled: valid });
     if (count === null || !valid()) return;
     entry = await this.update(email, { windowCount: count, lastCheckedAt: new Date(end).toISOString(), lastError: null });
     if (count < settings.threshold) return;
-    const targets = records.filter(record => record.enabled === true).map(record => String(record.id));
+    const targets = eligibleRecords.map(record => String(record.id));
     if (!targets.length) return;
     // Save the full pause intent before the first remote write, so interrupted
     // requests remain recoverable even if their response was never received.

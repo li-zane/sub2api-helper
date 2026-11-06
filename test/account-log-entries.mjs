@@ -1,0 +1,73 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { generateAccountPassword } from "../src/account-password.mjs";
+import { appendAccountLog, recordCredentialHistory, readCredentialHistory } from "../src/account-history.mjs";
+import { beginAccountLogOperation, finishAccountLogOperation, readAccountLogEntries } from "../src/account-log-entries.mjs";
+
+const root = await fs.mkdtemp(path.join(os.tmpdir(), "helper-records-"));
+try {
+  const passwords = new Set(Array.from({ length: 2000 }, generateAccountPassword));
+  assert.equal(passwords.size, 2000);
+  for (const password of passwords) {
+    assert.equal(password.length, 12);
+    for (const re of [/[a-z]/, /[A-Z]/, /[0-9]/, /[!@#%_]/]) assert(re.test(password));
+  }
+  const job = { outputPath: path.join(root, "sub2api-import-oauth.json"), status: "completed", logs: "legacy\n", createdAt: new Date().toISOString() };
+  const first = beginAccountLogOperation(job, "web_login"); appendAccountLog(job, "FIRST_REQUEST\n");
+  finishAccountLogOperation(job, first, "completed");
+  const second = beginAccountLogOperation(job, "replace_password"); appendAccountLog(job, "SECOND_REQUEST\n");
+  finishAccountLogOperation(job, second, "failed");
+  const list = await readAccountLogEntries(job);
+  assert.equal(list.entries.length, 3); assert.equal(list.content, "");
+  assert.equal((await readAccountLogEntries(job, { entryId: first.id })).content, "FIRST_REQUEST\n");
+  assert.equal((await readAccountLogEntries(job, { entryId: second.id })).content, "SECOND_REQUEST\n");
+  assert.equal((await readAccountLogEntries(job, { entryId: "legacy" })).content, "legacy\n");
+  await assert.rejects(readAccountLogEntries(job, { entryId: "../../secret" }), error => error.status === 404);
+  await recordCredentialHistory(root, { type: "password", stage: "prepared", before: { password: "old" }, after: { password: "candidate" } });
+  await recordCredentialHistory(root, { type: "2fa", stage: "local_key_delete_prepared", before: { totpSecret: "historical" }, after: { totpSecret: "" } });
+  await recordCredentialHistory(root, { type: "web_session", stage: "prepared", before: { cookies: "obsolete" }, after: { cookies: "candidate" } });
+  await fs.writeFile(path.join(root, "credential-history/123-11111111-1111-4111-8111-111111111111.json"), JSON.stringify({ type: "web_login", before: { cookies: "legacy-secret" } }));
+  await fs.writeFile(path.join(root, "web-session.json"), JSON.stringify({ version: 1, email: "fixture@example.test", cookies: [{ name: "session", value: "current" }], accessToken: "current-token", updatedAt: new Date().toISOString() }));
+  await fs.writeFile(job.outputPath, JSON.stringify({ type: "sub2api-data", accounts: [{ credentials: { access_token: "current-OAuth" } }] }));
+  let history = await readCredentialHistory(root);
+  assert.equal(history.length, 4); assert.equal(history.filter(e => e.type === "web_session").length, 1);
+  assert(!JSON.stringify(history).includes("legacy-secret")); assert(!JSON.stringify(history).includes("obsolete"));
+  assert((await fs.readdir(path.join(root, "credential-history"))).length === 2);
+  await fs.writeFile(path.join(root, "web-session.json"), JSON.stringify({ cookies: [{ name: "session", value: "new-current" }] }));
+  history = await readCredentialHistory(root); assert.equal(history.find(e => e.type === 'web_session').after.cookies[0].value, 'new-current'); assert(JSON.stringify(history).includes("new-current"));
+  const rescue = path.join(root, "rescue"); await fs.mkdir(path.join(rescue, "credential-history"), { recursive: true });
+  const snapshot = path.join(rescue, "credential-history/123-11111111-1111-4111-8111-111111111111.json");
+  await fs.writeFile(snapshot, JSON.stringify({ type: "web_session", after: { cookies: [{ value: "recoverable" }] } }));
+  await readCredentialHistory(rescue); await fs.access(snapshot);
+  await fs.writeFile(path.join(rescue, "web-session.json"), JSON.stringify({ cookies: [{ value: "verified-current" }] }));
+  await readCredentialHistory(rescue); await assert.rejects(fs.access(snapshot), { code: "ENOENT" });
+  const credentialList = await readAccountLogEntries(job, { view: "credentials" });
+  assert(!JSON.stringify(credentialList.entries).includes("candidate")); assert.equal(credentialList.content, "");
+  const detail = await readAccountLogEntries(job, { view: "credentials", entryId: history[0].id }); assert(detail.content.includes("candidate"));
+  job.password = "local-password"; job.totpSecret = "local-totp";
+  job.securityState = { passwordEnabled: true, totpEnabled: null };
+  const currentList = await readAccountLogEntries(job, { view: "credentials" });
+  assert(currentList.entries.some(e => e.id === "current-password"));
+  assert(currentList.entries.some(e => e.id === "current-2fa"));
+  assert(!JSON.stringify(currentList.entries).includes("local-password"));
+  const localPassword = JSON.parse((await readAccountLogEntries(job, { view: "credentials", entryId: "current-password" })).content);
+  assert.equal(localPassword.after.password, job.password); assert.equal(localPassword.after.remoteEnabled, true);
+  const localTotp = JSON.parse((await readAccountLogEntries(job, { view: "credentials", entryId: "current-2fa" })).content);
+  assert.equal(localTotp.after.localRecord, true); assert.equal(localTotp.after.remoteEnabled, null);
+  job.password = ""; job.totpSecret = "";
+  await assert.rejects(readAccountLogEntries(job, { view: "credentials", entryId: "current-password" }), e => e.status === 404);
+  assert((await readAccountLogEntries(job, { view: "credentials", entryId: history[0].id })).content.includes("candidate"));
+  const interrupted = beginAccountLogOperation(job, "web_login"); appendAccountLog(job, "BEFORE_RESTART\n");
+  job.logOperation = null;
+  const resumed = beginAccountLogOperation(job, "automatic_relogin"); appendAccountLog(job, "AFTER_RESTART\n");
+  let recovered = await readAccountLogEntries(job);
+  assert.equal(recovered.entries.find(e => e.id === interrupted.id).status, "interrupted");
+  assert.equal(recovered.entries.find(e => e.id === resumed.id).status, "running");
+  assert.equal((await readAccountLogEntries(job, { entryId: interrupted.id })).content, "BEFORE_RESTART\n");
+  finishAccountLogOperation(job, resumed, "completed");
+  console.log("ACCOUNT_RECORDS_PASS 12-character CSPRNG passwords; isolated task byte ranges and legacy logs; lazy detail/authenticated IDs; all password/TOTP history retained; superseded session snapshots removed; one current Web/OAuth version");
+} finally {
+  assert(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)); await fs.rm(root, { recursive: true, force: true });
+}

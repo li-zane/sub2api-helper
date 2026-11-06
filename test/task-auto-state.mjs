@@ -51,8 +51,8 @@ for (const actions of [["upload", rotate], [rotate, "upload"], [detection, "uplo
   assert.deepEqual(actions, original, "normalization mutates input");
 }
 assert.deepEqual(normalizeTaskUploadActions(["upload", detection]), ["upload", detection]);
-assert.deepEqual(toggleTaskAutoAction(["upload", detection], rotate, true), [detection, rotate]);
-assert.deepEqual(toggleTaskAutoAction([rotate, cooldown], "upload", true), [cooldown, "upload"]);
+assert.deepEqual(toggleTaskAutoAction(["upload", detection], rotate, true), [detection, rotate, "authorize-codex"]);
+assert.deepEqual(toggleTaskAutoAction([rotate, cooldown], "upload", true), [cooldown, "upload", "authorize-codex"]);
 assert.deepEqual(toggleTaskAutoAction([rotate, detection], rotate, false), [detection]);
 assert.deepEqual(toggleTaskAutoAction(["upload"], detection, true), ["upload", detection]);
 assert.deepEqual(toggleTaskAutoAction([rotate, "upload"], cooldown, true), [rotate, cooldown]);
@@ -71,7 +71,7 @@ for (const [actions, index, expected] of [
 ]) {
   const calls = [], logs = [];
   const run = vm.runInNewContext(runnerSource + "\nrunConfiguredTaskActions;", {
-    isRedundantTaskUpload, accountAutomationBlocked: () => false,
+    isRedundantTaskUpload, accountAutomationBlocked: () => false, assertCodexMonitoringAllowed: async () => {},
     touch() {}, saveJobMetadata: async () => {},
     runConfiguredUploadAction: async () => calls.push("upload"),
     runConfiguredRotateAndUploadAction: async () => calls.push(rotate),

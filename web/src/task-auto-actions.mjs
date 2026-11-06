@@ -16,6 +16,10 @@ export function toggleTaskAutoAction(actions, action, checked) {
     next.add(action);
     if (action === "upload") next.delete(ROTATE_UPLOAD_ACTION);
     if (action === ROTATE_UPLOAD_ACTION) next.delete("upload");
-  } else next.delete(action);
+  } else {
+    next.delete(action);
+    if (action === "authorize-codex") { next.delete("upload"); next.delete(ROTATE_UPLOAD_ACTION); }
+  }
+  if (checked && ["upload", ROTATE_UPLOAD_ACTION].includes(action)) next.add("authorize-codex");
   return normalizeTaskUploadActions([...next]);
 }

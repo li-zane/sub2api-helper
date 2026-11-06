@@ -8,7 +8,7 @@ const email = arg("--email") || JSON.parse(await fs.readFile(arg("--refresh-sub2
 const outputPath = arg("--sub2api-out");
 const web = process.argv.includes("--web-only");
 const trace = entry => fs.appendFile(process.env.WEB_LOGIN_TRACE, JSON.stringify({ email, web, ...entry }) + "\n");
-await trace({ event: "start", mode: arg("--output-mode"), authMode: process.env.TOSUB2_CODEX_AUTH_MODE, hasPoolKey: Boolean(process.env.TOSUB2_OAUTH_ADMIN_KEY) });
+await trace({ event: "start", mode: arg("--output-mode"), authMode: process.env.TOSUB2_CODEX_AUTH_MODE, hasPoolKey: Boolean(process.env.TOSUB2_OAUTH_ADMIN_KEY), emailOtpApiAvailable: process.env.TOSUB2_EMAIL_OTP_API_AVAILABLE });
 console.log("Email OTP (r=resend, q=quit):");
 process.stdin.resume();
 await new Promise(resolve => process.stdin.once("data", resolve));

@@ -1,3 +1,4 @@
+import "./legacy-import-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -13,6 +14,7 @@ const tracePath = path.join(temp, "trace.jsonl");
 const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"];
 const originals = new Map();
 const upstream = http.createServer((req, res) => {
+  if (req.url === "/mail-fixture") { res.setHeader("content-type", "application/json"); return res.end("[]"); }
   assert.match(req.headers.authorization, /^Bearer web\./);
   res.setHeader("content-type", "application/json");
   if (req.url.endsWith("/accounts/mfa_info")) return res.end('{"mfa_enabled_v2":false}');
@@ -35,7 +37,7 @@ const waitFor = async callback => {
 };
 async function start() {
   child = spawn(process.execPath, ["src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: root,
-    env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: output,
+    env: { ...process.env, NODE_ENV: "test", TOSUB2_EMAIL_OTP_API_AVAILABLE: "1", ONBOARDING_OUTPUT_ROOT: output,
       ONBOARDING_PROTOCOL_SCRIPT: path.join(root, "test/mock-web-login-protocol.mjs"), WEB_LOGIN_TRACE: tracePath,
       LOCALAPPDATA: temp, TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(temp, "credentials"), TOSUB2_MAC_CREDENTIAL_ROOT: path.join(temp, "credentials"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32),
       SUB2API_MONITOR_ENABLED: "0", TOSUB2_SESSION_NATIVE_HTTP: "1", CHATGPT_BASE: `http://127.0.0.1:${upstream.address().port}` },
@@ -105,7 +107,7 @@ try {
   assert.equal(failed.status, "completed"); assert.equal(failed.canDownload, true);
   await request(`/api/jobs/${ids[3]}/web-login`, {}); await waitJob(ids[3], j => j.status === "email_otp");
   await release(ids[3]); const webOnly = await waitJob(ids[3], j => !j.webLoginPending && j.webLoginCompletedAt);
-  assert.equal(webOnly.canDownload, false); assert.equal(webOnly.status, "failed", "Web login never fabricates Codex authorization success");
+  assert.equal(webOnly.canDownload, false); assert.equal(webOnly.status, "completed", "Web-only task completes without fabricating an OAuth export");
   assert.equal((await request(`/api/jobs/${ids[3]}/workspaces`)).status, 200);
   assert.equal((await request(`/api/jobs/${ids[3]}/workspaces/switch`, { workspaceId: "fixture-workspace" })).status, 200);
   await assert.rejects(fs.access(path.join(output, ids[3], "sub2api-import-oauth.json")), { code: "ENOENT" });
@@ -137,8 +139,16 @@ try {
   await start();
   const interrupted = await job(ids[0]); assert.equal(interrupted.status, "completed"); assert.match(interrupted.webLoginError, /重启中断/);
   assert.equal((await job(ids[4])).status, "canceled", "restart must not turn an old OAuth file into a successful authorization");
+  const withMail = await request("/api/jobs", { email: "mail-api@example.test", password: "Fixture-Password!", mailApiUrl: `http://127.0.0.1:${upstream.address().port}/mail-fixture` });
+  assert.equal(withMail.status, 201); const mailId = withMail.data.job.id;
+  await waitJob(mailId, j => j.status === "email_otp"); await release(mailId); await waitJob(mailId, j => j.status === "completed");
+  await request(`/api/jobs/${mailId}/web-login`, {});
+  await waitJob(mailId, j => j.status === "email_otp"); await release(mailId); await waitJob(mailId, j => !j.webLoginPending && j.webLoginCompletedAt);
   for (const [id, contents] of originals) assert.equal(await fs.readFile(path.join(output, id, "sub2api-import-oauth.json"), "utf8"), contents);
   const traces = (await fs.readFile(tracePath, "utf8")).trim().split("\n").map(JSON.parse);
+  assert(traces.filter(t => t.event === "start" && t.email !== "mail-api@example.test").every(t => t.emailOtpApiAvailable === "0"), "no-API workers inherited the parent API availability flag");
+  const mailStarts = traces.filter(t => t.event === "start" && t.email === "mail-api@example.test");
+  assert.equal(mailStarts.length, 2); assert(mailStarts.every(t => t.emailOtpApiAvailable === "1"), "configured mail API was not signaled to full/Web-only login");
   assert(traces.filter(t => t.web).every(t => t.event !== "start" || (t.mode === "web" && t.authMode === "local" && !t.hasPoolKey)));
   const latestWeb = JSON.parse(await fs.readFile(path.join(output, ids[0], "web-session.json"), "utf8"));
   assert.equal(latestWeb.email, "web-a@example.test");

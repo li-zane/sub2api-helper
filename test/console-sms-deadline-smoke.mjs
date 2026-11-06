@@ -1,3 +1,4 @@
+import "./legacy-import-fixture.mjs";
 import assert from 'node:assert/strict';import fs from 'node:fs/promises';import path from 'node:path';import os from 'node:os';import http from 'node:http';import {spawn} from 'node:child_process';
 import {seedWebSession} from './account-web-fixture.mjs';import {createCredentialStore} from '../src/credential-store.mjs';
 const project=path.resolve(import.meta.dirname,'..'),root=await fs.mkdtemp(path.join(os.tmpdir(),'helper-sms-deadline-')),trace=path.join(root,'trace.jsonl');

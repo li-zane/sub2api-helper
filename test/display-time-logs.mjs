@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { normalizeDisplayTimeZone, setDisplayTimeZone, getDisplayTimeZone, subscribeDisplayTimeZone, displayTimeParts, displayDateTime, displayProtocolLog } from "../web/src/display-time.mjs";
+import { appendAccountLog, appendTimestampedAccountLog, readAccountLog } from "../src/account-history.mjs";
+for (const value of [null, "", "invalid/zone", 8, [], "UTC\nignored"]) assert.throws(() => normalizeDisplayTimeZone(value));
+assert.equal(normalizeDisplayTimeZone(), "Asia/Shanghai"); assert.equal(normalizeDisplayTimeZone(" UTC "), "UTC");
+let updates = 0; const unsubscribe = subscribeDisplayTimeZone(() => updates++);
+setDisplayTimeZone("Asia/Shanghai"); assert.equal(displayTimeParts("2026-11-06T16:30:45Z").time, "00:30:45");
+assert.equal(displayTimeParts("2026-11-06T16:30:45Z").date, "11/07");
+setDisplayTimeZone("UTC"); assert.equal(updates, 1); setDisplayTimeZone("UTC"); assert.equal(updates, 1);
+assert.equal(displayTimeParts("2026-11-06T16:30:45Z").date, "11/06");
+assert.equal(displayTimeParts("2026-11-06T16:30:45Z").time, "16:30:45");
+setDisplayTimeZone("America/New_York");
+assert.equal(displayTimeParts("2026-07-01T16:00:00Z").time, "12:00:00");
+assert.equal(displayTimeParts("2026-12-01T16:00:00Z").time, "11:00:00");
+assert.equal(displayDateTime("not-a-date"), "—"); unsubscribe(); setDisplayTimeZone("UTC");
+const root = await fs.mkdtemp(path.join(os.tmpdir(), "helper-time-logs-"));
+try {
+  const job = { outputPath: path.join(root, "sub2api-import-oauth.json"), logs: "legacy without timestamp\n" };
+  const at = new Date("2026-11-06T16:30:45.123Z");
+  appendTimestampedAccountLog(job, "[web] partial", at);
+  appendTimestampedAccountLog(job, " line\n\n[web] next\n", new Date("2026-11-06T16:30:46.000Z"));
+  const result = await readAccountLog(job, { full: true });
+  assert.equal(result.logs, "legacy without timestamp\n[2026-11-06T16:30:45.123Z] [web] partial line\n\n[2026-11-06T16:30:46.000Z] [web] next\n");
+  assert(!displayProtocolLog(result.logs).includes("16:30:45.123Z")); assert(displayProtocolLog(result.logs).includes("16:30:45 GMT"));
+  setDisplayTimeZone("Asia/Shanghai"); assert(displayProtocolLog(result.logs).includes("00:30:45 GMT+8"));
+  assert.equal((await readAccountLog(job, { full: true })).logs, result.logs, "display conversion rewrote original logs");
+  appendAccountLog(job, "raw-compatible\n"); assert((await readAccountLog(job, { full: true })).logs.endsWith("raw-compatible\n"));
+  assert.equal(getDisplayTimeZone(), "Asia/Shanghai");
+  console.log("DISPLAY_TIME_LOGS_PASS IANA validation/default; shared subscriptions; UTC/Shanghai date boundary; DST; chunk-safe UTC log timestamps; legacy/raw log preservation; display-only timezone conversion");
+} finally { assert(root.startsWith(os.tmpdir() + path.sep)); await fs.rm(root, { recursive: true, force: true }); }

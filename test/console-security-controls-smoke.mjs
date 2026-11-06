@@ -1,3 +1,4 @@
+import "./legacy-import-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -69,7 +70,7 @@ try {
   const rotations = () => fs.readFile(trace, "utf8").then(s => s.trim().split("\n").map(JSON.parse).filter(e => e.type === "rotation"));
   const first = (await rotations()).find(e => e.email === "success-security@example.test");
   assert.equal(first.password, c.password); assert.equal(first.previous, oldPassword); assert.equal(first.argsHaveAddPassword, false);
-  assert.equal(first.password.length, 18); assert.match(first.password, /[a-z]/); assert.match(first.password, /[A-Z]/); assert.match(first.password, /[0-9]/); assert.match(first.password, /[^A-Za-z0-9]/);
+  assert.equal(first.password.length, 12); assert.match(first.password, /[a-z]/); assert.match(first.password, /[A-Z]/); assert.match(first.password, /[0-9]/); assert.match(first.password, /[^A-Za-z0-9]/);
   for (const prefix of ["prepared", "uncertain", "uncertainlegacy"]) {
     const id = await create(prefix); await rotate(id);
     assert.equal((await credentials(id)).password, oldPassword, prefix + " candidate replaced stored password");

@@ -47,16 +47,17 @@ export async function listAccountWorkspaces(job, { forceWebRefresh = false, refr
   return normalizeAccountWorkspaces(result.data, result.session.web?.workspaceId);
 }
 
-export async function readAccountSecurityState(job) {
+export async function readAccountSecurityState(job, { field = "all" } = {}) {
+  if (!["all", "totp", "password"].includes(field)) throw Object.assign(new Error("不支持的安全状态类型"), { status: 400 });
   const state = normalizeSecurityState();
   const checkedAt = new Date().toISOString();
   let firstError;
-  try {
+  if (field !== "password") try {
     const { data } = await requestWithWebSession(job, "GET", "/accounts/mfa_info", undefined, { refreshOnUnauthorized: false });
     state.totpEnabled = normalizeSecurityState(data).totpEnabled;
     if (state.totpEnabled !== null) state.totpCheckedAt = checkedAt;
   } catch (error) { firstError = error; }
-  try {
+  if (field !== "totp") try {
     const { data } = await requestWithWebSession(job, "GET", "/accounts/change_password/eligibility", undefined, { refreshOnUnauthorized: false });
     if (data?.eligible === true) state.passwordEnabled = true;
     else if (data?.eligible === false) {

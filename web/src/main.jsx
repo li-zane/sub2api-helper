@@ -1,3 +1,8 @@
+import { AccountLogDialog } from "./account-log-dialog.jsx";
+import { AccountSecurityLights } from "./account-security-lights.jsx";
+import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone, setDisplayTimeZone, compactDateTime, displayTimeParts, displayProtocolLog } from "./display-time.mjs";
+import { useDisplayTimeZone } from "./use-display-time.jsx";
+import { usageRestricted } from "./codex-eligibility.mjs";
 import { totpRotationView } from "./totp-rotation-state.mjs";
 import React, { useLayoutEffect, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -87,6 +92,7 @@ const DEFAULT_PLAN_TYPE_MAPPING = {
   self_serve_pro: "Pro",
 };
 const DEFAULT_TASK_AUTO_ACTION_OPTIONS = [
+  { value: "authorize-codex", label: "Codex 授权" },
   { value: "upload", label: "上传到 Sub2API" },
   { value: "rotate-logout-reauthorize-upload", label: "一键轮换并上传" },
   { value: "enable-overload-detection", label: "自动开启过载检测" },
@@ -271,6 +277,8 @@ function App() {
   const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 1 });
   const [stats, setStats] = useState({ active: 0, queued: 0, completed: 0 });
   const [taskSettings, setTaskSettings] = useState(null);
+  useDisplayTimeZone();
+  useLayoutEffect(() => { setDisplayTimeZone(taskSettings?.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE); }, [taskSettings?.displayTimeZone]);
   const [taskSettingsOpen, setTaskSettingsOpen] = useState(false);
   const [taskSettingsOpening, setTaskSettingsOpening] = useState(false);
   const taskSettingsButtonRef = useRef(null);
@@ -720,8 +728,8 @@ function App() {
     setAccountUsageByJobId((current) => ({ ...current, [jobId]: { status: "loading" } }));
     try {
       const data = await apiFetch(token, `/api/jobs/${encodeURIComponent(jobId)}/usage?refresh=1`);
-      setJobs((current) => current.map((job) => job.id === jobId ? { ...job, sub2apiUsage: data.usage || null } : job));
-      setJobSelectionIndex((current) => current.map((job) => job.id === jobId ? { ...job, sub2apiUsage: data.usage || null } : job));
+      setJobs((current) => current.map((job) => job.id === jobId ? data.job ? shareSnapshot(job, data.job) : { ...job, sub2apiUsage: data.usage || null } : job));
+      setJobSelectionIndex((current) => current.map((job) => job.id === jobId ? data.job ? shareSnapshot(job, data.job) : { ...job, sub2apiUsage: data.usage || null } : job));
       setAccountUsageByJobId((current) => ({
         ...current,
         [jobId]: { status: "ready", ...(data.usage || {}) },
@@ -2380,6 +2388,7 @@ function App() {
                   expanded={expandedJobId === job.id}
                   onToggleLogs={() => setExpandedJobId((current) => current === job.id ? null : job.id)}
                   onError={setError}
+                  onJobUpdate={next => setJobs(current => current.map(item => item.id === next.id ? shareSnapshot(item, next) : item))}
                   selected={selectedJobIds.has(job.id)}
                   onToggleSelected={() => toggleJobSelection(job.id)}
                   onDelete={() => deleteAccount(job)}
@@ -3525,6 +3534,7 @@ function RemarkDialog({ token, job, onClose, onSaved }) {
 }
 
 function OperationDetailDialog({ detail, onClose }) {
+  useDisplayTimeZone();
   return (
     <AccessibleDialog className="operation-detail-dialog" labelledBy="operation-detail-title" onClose={onClose}>
       <div className="dialog-header">
@@ -3536,7 +3546,7 @@ function OperationDetailDialog({ detail, onClose }) {
           <X size={18} />
         </button>
       </div>
-      <pre className="operation-detail-content" tabIndex="0" aria-label="操作反馈代码详情">{detail.text}</pre>
+      <pre className="operation-detail-content" tabIndex="0" aria-label="操作反馈代码详情">{displayProtocolLog(detail.operation ? `操作：${detail.operation.label}\n时间：${formatDateTime(detail.operation.at)}\n\n${detail.operation.text}` : detail.text)}</pre>
       <div className="dialog-actions">
         <span className="dialog-actions-spacer" />
         <button type="button" className="cancel-button" onClick={onClose}>关闭</button>
@@ -3546,6 +3556,7 @@ function OperationDetailDialog({ detail, onClose }) {
 }
 
 function OperationTime({ value, className = "" }) {
+  useDisplayTimeZone();
   const parts = formatTimeParts(value);
   return (
     <div className={`time-stack ${className}`.trim()} title={formatDateTime(value)}>
@@ -3737,7 +3748,7 @@ function BulkMoreMenu({
 
 // The boundary keeps event handlers fresh without invalidating unchanged memoized rows.
 const MemoizedJobRow = React.memo(JobRow);
-const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
+const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
 function JobRowBoundary(props) {
   const latest = useRef(props);
   useLayoutEffect(() => { latest.current = props; });
@@ -3745,7 +3756,8 @@ function JobRowBoundary(props) {
   return <MemoizedJobRow {...props} {...callbacks} />;
 }
 
-function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onError, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, forceReloginAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
+function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, forceReloginAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
+  useDisplayTimeZone();
   const [value, setValue] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [priorityValue, setPriorityValue] = useState(() => job.sub2apiPriority === null || job.sub2apiPriority === undefined ? "" : String(job.sub2apiPriority));
@@ -4022,7 +4034,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
       </td>
       <td className="status-cell">
         <StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} />
-        <AccountSecurityLights state={job.securityState} />
+        <AccountSecurityLights job={job} token={token} onJobUpdate={onJobUpdate} onError={onError}
+          disabledReason={isBlockedAccount(job) ? "账号已封禁，已停止远端安全状态核对" : mutationReason} />
       </td>
       <td className="step-cell recent-operation-cell">
         <div className="recent-operation-overview">
@@ -4032,7 +4045,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               className={`operation-type-badge operation-feedback-trigger ${operation.tone}`}
               title={`${operation.label} · ${operation.result}（点击查看反馈代码详情）`}
               aria-label={`查看${operation.label}反馈详情`}
-              onClick={() => onOpenOperationDetail({ text: `操作：${operation.label}\n时间：${formatDateTime(operation.at)}\n\n${operation.text}` })}
+              onClick={() => onOpenOperationDetail({ operation: { label: operation.label, at: operation.at, text: operation.text } })}
             >
               {operation.label}
             </button>
@@ -4272,6 +4285,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
   const [loginTimeout, setLoginTimeout] = useState(() => String(settings.loginTimeoutMinutes ?? DEFAULT_LOGIN_TIMEOUT_MINUTES));
   const [smsTimeout, setSmsTimeout] = useState(() => String(settings.smsTimeoutMinutes ?? DEFAULT_SMS_TIMEOUT_MINUTES));
+  const [displayTimeZone, setTimeZone] = useState(settings.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE);
   const [monitoring, setMonitoring] = useState(() => Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
   const [fingerprintDefaults, setFingerprintDefaults] = useState(() => ({ intervalMinutes: String(settings.modelFingerprint?.intervalMinutes ?? 360), maxConcurrentAccounts: String(settings.modelFingerprint?.maxConcurrentAccounts ?? 3) }));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
@@ -4305,6 +4319,8 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   async function save(event) {
     event.preventDefault();
     if (saving) return;
+    let validTimeZone;
+    try { validTimeZone = normalizeDisplayTimeZone(displayTimeZone); } catch (error) { setError(error.message); return; }
     const value = Number(limit);
     if (!Number.isInteger(value) || value < settings.min || value > settings.max) {
       setError(`同时运行任务数必须是 ${settings.min} 到 ${settings.max} 的整数`);
@@ -4363,7 +4379,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
+        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4434,6 +4450,11 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             </label>
           </div>
           <div className="task-auth-mode-fields">
+            <label className="settings-field" htmlFor="task-display-time-zone">
+              <span className="field-label-row">显示时区<HelpTip label="显示时区说明">全局页面时间与日志时间使用此时区。原始时间戳保持 UTC，不改变检测间隔或任务调度。支持 IANA 时区，例如 Asia/Shanghai、UTC、America/New_York。</HelpTip></span>
+              <input id="task-display-time-zone" aria-label="显示时区" list="display-time-zones" value={displayTimeZone} onChange={event => setTimeZone(event.target.value)} disabled={saving} required style={{ width: "min(320px, 60%)", minWidth: 0, textAlign: "left" }} />
+              <datalist id="display-time-zones">{["Asia/Shanghai", "UTC", "Asia/Tokyo", "America/Los_Angeles", "America/New_York", "Europe/London"].map(zone => <option key={zone} value={zone} />)}</datalist>
+            </label>
             <label className="settings-field" htmlFor="task-login-timeout">
               <span className="field-label-row">登录超时
                 <HelpTip label="登录超时说明">Web、Codex 登录默认限时 3 分钟，包含邮箱和 2FA 等待、不含排队。进入手机号验证后改用独立接码时限，换号、重发和授权收尾都不重置或切回登录时限。超时保留原凭据；2FA 未通过时暂停自动登录，手动触发可恢复。</HelpTip>
@@ -4591,7 +4612,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
                       </label>
                     ))}
                   </div>
-                  <small className="task-auto-empty">一键轮换已包含上传；两种上传方式互斥。</small>
+                  <small className="task-auto-empty">新账号先登录 Web；上传需先完成 Codex 授权。一键轮换已包含上传。</small>
                 </div>
                 <button type="button" className="icon-button danger" title="删除自动任务规则" aria-label="删除自动任务规则" onClick={() => setAutoRows((current) => current.filter((_, itemIndex) => itemIndex !== index))} disabled={saving}>
                   <Trash2 size={15} />
@@ -4602,7 +4623,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
-          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES)); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setFingerprintDefaults({ intervalMinutes: "360", maxConcurrentAccounts: "3" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
+          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES)); setTimeZone(DEFAULT_DISPLAY_TIME_ZONE); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setFingerprintDefaults({ intervalMinutes: "360", maxConcurrentAccounts: "3" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>
@@ -4623,104 +4644,8 @@ function taskAutoActionRows(autoActions) {
 }
 
 function LogDialog({ token, job, onClose }) {
-  const [logs, setLogs] = useState("正在读取日志...");
-  const [refreshing, setRefreshing] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [fullHistory, setFullHistory] = useState(false);
-  const viewerRef = useRef(null);
-  const initialLoadedRef = useRef(false);
-
-  const load = async ({ manual = false } = {}) => {
-    if (manual) setRefreshing(true);
-    try {
-      const data = await apiFetch(token, `/api/jobs/${job.id}/logs${fullHistory ? "?full=1&credentials=1" : ""}`);
-      setLogs(data.logs || "暂无日志");
-      if (!initialLoadedRef.current) {
-        initialLoadedRef.current = true;
-        window.requestAnimationFrame(() => {
-          if (viewerRef.current) viewerRef.current.scrollTop = viewerRef.current.scrollHeight;
-        });
-      }
-    } catch (error) {
-      setLogs(`日志读取失败：${error.message}`);
-    } finally {
-      if (manual) setRefreshing(false);
-    }
-  };
-
-  useEffect(() => {
-    let stopped = false;
-    const poll = async () => {
-      try {
-        const data = await apiFetch(token, `/api/jobs/${job.id}/logs${fullHistory ? "?full=1&credentials=1" : ""}`);
-        if (stopped) return;
-        setLogs(data.logs || "暂无日志");
-        if (!initialLoadedRef.current) {
-          initialLoadedRef.current = true;
-          window.requestAnimationFrame(() => {
-            if (viewerRef.current) viewerRef.current.scrollTop = viewerRef.current.scrollHeight;
-          });
-        }
-      } catch (error) {
-        if (!stopped) setLogs(`日志读取失败：${error.message}`);
-      }
-    };
-    void poll();
-    const timer = fullHistory ? null : window.setInterval(poll, 1_200);
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [job.id, token, fullHistory]);
-
-  async function copyLogs() {
-    if (!logs) return;
-    try {
-      await navigator.clipboard.writeText(logs);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Ignore clipboard failures
-    }
-  }
-
-  return (
-    <AccessibleDialog className="log-dialog" labelledBy="log-dialog-title" onClose={onClose}>
-        <div className="dialog-header">
-          <div>
-            <div className="section-title-row">
-              <h2 id="log-dialog-title">协议日志</h2>
-              <StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} />
-            </div>
-            <span>{job.email}</span>
-          </div>
-          <div className="dialog-header-actions">
-            <button type="button" className="secondary-button compact-button" onClick={copyLogs} title="复制协议日志">
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-              {copied ? "已复制" : "复制日志"}
-            </button>
-            <button type="button" className="icon-button" onClick={() => load({ manual: true })} disabled={refreshing} title="刷新日志" aria-label="刷新日志">
-              <RefreshCw className={refreshing ? "spin" : ""} size={16} />
-            </button>
-            <button type="button" className="icon-button" autoFocus onClick={onClose} title="关闭" aria-label="关闭协议日志">
-              <X size={18} />
-            </button>
-          </div>
-        </div>
-        <div className="log-dialog-body">
-          <button type="button" className="secondary-button compact-button" aria-pressed={fullHistory}
-            onClick={() => setFullHistory(value => !value)} title="查看永久保留的完整日志与原始、新凭据">
-            {fullHistory ? "实时日志" : "完整日志与凭据历史"}
-          </button>
-          <pre ref={viewerRef} className="log-dialog-viewer" tabIndex="0">{logs}</pre>
-        </div>
-        <div className="dialog-actions log-dialog-actions">
-          <span className="log-dialog-meta">{fullHistory ? "完整历史保留至删除账号；凭据按阶段记录，候选值不代表已生效" : "每 1.2 秒同步最近输出；完整历史永久保留"}</span>
-          <span className="dialog-actions-spacer" />
-          <button type="button" className="cancel-button" onClick={onClose}>关闭</button>
-        </div>
-    </AccessibleDialog>
-  );
+  const request = useMemo(() => url => apiFetch(token, url), [token]);
+  return <AccountLogDialog request={request} job={job} onClose={onClose} statusBadge={<StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} />} />;
 }
 
 function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, totpReplaceAvailable, onJobUpdate, onClose, onError }) {
@@ -4902,7 +4827,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
 
   async function replacePassword() {
     if (readOnlyReason || credentialBusy || mutationRequestRef.current || passwordDirty || totpDirty || !job.canReplacePassword) return;
-    if (!window.confirm("确定为该账号生成并轮换强密码吗？原密码和候选新密码会保留在凭据历史中，成功后更新本地记录。")) return;
+    if (!window.confirm("确定为该账号生成并轮换 12 位随机密码吗？原密码和候选新密码会保留在凭据历史中，成功后更新本地记录。")) return;
     mutationRequestRef.current = true;
     setPasswordReplacing(true);
     setDialogError("");
@@ -4990,12 +4915,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
             <div className="credential-field">
               <div className="credential-json-heading">
                 <strong>密码</strong>
-                <button type="button" className="text-action" onClick={replacePassword}
-                  disabled={Boolean(readOnlyReason) || credentialBusy || !job.canReplacePassword || passwordDirty || totpDirty}
-                  aria-busy={passwordReplacing}
-                  title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : !job.canReplacePassword ? "当前账号暂不具备密码轮换条件" : "生成强密码并加入共享登录队列") }>
-                  {passwordReplacing ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}一键轮换密码
-                </button>
+
               </div>
               <div className="secret-input-row">
                 <KeyRound size={15} aria-hidden="true" />
@@ -5114,9 +5034,16 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
             {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{dialogError}</div>}
             {notice && <div className="credential-notice" role="status"><Check size={15} />{notice}</div>}
             <div className="dialog-actions credential-dialog-actions" style={{ flexWrap: "wrap" }}>
-              {totpReplaceAvailable && job.canReplaceTotp && (
+              {!isBlockedAccount(job) && totpReplaceAvailable && job.canReplaceTotp && (
                 <button type="button" className="danger-button" onClick={replaceTotp} disabled={credentialBusy || Boolean(readOnlyReason) || passwordDirty || totpDirty} title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : undefined)}>
                   {replacing ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}轮换 2FA
+                </button>
+              )}
+              {!isBlockedAccount(job) && (
+                <button type="button" className="danger-button" onClick={replacePassword}
+                  disabled={Boolean(readOnlyReason) || credentialBusy || !job.canReplacePassword || passwordDirty || totpDirty}
+                  aria-busy={passwordReplacing} title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : "生成 12 位随机密码并轮换；原值和新值永久保留")}>
+                  {passwordReplacing ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}一键轮换密码
                 </button>
               )}
               <span className="dialog-actions-spacer" />
@@ -5810,25 +5737,6 @@ function formatWorkspaceRole(role) {
   return map[normalized] || String(role).trim();
 }
 
-function AccountSecurityLights({ state }) {
-  return (
-    <div className="account-security-lights" role="group" aria-label="账号安全状态"
-      style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8, marginTop: 5, fontSize: 10.5, color: "var(--muted)" }}>
-      {[["2FA", state?.totpEnabled, "totpCheckedAt"], ["密码", state?.passwordEnabled, "passwordCheckedAt"]].map(([label, enabled, timeKey]) => {
-        const known = enabled === true || enabled === false;
-        const checkedAt = state && Object.hasOwn(state, timeKey) ? state[timeKey] : state?.checkedAt;
-        const description = `${label}：${known ? enabled ? "已开启" : "未开启" : "待确认"}`;
-        return <span key={label} role="img" aria-label={description}
-          title={`${description}${checkedAt ? `；核对时间：${formatDateTime(checkedAt)}` : known ? "；已有成功验证记录，时间未记录" : "；尚无远端确认结果"}`}
-          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-          <i aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: known ? enabled ? "var(--emerald)" : "var(--danger)" : "var(--subtle)" }} />
-          {label}
-        </span>;
-      })}
-    </div>
-  );
-}
-
 function StatusBadge({ status, webSessionStatus = "absent" }) {
   const description = status === "canceled"
     ? `上次 Codex 授权任务已取消；${WEB_STATES[webSessionStatus] || "Web 状态未知"}。Web 登录状态与授权任务结果分别记录。`
@@ -5911,7 +5819,7 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
       </span>
     );
   }
-  const restricted = usage.limitReached === true || usage.allowed === false || credits?.overageLimitReached === true;
+  const restricted = usageRestricted(usage);
   const windows = [
     { key: "primary", label: usageWindowLabel("5h", primary), value: primary },
     { key: "secondary", label: usageWindowLabel("7d", secondary), value: secondary },
@@ -6158,8 +6066,8 @@ function downloadFilename(contentDisposition) {
 }
 
 function localTimestamp(date = new Date()) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  const parts = displayTimeParts(date);
+  return `${parts.year}${parts.date.replace("/", "")}-${parts.time.replaceAll(":", "")}`;
 }
 
 function formatProfileSyncNotice(sync) {
@@ -6242,33 +6150,11 @@ function shortId(id) {
 }
 
 function formatDateTime(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "-";
-  const now = new Date();
-  const isToday = date.getFullYear() === now.getFullYear()
-    && date.getMonth() === now.getMonth()
-    && date.getDate() === now.getDate();
-  return new Intl.DateTimeFormat("zh-CN", {
-    ...(isToday ? {} : { month: "2-digit", day: "2-digit" }),
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+  return compactDateTime(value);
 }
 
 function formatTimeParts(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return { date: "-", time: "" };
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hours = String(date.getHours()).padStart(2, "0");
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  const seconds = String(date.getSeconds()).padStart(2, "0");
-  return {
-    date: `${month}/${day}`,
-    time: `${hours}:${minutes}:${seconds}`,
-  };
+  return displayTimeParts(value);
 }
 
 function countBatchLines(value) {
@@ -6784,6 +6670,9 @@ function sub2ApiStatusJobFields(status) {
     sub2apiGroupIds: Array.isArray(status?.groupIds) ? status.groupIds : [],
     sub2apiRemoteStatus: status?.remoteStatus || null,
     sub2apiUsage: status?.usage || null,
+    sub2apiRateLimited: status?.rateLimited === true,
+    sub2apiQuotaRestricted: status?.quotaRestricted === true || usageRestricted(status?.usage),
+    ...(typeof status?.codexStatusEligible === "boolean" ? { codexStatusEligible: status.codexStatusEligible } : {}),
     // Keep the remote PlanType separate from the local account/workspace
     // PlanType. A workspace switch updates the local OAuth bundle first, while
     // Sub2API may still be serving its previous snapshot until the account

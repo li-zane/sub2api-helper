@@ -4,6 +4,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { Activity, Check, ChevronDown, RefreshCw, Settings2, X } from "lucide-react";
 import { HelpTip } from "./help-tip.jsx";
 import { trapModalTab } from "./accessible-dialog.jsx";
+import { displayDateTime } from "./display-time.mjs";
+import { useDisplayTimeZone } from "./use-display-time.jsx";
 
 const TITLES = { match: "指纹一致", mismatch: "疑似不一致", unknown: "证据不足", error: "请求失败" };
 const toText = models => (models || []).map(m => m.expected === m.model ? m.model : `${m.model} => ${m.expected}`).join("\n");
@@ -14,12 +16,7 @@ function formatReferenceTime(val) {
   try {
     const d = new Date(val);
     if (isNaN(d.getTime())) return String(val).slice(0, 19).replace("T", " ");
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    const h = String(d.getHours()).padStart(2, "0");
-    const min = String(d.getMinutes()).padStart(2, "0");
-    return `${y}-${m}-${day} ${h}:${min}`;
+    return displayDateTime(val, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   } catch {
     return String(val);
   }
@@ -30,7 +27,7 @@ function formatTimelineTime(val) {
   try {
     const d = new Date(val);
     if (isNaN(d.getTime())) return { time: String(val), date: "" };
-    const str = d.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+    const str = displayDateTime(val);
     const parts = str.split(" ");
     return { date: parts[0] || "", time: parts[1] || str };
   } catch {
@@ -265,6 +262,7 @@ function AttributionModels({ models, parentStatus }) {
   })}</div>;
 }
 function FingerprintHistoryDialog({ job, token, onClose }) {
+  useDisplayTimeZone();
   const [data, setData] = useState(null), [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [refreshed, setRefreshed] = useState(false);
@@ -393,6 +391,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
   </div></Dialog>;
 }
 export function ModelFingerprintCell({ job, token, onError }) {
+  useDisplayTimeZone();
   const [state, setState] = useState(job.modelFingerprint), [editing, setEditing] = useState(false), [showHistory, setShowHistory] = useState(false), [draft, setDraft] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [checkPending, setCheckPending] = useState(false);
   const requestPending = useRef(false);
@@ -423,7 +422,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
     <div className="fingerprint-rounds" role="group" aria-label={`${job.email} 最近 6 轮检测结果`}>
       {rounds.map((round, index) => {
         const status = !round ? "empty" : round.status === "match" ? "match" : round.status === "mismatch" ? "mismatch" : "error";
-        const label = `${effectiveEnabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${new Date(round.checkedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`}`;
+        const label = `${effectiveEnabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${displayDateTime(round.checkedAt)}`}`;
         return <button key={round?.checkedAt || `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
       })}
     </div>

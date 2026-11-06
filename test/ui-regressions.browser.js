@@ -29,8 +29,9 @@ async (page) => {
     await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 1);
     const banned = page.locator("tr.job-row");
     check(await banned.getByText("账号封禁", { exact: true }).isVisible(), "ban must override the ordinary Web state");
-    check(await banned.getByRole("button", { name: "检测 Web 会话", exact: true }).isDisabled(), "known bans must not offer Web login");
-    check((await banned.getByRole("button", { name: "检测 Web 会话", exact: true }).getAttribute("title")).includes("封禁"), "disabled Web login must explain the ban");
+    check(await banned.getByRole("button", { name: "登录 Web", exact: true }).isEnabled(), "known bans must retain the explicit manual Web-only login");
+    check((await banned.getByRole("button", { name: "登录 Web", exact: true }).getAttribute("title")).includes("不执行 Codex 授权"), "manual Web login must explain the ban and OAuth boundary");
+    for (const name of ["重新授权", "重新开始授权"]) check(await banned.getByRole("button", { name, exact: true }).isDisabled(), "banned OAuth must remain disabled: " + name);
     check(await banned.locator(".bound-ip-cell").innerText() === "未绑定", "released ban must not appear as direct or bound");
     let reads = 0;
     const providerReads = /\/api\/jobs\/[^/]+\/(?:sessions|workspaces)$/;
@@ -181,7 +182,7 @@ async (page) => {
   await test("log-modal-focus-and-Escape", async () => {
     const trigger = row().getByRole("button", { name: "查看协议日志", exact: true });
     await trigger.click();
-    const modal = page.getByRole("dialog", { name: "协议日志", exact: true });
+    const modal = page.getByRole("dialog", { name: "账号日志与凭据", exact: true });
     try {
       check(await modal.evaluate(e => e.contains(document.activeElement)), "focus stays behind log modal");
       await page.keyboard.press("Escape");

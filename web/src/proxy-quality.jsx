@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ChevronDown, LoaderCircle, ShieldCheck } from "lucide-react";
 import { HelpTip } from "./help-tip.jsx";
+import { displayDateTime } from "./display-time.mjs";
+import { useDisplayTimeZone } from "./use-display-time.jsx";
 
 const RISK_LABELS = { low: "低风险", medium: "中风险", high: "高风险", unknown: "风险未知" };
 const flag = value => value === true ? "是" : value === false ? "否" : "未知";
-const timeLabel = value => new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+const timeLabel = value => displayDateTime(value, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
 export function ProxyQualityPanel({ token, mode, proxies, globalProxyUrl, dirty, defaultOpen = false }) {
   return <details className="proxy-quality-panel" open={defaultOpen || undefined}>
@@ -26,6 +28,7 @@ export function ProxyQualityPanel({ token, mode, proxies, globalProxyUrl, dirty,
 }
 
 function ProxyQualityCheck({ token, name, target, disabled = false, hint }) {
+  useDisplayTimeZone();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");

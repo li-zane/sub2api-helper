@@ -37,7 +37,9 @@ try {
     else { assert.equal(current.accessToken, jwt); assert.equal(current.cookies.find(c => c.name === "session").value, "rotated-cookie"); }
   }
   const events = await readCredentialHistory(root);
-  assert(events.some(e => e.before?.cookies?.some(c => c.value === "original-cookie") && e.after?.cookies?.some(c => c.value === "rotated-cookie")));
+  assert.equal(events.filter(e => e.type === "web_session").length, 1);
+  assert(events.some(e => e.stage === "current" && e.after?.cookies?.some(c => c.value === "rotated-cookie")));
+  assert(!JSON.stringify(events).includes("original-cookie"));
   await saveProtocolWebSession(file, { browserIdentity: identity, jar: { toJSON: () => original.cookies } }, {});
   assert.equal(JSON.parse(await fs.readFile(file, "utf8")).accessToken, jwt, "OAuth save erased the verified Web access token");
   const hash = crypto.createHash("sha256").update(await fs.readFile(file)).digest("hex");
@@ -47,9 +49,9 @@ try {
   const blocked = path.join(root, "blocked"); await fs.mkdir(blocked); await fs.writeFile(path.join(blocked, "credential-history"), "not a directory");
   const protectedFile = path.join(blocked, "web-session.json"); await fs.writeFile(protectedFile, JSON.stringify(original));
   const bytes = await fs.readFile(protectedFile, "utf8");
-  await assert.rejects(writeAccountWebSession(protectedFile, { ...original, accessToken: "new" }));
-  assert.equal(await fs.readFile(protectedFile, "utf8"), bytes, "history persistence failure overwrote current session");
-  console.log("WEB_SESSION_DURABILITY_PASS error/mismatched jars discarded; verified cookie rotation persisted despite later backend error; old/new snapshots; OAuth save retains token; history fsync precedes replacement");
+  await writeAccountWebSession(protectedFile, { ...original, accessToken: "new" });
+  assert.equal(JSON.parse(await fs.readFile(protectedFile, "utf8")).accessToken, "new", "superseded snapshot archive must not block atomic current-session updates");
+  console.log("WEB_SESSION_DURABILITY_PASS error/mismatched jars discarded; verified cookie rotation persisted despite later backend error; one current snapshot; OAuth save retains token; atomic current-file replacement");
 } finally {
   if (oldBase === undefined) delete process.env.CHATGPT_BASE; else process.env.CHATGPT_BASE = oldBase;
   if (oldNative === undefined) delete process.env.TOSUB2_SESSION_NATIVE_HTTP; else process.env.TOSUB2_SESSION_NATIVE_HTTP = oldNative;

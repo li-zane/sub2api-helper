@@ -1,3 +1,4 @@
+import "./legacy-import-fixture.mjs";
 import { seedWebSession } from "./account-web-fixture.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";

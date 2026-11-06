@@ -1,3 +1,4 @@
+import "./legacy-import-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -56,7 +57,7 @@ try {
       assert.equal((await api(`/api/jobs/${target}/web-login`, {})).status, 200);
       await waitJob(target, j => !j.webLoginPending && j.webLoginError);
       assert.equal(await fs.readFile(sessionPath, "utf8"), before, "failed/timed-out Web login replaced the usable session");
-      const log = await api(`/api/jobs/${target}/logs?full=1&credentials=1`); assert(log.data.logs.includes("old-valid-cookie")); assert(log.data.logs.includes("new-candidate-cookie"));
+      const log = await api(`/api/jobs/${target}/logs?full=1&credentials=1`); assert(log.data.logs.includes("old-valid-cookie")); assert(!log.data.logs.includes("new-candidate-cookie"), "unverified candidate retained as current history");
     }
     assert(!serverLog.includes(first) && !serverLog.includes(second), "credential leaked to service stdout");
     assert.equal((await api("/api/jobs/delete-batch", { ids: [id] })).status, 200);

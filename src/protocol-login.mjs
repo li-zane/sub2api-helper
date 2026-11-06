@@ -310,6 +310,9 @@ class ProtocolClient {
     let last = null;
     const referer = options.referer || this.documentUrl;
     for (let i = 0; i < (options.maxRedirects || 12); i += 1) {
+      if (options.allowedOrigin && new URL(current).origin !== options.allowedOrigin) {
+        throw new Error("AUTH_REDIRECT_ORIGIN_INVALID: Password entry redirected outside the current authentication origin");
+      }
       if (isLocalCallback(current)) return { finalUrl: current, last };
       last = await this.request("GET", current, {
         accept:
@@ -1435,7 +1438,8 @@ async function reuseSavedWebLogin({ file, email, transport, chatgptBase, verbose
   return { client, reused: true, web: { ...saved.web, deviceId: identity.deviceId } };
 }
 
-async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password, totpSecret }) {
+async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password, totpSecret,
+  emailOtpApiAvailable = process.env.TOSUB2_EMAIL_OTP_API_AVAILABLE === "1" }) {
   if (!client.browserIdentity) {
     client.browserIdentity = await getAccountBrowserIdentity(email, { root: client.transport?.accountIdentityRoot });
     if (client.transport) {
@@ -1482,17 +1486,38 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
   if (!signin.url) throw new Error("signin/openai did not return url");
 
   const authRequestStartedAt = new Date().toISOString();
-  const authPage = await client.follow(signin.url, { referer: `${chatgptBase}/` });
+  let authPage = await client.follow(signin.url, { referer: `${chatgptBase}/` });
   console.log(`[info] Auth page: ${safeUrl(authPage.finalUrl)}`);
   if (authPage.last?.text) {
     console.log(`[info] Page text: ${summarizeHtml(authPage.last.text)}`);
   }
+  assertWebAuthPageNotChallenge(authPage);
+  if (isEmailVerificationPage(authPage.finalUrl) && !emailOtpApiAvailable && password) {
+    console.log("[web-password-fallback] 邮箱 OTP 未配置收码 API，且已有密码；沿用当前认证会话尝试密码入口 1/1。");
+    const passwordPage = await client.follow(new URL("/log-in/password", authBase).href, {
+      referer: authPage.finalUrl, allowedOrigin: new URL(authBase).origin,
+    });
+    assertWebAuthPageNotChallenge(passwordPage);
+    if (isPasswordLoginPage(passwordPage.finalUrl)) {
+      if (passwordPage.last?.res?.status !== 200 || !/<input\b[^>]*\btype\s*=\s*(?:"password"|'password'|password(?=\s|>))/i.test(passwordPage.last?.text || "")) {
+        throw new Error("WEB_PASSWORD_FALLBACK_PAGE_UNCONFIRMED: Password entry did not return a confirmed password form");
+      }
+      console.log("[web-password-fallback] 已确认进入密码输入页，继续密码与 2FA 验证。");
+    } else if (isEmailVerificationPage(passwordPage.finalUrl)) {
+      console.log("[web-password-fallback] 上游仍要求邮箱验证；保留邮箱 OTP 步骤，不再重复切换。");
+    } else {
+      throw new Error("WEB_PASSWORD_FALLBACK_PAGE_UNSUPPORTED: Password entry did not return a password or email verification step");
+    }
+    authPage = passwordPage;
+  }
 
   let authenticated;
   let loginMethod;
+  let emailOtpRequestedAt = authRequestStartedAt;
   if (isPasswordLoginPage(authPage.finalUrl)) {
     loginMethod = "password";
     console.log("[3/5] Password login page reached.");
+    emailOtpRequestedAt = new Date().toISOString();
     authenticated = await verifyPassword(client, {
       authBase,
       rl,
@@ -1522,7 +1547,27 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
     throw new Error(`UNEXPECTED_LOGIN_PAGE: Expected password or email verification, received ${pathname}`);
   }
 
+  let emailVerificationHandled = loginMethod === "email_otp";
+  // Selecting password is a login-method choice, not a way to dismiss an
+  // additional email check imposed after password/TOTP verification.
+  async function completeRequiredEmail(payload) {
+    const next = getContinueUrl(payload);
+    if (!next) return payload;
+    const target = new URL(next, authBase);
+    if (!isEmailVerificationPage(target.href)) return payload;
+    if (target.origin !== new URL(authBase).origin) throw new Error("WEB_AUTH_ORIGIN_INVALID: Email verification origin does not match the active flow");
+    if (emailVerificationHandled) throw new Error("WEB_AUTH_VERIFICATION_INCOMPLETE: Upstream still requires email verification after the submitted code");
+    const page = await client.follow(target.href, { referer: authPage.finalUrl, allowedOrigin: new URL(authBase).origin });
+    assertWebAuthPageNotChallenge(page);
+    if (!isEmailVerificationPage(page.finalUrl)) throw new Error("WEB_AUTH_VERIFICATION_INCOMPLETE: Expected the required email verification page");
+    console.log(`[email-otp-requested-at] ${emailOtpRequestedAt}`);
+    console.log("[3/5] Email OTP page reached. Enter code, or type r to resend.");
+    emailVerificationHandled = true;
+    return verifyEmailOtp(client, { authBase, rl, deviceId, referer: page.finalUrl });
+  }
+  authenticated = await completeRequiredEmail(authenticated);
   const mfaRequired = isMfaChallengePayload(authenticated);
+  if (mfaRequired) emailOtpRequestedAt = new Date().toISOString();
   authenticated = await completeTotpMfaIfNeeded(client, {
     authBase,
     rl,
@@ -1531,6 +1576,8 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
     totpSecret,
     referer: authPage.finalUrl,
   });
+  authenticated = await completeRequiredEmail(authenticated);
+  if (isMfaChallengePayload(authenticated)) throw new Error("WEB_AUTH_VERIFICATION_INCOMPLETE: Upstream still requires MFA verification");
   authenticated = await completeAccountProfileIfNeeded(client, {
     authBase,
     deviceId,
@@ -1677,6 +1724,16 @@ function isPasswordLoginPage(url) {
     return new URL(url).pathname === "/log-in/password";
   } catch {
     return false;
+  }
+}
+
+function assertWebAuthPageNotChallenge(page) {
+  const html = page.last?.text || "";
+  const title = /<title[^>]*>(.*?)<\/title>/is.exec(html)?.[1] || "";
+  const mitigated = page.last?.res?.headers?.get?.("cf-mitigated") || page.last?.res?.headers?.get?.("x-cf-mitigated") || "";
+  if (/challenge/i.test(mitigated) || /just a moment|checking your browser|verify you are human/i.test(title)
+    || /<form\b[^>]*\bid\s*=\s*["']challenge-form["']/i.test(html)) {
+    throw new Error("WEB_AUTH_CHALLENGE_REQUIRED: Authentication returned a verification interstitial, not a password or email OTP form");
   }
 }
 
@@ -3194,6 +3251,9 @@ Notes:
   Set CHATGPT_LOGIN_PASSWORD for password login, CHATGPT_TOTP_SECRET for automatic
   6-digit TOTP generation, and CHATGPT_NEW_PASSWORD for --add-password. These values
   are read from the environment and are not logged.
+  With a saved password and no email OTP API, Web login tries the password entry
+  once if the upstream first selects email verification. Set
+  TOSUB2_EMAIL_OTP_API_AVAILABLE=1 when an external mail-code provider is available.
   Existing phone-bound accounts are supported. If session/select returns workspaces,
   the script skips add-phone/send and goes directly to workspace selection.
   OAuth code can only be exchanged once; rerun login if token exchange fails with invalid_grant.
