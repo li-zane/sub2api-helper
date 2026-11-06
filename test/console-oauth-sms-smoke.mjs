@@ -24,9 +24,9 @@ const api = async (route, body, method = "POST") => { const r = await fetch(base
 const job = async id => (await api("/api/jobs")).data.jobs.find(j => j.id === id);
 const waitJob = (id, test) => wait(async () => { const j = await job(id); return j && test(j) ? j : null; });
 const create = async prefix => { const r = await api("/api/jobs", { email: prefix + "@example.test" }); assert.equal(r.status, 201); return r.data.job.id; };
-const settings = autoAcquire => api("/api/sms-provider-settings", { settings: { selectedProviderId: "smsbower", autoAcquire, configs: { smsbower: { apiKey: "fixture-sms-key", service: "dr", country: "1001", maxPrice: "0.42" } } } });
+const settings = (autoAcquire, maxAutoNumbers = 3) => api("/api/sms-provider-settings", { settings: { selectedProviderId: "smsbower", autoAcquire, maxAutoNumbers, configs: { smsbower: { apiKey: "fixture-sms-key", service: "dr", country: "1001", maxPrice: "0.42" } } } });
 async function start() {
-  helper = spawn(process.execPath, ["src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: project, windowsHide: true,
+  helper = spawn(process.execPath, [process.env.SMS_TEST_SERVER || "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: project, windowsHide: true,
     env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: root, LOCALAPPDATA: root, TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(root, "credentials"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32),
       ONBOARDING_PROTOCOL_SCRIPT: path.join(project, "test/mock-oauth-sms-protocol.mjs"), SMSBOWER_API_BASE: `http://127.0.0.1:${sms.address().port}/handler_api.php`, SMS_POLL_INTERVAL_MS: "20", SMS_POLL_TIMEOUT_MS: "3000", SUB2API_MONITOR_ENABLED: "0" }, stdio: ["ignore", "pipe", "pipe"] });
   helper.stdout.on("data", d => logs += d); helper.stderr.on("data", d => logs += d);
@@ -44,8 +44,26 @@ try {
   const no = await create("no-stock"); // Force a provider-level failure before acquiring any paid order.
   await waitJob(no, j => j.smsStatus === "error"); const count = gets; await new Promise(r => setTimeout(r, 200)); assert.equal(gets, count, "no-stock loop purchased repeatedly");
   await api(`/api/jobs/${no}/cancel`, {}); noStock = false;
-  const reject = await create("reject-phone"); await waitJob(reject, j => j.status === "phone" && j.smsStatus === "error");
-  const rejectedCount = gets; await new Promise(r => setTimeout(r, 200)); assert.equal(gets, rejectedCount, "send rejection started another paid order"); await api(`/api/jobs/${reject}/cancel`, {});
+  for (const prefix of ["reject-once", "partial-reject", "otp-risk"]) {
+    const before = gets, id = await create(prefix);
+    const result = await waitJob(id, j => j.status === "completed");
+    assert.equal(result.smsStatus, "completed");
+    assert.equal(gets - before, 2, prefix + " must automatically replace exactly one rejected number");
+  }
+  const beforeReject = gets, reject = await create("reject-phone");
+  await waitJob(reject, j => j.status === "phone" && /上限/.test(j.prompt || ""));
+  assert.equal(gets - beforeReject, 3, "default limit must include the first purchased number");
+  const rejectedCount = gets; await new Promise(r => setTimeout(r, 200)); assert.equal(gets, rejectedCount, "risk rejection exceeded paid limit"); await api(`/api/jobs/${reject}/cancel`, {});
+  for (const prefix of ["rate-limit", "wrong-otp"]) {
+    const before = gets, id = await create(prefix);
+    await waitJob(id, j => j.smsStatus === "error");
+    await new Promise(r => setTimeout(r, 200)); assert.equal(gets - before, 1, prefix + " must not buy another number");
+    await api(`/api/jobs/${id}/cancel`, {});
+  }
+  assert.equal((await settings(true, 2)).status, 200);
+  const beforeTwo = gets, two = await create("reject-phone-limit-two");
+  await waitJob(two, j => /上限 2 次/.test(j.prompt || "")); assert.equal(gets - beforeTwo, 2);
+  await api(`/api/jobs/${two}/cancel`, {});
   hold = new Promise(r => releaseHold = r);
   const stale = await create("stale-order"); await waitJob(stale, j => j.smsStatus === "requesting");
   const cancel = api(`/api/jobs/${stale}/cancel`, {}); // Cancellation does not need to wait for the supplier.
@@ -53,9 +71,10 @@ try {
   assert.equal((await job(stale)).status, "canceled");
   await stop(); await start();
   assert.equal((await api("/api/sms-provider-settings")).data.settings.autoAcquire, true, "saved server config did not survive restart");
+  assert.equal((await api("/api/sms-provider-settings")).data.settings.maxAutoNumbers, 2);
   const restored = await create("after-restart"); await waitJob(restored, j => j.status === "completed");
   const bad = await api("/api/sms-provider-settings", { settings: { selectedProviderId: "smsbower", autoAcquire: "true", configs: {} } }); assert.equal(bad.status, 400);
   assert.equal((await api("/api/sms-provider-settings")).data.settings.autoAcquire, true, "invalid save corrupted working settings");
   assert(!logs.includes("fixture-sms-key"));
-  console.log("OAUTH_SMS_CONSOLE_PASS opt-in automatic acquire/poll/submit/complete; authenticated private persistence/restart; no-stock/send-failure single-attempt; canceled-order release; invalid-save preservation; no stdout keys");
+  console.log("OAUTH_SMS_CONSOLE_PASS opt-in automatic acquire/poll/submit/complete; authenticated private persistence/restart; bounded phone-risk/OTP-risk replacement; split-output dedupe; global429/wrong-OTP/no-stock stop; configurable limit/restart; canceled-order release; invalid-save preservation; no stdout keys");
 } finally { releaseHold?.(); await stop(); sms.closeAllConnections(); await new Promise(r => sms.close(r)); await fs.rm(root, { recursive: true, force: true }); }

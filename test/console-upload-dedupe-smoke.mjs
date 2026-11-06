@@ -3,11 +3,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import http from "node:http";
+import { PoolUploadIntents } from "../src/pool-upload-intents.mjs";
 import { spawn } from "node:child_process";
 
 const project = path.resolve(import.meta.dirname, ".."), temp = await fs.mkdtemp(path.join(os.tmpdir(), "helper-upload-dedupe-"));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let rows = [], nextId = 100, heldCommit = null, holdFirst = true, dropUncertain = true, hideUncertain = false;
+let hidePartial = true;
 let dropPendingBody = true, hidePendingBody = false, dropPendingVisible = true, dropPendingDeleted = true;
 const creates = [], updates = [], idempotency = new Map();
 const pool = http.createServer(async (req, res) => {
@@ -16,7 +18,7 @@ const pool = http.createServer(async (req, res) => {
   const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
   const json = (status, data) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
   if (req.method === "GET" && url.pathname === "/api/v1/admin/accounts") {
-    const visible = rows.filter(row => !(hideUncertain && row.credentials?.email === "uncertain@example.test") &&
+    const visible = rows.filter(row => !(hidePartial && row.credentials?.email === "partial-failure@example.test") && !(hideUncertain && row.credentials?.email === "uncertain@example.test") &&
       !(hidePendingBody && row.credentials?.email === "pending-body@example.test"));
     return json(200, { data: { items: visible, pages: 1, total: visible.length } });
   }
@@ -40,10 +42,15 @@ const pool = http.createServer(async (req, res) => {
       if (emails.includes("pending-body@example.test")) hidePendingBody = false;
       return json(200, cached.response);
     }
+    if (body.accounts[0].proxy_id === 0) {
+      const response = { data: { success: 0, failed: 1, results: [{ name: body.accounts[0].name, success: false, error: 'ent: constraint failed: pq: insert or update on table "accounts" violates foreign key constraint "accounts_proxy_id_fkey"'  }] } };
+      idempotency.set(key, { fingerprint, response });
+      return json(200, response);
+    }
     const commit = () => {
       const created = body.accounts.map(account => ({ ...structuredClone(account), id: nextId++, created_at: new Date().toISOString() }));
       rows.push(...created);
-      const response = { data: { created: created.length, accounts: created } };
+      const response = { data: { success: created.length, failed: 0, results: created.map(row => ({ name: row.name, id: row.id, success: true })) } };
       idempotency.set(key, { fingerprint, response });
       return response;
     };
@@ -51,6 +58,12 @@ const pool = http.createServer(async (req, res) => {
       holdFirst = false;
       heldCommit = () => json(200, commit());
       return;
+    }
+    if (emails.includes("partial-failure@example.test")) {
+      commit(); // Simulate Create committing before BindGroups returns an error.
+      const response = { data: { success: 0, failed: 1, results: [{ name: body.accounts[0].name, success: false, error: "group binding FK failed after insert" }] } };
+      idempotency.set(key, { fingerprint, response });
+      return json(200, response);
     }
     const response = commit();
     if (emails.includes("uncertain@example.test") && dropUncertain) {
@@ -80,11 +93,11 @@ async function safeListen(server) {
 }
 const poolUrl = `http://127.0.0.1:${await safeListen(pool)}`;
 const listener = http.createServer(), port = await safeListen(listener); await new Promise(resolve => listener.close(resolve));
-const base = `http://127.0.0.1:${port}`, ids = Array.from({ length: 11 }, (_, n) => `11111111-1111-4111-8111-${String(n + 1).padStart(12, "0")}`);
+const base = `http://127.0.0.1:${port}`, ids = Array.from({ length: 14 }, (_, n) => `11111111-1111-4111-8111-${String(n + 1).padStart(12, "0")}`);
 const cases = [["race@example.test", "race-token"], ["batch@example.test", "batch-token"], ["batch@example.test", "batch-token"],
   ["mixed@example.test", "mixed-token"], ["uncertain@example.test", "uncertain-token"], ["conflict@example.test", "first-token"], ["conflict@example.test", "second-token"],
   ["pending-body@example.test", "old-body-token"], ["pending-body@example.test", "new-body-token"], ["pending-visible@example.test", "visible-token"],
-  ["pending-deleted@example.test", "deleted-token"]];
+  ["pending-deleted@example.test", "deleted-token"], ["legacy-direct@example.test", "legacy-token"], ["new-direct@example.test", "new-token"], ["partial-failure@example.test", "partial-token"]];
 for (const [n, [email, token]] of cases.entries()) {
   const dir = path.join(temp, ids[n]); await fs.mkdir(dir);
   await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: "completed", result_saved: true,
@@ -92,10 +105,15 @@ for (const [n, [email, token]] of cases.entries()) {
   await fs.writeFile(path.join(dir, "sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ name: `oauth---${email}`, platform: "openai", type: "oauth",
     credentials: { email, access_token: token, refresh_token: `${token}-refresh`, plan_type: "free" }, extra: { email, plan_type: "free" } }] }));
 }
+// Simulate an old-version uncertain request with the broken zero foreign key.
+const oldIntentStore = new PoolUploadIntents({ filePath: path.join(temp, "pool-upload-intents.json") });
+const legacyAccount = { name: "oauth---legacy-direct@example.test", platform: "openai", type: "oauth", proxy_id: 0,
+  credentials: { email: "legacy-direct@example.test", access_token: "legacy-token", refresh_token: "legacy-token-refresh", plan_type: "free" }, extra: {} };
+const legacyIntent = await oldIntentStore.prepare({ baseUrl: poolUrl }, legacyAccount);
 let output = "", headers, child;
 const wait = async fn => { const end = Date.now() + 20000; while (Date.now() < end) { const result = await fn().catch(() => null); if (result) return result; if (child && child.exitCode !== null) throw Error("fixture helper exited\n" + output); await pause(30); } throw Error("fixture wait timeout\n" + output); };
 async function upload(selected) {
-  const r = await fetch(base + "/api/sub2api/upload", { method: "POST", headers, body: JSON.stringify({ ids: selected, config: { baseUrl: poolUrl, adminApiKey: "fixture-admin-key", groupIds: [1] } }) });
+  const r = await fetch(base + "/api/sub2api/upload", { method: "POST", headers, body: JSON.stringify({ ids: selected, config: { baseUrl: poolUrl, adminApiKey: "fixture-admin-key", groupIds: [1], proxyId: "direct" } }) });
   return { status: r.status, data: await r.json() };
 }
 async function startHelper() {
@@ -201,7 +219,35 @@ try {
     assert.notEqual(deletedCalls[1].key, deletedCalls[2].key, "confirmed absent cached row must use a fresh creation generation");
     assert.equal(rows.filter(row => row.credentials?.email === "pending-deleted@example.test").length, 1);
 
-    console.log("UPLOAD_DEDUPE_HTTP_PASS held-create serialization; same-email batch collapse/conflict409; API-key/OAuth isolation; commit-unknown stable-key retry; confirmed and listing-recovered external deletion with fresh keys; process-restart pending-body recovery and latest-body update; cached deleted-ID rejection then new-generation recreation");
+    const rejected = await upload([ids[11]]);
+    assert(rejected.status >= 400);
+    assert.match(rejected.data.error, /POOL_UPLOAD_REJECTED:.*accounts_proxy_id_fkey/, "actual batch item rejection was hidden");
+    assert.equal(rows.filter(row => row.credentials?.email === "legacy-direct@example.test").length, 0);
+    const rejectedStore = JSON.parse(await fs.readFile(path.join(temp, "pool-upload-intents.json"), "utf8"));
+    assert.equal(Object.values(rejectedStore.entries).find(e => e.email === "legacy-direct@example.test").state, "rejected");
+    await stopHelper(); await startHelper();
+    assert.equal((await upload([ids[11]])).status, 200, "confirmed rejection did not allow corrected creation after restart");
+    const legacyCalls = creates.filter(call => call.emails.includes("legacy-direct@example.test"));
+    assert.equal(legacyCalls.length, 2); assert.equal(legacyCalls[0].key, legacyIntent.key);
+    assert.equal(legacyCalls[0].accounts[0].proxy_id, 0, "unknown old intent must first replay unchanged");
+    assert.notEqual(legacyCalls[0].key, legacyCalls[1].key);
+    assert(!Object.hasOwn(legacyCalls[1].accounts[0], "proxy_id"), "corrected direct create sent zero FK");
+    assert.equal(rows.filter(row => row.credentials?.email === "legacy-direct@example.test").length, 1);
+    assert.equal((await upload([ids[12]])).status, 200);
+    assert(!Object.hasOwn(creates.find(call => call.emails.includes("new-direct@example.test")).accounts[0], "proxy_id"));
+    assert.equal((await upload([ids[12]])).status, 200);
+    assert.equal(rows.find(row => row.credentials?.email === "new-direct@example.test").proxy_id, 0, "existing direct update must retain unbind semantics");
+
+    assert((await upload([ids[13]])).status >= 400);
+    assert((await upload([ids[13]])).status >= 400);
+    const partialCalls = creates.filter(call => call.emails.includes("partial-failure@example.test"));
+    assert.equal(partialCalls.length, 2); assert.equal(partialCalls[0].key, partialCalls[1].key, "post-insert failure changed key and risked duplicate creation");
+    assert.equal(rows.filter(row => row.credentials?.email === "partial-failure@example.test").length, 1);
+    hidePartial = false;
+    assert.equal((await upload([ids[13]])).status, 200);
+    assert.equal(rows.filter(row => row.credentials?.email === "partial-failure@example.test").length, 1);
+
+    console.log("UPLOAD_DEDUPE_HTTP_PASS post-insert group-failure keeps original key; real results receipts; direct-create zero-FK omission; legacy explicit-rejection restart recovery with new key; held-create serialization; same-email batch collapse/conflict409; API-key/OAuth isolation; commit-unknown stable-key retry; confirmed and listing-recovered external deletion with fresh keys; process-restart pending-body recovery and latest-body update; cached deleted-ID rejection then new-generation recreation");
   }
 } finally {
   if (heldCommit) { heldCommit(); heldCommit = null; }

@@ -16,11 +16,16 @@ async (page) => {
     await modal.getByRole("button", { name: "取消", exact: true }).click();
   });
   await test("save-enables-server-automation-and-survives-reload", async () => {
-    const modal = await open(); await modal.getByRole("checkbox", { name: "需要手机号时自动取号并接码" }).check();
+    const modal = await open();
+    const limit = modal.getByRole("spinbutton", { name: "每次授权自动取号上限（含首次）" });
+    check(await limit.inputValue() === "3" && await limit.isDisabled(), "default bounded limit or opt-in state wrong");
+    await modal.getByRole("checkbox", { name: "需要手机号时自动取号并接码" }).check();
+    await limit.fill("2");
     await modal.getByRole("button", { name: "保存配置", exact: true }).click(); await modal.waitFor({ state: "hidden" });
     await page.reload(); const m = await open();
     await m.getByRole("checkbox", { name: "需要手机号时自动取号并接码" }).waitFor();
     check(await m.getByRole("checkbox", { name: "需要手机号时自动取号并接码" }).isChecked(), "server setting did not survive reload");
+    check(await m.getByRole("spinbutton", { name: "每次授权自动取号上限（含首次）" }).inputValue() === "2", "limit did not survive reload");
     await page.waitForTimeout(250); await page.screenshot({ path: evidence + "/sms-settings-desktop.png" });
     await m.getByRole("button", { name: "取消", exact: true }).click();
   });

@@ -1777,7 +1777,7 @@ try {
   const directUploadText = await directUploadResponse.text();
   assert.equal(directUploadResponse.status, 200, directUploadText);
   assert.equal(JSON.parse(directUploadText).created, 1);
-  assert.equal(uploadedAccounts[0].proxy_id, 0, "新上传账号选择无代理时也应显式发送 0");
+  assert(!Object.hasOwn(uploadedAccounts[0], "proxy_id"), "新建直连账号应省略代理外键，只有更新解绑时发送 0");
 
   remoteErrorAccounts = [];
   const restoreProfileResponse = await fetch(`${baseUrl}/api/sub2api/monitor`, {

@@ -213,6 +213,20 @@ try {
     await assert.rejects(store.observeExisting(config, changed, [502]), /POOL_UPLOAD_INTENTS_INVALID/);
     assert.equal(await fs.readFile(observedFile, "utf8"), "{synthetic-corrupt-record");
   });
+  await check("explicit rejection persists and permits a corrected fresh generation", async () => {
+    const rejectedFile = path.join(directory, "rejected.json"), store = new PoolUploadIntents({ filePath: rejectedFile });
+    const old = await store.prepare(config, payload);
+    await store.reject(config, email, old.id);
+    const saved = Object.values(JSON.parse(await fs.readFile(rejectedFile, "utf8")).entries)[0];
+    assert.equal(saved.state, "rejected"); assert(saved.rejectedAt); assert.deepEqual(saved.remoteIds, []);
+    const next = await new PoolUploadIntents({ filePath: rejectedFile }).prepare(config, changed);
+    assert.notEqual(next.key, old.key); assert.notEqual(next.id, old.id); assert.deepEqual(next.account, changed);
+    await assert.rejects(store.reject(config, email, old.id), /POOL_UPLOAD_INTENT_STALE/);
+    assert.equal((await store.prepare(config, changed)).key, next.key);
+    await store.confirm(config, email, next.id, [601]);
+    await assert.rejects(store.reject(config, email, next.id), /POOL_UPLOAD_INTENT_STALE/);
+    assert.deepEqual((await store.prepare(config, payload, { lookupAccount: async id => ({ id }) })).existingIds, ["601"]);
+  });
   console.log(`POOL_UPLOAD_INTENTS_PASS ${passed}/${passed} durable pending retries; confirmed-ID checks; recreation generations; strict inputs; backend isolation; global queue; deletion cleanup; observed-listing confirmation`);
 } finally {
   const resolved = path.resolve(directory), temporaryRoot = path.resolve(os.tmpdir()) + path.sep;

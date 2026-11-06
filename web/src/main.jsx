@@ -2815,6 +2815,13 @@ function App() {
                 onChange={event => setSmsSettingsDraft(current => ({ ...current, autoAcquire: event.target.checked }))} />
               需要手机号时自动取号并接码
             </label>
+            <label className="settings-field">
+              <span>每次授权自动取号上限（含首次）</span>
+              <input type="number" min="1" max="10" step="1" value={smsSettingsDraft.maxAutoNumbers ?? 3}
+                disabled={smsSettingsSaving || !smsSettingsDraft.autoAcquire}
+                onChange={event => setSmsSettingsDraft(current => ({ ...current, maxAutoNumbers: event.target.value === "" ? "" : Number(event.target.value) }))} />
+              <small>手机号被风控或已被使用时自动换号；达到上限或平台取号失败时停止。</small>
+            </label>
             {smsSettingsError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{smsSettingsError}</div>}
             <div className="dialog-footer">
               <button type="button" className="cancel-button" onClick={() => setSmsSettingsOpen(false)} disabled={smsSettingsSaving}>取消</button>
@@ -6643,7 +6650,7 @@ function withSmsProviderDefaults(definitions, settings) {
   const selectedProviderId = definitions.some((provider) => provider.id === settings?.selectedProviderId)
     ? settings.selectedProviderId
     : definitions[0]?.id || settings?.selectedProviderId || "luban";
-  return { selectedProviderId, configs, autoAcquire: settings?.autoAcquire === true };
+  return { selectedProviderId, configs, autoAcquire: settings?.autoAcquire === true, maxAutoNumbers: settings?.maxAutoNumbers ?? 3 };
 }
 
 function resolveSmsProvider(definitions, settings) {

@@ -15,6 +15,7 @@ import { appendAccountLog, hydrateAccountLog, readAccountLog, recordCredentialHi
 import { normalizeSecurityState, mergeSecurityState, publicSecurityState } from "./account-security.mjs";
 import { PoolUploadLocks, uniquePoolUploadAccounts } from "./pool-upload-lock.mjs";
 import { PoolUploadIntents } from "./pool-upload-intents.mjs";
+import { poolCreateAccount, poolBatchResult } from "./pool-batch-result.mjs";
 import {
   listAccountSessions,
   revokeAccountSession,
@@ -2224,6 +2225,10 @@ async function handleChildClose(job, { code, signal, mode, runId }) {
     if (job.poolRefreshAction) job.poolRefreshReady = true;
     touch(job);
     await saveJobMetadata(job);
+    // A resumed phone checkpoint may never repeat password/MFA acceptance.
+    // Make the normal Web/security inspection due after every completed OAuth,
+    // not only after a monitor-initiated recovery (still obeys monitor opt-in).
+    await webSessionMonitor.repairFinished(job.email, { success: true, webOnly: true });
     await finishSub2ApiAutoRepairSuccess(job);
     if (job.poolRefreshAction) await synchronizePoolRefresh(job);
     await queueConfiguredTaskActions(job);
@@ -3156,6 +3161,20 @@ function consumeOutput(job, rawText) {
   appendAccountLog(job, text);
   const scan = `${job.parserTail}${text}`;
   job.parserTail = scan.slice(-2_000);
+  job.smsOutputOffset = (job.smsOutputOffset || 0) + text.length;
+  const smsScanBase = job.smsOutputOffset - scan.length;
+  const freshSmsFailure = (kind, match) => {
+    const position = smsScanBase + match.index;
+    const key = `${job.runId}:${kind}:${position}`;
+    if (job.smsSeenFailureEvents?.has(key)) return false;
+    if (job.smsFailureRunId !== job.runId) {
+      job.smsSeenFailureEvents = new Set(); job.smsFailureRunId = job.runId;
+    }
+    job.smsSeenFailureEvents ||= new Set();
+    job.smsSeenFailureEvents.add(key);
+    job.smsLastFailurePosition = position;
+    return true;
+  };
   if (scan.includes("[ok] Password accepted")) job.securityState = mergeSecurityState(job.securityState, { passwordEnabled: true });
   if (scan.includes("[ok] 2FA verification accepted")) job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true });
 
@@ -3315,7 +3334,10 @@ function consumeOutput(job, rawText) {
   if (phoneNumberPromptIndex > phoneOtpPromptIndex) {
     stopMailPolling(job);
     const automatic = smsProviderSettingsState.settings.autoAcquire === true;
-    setStage(job, "phone", automatic ? "Codex 需要手机号验证，正在通过接码平台自动取号" : "Codex 需要手机号验证，请输入手机号或使用接码平台取号");
+    setStage(job, "phone", job.phoneError
+      ? automatic && !job.smsAutoStopped ? "手机号被拒绝，正在按配置更换手机号" : "短信发送失败，请检查错误后更换手机号或手动重试"
+      : automatic ? "Codex 需要手机号验证，正在通过接码平台自动取号" : "Codex 需要手机号验证，请输入手机号或使用接码平台取号");
+    if (smsScanBase + phoneNumberPromptIndex > (job.smsLastFailurePosition ?? -1)) job.smsAutoRetryReady = true;
     maybeAcquireAutomaticSms(job);
   } else if (phoneOtpPromptIndex > phoneNumberPromptIndex) {
     if (job.smsStatus !== "error") job.phoneError = null;
@@ -3327,19 +3349,24 @@ function consumeOutput(job, rawText) {
     if (job.smsOrderId && job.smsNumber === job.currentPhone) void beginSmsPolling(job);
   }
 
-  const sendFailures = [...scan.matchAll(/\[warn\] Could not send SMS to (\+\d+):\s*([^\r\n]+)/g)];
-  if (sendFailures.length) {
+  const sendFailures = [...scan.matchAll(/\[warn\] Could not send SMS to (\+\d+):[^\S\r\n]*([^\r\n]+)\r?\n/g)];
+  if (sendFailures.length && freshSmsFailure("send", sendFailures.at(-1))) {
     const latest = sendFailures.at(-1);
+    job.smsAutoStopped = !shouldReplaceRejectedPhone(latest[2]);
+    job.smsAutoRetryReady = smsScanBase + phoneNumberPromptIndex > job.smsLastFailurePosition;
     job.currentPhone = latest[1];
     job.phoneError = friendlyPhoneError(latest[2]);
     if (job.smsOrderId && job.smsNumber === job.currentPhone) {
       releaseSmsNumber(job, "error", "该平台手机号无法接收验证码，请重新取号或手动输入其他手机号");
     }
-    setStage(job, "phone", `手机号 ${job.currentPhone} 无法接收验证码，请更换手机号`);
+    setStage(job, "phone", job.smsAutoStopped
+      ? "短信发送失败，自动换号已暂停，请检查错误后手动重试"
+      : `手机号 ${job.currentPhone} 被拒绝，正在按配置更换手机号`);
+    maybeAcquireAutomaticSms(job);
   }
 
-  const validationFailures = [...scan.matchAll(/\[warn\] Phone OTP validation failed:\s*([^\r\n]+)/g)];
-  if (validationFailures.length) {
+  const validationFailures = [...scan.matchAll(/\[warn\] Phone OTP validation failed:[^\S\r\n]*([^\r\n]+)\r?\n/g)];
+  if (validationFailures.length && freshSmsFailure("otp", validationFailures.at(-1))) {
     const validationMessage = validationFailures.at(-1)[1];
     job.phoneError = friendlyPhoneOtpError(validationMessage);
     stopSmsPolling(job);
@@ -3352,7 +3379,9 @@ function consumeOutput(job, rawText) {
       "phone_otp",
       job.currentPhone ? `请重新输入发送至 ${job.currentPhone} 的验证码` : "请重新输入手机验证码",
     );
-    if (shouldChangePhoneAfterOtpFailure(validationMessage)) {
+    if (shouldReplaceRejectedPhone(validationMessage)) {
+      job.smsAutoStopped = false;
+      job.smsAutoRetryReady = false;
       job.smsError = job.phoneError;
       appendJobLog(job, "[sms] 当前手机号已被服务端拒绝，停止提交旧验证码并自动返回换号步骤。\n");
       void submitJobInput(job, { action: "change_phone", value: "" }, {
@@ -3665,9 +3694,13 @@ function friendlyPhoneOtpError(message) {
   return "手机验证码不正确，请重新输入；也可以重新发送或更换手机号";
 }
 
-function shouldChangePhoneAfterOtpFailure(message) {
-  return /phone_recently_used|phone number was recently used|phone_number_in_use|phone number already in use|too many|rate.?limit|HTTP 429/i
-    .test(String(message || ""));
+function shouldReplaceRejectedPhone(message) {
+  const text = String(message || "");
+  // Upstream sometimes uses HTTP 429 for an explicitly number-scoped refusal.
+  if (/phone_recently_used|phone number was recently used|phone_number_in_use|phone number already in use/i.test(text)) return true;
+  // Account/session/global throttling is not repaired by buying another number.
+  if (/HTTP 429|rate.?limit|too many|account_(?:deactivated|suspended)|invalid_auth|session.*expired/i.test(text)) return false;
+  return /suspicious behavior from phone numbers|phone_recently_used|phone number was recently used|phone_number_in_use|phone number already in use|phone.*already.*used|phone.*unsupported|invalid phone|unsupported.*phone/i.test(text);
 }
 
 function acquireCustomSmsEntry(entries) {
@@ -3737,23 +3770,34 @@ function maybeAcquireAutomaticSms(job) {
   const attemptKey = `${job.lastOperationAt || job.createdAt}:${job.attempt}`;
   if (!state?.configured || !state.settings.autoAcquire || job.status !== "phone" || !job.child || !job.runId
     || shuttingDown || accountAutomationBlocked(job.email) || job.smsOrderId || job.smsStatus === "requesting"
-    || job.smsAutoAttemptKey === attemptKey) return;
-  // One paid acquisition per authorization attempt. Failed sends/no stock do
-  // not start an unbounded purchase loop; an operator may explicitly retry.
+    || job.smsReleasePending) return;
+  if (job.smsAutoAttemptKey !== attemptKey) {
+    job.smsAutoAttemptKey = attemptKey;
+    job.smsAutoNumberCount = 0; job.smsAutoStopped = false; job.smsAutoLimitLogged = false;
+  }
+  if (job.smsAutoStopped || job.smsAutoRetryReady === false) return;
+  const limit = state.settings.maxAutoNumbers;
+  if ((job.smsAutoNumberCount || 0) >= limit) {
+    job.prompt = `自动取号已达本次授权上限 ${limit} 次，请检查风控反馈后手动处理`;
+    if (!job.smsAutoLimitLogged) {
+      job.smsAutoLimitLogged = true;
+      appendJobLog(job, `[sms] 自动取号已达上限 ${limit} 次，停止购买新号码。\n`);
+      touch(job);
+    }
+    return;
+  }
   const runId = job.runId;
-  job.smsAutoAttemptKey = attemptKey;
+  job.smsAutoNumberCount = (job.smsAutoNumberCount || 0) + 1;
   const providerId = state.settings.selectedProviderId, config = structuredClone(state.settings.configs[providerId]);
-  // acquireSmsNumber synchronously claims smsStatus=requesting before its first
-  // network await. Do not hold the job lock across a slow paid supplier call:
-  // cancel/timeout must be able to invalidate the run and release a late order.
+  // Claim synchronously; cancel/timeout must not wait for a supplier request.
   void (async () => {
-    if (job.runId !== runId || job.status !== "phone" || !job.child || job.smsOrderId || job.smsStatus === "requesting"
-      || shuttingDown || accountAutomationBlocked(job.email) || !smsProviderSettingsState.settings.autoAcquire) return;
     try {
-      appendJobLog(job, "[sms] Codex 需要手机号验证，按已保存配置自动取号；本次授权最多自动取号一次。\n");
+      appendJobLog(job, `[sms] 自动取号 ${job.smsAutoNumberCount}/${limit}；仅对明确的号码拒绝自动换号。\n`);
       await acquireSmsNumber(job, providerId, config);
     } catch (error) {
       if (job.runId !== runId || job.status !== "phone") return;
+      // Includes ambiguous supplier timeouts: do not buy again blindly.
+      job.smsAutoStopped = true;
       job.prompt = "自动取号未完成，请检查接码反馈或手动重试";
       job.smsError = safeSmsProviderError(error, config?.apiKey);
       appendJobLog(job, `[sms] 自动取号停止：${job.smsError}\n`);
@@ -3862,9 +3906,16 @@ function releaseSmsNumber(job, nextStatus = "idle", errorMessage = null) {
     job.smsServiceLabel = null;
   }
   if (requestId && smsClient) {
-    void smsClient.release(requestId).catch(() => {
-      appendJobLog(job, `[sms] ${providerName} 号码释放请求失败，请在平台控制台检查订单。\n`);
+    const pending = smsClient.release(requestId).catch(() => {
+      job.smsAutoStopped = true;
+      appendJobLog(job, `[sms] ${providerName} 号码释放请求失败，已暂停自动换号，请在平台控制台检查订单。\n`);
+    }).finally(() => {
+      if (job.smsReleasePending === pending) {
+        job.smsReleasePending = null;
+        maybeAcquireAutomaticSms(job);
+      }
     });
+    job.smsReleasePending = pending;
   }
   if (job.outputPath) void saveJobMetadata(job).catch(() => {});
 }
@@ -4300,7 +4351,7 @@ async function performUploadJobsToSub2Api(selected, config, profileState, { reco
     }
     for (const account of accountsToCreate) {
       const email = sub2ApiAccountEmail(account);
-      const intent = await poolUploadIntents.prepare(accountConfig, JSON.parse(JSON.stringify(account)), { lookupAccount: id => lookup(id, email) });
+      const intent = await poolUploadIntents.prepare(accountConfig, poolCreateAccount(JSON.parse(JSON.stringify(account))), { lookupAccount: id => lookup(id, email) });
       if (intent.existingIds.length) {
         for (const id of intent.existingIds) await updateExisting(account, await lookup(id, email));
         continue;
@@ -4312,7 +4363,23 @@ async function performUploadJobsToSub2Api(selected, config, profileState, { reco
       });
       results.push(response);
       const data = response?.data || response;
+      const receipt = poolBatchResult(response, intent.account);
+      if (receipt.rejected) {
+        // A known account-insert FK failure permits a corrected generation.
+        // Other item failures can follow a committed insert (e.g. BindGroups):
+        // keep their original key until a later listing resolves the outcome.
+        if (receipt.noCommit) await poolUploadIntents.reject(accountConfig, email, intent.id);
+        throw new Error(`POOL_UPLOAD_REJECTED: ${sanitizeLog(receipt.error).slice(0, 500)}`);
+      }
       let confirmed = (Array.isArray(data?.accounts) ? data.accounts : []).filter(row => isOAuthPoolAccount(row) && sub2ApiAccountEmail(row) === email && normalizeSub2ApiAccountId(row.id));
+      if (!confirmed.length && receipt.ids.length) {
+        confirmed = (await Promise.all(receipt.ids.map(id => lookup(id, email)))).filter(Boolean);
+        // Keep a cached receipt's IDs even if its rows have since been deleted.
+        if (!confirmed.length) {
+          await poolUploadIntents.confirm(accountConfig, email, intent.id, receipt.ids);
+          throw new Error("POOL_UPLOAD_REMOTE_MISSING: 创建回执对应账号已不存在，等待确认新的创建代次");
+        }
+      }
       if (!confirmed.length) {
         const fresh = await listSub2ApiAccounts(accountConfig, { withMeta: true });
         if (fresh.complete) confirmed = fresh.accounts.filter(row => isOAuthPoolAccount(row) && sub2ApiAccountEmail(row) === email && normalizeSub2ApiAccountId(row.id));

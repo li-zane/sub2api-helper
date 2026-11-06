@@ -8,6 +8,10 @@ const dir = await fs.mkdtemp(path.join(os.tmpdir(), "helper-sms-settings-")), fi
 const settings = { selectedProviderId: "smsbower", autoAcquire: true, configs: { smsbower: { apiKey: "fixture-sms-key", service: "dr", country: "1001", maxPrice: "0.42" }, ignored: { password: "ignore" } } };
 try {
   assert.equal(emptySmsSettings().autoAcquire, false);
+  assert.equal(emptySmsSettings().maxAutoNumbers, 3);
+  assert.equal(normalizeSmsSettings(settings).maxAutoNumbers, 3);
+  for (const maxAutoNumbers of [0, 11, 1.5, "3", false]) assert.throws(() => normalizeSmsSettings({ ...settings, maxAutoNumbers }));
+  assert.equal(normalizeSmsSettings({ ...settings, maxAutoNumbers: 2 }).maxAutoNumbers, 2);
   assert.match(oauthErrorMessage("CODEX_AUTH_LOGIN_REQUIRED: web session is missing or expired"), /Codex 要求继续账号身份验证/);
   assert.equal(oauthErrorMessage(null), null);
   assert.equal(oauthErrorMessage("SESSION_TOKEN_EXPIRED: real Web failure"), "SESSION_TOKEN_EXPIRED: real Web failure");

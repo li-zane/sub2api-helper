@@ -100,14 +100,14 @@ async function readStore(file) {
   for (const [scope, entry] of Object.entries(store.entries)) {
     if (!/^[a-f0-9]{64}$/.test(scope) || !plain(entry) || !uuid(entry.id) ||
         typeof entry.key !== "string" || !/^helper-upload-v1-[a-f0-9]{40}$/.test(entry.key) ||
-        !["pending", "confirmed"].includes(entry.state) || !Array.isArray(entry.remoteIds) ||
+        !["pending", "confirmed", "rejected"].includes(entry.state) || !Array.isArray(entry.remoteIds) ||
         typeof entry.createdAt !== "string" || !Number.isFinite(Date.parse(entry.createdAt))) {
       throw failure("POOL_UPLOAD_INTENTS_INVALID", "上传意图记录结构错误");
     }
     if (emailValue(entry.email) !== entry.email || accountEmail(accountValue(entry.account)) !== entry.email) {
       throw failure("POOL_UPLOAD_INTENTS_INVALID", "上传意图邮箱不一致");
     }
-    if (entry.state === "pending" && entry.remoteIds.length) throw failure("POOL_UPLOAD_INTENTS_INVALID", "待确认意图含远端 ID");
+    if (entry.state !== "confirmed" && entry.remoteIds.length) throw failure("POOL_UPLOAD_INTENTS_INVALID", "未确认意图含远端 ID");
     if (entry.state === "confirmed") idsValue(entry.remoteIds);
   }
   return store;
@@ -183,6 +183,18 @@ export class PoolUploadIntents {
       entry.confirmedAt = new Date().toISOString();
       await writePrivateJsonAtomic(this.filePath, store);
       return result(entry, jsonValue(entry.account), entry.remoteIds);
+    });
+  }
+
+  async reject(config, email, intentId) {
+    const scope = scopeFor(backend(config), emailValue(email));
+    if (!uuid(intentId)) throw failure("POOL_UPLOAD_INTENT_INVALID", "上传意图标识格式错误");
+    return serialized(this.filePath, async () => {
+      const store = await readStore(this.filePath), entry = store.entries[scope];
+      if (!entry || entry.id !== intentId || entry.state !== "pending") throw failure("POOL_UPLOAD_INTENT_STALE", "上传意图已变化，保留现有记录");
+      entry.state = "rejected";
+      entry.rejectedAt = new Date().toISOString();
+      await writePrivateJsonAtomic(this.filePath, store);
     });
   }
 

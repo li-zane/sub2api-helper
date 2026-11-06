@@ -19,7 +19,7 @@ const calls = [], upstream = http.createServer(async (req, res) => {
   const json = (data, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
   if (u.pathname === "/sms") {
     assert.equal(u.searchParams.get("api_key"), "fixture-sms-key");
-    const a = u.searchParams.get("action"); if (a === "getNumber") { smsCount++; return res.end("ACCESS_NUMBER:real-fixture-order:12025550123"); }
+    const a = u.searchParams.get("action"); if (a === "getNumber") { smsCount++; return res.end(`ACCESS_NUMBER:real-fixture-order-${smsCount}:1202555${String(smsCount).padStart(4, "0")}`); }
     return res.end(a === "getStatus" ? "STATUS_OK:654321" : "ACCESS_READY");
   }
   if (u.pathname === "/api/auth/session") return json({ user: { email }, accessToken, expires: "2030-01-01T00:00:00Z" });
@@ -39,7 +39,9 @@ const calls = [], upstream = http.createServer(async (req, res) => {
   }
   if (u.pathname === "/api/accounts/mfa/issue_challenge") return json({ success: true });
   if (u.pathname === "/api/accounts/mfa/verify") { assert.match(body.code, /^\d{6}$/); return json({ page: { type: "add_phone" }, continue_url: upstreamBase + "/add-phone" }); }
-  if (u.pathname === "/api/accounts/add-phone/send") { assert.equal(body.phone_number, "+12025550123"); return json({ continue_url: upstreamBase + "/phone-verification" }); }
+  if (u.pathname === "/api/accounts/add-phone/send") { assert.match(body.phone_number, /^\+1202555000[12]$/);
+    if (body.phone_number.endsWith("1")) return json({ error: { message: "We've detected suspicious behavior from phone numbers similar to yours." } }, 400);
+    return json({ continue_url: upstreamBase + "/phone-verification" }); }
   if (u.pathname === "/api/accounts/phone-otp/validate") { assert.equal(body.code, "654321"); return json({ continue_url: callback }); }
   if (u.pathname === "/oauth/token") return json({ access_token: accessToken, refresh_token: "fixture-refresh", id_token: jwt({ email, sub: "user", sid: "personal", "https://api.openai.com/auth": { chatgpt_plan_type: "free" } }) });
   json({ error: "unexpected route" }, 404);
@@ -63,14 +65,18 @@ try {
   await post("/api/sms-provider-settings", { settings: { selectedProviderId: "smsbower", autoAcquire: true, configs: { smsbower: { apiKey: "fixture-sms-key", service: "dr", country: "1001", maxPrice: "0.42" } } } });
   await post(`/api/jobs/${id}/retry`, {});
   const completed = await wait(async () => { const d = await fetch(base + "/api/jobs", { headers }).then(r => r.json()); const j = d.jobs.find(j => j.id === id); if (j.status === "failed") throw Error(j.lastError); return j.status === "completed" && j; });
-  assert.equal(completed.smsStatus, "completed"); assert.equal(smsCount, 1);
+  assert.equal(completed.smsStatus, "completed"); assert.equal(smsCount, 2);
+  assert.equal(completed.securityState.passwordEnabled, true, "successful password login evidence was not recorded");
+  assert.equal(completed.securityState.totpEnabled, true, "successful MFA evidence was not recorded");
+  const monitor = JSON.parse(await fs.readFile(path.join(root, "web-session-monitor.json"), "utf8"));
+  assert.equal(monitor.accounts[email].status, "pending_check", "post-OAuth inspection was not made due");
   assert.equal(calls.filter(p => p === "/oauth/authorize").length, 1); assert(!calls.includes("/api/auth/signin/openai"));
   for (const route of ["/api/accounts/authorize/continue", "/api/accounts/password/verify", "/api/accounts/mfa/verify", "/api/accounts/add-phone/send", "/api/accounts/phone-otp/validate", "/oauth/token"]) assert(calls.includes(route), route);
   const exportData = JSON.parse(await fs.readFile(path.join(dir, "sub2api-import-oauth.json"), "utf8")); assert.equal(exportData.accounts[0].credentials.email, email);
   const protocolLog = (await fetch(base + `/api/jobs/${id}/logs`, { headers }).then(r => r.json())).logs;
   assert(protocolLog.includes("[codex-auth-login]") && protocolLog.includes("自动取号"));
   for (const secret of ["Fixture-Password-123!", "JBSWY3DPEHPK3PXP", "fixture-sms-key"]) assert(!protocolLog.includes(secret) && !logs.includes(secret));
-  console.log("REAL_OAUTH_SMS_HTTP_PASS verified saved Web -> same OAuth state -> password+TOTP -> add_phone -> automatic SMSBower purchase/poll/submit -> validated callback/token export; one purchase; no Web relogin or credential logs");
+  console.log("REAL_OAUTH_SMS_HTTP_PASS verified saved Web -> same OAuth state -> password+TOTP -> add_phone -> automatic SMSBower purchase/poll/submit -> validated callback/token export; first phone HTTP400 risk rejection -> release and automatic second purchase; password/MFA confirmed; post-OAuth inspection due; no Web relogin or credential logs");
 } catch (error) {
   if (headers) {
     const data = await fetch(base + "/api/jobs", { headers }).then(r => r.json()).catch(() => null);
