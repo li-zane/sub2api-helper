@@ -10,13 +10,18 @@ import { fileURLToPath } from "node:url";
 import { createDirectPublicIpReader } from "./direct-public-ip.mjs";
 import { createStaticFrontend } from "./static-frontend.mjs";
 import { createCredentialStore } from "./credential-store.mjs";
-import { readAccountWebSession, webSessionPathForJob, inspectAccountWebSession, publicWebCredentialSync } from "./account-web-session.mjs";
+import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, inspectAccountWebSession, publicWebCredentialSync } from "./account-web-session.mjs";
+import { appendAccountLog, hydrateAccountLog, readAccountLog, recordCredentialHistory } from "./account-history.mjs";
+import { normalizeSecurityState, mergeSecurityState, publicSecurityState } from "./account-security.mjs";
+import { PoolUploadLocks, uniquePoolUploadAccounts } from "./pool-upload-lock.mjs";
+import { PoolUploadIntents } from "./pool-upload-intents.mjs";
 import {
   listAccountSessions,
   revokeAccountSession,
   revokeAllAccountSessions,
   listAccountWorkspaces,
   probeAccountWebSession,
+  readAccountSecurityState,
   switchAccountWorkspace,
   accountWorkspaceAvailabilityLabel,
   isAccountWorkspaceAvailable,
@@ -27,6 +32,8 @@ import {
   validateMailApiUrl,
 } from "./mail-otp.mjs";
 import { createSmsProvider, publicSmsProviderDefinitions } from "./sms-providers.mjs";
+import { loadSmsSettings, saveSmsSettings } from "./sms-settings.mjs";
+import { oauthErrorMessage } from "./oauth-errors.mjs";
 import { hasJobTotpKey, isReauthorizationComplete, isTotpRotationComplete } from "./task-auto-state.mjs";
 import { normalizeCodexAuthMode } from "./sub2api-oauth.mjs";
 import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-transport.mjs";
@@ -35,6 +42,8 @@ import { ProxyQualityService } from "./proxy-quality.mjs";
 import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
 import { DEFAULT_MONITORING, normalizeMonitoring } from "../web/src/monitor-settings.mjs";
 import { normalizeTaskUploadActions, isRedundantTaskUpload } from "../web/src/task-auto-actions.mjs";
+import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes } from "../web/src/login-settings.mjs";
+import { LoginTimeouts } from "./login-timeout.mjs";
 import { limitPoolRequests } from "./pool-network.mjs";
 import { createUsageTotalsReader, combineUsageTotals } from "./sub2api-usage-totals.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
@@ -63,7 +72,6 @@ const MAX_PROXY_CONNECTION_FAILURES = 20;
 const PROXY_CONNECTION_RETRY_BASE_MS = Math.max(1, Number(process.env.PROXY_CONNECTION_RETRY_BASE_MS || 1_000));
 const PROXY_CONNECTION_RETRY_MAX_MS = 15_000;
 const PAGE_SIZE = 20;
-const MAX_LOG_CHARS = 80_000;
 const JOB_STATUS_FILTER_VALUES = [
   "queued",
   "starting",
@@ -134,7 +142,18 @@ const monitoringDefaults = {
   poolRepairRetrySeconds: SUB2API_AUTO_REPAIR_COOLDOWN_MS / 1000,
 };
 let monitoringSettings = { ...monitoringDefaults };
+let loginTimeoutMinutes = DEFAULT_LOGIN_TIMEOUT_MINUTES;
+const loginTimeouts = new LoginTimeouts({
+  getMinutes: () => loginTimeoutMinutes,
+  minuteMs: process.env.NODE_ENV === "test" && Number(process.env.TOSUB2_LOGIN_TIMEOUT_MINUTE_MS) > 0
+    ? Number(process.env.TOSUB2_LOGIN_TIMEOUT_MINUTE_MS) : 60_000,
+  onTimeout: (job, entry) => { void expireLogin(job, entry).catch(error => {
+    appendJobLog(job, `[login-timeout] 超时收尾失败：${error.message}\n`);
+    scheduleQueuedJobs();
+  }); },
+});
 const requestProfileSync = limitPoolRequests(requestSub2Api, () => monitoringSettings.profileSyncConcurrency);
+const poolUploadLocks = new PoolUploadLocks();
 let accountDataSyncTimers = [], accountDataSyncGeneration = 0;
 const accountDataSyncOperations = new Set();
 const MAIL_POLL_INTERVAL_MS = 2_500;
@@ -167,6 +186,9 @@ const SUB2API_MONITOR_PATH = path.join(OUTPUT_ROOT, SUB2API_MONITOR_FILENAME);
 const SUB2API_SETTINGS_PATH = path.join(OUTPUT_ROOT, SUB2API_SETTINGS_FILENAME);
 const PLAN_TYPE_MAPPING_PATH = path.join(OUTPUT_ROOT, PLAN_TYPE_MAPPING_FILENAME);
 const TASK_SETTINGS_PATH = path.join(OUTPUT_ROOT, TASK_SETTINGS_FILENAME);
+const SMS_SETTINGS_PATH = path.join(OUTPUT_ROOT, "sms-provider-settings.json");
+let smsProviderSettingsState;
+const poolUploadIntents = new PoolUploadIntents({ filePath: path.join(OUTPUT_ROOT, "pool-upload-intents.json") });
 const credentialStore = createCredentialStore();
 const proxyQualityService = new ProxyQualityService({
   exitUrl: process.env.TOSUB2_PROXY_EXIT_CHECK_URL,
@@ -274,6 +296,8 @@ const webSessionMonitor = new WebSessionMonitor({
       throw error;
     }
     await reconcilePlanAutomations(job, snapshot.planType);
+    if (snapshot.securityState) job.securityState = mergeSecurityState(job.securityState, snapshot.securityState);
+    await saveJobMetadata(job);
     if (!job.resultSaved && snapshot.planType) {
       job.workspacePlanType = snapshot.planType;
       if (snapshot.repairReason === "plan_changed") snapshot.repairReason = null;
@@ -429,6 +453,7 @@ if (!Number.isInteger(requestedPort) || requestedPort < 1 || requestedPort > 655
 }
 
 await fs.mkdir(OUTPUT_ROOT, { recursive: true });
+smsProviderSettingsState = await loadSmsSettings(SMS_SETTINGS_PATH);
 await loadTaskSettings();
 await loadPlanTypeLabelMapping();
 await loadSub2ApiSettingsConfiguration();
@@ -1325,6 +1350,20 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
+  if (requestUrl.pathname === "/api/sms-provider-settings" && req.method === "GET") {
+    sendJson(res, 200, smsProviderSettingsState);
+    return;
+  }
+  if (requestUrl.pathname === "/api/sms-provider-settings" && req.method === "POST") {
+    const body = await readJson(req);
+    try {
+      const settings = await saveSmsSettings(SMS_SETTINGS_PATH, body.settings);
+      smsProviderSettingsState = { configured: true, settings };
+    } catch (error) { throw httpError(400, safeSmsProviderError(error, body.settings?.configs?.[body.settings?.selectedProviderId]?.apiKey)); }
+    sendJson(res, 200, smsProviderSettingsState);
+    for (const job of jobs.values()) maybeAcquireAutomaticSms(job);
+    return;
+  }
   const providerOptionsMatch = /^\/api\/sms-providers\/([a-z0-9_-]+)\/options$/.exec(requestUrl.pathname);
   if (req.method === "POST" && providerOptionsMatch) {
     const body = await readJson(req);
@@ -1344,7 +1383,7 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
-  const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|retry|regenerate|relogin|web-login|web-session-check|setup-2fa|replace-2fa|add-password|credentials|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
+  const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|retry|regenerate|relogin|web-login|web-session-check|setup-2fa|replace-2fa|add-password|replace-password|security-state|credentials|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
   if (!match) {
     sendJson(res, 404, { error: "Not found" });
     return;
@@ -1359,12 +1398,24 @@ async function handleApi(req, res, requestUrl) {
   const action = match[2];
   if (/^(?:sessions|workspaces)(?:\/|$)/.test(action || "")) assertAccountWebActionsAllowed(job);
   if (req.method === "GET" && action === "logs") {
-    sendJson(res, 200, { id: job.id, logs: job.logs });
+    sendJson(res, 200, { id: job.id, ...await readAccountLog(job, {
+      full: requestUrl.searchParams.get("full") === "1", credentials: requestUrl.searchParams.get("credentials") === "1",
+    }) });
     return;
   }
   if (req.method === "GET" && action === "credentials") {
     await reloadMissingJobCredentials(job);
     sendJson(res, 200, { credentials: await publicCredentialDetails(job) });
+    return;
+  }
+  if (req.method === "GET" && action === "security-state") {
+    assertAccountWebActionsAllowed(job);
+    try {
+      await refreshJobProxyBinding(job);
+      job.securityState = mergeSecurityState(job.securityState, await readAccountSecurityState(job));
+      await saveJobMetadata(job);
+      sendJson(res, 200, { securityState: publicSecurityState(job), job: publicJob(job) });
+    } catch (error) { throw sessionApiError(error, job); }
     return;
   }
   if (req.method === "GET" && action === "sessions") {
@@ -1558,6 +1609,12 @@ async function handleApi(req, res, requestUrl) {
   if (req.method === "POST" && action === "add-password") {
     const body = await readJson(req);
     await withEmailJobLock(job.email, () => startPasswordAdd(job, body));
+    sendJson(res, 200, { job: publicJob(job) });
+    return;
+  }
+  if (req.method === "POST" && action === "replace-password") {
+    await readJson(req);
+    await withEmailJobLock(job.email, () => startPasswordAdd(job, { replaceExisting: true }));
     sendJson(res, 200, { job: publicJob(job) });
     return;
   }
@@ -1821,6 +1878,8 @@ async function startJob(email, credentials = {}, proxyUrl = null) {
   };
   beginAuthorizationAutomationAttempt(job, "initial");
   jobs.set(id, job);
+  if (totpSecret) await recordCredentialHistory(outputDir, { type: "2fa", stage: "imported", email,
+    before: null, after: { totpSecret } });
   await saveJobMetadata(job);
   scheduleQueuedJobs();
   return job;
@@ -1853,6 +1912,7 @@ function scheduleQueuedJobs() {
           : "正在建立登录会话");
     job.queuedAt = null;
     job.startedAt = new Date().toISOString();
+    loginTimeouts.resume(job, mode);
     touch(job);
     void saveJobMetadata(job).catch(() => {});
     void prepareAndLaunchJob(job, mode, queueRunId);
@@ -1873,6 +1933,7 @@ async function withWebSessionCheckSlot(_job, operation) {
 }
 
 async function prepareAndLaunchJob(job, mode, queueRunId) {
+  const current = () => !shuttingDown && isActive(job.status) && job.status !== "queued" && job.queueRunId === queueRunId;
   try {
     let hasBinding = accountProxyMode === "plan" && hasPlanProxyBinding(job);
     if (accountProxyMode === "plan") {
@@ -1888,14 +1949,17 @@ async function prepareAndLaunchJob(job, mode, queueRunId) {
       job.runProxyFixed = hasBinding;
     } else await refreshJobProxyBinding(job);
     if (!job.proxyFallbackActive && accountProxyMode !== "plan") job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
+    if (!current()) return;
     const oauthSettings = accountProxyMode === "plan" && ["full", "web_login"].includes(mode)
       ? { codexAuthMode, phasedProxy: true, loginProxyFixed: hasBinding, loginProxyUrl: hasBinding ? job.proxyUrl : globalProxyUrl }
       : ["full", "refresh"].includes(mode) ? await codexOAuthSettingsForJob(job)
         : { codexAuthMode: "local", ...(accountProxyMode === "plan" && !hasBinding ? { phasedProxy: true, loginProxyUrl: globalProxyUrl } : {}) };
+    if (!current()) return;
     if (["full", "web_login", "totp_setup", "password_add"].includes(mode) && job.mailApiUrl) await loadMailboxBaseline(job);
-    if (!isActive(job.status) || job.status === "queued" || job.queueRunId !== queueRunId) return;
+    if (!current()) return;
     launchJob(job, { mode, ...oauthSettings });
   } catch (error) {
+    if (!current()) return;
     if (mode === "web_login") {
       await finishWebLogin(job, 1, null, `准备 Web 登录失败：${error.message}`);
     } else if (mode === "totp_setup") {
@@ -1915,7 +1979,41 @@ async function prepareAndLaunchJob(job, mode, queueRunId) {
   }
 }
 
-function enqueueJob(job, mode, startPrompt) {
+async function expireLogin(job, entry) {
+  if (shuttingDown || job.deleted || !occupiesActiveSlot(job)) return;
+  const message = `LOGIN_TIMEOUT: 登录超时（${entry.minutes} 分钟），已停止本次尝试，可手动重试`;
+  const mode = job.runMode || entry.mode;
+  const child = job.child;
+  // Invalidate first: a late child event or preparation result cannot revive
+  // this attempt. Kill outside the email lock even if an upstream call holds it.
+  job.queueRunId = null;
+  job.runId = crypto.randomUUID();
+  const runId = job.runId;
+  job.child = null;
+  const reaped = waitForChildExit(child, 1_000);
+  child?.kill("SIGTERM");
+  stopMailPolling(job);
+  stopSmsPolling(job);
+  releaseSmsNumber(job, "idle");
+  const mfaPending = job.status === "mfa_otp";
+  job.status = mfaPending ? "mfa_failed" : "failed";
+  job.prompt = "登录超时，本次尝试已停止";
+  job.lastError = message;
+  if (mode === "web_login") job.webLoginError = message;
+  if (mode === "totp_setup") job.totpSetupError = message;
+  if (mode === "password_add") job.passwordAddError = message;
+  appendJobLog(job, `[login-timeout] ${message}\n`);
+  touch(job);
+  // Queue cleanup before admitting same-account retries. Other accounts can
+  // immediately use the released slot, without waiting on a stalled lock.
+  const finishing = withEmailJobLock(job.email, () => handleChildClose(job, { code: 1, signal: "SIGTERM", mode, runId }));
+  scheduleQueuedJobs();
+  try { await finishing; }
+  finally { await reaped; scheduleQueuedJobs(); }
+}
+
+function enqueueJob(job, mode, startPrompt, { preserveLoginTimeout = false } = {}) {
+  if (!preserveLoginTimeout) loginTimeouts.stop(job);
   job.queueRunId = null;
   job.status = "queued";
   job.prompt = "已加入任务队列";
@@ -1976,7 +2074,7 @@ function launchJob(job, options = {}) {
           PROTOCOL_SCRIPT,
           "--email",
           job.email,
-          "--add-password",
+          job.passwordReplaceExisting ? "--replace-password" : "--add-password",
           "--password-add-result",
           job.passwordAddResultPath,
           ...(job.passwordAddResumesAuthorization ? ["--resume-checkpoint", job.checkpointPath] : []),
@@ -2002,7 +2100,7 @@ function launchJob(job, options = {}) {
       ...process.env,
       CHATGPT_LOGIN_PASSWORD: job.password || "",
       TOSUB2_BROWSER_IDENTITY_ROOT: path.join(OUTPUT_ROOT, "browser-identities"),
-      TOSUB2_WEB_SESSION_PATH: path.join(path.dirname(job.outputPath), "web-session.json"),
+      TOSUB2_WEB_SESSION_PATH: mode === "web_login" ? webLoginCandidatePath(job) : webSessionPathForJob(job),
       CHATGPT_TOTP_SECRET: job.totpSecret || "",
       CHATGPT_NEW_PASSWORD: mode === "password_add" ? job.pendingNewPassword || "" : "",
       CHATGPT_PROXY_URL: job.proxyFallbackActive ? "" : ((options.phasedProxy ? options.loginProxyUrl : job.proxyUrl) || ""),
@@ -2035,6 +2133,7 @@ function launchJob(job, options = {}) {
         job.proxyPhaseSelecting = true;
         job.planAutomationPlanType ||= getJobPlanType(job);
         const route = await preparePlanCodexProxy(job, message.planType, message.workspaceId, { reapply: true });
+        if (job.runId !== runId || job.child !== child || !isActive(job.status)) return;
         await reconcilePlanAutomations(job, message.planType);
         if (mode === "web_login") job.webLoginPlanType = message.planType;
         if (job.runId !== runId || job.child !== child || !isActive(job.status)) return;
@@ -2057,6 +2156,7 @@ function launchJob(job, options = {}) {
     if (job.runId === runId) consumeOutput(job, chunk.toString("utf8"));
   });
   child.on("error", (error) => {
+    if (job.runId === runId) loginTimeouts.stop(job);
     void withEmailJobLock(job.email, async () => {
       if (job.runId !== runId) return;
       if (mode === "web_login") await finishWebLogin(job, 1, null, `无法启动 Web 登录进程：${error.message}`);
@@ -2071,6 +2171,7 @@ function launchJob(job, options = {}) {
     });
   });
   child.on("close", (code, signal) => {
+    if (job.runId === runId) loginTimeouts.pause(job);
     void withEmailJobLock(job.email, () => handleChildClose(job, { code, signal, mode, runId }))
       .catch((error) => {
         void handleChildCloseFailure(job, mode, runId, error);
@@ -2080,6 +2181,7 @@ function launchJob(job, options = {}) {
 
 async function handleChildClose(job, { code, signal, mode, runId }) {
   if (job.runId !== runId) return;
+  loginTimeouts.pause(job);
   stopMailPolling(job);
   job.child = null;
   if (mode === "web_login") {
@@ -2280,6 +2382,33 @@ function webLoginCheckpointPath(job) {
   return path.join(path.dirname(job.outputPath), "web-login-checkpoint.json");
 }
 
+function webLoginCandidatePath(job) {
+  return path.join(path.dirname(job.outputPath), `web-login-${job.webLoginAttemptId}.json`);
+}
+
+async function privateJsonIfPresent(file) {
+  try { return JSON.parse(await fs.readFile(file, "utf8")); }
+  catch (error) {
+    if (error.code === "ENOENT") return null;
+    if (error instanceof SyntaxError) return { invalidJson: await fs.readFile(file, "utf8") };
+    throw error;
+  }
+}
+
+async function archiveTotpResult(job, stage) {
+  const result = await privateJsonIfPresent(job.totpResultPath);
+  if (result) await recordCredentialHistory(path.dirname(job.outputPath), {
+    type: "2fa", stage, email: job.email, before: { totpSecret: job.totpSecret || "" }, after: result,
+  });
+}
+
+async function archivePasswordResult(job, stage) {
+  const result = await privateJsonIfPresent(job.passwordAddResultPath);
+  if (result) await recordCredentialHistory(path.dirname(job.outputPath), {
+    type: "password", stage, email: job.email, before: { password: job.password || "" }, after: result,
+  });
+}
+
 function webSessionCheckPending(job) {
   return ["queued", "checking", "relogin"].includes(manualWebSessionChecks.get(job.id)?.phase);
 }
@@ -2316,12 +2445,11 @@ function drainWebSessionChecks() {
           } catch (error) {
             const invalid = /^SESSION_(?:TOKEN_EXPIRED|CREDENTIALS_UNAVAILABLE|WORKSPACE_UNAVAILABLE):/.test(error.message || "");
             if (!invalid || task.renewed || accountAutomationBlocked(job.email)) throw error;
-            // Clear pending admission while starting exactly one Web-only renewal.
-            task.phase = "success";
-            await startWebLogin(job);
+            // Never expose a temporary "success" while preparing the renewal.
+            // Durable history writes make that transition observable to polls.
             task.renewed = true;
-            task.loginAttemptId = job.webLoginAttemptId;
             task.phase = "relogin";
+            await startWebLogin(job, { checkTask: task });
           }
         });
       }).catch(error => { task.phase = "failed"; task.error = sessionApiError(error, job).message; touch(job); });
@@ -2353,18 +2481,31 @@ async function reconcilePlanAutomations(job, planType) {
   await saveJobMetadata(job);
 }
 
-async function startWebLogin(job, { maintenance = false } = {}) {
+async function startWebLogin(job, { maintenance = false, checkTask = null } = {}) {
+  const checking = Boolean(checkTask && manualWebSessionChecks.get(job.id) === checkTask);
   if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，已停止 Web 重登；如需确认解封，请使用重新开始授权");
-  if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
+  if (!canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
   await reloadMissingJobCredentials(job);
-  if (!canLoginWeb(job, { maintenance })) throw httpError(409, "账号当前不能登录 Web");
+  if (!canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号当前不能登录 Web");
   if (!maintenance) job.webSessionMaintenancePause = null;
   const preserved = ["status", "prompt", "lastError", "completedAt", "startedAt", "attempt", "loginCheckpointAvailable",
-    "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount"];
-  job.webLoginPreviousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
+    "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount",
+    "webSessionAvailable", "webSessionStatus", "webSessionVerifiedAt", "webSessionReadError", "webSessionContext"];
+  const previousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
   job.webLoginError = null;
   job.webLoginPlanType = null;
   job.webLoginAttemptId = crypto.randomUUID();
+  if (checking) checkTask.loginAttemptId = job.webLoginAttemptId;
+  let oldBytes = null;
+  try { oldBytes = await fs.readFile(webSessionPathForJob(job)); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  let oldSession = null;
+  if (oldBytes) { try { oldSession = JSON.parse(oldBytes.toString("utf8")); } catch { oldSession = { invalidJson: oldBytes.toString("utf8") }; } }
+  job.webLoginOriginalHash = oldBytes ? crypto.createHash("sha256").update(oldBytes).digest("hex") : null;
+  await recordCredentialHistory(path.dirname(job.outputPath), { type: "web_login", stage: "started", email: job.email,
+    attemptId: job.webLoginAttemptId, before: oldSession, after: null });
+  if (oldBytes) await fs.writeFile(webLoginCandidatePath(job), oldBytes, { mode: 0o600 });
+  job.webLoginPreviousState = previousState;
   job.webLoginResultSaved = false;
   job.lastError = null;
   job.parserTail = "";
@@ -2405,12 +2546,19 @@ async function finishWebLogin(job, code, signal, message = null) {
   let success = code === 0 && job.webLoginResultSaved;
   let webSession;
   if (success) {
-    try { webSession = await readAccountWebSession(job); }
+    try {
+      webSession = await readAccountWebSession({ ...job, webSessionPath: webLoginCandidatePath(job) });
+      if (!webSession.accessToken) throw new Error("WEB_LOGIN_SESSION_MISSING: 新 Web 会话缺少已验证的访问令牌");
+      await writeAccountWebSession(webSessionPathForJob(job), webSession, { expectedHash: job.webLoginOriginalHash });
+    }
     catch (error) { success = false; message = error.message; }
   }
   const failure = message || job.lastError || (signal ? `Web 登录被 ${signal} 中断` : `Web 登录未完成，退出代码 ${code ?? "未知"}`);
   const previous = job.webLoginPreviousState;
   if (previous) Object.assign(job, previous);
+  await recordCredentialHistory(path.dirname(job.outputPath), { type: "web_login", stage: success ? "committed" : "failed_preserved",
+    email: job.email, attemptId: job.webLoginAttemptId, after: await privateJsonIfPresent(webLoginCandidatePath(job)) });
+  await inspectAccountWebSession(job);
   job.webLoginError = success ? null : failure;
   if (!success && isPermanentAccountFailure(failure)) {
     markAutoRepairBlocked(job, failure);
@@ -2444,6 +2592,7 @@ async function finishWebLogin(job, code, signal, message = null) {
   job.queuedAt = null;
   job.child = null;
   await removePrivateFile(webLoginCheckpointPath(job));
+  await removePrivateFile(webLoginCandidatePath(job));
   appendJobLog(job, success ? "[web-login] Web 登录态已保存，已核对套餐、IP 绑定及自动开关；未重签 Codex 凭据。\n" : `[web-login] ${failure}\n`);
   const check = manualWebSessionChecks.get(job.id);
   if (check?.phase === "relogin" && check.loginAttemptId === job.webLoginAttemptId) {
@@ -2458,6 +2607,7 @@ async function finishWebLogin(job, code, signal, message = null) {
 function restoreWebLoginState(job, metadata) {
   job.webSessionMonitorRepair = metadata.web_session_monitor_repair === true;
   job.webLoginAttemptId = metadata.web_login_attempt_id || null;
+  job.webLoginOriginalHash = metadata.web_login_original_hash;
   job.webLoginCompletedAt = metadata.web_login_completed_at || null;
   job.webLoginError = metadata.web_login_error || null;
   const previous = metadata.web_login_previous_state;
@@ -2502,6 +2652,7 @@ async function forceReloginJob(job, options = {}, context = {}) {
   job.runId = crypto.randomUUID();
   job.child?.kill("SIGTERM");
   job.child = null;
+  await archiveTotpResult(job, "before_reauthorize");
   await Promise.all([
     removePrivateFile(job.checkpointPath),
     removePrivateFile(job.totpResultPath),
@@ -2608,6 +2759,9 @@ async function startTotpSetup(job, options = {}) {
   job.phoneError = null;
   const resumeDisabledRotation = replaceExisting
     && await hasIncompleteRemoteTotpRotation(job.totpResultPath, job.totpRotationRemoteDisabled);
+  await archiveTotpResult(job, "before_retry");
+  await recordCredentialHistory(path.dirname(job.outputPath), { type: "2fa", stage: "started", email: job.email,
+    before: { totpSecret: job.totpSecret || "" }, after: null });
   if (!resumeDisabledRotation) await removePrivateFile(job.totpResultPath);
   job.totpSetupSecret = null;
   job.totpSetupUri = null;
@@ -2617,6 +2771,7 @@ async function startTotpSetup(job, options = {}) {
   job.totpRotationStage = resumeDisabledRotation ? "disabled" : (replaceExisting ? "starting" : null);
   job.totpRotationIncomplete = replaceExisting;
   job.totpSetupAttempt = (job.totpSetupAttempt || 0) + 1;
+  job.totpManualOverride = false;
   job.totpSetupResumesAuthorization = resumeAuthorization;
   job.proxyRiskRetryCount = 0;
   job.proxyConnectionFailureCount = 0;
@@ -2650,13 +2805,18 @@ async function hasIncompleteRemoteTotpRotation(resultPath, metadataFlag = false)
 }
 
 async function startPasswordAdd(job, options = {}) {
+  const replacing = options.replaceExisting === true;
   job.proxyFallbackAttempted = false;
   job.proxyFallbackActive = false;
   job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
-  if (!canAddPassword(job)) {
+  if (replacing ? !canReplacePassword(job) : !canAddPassword(job)) {
     throw httpError(409, "只能为已完成授权，或已保存邮箱登录检查点且尚未保存密码的账号添加密码");
   }
+  await reloadMissingJobCredentials(job);
   const resumeAuthorization = !job.resultSaved;
+  if (job.hasTotpCredential && !job.totpSecret || job.hasPasswordCredential && !job.password) {
+    throw httpError(409, "现有登录凭据尚未读取完整，请重新读取凭据，或明确清空本地记录后再轮换密码");
+  }
   if (resumeAuthorization && !(await fileExists(job.checkpointPath))) {
     job.loginCheckpointAvailable = false;
     throw httpError(409, "邮箱登录检查点已丢失，请先重新登录");
@@ -2673,8 +2833,13 @@ async function startPasswordAdd(job, options = {}) {
   job.child = null;
   job.currentPhone = null;
   job.phoneError = null;
+  await archivePasswordResult(job, "before_retry");
   await removePrivateFile(job.passwordAddResultPath);
   job.pendingNewPassword = generateStrongPassword();
+  await recordCredentialHistory(path.dirname(job.outputPath), { type: "password", stage: "started", email: job.email,
+    before: { password: job.password || "" }, after: { password: job.pendingNewPassword }, operation: replacing ? "replace_password" : "add_password" });
+  job.passwordReplaceExisting = replacing;
+  job.passwordManualOverride = false;
   job.passwordAddResumesAuthorization = resumeAuthorization;
   job.passwordAddError = null;
   job.proxyRiskRetryCount = 0;
@@ -2685,9 +2850,10 @@ async function startPasswordAdd(job, options = {}) {
   job.proxyAttemptParserTail = "";
   job.lastError = null;
   job.parserTail = "";
-  recordJobOperation(job, "add_password");
-  appendJobLog(job, "\n[password-add] 开始为无密码账号添加密码，新密码不会写入协议日志。\n");
-  enqueueJob(job, "password_add", "正在重新验证账号并准备添加密码");
+  recordJobOperation(job, replacing ? "replace_password" : "add_password");
+  appendJobLog(job, replacing ? "\n[password-replace] 开始轮换密码，原值和候选新值已保存到私有凭据历史。\n"
+    : "\n[password-add] 开始为无密码账号添加密码，候选值已保存到私有凭据历史。\n");
+  enqueueJob(job, "password_add", replacing ? "正在验证身份并轮换密码" : "正在重新验证账号并准备添加密码");
 }
 
 function generateStrongPassword() {
@@ -2711,6 +2877,8 @@ function generateStrongPassword() {
 }
 
 async function finishPasswordAdd(job, code, signal) {
+  const replacing = job.passwordReplaceExisting === true;
+  const followUpFailure = code !== 0 ? (job.passwordAddError || job.lastError || "密码已变更，但后续会话验证未完成") : null;
   let result = null;
   try {
     result = JSON.parse(await fs.readFile(job.passwordAddResultPath, "utf8"));
@@ -2723,19 +2891,24 @@ async function finishPasswordAdd(job, code, signal) {
     && String(result.email || "").toLowerCase() === job.email.toLowerCase()
     && typeof result.password === "string"
     && result.password === job.pendingNewPassword
+    && result.activation_succeeded !== false
+    && (!(replacing || result.operation) || result.activation_succeeded === true)
   ) {
+    await recordCredentialHistory(path.dirname(job.outputPath), { type: "password", stage: "confirmed_before_save", email: job.email,
+      before: { password: job.password || "" }, after: result });
     job.password = result.password;
     job.hasPasswordCredential = true;
     job.loginMode = "password";
     job.passwordAddedAt = result.added_at || new Date().toISOString();
+    job.securityState = mergeSecurityState(job.securityState, { passwordEnabled: true });
     const persisted = await saveStoredLoginCredentials(job.email, job);
     job.passwordAddError = persisted
-      ? null
+      ? followUpFailure
       : "当前系统不支持持久凭据存储，新密码仅在本次服务运行期间可用";
-    job.prompt = persisted
+    job.prompt = persisted && followUpFailure ? "新密码已确认并保存，但后续会话验证未完成；原 Web 文件保持不变" : persisted
       ? job.passwordAddResumesAuthorization
         ? "密码添加成功，可以继续未完成的 Codex 授权"
-        : "密码添加成功，账号原始信息已经更新"
+        : replacing ? "密码轮换成功，新密码已保存，原授权文件保持不变" : "密码添加成功，账号原始信息已经更新"
       : "密码添加成功，但新密码未能持久保存";
     appendJobLog(job, persisted
       ? "[password-add] 密码添加成功，新密码已安全保存，未写入协议日志。\n"
@@ -2748,7 +2921,7 @@ async function finishPasswordAdd(job, code, signal) {
     job.passwordAddError ||= signal
       ? `添加密码进程被 ${signal} 终止`
       : `添加密码进程退出，代码 ${code ?? "未知"}`;
-    await removePrivateFile(job.passwordAddResultPath);
+    await archivePasswordResult(job, "failed_preserved");
   }
 
   job.status = job.passwordAddResumesAuthorization ? "resume_available" : "completed";
@@ -2759,6 +2932,7 @@ async function finishPasswordAdd(job, code, signal) {
   job.runId = null;
   job.pendingNewPassword = null;
   job.passwordAddResumesAuthorization = false;
+  job.passwordReplaceExisting = false;
   touch(job);
   await saveJobMetadata(job);
   if (job.poolRefreshAction && job.status === "completed" && job.resultSaved) await synchronizePoolRefresh(job);
@@ -2776,10 +2950,12 @@ function restorePasswordAddFailure(job, message) {
   job.runId = null;
   job.pendingNewPassword = null;
   job.passwordAddResumesAuthorization = false;
+  job.passwordReplaceExisting = false;
   job.child?.kill("SIGTERM");
   job.child = null;
   touch(job);
-  void removePrivateFile(job.passwordAddResultPath).catch(() => {});
+  // Preserve the private result/history even if the process failed after the
+  // remote password mutation, so crash recovery can save a confirmed new key.
   void saveJobMetadata(job).catch(() => {});
   if (job.poolRefreshAction && !resumeAuthorization) void synchronizePoolRefresh(job).catch(() => {});
 }
@@ -2797,6 +2973,7 @@ async function loadTotpSetupResult(job) {
     job.totpSetupUri = null;
     return data;
   }
+  if (!data.secret) return data; // Disable/enroll failures do not contain a new key.
   const secret = normalizeTotpSecret(data.secret);
   const uri = String(data.otpauth_uri || "");
   if (!uri.startsWith("otpauth://totp/")) throw new Error("2FA 设置地址格式不正确");
@@ -2824,14 +3001,18 @@ async function finishTotpSetup(job, code, signal) {
   let removeResult = false;
   if (code === 0 && result?.already_enabled) {
     job.totpKnownEnabled = true;
+    job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true });
     job.prompt = "账号已经启用 2FA，但服务端不会返回原始密钥";
     job.totpSetupError = "如需自动登录，请重新导入这个账号原有的 2FA 密钥";
     removeResult = true;
   } else if ((code === 0 || activationSucceeded) && result?.secret) {
     const secret = normalizeTotpSecret(result.secret);
+    await recordCredentialHistory(path.dirname(job.outputPath), { type: "2fa", stage: "activated_before_save", email: job.email,
+      before: { totpSecret: job.totpSecret || "" }, after: { ...result, totpSecret: secret } });
     job.totpSecret = secret;
     job.hasTotpCredential = true;
     job.totpKnownEnabled = true;
+    job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true });
     job.totpRotationRemoteDisabled = false;
     job.totpRotationStage = result?.confirmation_succeeded === false ? "confirmation_failed" : "confirmed";
     job.totpRotationIncomplete = false;
@@ -2860,6 +3041,11 @@ async function finishTotpSetup(job, code, signal) {
     job.totpRotationStage = result?.stage || (replacingTotp ? "failed" : null);
     job.totpRotationIncomplete = replacingTotp;
     job.totpKnownEnabled = replacingTotp ? !remoteDisabled : job.totpKnownEnabled;
+    if (replacingTotp && result?.remote_disabled === true && !result?.disable_uncertain && result?.stage !== "disable_unconfirmed") {
+      job.securityState = mergeSecurityState(job.securityState, { totpEnabled: false });
+    } else if (replacingTotp && (result?.disable_uncertain || result?.stage === "disable_unconfirmed")) {
+      job.securityState = mergeSecurityState(job.securityState, { totpEnabled: null, totpCheckedAt: new Date().toISOString() });
+    }
     job.prompt = replacingTotp && remoteDisabled
       ? "原 2FA 状态可能已关闭，新 2FA 尚未激活；可以重试更换流程"
       : resumeAuthorization
@@ -2947,7 +3133,7 @@ async function fallbackFromRefresh(job) {
   appendJobLog(job, "[refresh] 刷新令牌已失效，自动回退到邮箱验证码登录。\n");
   job.fallbackInProgress = false;
   if (job.status !== "canceled") {
-    enqueueJob(job, "full", "刷新令牌已失效，正在重新登录并授权");
+    enqueueJob(job, "full", "刷新令牌已失效，正在重新登录并授权", { preserveLoginTimeout: true });
   }
   touch(job);
 }
@@ -2967,9 +3153,11 @@ function consumeOutput(job, rawText) {
   }
   const text = `${proxyAttemptNotices}${sanitizeLog(rawText)}`
     .replace(/^\[proxy-session-attempt\][^\r\n]*(?:\r?\n)?/gim, "");
-  job.logs = `${job.logs}${text}`.slice(-MAX_LOG_CHARS);
+  appendAccountLog(job, text);
   const scan = `${job.parserTail}${text}`;
   job.parserTail = scan.slice(-2_000);
+  if (scan.includes("[ok] Password accepted")) job.securityState = mergeSecurityState(job.securityState, { passwordEnabled: true });
+  if (scan.includes("[ok] 2FA verification accepted")) job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true });
 
   if (scan.includes("[3/5] Password login page reached.")) {
     markAuthorizationRequirement(job, "password");
@@ -3017,6 +3205,7 @@ function consumeOutput(job, rawText) {
 
   if (job.runMode === "totp_setup" && scan.includes("[2fa-already-enabled]")) {
     job.totpKnownEnabled = true;
+    job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true });
     setStage(job, "working", "账号已经启用 2FA，正在收尾");
   }
 
@@ -3083,6 +3272,9 @@ function consumeOutput(job, rawText) {
     job.phoneError = null;
     setStage(job, "starting", "新登录状态被服务端拒绝，正在自动重新获取邮箱验证码");
   }
+  if (scan.includes("[codex-auth-login]")) {
+    setStage(job, "working", "Codex 要求独立身份验证，正在继续授权；原 Web 会话已保留");
+  }
 
   if (scan.includes("Email OTP (r=resend, q=quit):")) {
     markAuthorizationRequirement(job, "emailOtp");
@@ -3122,7 +3314,9 @@ function consumeOutput(job, rawText) {
   const phoneOtpPromptIndex = scan.lastIndexOf("Phone OTP (r=resend, p=change phone, q=quit):");
   if (phoneNumberPromptIndex > phoneOtpPromptIndex) {
     stopMailPolling(job);
-    setStage(job, "phone", "请输入需要绑定的手机号");
+    const automatic = smsProviderSettingsState.settings.autoAcquire === true;
+    setStage(job, "phone", automatic ? "Codex 需要手机号验证，正在通过接码平台自动取号" : "Codex 需要手机号验证，请输入手机号或使用接码平台取号");
+    maybeAcquireAutomaticSms(job);
   } else if (phoneOtpPromptIndex > phoneNumberPromptIndex) {
     if (job.smsStatus !== "error") job.phoneError = null;
     setStage(
@@ -3214,6 +3408,7 @@ async function restartAfterProxyRisk(job, options = {}) {
   if (job.proxyRiskRestarting || isTerminalStatus(job.status)) return;
   job.proxyRiskRestarting = true;
   const mode = job.runMode || job.queuedMode || "full";
+  const sourceRunId = job.runId;
   const runProxyUrl = accountProxyMode === "plan" && !job.runProxyFixed ? job.runLoginProxyUrl : job.proxyUrl;
   try {
     if (accountProxyMode === "sub2api" || job.runProxyFixed) {
@@ -3227,6 +3422,7 @@ async function restartAfterProxyRisk(job, options = {}) {
       }
       job.directTlsFallbackAttempted = true;
       const fallbackProfile = await directTlsProfileProbe.resolve();
+      if (job.runId !== sourceRunId || isTerminalStatus(job.status)) return;
       appendJobLog(job, `[tls] Cloudflare 求解未完成，正在启用直连 TLS 指纹筛选兜底（${fallbackProfile}）。\n`);
     } else if (!proxySupportsSessionRotation(runProxyUrl)) {
       finishProxyRiskRetries(
@@ -3290,6 +3486,7 @@ async function restartAfterProxyRisk(job, options = {}) {
       options.connectionFailure
         ? `代理连接失败，正在更换会话；HTTP 检测次数仍为 ${job.proxyRiskRetryCount}/${MAX_PROXY_RISK_RETRIES}`
         : `代理触发安全校验，已使用 ${job.proxyRiskRetryCount}/${MAX_PROXY_RISK_RETRIES} 个代理会话`,
+      { preserveLoginTimeout: true },
     );
   } finally {
     job.proxyRiskRestarting = false;
@@ -3356,7 +3553,7 @@ async function fallbackToDirectIp(job, reason) {
   job.securityCheckRequired = false;
   job.restartRequired = false;
   appendJobLog(job, `[proxy] ${reason}；按配置回退本地出口 IP，本次任务仅回退一次。\n`);
-  enqueueJob(job, mode, "代理不可用，正在回退本地出口 IP");
+  enqueueJob(job, mode, "代理不可用，正在回退本地出口 IP", { preserveLoginTimeout: true });
 }
 
 function requireReauthorization(job, message) {
@@ -3486,6 +3683,7 @@ function acquireCustomSmsEntry(entries) {
 async function acquireSmsNumber(job, providerId, config) {
   requireStage(job, "phone");
   if (job.smsStatus === "requesting") throw httpError(409, "正在获取手机号，请不要重复提交");
+  const runId = job.runId, child = job.child;
 
   let smsClient;
   try {
@@ -3510,7 +3708,7 @@ async function acquireSmsNumber(job, providerId, config) {
   let order;
   try {
     order = await smsClient.getNumber();
-    if (job.status !== "phone" || !job.child) {
+    if (job.status !== "phone" || !job.child || job.runId !== runId || job.child !== child) {
       void smsClient.release(order.requestId).catch(() => {});
       throw httpError(409, "任务已经不在手机号输入步骤，平台号码已释放");
     }
@@ -3523,7 +3721,7 @@ async function acquireSmsNumber(job, providerId, config) {
     await submitJobInput(job, { action: "phone", value: order.number }, { source: "sms-provider" });
   } catch (error) {
     if (order?.requestId && job.smsOrderId === order.requestId) releaseSmsNumber(job, "error");
-    if (job.status === "phone") {
+    if (job.status === "phone" && job.runId === runId && job.child === child) {
       job.smsStatus = "error";
       job.smsError = safeSmsProviderError(error, smsClient.apiKey);
       if (!order) job.smsClient = null;
@@ -3532,6 +3730,37 @@ async function acquireSmsNumber(job, providerId, config) {
     if (error?.status) throw error;
     throw httpError(502, safeSmsProviderError(error, smsClient.apiKey));
   }
+}
+
+function maybeAcquireAutomaticSms(job) {
+  const state = smsProviderSettingsState;
+  const attemptKey = `${job.lastOperationAt || job.createdAt}:${job.attempt}`;
+  if (!state?.configured || !state.settings.autoAcquire || job.status !== "phone" || !job.child || !job.runId
+    || shuttingDown || accountAutomationBlocked(job.email) || job.smsOrderId || job.smsStatus === "requesting"
+    || job.smsAutoAttemptKey === attemptKey) return;
+  // One paid acquisition per authorization attempt. Failed sends/no stock do
+  // not start an unbounded purchase loop; an operator may explicitly retry.
+  const runId = job.runId;
+  job.smsAutoAttemptKey = attemptKey;
+  const providerId = state.settings.selectedProviderId, config = structuredClone(state.settings.configs[providerId]);
+  // acquireSmsNumber synchronously claims smsStatus=requesting before its first
+  // network await. Do not hold the job lock across a slow paid supplier call:
+  // cancel/timeout must be able to invalidate the run and release a late order.
+  void (async () => {
+    if (job.runId !== runId || job.status !== "phone" || !job.child || job.smsOrderId || job.smsStatus === "requesting"
+      || shuttingDown || accountAutomationBlocked(job.email) || !smsProviderSettingsState.settings.autoAcquire) return;
+    try {
+      appendJobLog(job, "[sms] Codex 需要手机号验证，按已保存配置自动取号；本次授权最多自动取号一次。\n");
+      await acquireSmsNumber(job, providerId, config);
+    } catch (error) {
+      if (job.runId !== runId || job.status !== "phone") return;
+      job.prompt = "自动取号未完成，请检查接码反馈或手动重试";
+      job.smsError = safeSmsProviderError(error, config?.apiKey);
+      appendJobLog(job, `[sms] 自动取号停止：${job.smsError}\n`);
+      touch(job);
+      await saveJobMetadata(job);
+    }
+  })().catch(() => {});
 }
 
 async function beginSmsPolling(job) {
@@ -3959,6 +4188,16 @@ async function buildSub2ApiUploadPayload(downloadable) {
 }
 
 async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2ApiProfileState(), { recoverAuthorization = false } = {}) {
+  const eligible = selected.filter(job => job.resultSaved && !accountAutomationBlocked(job.email));
+  if (!eligible.length) throw httpError(409, "选中的任务里没有已完成的导入文件");
+  return performUploadJobsToSub2Api(selected, config, profileState, { recoverAuthorization });
+}
+
+function isOAuthPoolAccount(account) {
+  return (account.platform || "openai") === "openai" && (account.type || "oauth") === "oauth";
+}
+
+async function performUploadJobsToSub2Api(selected, config, profileState, { recoverAuthorization = false } = {}) {
   const downloadable = selected.filter((job) => job.resultSaved && !accountAutomationBlocked(job.email));
   if (downloadable.length === 0) throw httpError(409, "选中的任务里没有已完成的导入文件");
   if (accountProxyMode === "sub2api") {
@@ -3975,7 +4214,8 @@ async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2
     for (const job of downloadable) await refreshJobProxyBinding(job);
   }
   const payload = await buildSub2ApiUploadPayload(downloadable);
-  const idempotencyKey = `tosub2-upload-${crypto.randomUUID()}`;
+  if (payload.accounts.some(account => !isOAuthPoolAccount(account))) throw httpError(409, "此上传入口只接受 OpenAI OAuth 账号，已停止上传非 OAuth 记录");
+  payload.accounts = uniquePoolUploadAccounts(payload.accounts, sub2ApiAccountEmail);
   const accountsByProfile = new Map();
   for (const account of payload.accounts) {
     const accountConfig = await resolveSub2ApiWriteConfig(resolveSub2ApiConfigForAccount(config, account, profileState));
@@ -4006,21 +4246,40 @@ async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2
   }
 
   const results = [];
-  let profileBatchIndex = 0;
   let createdCount = 0;
   let updatedCount = 0;
   const updatedAccountIds = [];
   for (const { config: accountConfig, accounts } of accountsByProfile.values()) {
-    const listing = await listSub2ApiAccounts(accountConfig, { withMeta: true });
-    if (!listing.complete) throw new Error("Sub2API 账号列表不完整，已停止上传以避免创建重复账号");
-    const profileNewAccounts = accounts.filter((account) => !listing.accounts.some((remote) => sub2ApiAccountEmail(account) === sub2ApiAccountEmail(remote)));
-    // Replace each existing row's PlanType with the uploaded workspace PlanType
-    // but keep its original pool import date. New rows join the same day ranks.
-    const effective = listing.accounts.map((remote) => {
-      const local = accounts.find((account) => sub2ApiAccountEmail(account) === sub2ApiAccountEmail(remote));
-      return local ? { ...remote, ...local, id: remote.id, created_at: remote.created_at } : remote;
+    // PlanType bindings can route a top-level config to another backend. Lock
+    // the resolved write target, not the caller's initially selected profile.
+    await poolUploadLocks.run(accountConfig, accounts.map(sub2ApiAccountEmail), async () => {
+      const listing = await listSub2ApiAccounts(accountConfig, { withMeta: true });
+      if (!listing.complete) throw new Error("Sub2API 账号列表不完整，已停止上传以避免创建重复账号");
+      listing.accounts = listing.accounts.filter(isOAuthPoolAccount);
+      const profileNewAccounts = accounts.filter((account) => !listing.accounts.some((remote) => sub2ApiAccountEmail(account) === sub2ApiAccountEmail(remote)));
+      // Replace each existing row's PlanType with the uploaded workspace PlanType
+      // but keep its original pool import date. New rows join the same day ranks.
+      const effective = listing.accounts.map((remote) => {
+        const local = accounts.find((account) => sub2ApiAccountEmail(account) === sub2ApiAccountEmail(remote));
+        return local ? { ...remote, ...local, id: remote.id, created_at: remote.created_at } : remote;
     });
     const dayPriorities = importDatePriorities([...effective, ...profileNewAccounts], config, profileState);
+    const lookup = async (id, email) => {
+      const remote = await getSub2ApiAccount(accountConfig, id);
+      if (remote && (!isOAuthPoolAccount(remote) || sub2ApiAccountEmail(remote) !== email)) throw httpError(409, "号池账号身份已改变，已停止重传旧创建意图");
+      return remote;
+    };
+    const updateExisting = async (account, remoteAccount) => {
+      const email = sub2ApiAccountEmail(account), accountId = normalizeSub2ApiAccountId(remoteAccount?.id);
+      if (!accountId) throw new Error("号池账号缺少有效 ID");
+      const accountUpdate = await buildSub2ApiAccountUpdate(account, accountConfig, remoteAccount);
+      const dated = effective.find(item => item.id === remoteAccount.id);
+      if (dayPriorities.has(dated)) accountUpdate.priority = dayPriorities.get(dated);
+      await requestSub2Api(accountConfig, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, { method: "PUT", body: JSON.stringify(accountUpdate) });
+      const recoveryJob = downloadable.find(job => job.email.toLowerCase() === email);
+      if (recoverAuthorization && (remoteAccount.status === "error" || recoveryJob?.poolRefreshRecovery)) await recoverSub2ApiAuthorization(accountConfig, accountId, email, { recoveryJob });
+      updatedCount++; updatedAccountIds.push(accountId);
+    };
     const accountsToCreate = [];
     for (const account of accounts) {
       const email = sub2ApiAccountEmail(account);
@@ -4032,32 +4291,43 @@ async function uploadJobsToSub2Api(selected, config, profileState = snapshotSub2
         accountsToCreate.push(account);
         continue;
       }
+      // A previous POST may have committed even though its response was lost.
+      // Seeing its row in a complete listing resolves that pending intent too.
+      await poolUploadIntents.observeExisting(accountConfig, JSON.parse(JSON.stringify(account)), matches.map(row => normalizeSub2ApiAccountId(row.id)));
       for (const remoteAccount of matches) {
-        const accountId = normalizeSub2ApiAccountId(remoteAccount?.id);
-        if (!accountId) continue;
-        const accountUpdate = await buildSub2ApiAccountUpdate(account, accountConfig, remoteAccount);
-        const dated = effective.find((item) => item.id === remoteAccount.id);
-        if (dayPriorities.has(dated)) accountUpdate.priority = dayPriorities.get(dated);
-        await requestSub2Api(accountConfig, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
-          method: "PUT",
-          body: JSON.stringify(accountUpdate),
-        });
-        const recoveryJob = downloadable.find(job => job.email.toLowerCase() === email);
-        if (recoverAuthorization && (remoteAccount.status === "error" || recoveryJob?.poolRefreshRecovery)) {
-          await recoverSub2ApiAuthorization(accountConfig, accountId, email, { recoveryJob });
-        }
-        updatedCount += 1;
-        updatedAccountIds.push(accountId);
+        await updateExisting(account, remoteAccount);
       }
     }
-    if (accountsToCreate.length) {
-      createdCount += accountsToCreate.length;
-      results.push(await requestSub2Api(accountConfig, "/api/v1/admin/accounts/batch", {
+    for (const account of accountsToCreate) {
+      const email = sub2ApiAccountEmail(account);
+      const intent = await poolUploadIntents.prepare(accountConfig, JSON.parse(JSON.stringify(account)), { lookupAccount: id => lookup(id, email) });
+      if (intent.existingIds.length) {
+        for (const id of intent.existingIds) await updateExisting(account, await lookup(id, email));
+        continue;
+      }
+      const response = await requestSub2Api(accountConfig, "/api/v1/admin/accounts/batch", {
         method: "POST",
-        headers: { "Idempotency-Key": `${idempotencyKey}-${profileBatchIndex++}` },
-        body: JSON.stringify({ accounts: accountsToCreate }),
-      }));
+        headers: { "Idempotency-Key": intent.key },
+        body: JSON.stringify({ accounts: [intent.account] }),
+      });
+      results.push(response);
+      const data = response?.data || response;
+      let confirmed = (Array.isArray(data?.accounts) ? data.accounts : []).filter(row => isOAuthPoolAccount(row) && sub2ApiAccountEmail(row) === email && normalizeSub2ApiAccountId(row.id));
+      if (!confirmed.length) {
+        const fresh = await listSub2ApiAccounts(accountConfig, { withMeta: true });
+        if (fresh.complete) confirmed = fresh.accounts.filter(row => isOAuthPoolAccount(row) && sub2ApiAccountEmail(row) === email && normalizeSub2ApiAccountId(row.id));
+      }
+      if (!confirmed.length) throw new Error("POOL_UPLOAD_UNCONFIRMED: 创建响应尚未核对到号池账号，已保留原请求与幂等键，等待重试确认");
+      await poolUploadIntents.confirm(accountConfig, email, intent.id, confirmed.map(row => normalizeSub2ApiAccountId(row.id)));
+      // An idempotency cache can return a former success after a remote row was
+      // deleted. Keep those IDs for the next generation's absence check, but do
+      // not report success until the actual remote entities are still present.
+      confirmed = (await Promise.all(confirmed.map(row => lookup(normalizeSub2ApiAccountId(row.id), email)))).filter(Boolean);
+      if (!confirmed.length) throw new Error("POOL_UPLOAD_REMOTE_MISSING: 创建回执对应账号已不存在，已保留 ID 供重试时确认新的创建代次");
+      if (intent.payloadChanged) for (const remote of confirmed) await updateExisting(account, remote);
+      createdCount++;
     }
+    });
   }
   const datePrioritySync = await refreshImportDatePriorities(config, profileState);
   invalidateSub2ApiAccountStatusCache();
@@ -4511,6 +4781,7 @@ function taskAutoActionsForPlanType(planType) {
 function publicTaskSettings(includeProxy = true) {
   return {
     maxActiveJobs,
+    loginTimeoutMinutes,
     ...(includeProxy ? { proxyUrl: globalProxyUrl || "" } : {}),
     accountProxyMode,
     codexAuthMode,
@@ -4532,6 +4803,7 @@ async function loadTaskSettings() {
   try {
     const saved = JSON.parse(await fs.readFile(TASK_SETTINGS_PATH, "utf8"));
     maxActiveJobs = validateMaxActiveJobs(saved.maxActiveJobs);
+    loginTimeoutMinutes = normalizeLoginTimeoutMinutes(saved.loginTimeoutMinutes);
     taskAutoActions = normalizeTaskAutoActions(saved.autoActions);
     globalProxyUrl = saved.proxyUrl ? normalizeProxyUrl(saved.proxyUrl) : null;
     allowDirectFallback = saved.allowDirectFallback === true;
@@ -4551,6 +4823,10 @@ async function loadTaskSettings() {
 
 async function saveTaskSettings(body) {
   const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  if (Object.hasOwn(source, "loginTimeoutMinutes")) {
+    try { normalizeLoginTimeoutMinutes(source.loginTimeoutMinutes); }
+    catch (error) { throw httpError(400, error.message); }
+  }
   if (Object.hasOwn(source, "monitoring")) {
     try { normalizeMonitoring(source.monitoring, monitoringSettings); }
     catch (error) { throw httpError(400, error.message); }
@@ -4600,6 +4876,7 @@ async function saveTaskSettings(body) {
     const effectiveMonitoring = Object.hasOwn(source, "monitoring") ? normalizeMonitoring(source.monitoring, monitoringSettings) : monitoringSettings;
     const nextFingerprint = fingerprintPatch ? normalizeFingerprintSettings({ ...modelFingerprint.settings, ...fingerprintPatch }) : null;
     const effectiveLimit = Object.hasOwn(source, "maxActiveJobs") ? nextLimit : maxActiveJobs;
+    const effectiveLoginTimeout = Object.hasOwn(source, "loginTimeoutMinutes") ? normalizeLoginTimeoutMinutes(source.loginTimeoutMinutes) : loginTimeoutMinutes;
     const effectiveAutoActions = Object.hasOwn(source, "autoActions") ? nextAutoActions : taskAutoActions;
     const effectiveProxyUrl = Object.hasOwn(source, "proxyUrl") ? nextProxyUrl : globalProxyUrl;
     const effectiveFallback = Object.hasOwn(source, "allowDirectFallback") ? nextAllowDirectFallback : allowDirectFallback;
@@ -4613,6 +4890,7 @@ async function saveTaskSettings(body) {
       await fs.writeFile(tempPath, `${JSON.stringify({
         version: 2,
         maxActiveJobs: effectiveLimit,
+        loginTimeoutMinutes: effectiveLoginTimeout,
         autoActions: Object.fromEntries(Object.entries(effectiveAutoActions).map(([key, actions]) => [key, [...actions]])),
         proxyUrl: effectiveProxyUrl || "",
         allowDirectFallback: effectiveFallback,
@@ -4633,6 +4911,8 @@ async function saveTaskSettings(body) {
       await fs.rm(tempPath, { force: true }).catch(() => {});
     }
     maxActiveJobs = effectiveLimit;
+    loginTimeoutMinutes = effectiveLoginTimeout;
+    loginTimeouts.reschedule();
     taskAutoActions = effectiveAutoActions;
     globalProxyUrl = effectiveProxyUrl;
     allowDirectFallback = effectiveFallback;
@@ -7097,7 +7377,7 @@ function publicJob(job) {
     status: job.status,
     prompt: job.status === "queued"
       ? `排队中，前方还有 ${Math.max(0, getQueuePosition(job) - 1)} 条任务`
-      : job.prompt,
+      : job.status === "failed" && /^CODEX_AUTH_/.test(job.lastError || "") ? "Codex 授权未完成，原 Web 会话状态独立保留" : job.prompt,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     lastOperationAt: job.lastOperationAt || job.createdAt,
@@ -7118,11 +7398,12 @@ function publicJob(job) {
     overloadDetection: overloadMonitor.snapshot(job.email),
     overloadAutoCooldown: overloadCooldown.snapshot(job.email),
     modelFingerprint: modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown"),
-    lastError: job.lastError,
+    lastError: oauthErrorMessage(job.lastError),
     canDownload: Boolean(job.resultSaved),
     poolOnly: Boolean(job.poolOnly),
     loginMode: job.loginMode || (job.mailApiUrl ? "email_otp" : "manual"),
     hasTotpKey: hasJobTotpKey(job),
+    securityState: publicSecurityState(job),
     autoEmailOtp: Boolean(job.mailApiUrl),
     mailStatus: job.mailStatus,
     mailApiError: job.mailApiError,
@@ -7167,6 +7448,7 @@ function publicJob(job) {
     canSetupTotp: canSetupTotp(job),
     canReplaceTotp: canReplaceTotp(job),
     canAddPassword: canAddPassword(job),
+    canReplacePassword: canReplacePassword(job),
     restartRequired: job.restartRequired,
     proxyConfigured: Boolean(job.proxyUrl),
     assignedProxyId: normalizeStoredProxyId(job.assignedProxyId),
@@ -7178,7 +7460,7 @@ function publicJob(job) {
     poolRefreshReady: Boolean(job.poolRefreshReady),
     poolRefreshAction: normalizePoolRefreshAction(job.poolRefreshAction),
     poolRefreshDueAt: job.poolRefreshDueAt || null,
-    poolRefreshError: job.poolRefreshError || null,
+    poolRefreshError: oauthErrorMessage(job.poolRefreshError) || null,
     autoRepairEligible: autoRepair.eligible,
     autoRepairEligibilityReason: autoRepair.reason,
     autoRepairBlocked: Boolean(job.autoRepairBlocked),
@@ -7439,6 +7721,7 @@ function publicSelectionJob(job) {
     canSetupTotp: canSetupTotp(job),
     canReplaceTotp: canReplaceTotp(job),
     canAddPassword: canAddPassword(job),
+    canReplacePassword: canReplacePassword(job),
   };
 }
 
@@ -7476,6 +7759,12 @@ function canAddPassword(job) {
   if (job.status === "completed" && job.resultSaved) return true;
   return Boolean(job.loginCheckpointAvailable)
     && ["phone", "phone_otp", "resume_available", "failed", "mfa_failed", "canceled", "reauth_required"].includes(job.status);
+}
+
+function canReplacePassword(job) {
+  return !accountAutomationBlocked(job.email) && canForceRelogin(job)
+    && Boolean(job.resultSaved || job.loginCheckpointAvailable)
+    && !["pending", "running"].includes(job.autoTaskStatus);
 }
 
 function setStage(job, status, prompt) {
@@ -7736,6 +8025,8 @@ function requireStage(job, expected) {
 }
 
 function touch(job) {
+  if (job.status === "queued") loginTimeouts.pause(job);
+  else if (!occupiesActiveSlot(job)) loginTimeouts.stop(job);
   job.updatedAt = new Date().toISOString();
 }
 
@@ -7978,11 +8269,13 @@ async function deleteSub2ApiAccountsByEmail(email) {
 
 async function deleteJobsByEmail(email) {
   const sub2api = await deleteSub2ApiAccountsByEmail(email);
+  await poolUploadIntents.forgetEmail(email);
   await overloadMonitor.remove(email);
   await overloadCooldown.remove(email);
   await modelFingerprint.remove(email);
   const matching = [...jobs.values()].filter((job) => job.email.toLowerCase() === email);
   const directories = new Set();
+  const reaping = [];
   matching.forEach((job) => {
     job.deleted = true;
     clearPoolRefreshTimer(job);
@@ -7990,11 +8283,13 @@ async function deleteJobsByEmail(email) {
     stopMailPolling(job);
     releaseSmsNumber(job, "idle");
     job.runId = crypto.randomUUID();
+    reaping.push(waitForChildExit(job.child, 1_000));
     job.child?.kill("SIGTERM");
     job.child = null;
     directories.add(path.dirname(job.outputPath));
     jobs.delete(job.id);
   });
+  await Promise.all(reaping);
   await Promise.allSettled(matching.map((job) => job.metadataWritePromise).filter(Boolean));
   await Promise.all([
     ...[...directories].map((directory) => fs.rm(directory, { recursive: true, force: true })),
@@ -8046,12 +8341,14 @@ async function syncCompletedOutputs(force = false) {
           email,
           resultPath: passwordAddResultPath,
           credentials: storedCredentials,
+          skipRecovery: metadata.password_manual_override === true,
         });
         storedCredentials = passwordRecovery.credentials;
         const totpRecovery = await recoverActivatedTotpCredential({
           email,
           resultPath: totpResultPath,
           credentials: storedCredentials,
+          skipRecovery: metadata.totp_manual_override === true,
         });
         storedCredentials = totpRecovery.credentials;
         const restoredOperation = restoredOutputOperationState(metadata, completedAt, totpRecovery, passwordRecovery);
@@ -8148,12 +8445,14 @@ async function syncCompletedOutputs(force = false) {
           email,
           resultPath: passwordAddResultPath,
           credentials: storedCredentials,
+          skipRecovery: metadata.password_manual_override === true,
         });
         storedCredentials = passwordRecovery.credentials;
         const totpRecovery = await recoverActivatedTotpCredential({
           email,
           resultPath: totpResultPath,
           credentials: storedCredentials,
+          skipRecovery: metadata.totp_manual_override === true,
         });
         storedCredentials = totpRecovery.credentials;
         const restoredAt = stat.mtime.toISOString();
@@ -8362,6 +8661,7 @@ async function syncCompletedOutputs(force = false) {
       }
       const restored = jobs.get(entry.name);
       if (restored) {
+        hydrateAccountLog(restored);
         restoreWebLoginState(restored, metadata);
         restored.webSessionAvailable = await fileExists(webSessionPathForJob(restored));
       }
@@ -8372,7 +8672,8 @@ async function syncCompletedOutputs(force = false) {
   return outputSyncPromise;
 }
 
-async function recoverActivatedTotpCredential({ email, resultPath, credentials }) {
+async function recoverActivatedTotpCredential({ email, resultPath, credentials, skipRecovery = false }) {
+  if (skipRecovery) return { credentials, recovered: false, error: null };
   let result;
   try {
     result = JSON.parse(await fs.readFile(resultPath, "utf8"));
@@ -8405,7 +8706,8 @@ async function recoverActivatedTotpCredential({ email, resultPath, credentials }
   }
 }
 
-async function recoverAddedPasswordCredential({ email, resultPath, credentials }) {
+async function recoverAddedPasswordCredential({ email, resultPath, credentials, skipRecovery = false }) {
+  if (skipRecovery) return { credentials, recovered: false, error: null, addedAt: null };
   let result;
   try {
     result = JSON.parse(await fs.readFile(resultPath, "utf8"));
@@ -8413,6 +8715,7 @@ async function recoverAddedPasswordCredential({ email, resultPath, credentials }
     if (error?.code === "ENOENT") return { credentials, recovered: false, error: null, addedAt: null };
     return { credentials, recovered: false, error: `添加密码结果文件无法读取：${error.message}`, addedAt: null };
   }
+  if (result?.activation_succeeded === false || result?.operation && result.activation_succeeded !== true) return { credentials, recovered: false, error: null, addedAt: null };
   if (
     result?.version !== 1
     || String(result.email || "").toLowerCase() !== email.toLowerCase()
@@ -8592,6 +8895,10 @@ function restoredCredentialFlags(metadata = {}, credentials = {}) {
 
 function restoredTotpSetupState(metadata = {}, credentials = {}) {
   return {
+    securityState: normalizeSecurityState(metadata.security_state),
+    passwordManualOverride: metadata.password_manual_override === true,
+    passwordReplaceExisting: metadata.password_replace_existing === true,
+    totpManualOverride: metadata.totp_manual_override === true,
     totpSetupSecret: null,
     totpSetupUri: null,
     totpSetupError: null,
@@ -9258,7 +9565,12 @@ async function runConfiguredRotateAndUploadAction(job) {
     await forceReloginJob(job, {});
   });
   await waitForConfiguredTaskJob(job, isReauthorizationComplete, "重新授权");
-  await uploadJobsToSub2Api([job], config, snapshotSub2ApiProfileState());
+  // The login completion already synchronizes fresh credentials to the pool
+  // while holding this email lock. Wait for that upload rather than starting
+  // a second list-before-create request from the outer rotation pipeline.
+  await withEmailJobLock(job.email, async () => {
+    if (job.poolRefreshAction || job.poolRefreshError) throw new Error(job.poolRefreshError || "重新授权的号池同步尚未完成");
+  });
 }
 
 async function waitForConfiguredTaskJob(job, predicate, label) {
@@ -9288,12 +9600,23 @@ async function updateStoredCredentialFields(job, body = {}) {
     throw httpError(409, "现有 2FA 密钥无法从系统凭据存储读取，请同时提交 2FA 密钥后再修改其他字段");
   }
   const password = hasPassword ? String(body.password ?? "") : job.password || "";
-  const totpSecret = hasTotpSecret ? normalizeTotpSecret(body.totpSecret) : job.totpSecret || "";
+  const totpInput = String(body.totpSecret ?? "").toUpperCase().replace(/[\s=]/g, "");
+  const totpSecret = hasTotpSecret ? (totpInput ? normalizeTotpSecret(totpInput) : "") : job.totpSecret || "";
   if (password.length > 128) throw httpError(400, "密码长度不能超过 128 个字符");
-  if (hasTotpSecret && !/^[A-Z2-7]{16,128}$/.test(totpSecret)) {
+  if (hasTotpSecret && totpSecret && !/^[A-Z2-7]{16,128}$/.test(totpSecret)) {
     throw httpError(400, "2FA 密钥必须是 16 到 128 位 Base32 字符");
   }
 
+  if (hasTotpSecret) {
+    await archiveTotpResult(job, "before_manual_update");
+    await recordCredentialHistory(path.dirname(job.outputPath), { type: "2fa", stage: totpSecret ? "manual_update_prepared" : "local_key_delete_prepared",
+      email: job.email, before: { totpSecret: job.totpSecret || "" }, after: { totpSecret } });
+  }
+  if (hasPassword) {
+    await archivePasswordResult(job, "before_manual_update");
+    await recordCredentialHistory(path.dirname(job.outputPath), { type: "password", stage: password ? "manual_update_prepared" : "local_password_delete_prepared",
+      email: job.email, before: { password: job.password || "" }, after: { password } });
+  }
   const persisted = await saveStoredLoginCredentials(job.email, {
     password: hasPassword ? password : job.password,
     totpSecret: hasTotpSecret ? totpSecret : job.totpSecret,
@@ -9301,6 +9624,7 @@ async function updateStoredCredentialFields(job, body = {}) {
   });
   if (hasPassword) {
     job.password = password;
+    job.passwordManualOverride = true;
     job.hasPasswordCredential = Boolean(password);
     job.loginMode = password ? "password" : (job.mailApiUrl ? "email_otp" : "manual");
   }
@@ -9308,12 +9632,21 @@ async function updateStoredCredentialFields(job, body = {}) {
     job.totpSecret = totpSecret;
     job.hasTotpCredential = Boolean(totpSecret);
     if (totpSecret) job.totpKnownEnabled = true;
+    job.totpManualOverride = true;
   }
   if (password || totpSecret) job.poolOnly = false;
   recordJobOperation(job, "credential_update");
-  appendJobLog(job, "[account] 登录凭据已更新，敏感字段未写入日志。\n");
+  appendJobLog(job, hasTotpSecret
+    ? "[account] 本地 2FA 凭据已更新，原值和新值已存入完整日志的凭据历史；远端 MFA 状态未改动。\n"
+    : "[account] 本地登录凭据已更新；原值和新值保存在完整凭据历史，远端密码状态未改动。\n");
   touch(job);
   await saveJobMetadata(job);
+  if (hasTotpSecret) {
+    // The durable manual-override marker prevents crash recovery of a stale
+    // activated result from resurrecting a key the user replaced or deleted.
+    await removePrivateFile(job.totpResultPath).catch(() => {});
+  }
+  if (hasPassword) await removePrivateFile(job.passwordAddResultPath).catch(() => {});
   return persisted;
 }
 
@@ -9388,6 +9721,7 @@ async function saveJobMetadata(job) {
         web_login_completed_at: job.webLoginCompletedAt || null,
         web_login_error: job.webLoginError || null,
         web_login_attempt_id: job.webLoginAttemptId || null,
+        web_login_original_hash: job.webLoginOriginalHash,
         web_session_monitor_repair: job.webSessionMonitorRepair === true,
         web_session_maintenance_pause: job.webSessionMaintenancePause || null,
         login_mode: job.loginMode || null,
@@ -9395,7 +9729,11 @@ async function saveJobMetadata(job) {
         mail_request_body: job.mailRequestBody || null,
         has_stored_credentials: Boolean(job.password || job.totpSecret),
         has_password: Boolean(job.password || job.hasPasswordCredential),
+        security_state: publicSecurityState(job),
+        password_manual_override: Boolean(job.passwordManualOverride),
+        password_replace_existing: Boolean(job.passwordReplaceExisting),
         has_totp_key: hasJobTotpKey(job),
+        totp_manual_override: Boolean(job.totpManualOverride),
         totp_known_enabled: Boolean(
           !job.totpRotationRemoteDisabled && (job.totpKnownEnabled || hasJobTotpKey(job)),
         ),
@@ -9591,7 +9929,7 @@ function stopMailPolling(job) {
 }
 
 function appendJobLog(job, text) {
-  job.logs = `${job.logs}${sanitizeLog(text)}`.slice(-MAX_LOG_CHARS);
+  appendAccountLog(job, sanitizeLog(text));
 }
 
 function safeMailError(error) {
@@ -9743,6 +10081,7 @@ async function shutdown() {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
     shuttingDown = true;
+    loginTimeouts.close();
     accountDataSyncGeneration++;
     for (const timer of accountDataSyncTimers) clearTimeout(timer);
     for (const timer of poolRefreshTimers.values()) clearTimeout(timer);

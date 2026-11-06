@@ -19,6 +19,7 @@ let logs = "";
 try {
   await start("");
   assert.equal((await readSettings()).maxActiveJobs, 4);
+  assert.equal((await readSettings()).loginTimeoutMinutes, 3);
   assert.deepEqual((await readSettings()).monitoring, DEFAULT_MONITORING);
   for (const monitoring of [null, [], {missing:1}, {usageTotalsConcurrency:0}, {overloadIntervalSeconds:1.5}, {poolMonitorIntervalSeconds:"3"}]) assert.equal((await saveSettings({monitoring})).status,400);
   const patch={usageTotalsConcurrency:7,overloadConcurrency:9,poolMonitorIntervalSeconds:120,usageTotalsIntervalSeconds:90};
@@ -75,7 +76,8 @@ try {
   // must recover rather than inheriting the rejected write promise.
   await fs.rename(settingsPath, `${settingsPath}.backup`);
   await fs.mkdir(settingsPath);
-  assert.equal((await saveSettings({ maxActiveJobs: 8, accountProxyCooldownMinutes: 3, monitoring:{usageTotalsConcurrency:2},modelFingerprint:{maxConcurrentAccounts:9} })).status, 500);
+  assert.equal((await saveSettings({ maxActiveJobs: 8, loginTimeoutMinutes: 30, accountProxyCooldownMinutes: 3, monitoring:{usageTotalsConcurrency:2},modelFingerprint:{maxConcurrentAccounts:9} })).status, 500);
+  assert.equal((await readSettings()).loginTimeoutMinutes, 3);
   assert.equal((await readSettings()).maxActiveJobs, 2);
   assert.equal((await readSettings()).monitoring.usageTotalsConcurrency,7);
   assert.equal((await readSettings()).modelFingerprint.maxConcurrentAccounts,5);
@@ -88,9 +90,11 @@ try {
   await Promise.all([save(2), save(3), save(4)]);
   assert.equal((await readSettings()).maxActiveJobs, JSON.parse(await fs.readFile(settingsPath, "utf8")).maxActiveJobs);
   assert.equal((await save(3)).status, 200);
+  assert.equal((await saveSettings({loginTimeoutMinutes:5})).status,200);
   await stop();
   await start("20");
   assert.equal((await readSettings()).maxActiveJobs, 3, "saved UI limit overrides environment on restart");
+  assert.equal((await readSettings()).loginTimeoutMinutes,5);
   assert.equal((await readSettings()).accountProxyCooldownMinutes, 3);
   assert.equal((await readSettings()).monitoring.usageTotalsConcurrency,7);
   assert.equal((await readSettings()).modelFingerprint.maxConcurrentAccounts,5);

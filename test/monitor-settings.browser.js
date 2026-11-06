@@ -7,10 +7,23 @@ async (page) => {
   const open=async()=>{await page.getByRole('button',{name:'任务设置',exact:true}).click();const dialog=page.getByRole('dialog',{name:'任务设置',exact:true});await dialog.waitFor();return dialog;};
   let modal=await open(),savedBody;
   await test('all-monitor-controls-defaults-and-labels',async()=>{
+    check(await modal.locator('#task-login-timeout').inputValue()==='3','login timeout default');
+    await modal.locator('#task-login-timeout').scrollIntoViewIfNeeded();
+    await page.screenshot({path:evidenceDir+'/login-timeout-desktop.png'});
     check(await modal.locator('input[id^="monitor-"]').count()===12,'missing monitor settings');
     for(const key of ['usageTotalsConcurrency','overloadConcurrency','overloadCooldownConcurrency','profileSyncConcurrency']) check(await modal.locator('#monitor-'+key).inputValue()==='100',key+' default');
     check(await modal.getByLabel('降智检测并发（账号）',{exact:true}).inputValue()==='3','existing fingerprint concurrency not reused');
     check(await modal.getByLabel('检测间隔（分钟）',{exact:true}).count()===1,'duplicated Web account interval');
+  });
+  await test('reject-invalid-login-timeout-before-request',async()=>{
+    let posts=0;const cb=req=>{if(req.url().includes('/api/task-settings')&&req.method()==='POST')posts++;};page.on('request',cb);
+    try{
+      for(const value of ['0','','1.5','1441']){
+        await modal.locator('#task-login-timeout').fill(value);await modal.getByRole('button',{name:'保存设置',exact:true}).click();
+        check(posts===0,'invalid timeout sent to server');
+        check(await modal.getByText('登录超时必须为 1–1440 的整数（分钟）',{exact:true}).isVisible(),'login timeout validation missing');
+      }
+    }finally{page.off('request',cb);await modal.locator('#task-login-timeout').fill('3');}
   });
   await test('reject-invalid-settings-before-request',async()=>{
     let posts=0;const cb=req=>{if(req.url().includes('/api/task-settings')&&req.method()==='POST')posts++;};page.on('request',cb);
@@ -18,6 +31,7 @@ async (page) => {
     await modal.locator('#monitor-overloadConcurrency').fill('12');
   });
   await test('save-and-reopen-persist-all-fields',async()=>{
+    await modal.locator('#task-login-timeout').fill('5');
     await modal.locator('#monitor-accountStatusIntervalSeconds').fill('25');
     await modal.locator('#monitor-usageTotalsConcurrency').fill('11');
     await modal.locator('#fingerprint-default-concurrency').fill('5');
@@ -25,6 +39,7 @@ async (page) => {
     const reply=page.waitForResponse(r=>r.url().includes('/api/task-settings')&&r.request().method()==='POST');
     await modal.getByRole('button',{name:'保存设置',exact:true}).click();const r=await reply;savedBody=r.request().postDataJSON();check(r.ok(),'save failed');
     await modal.waitFor({state:'hidden'});modal=await open();
+    check(await modal.locator('#task-login-timeout').inputValue()==='5'&&savedBody.loginTimeoutMinutes===5,'login timeout not persisted');
     check(await modal.locator('#monitor-overloadConcurrency').inputValue()==='12','overload not persisted');
     check(await modal.locator('#monitor-usageTotalsConcurrency').inputValue()==='11','usage not persisted');
     check(await modal.locator('#fingerprint-default-concurrency').inputValue()==='5','fingerprint not persisted');
@@ -42,6 +57,9 @@ async (page) => {
   await test('mobile-dialog-width-and-save-access',async()=>{
     await page.setViewportSize({width:375,height:812});modal=await open();
     const b=await modal.boundingBox();check(b.x>=0&&b.x+b.width<=376,'mobile overflow');
+    await modal.locator('#task-login-timeout').scrollIntoViewIfNeeded();
+    check(await modal.locator('#task-login-timeout').evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=375;}),'login timeout input overflows');
+    await page.screenshot({path:evidenceDir+'/login-timeout-mobile.png'});
     await modal.locator('#monitor-usageTotalsConcurrency').scrollIntoViewIfNeeded();
     check(await modal.locator('#monitor-usageTotalsConcurrency').evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=375;}),'input exceeds viewport');
     await page.screenshot({path:evidenceDir+'/monitor-settings-mobile.png'});
@@ -49,9 +67,11 @@ async (page) => {
   });
   await test('restore-defaults-is-local-until-save',async()=>{
     modal=await open();await modal.getByRole('button',{name:'恢复默认',exact:true}).click();
+    check(await modal.locator('#task-login-timeout').inputValue()==='3','login timeout default not restored');
     check(await modal.locator('#monitor-usageTotalsConcurrency').inputValue()==='100','network default not restored');
     check(await modal.locator('#fingerprint-default-concurrency').inputValue()==='3','fingerprint default not restored');
     await modal.getByRole('button',{name:'取消',exact:true}).click();modal=await open();
+    check(await modal.locator('#task-login-timeout').inputValue()==='5','cancel overwrote login timeout');
     check(await modal.locator('#monitor-usageTotalsConcurrency').inputValue()==='11','cancel persisted reset');
     await modal.getByRole('button',{name:'取消',exact:true}).click();
   });

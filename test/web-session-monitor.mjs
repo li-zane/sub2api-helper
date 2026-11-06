@@ -51,5 +51,9 @@ try {
   monitor.start(); await new Promise(r => setTimeout(r, 40)); await monitor.stop();
   assert(calls > before, "background timer checks without a browser");
   const last = calls; await new Promise(r => setTimeout(r, 30)); assert.equal(calls, last);
+  monitor = new WebSessionMonitor(options);
+  action = async () => ({ planType: "free", expiresAt: new Date(now + 5 * 60_000).toISOString() });
+  await monitor.run({ force: true });
+  assert.equal(Date.parse(monitor.snapshot().accounts[job.email].nextCheckAt), now + 3 * 60_000, "renewal should precede known session expiry by two minutes");
   console.log("WEB_SESSION_MONITOR_UNIT_PASS defaults-off; live serial timer; busy/logout skip; transient failure separation; persistent snapshots/cooldown; restart/disable/shutdown");
 } finally { await monitor.stop(); await fs.rm(root, { recursive: true, force: true }); }

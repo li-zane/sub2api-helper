@@ -12,6 +12,7 @@ import {
 } from "./tls-transport.mjs";
 import { normalizeCodexAuthMode, generateSub2ApiOAuth, exchangeSub2ApiOAuth, refreshSub2ApiOAuth, sub2ApiOAuthIdentity } from "./sub2api-oauth.mjs";
 import { getAccountBrowserIdentity } from "./account-browser-identity.mjs";
+import { recordCredentialHistory, writePrivateJsonAtomic } from "./account-history.mjs";
 import { readAccountWebSession, saveProtocolWebSession, normalizeHelperLoginProxy } from "./account-web-session.mjs";
 import { uniqueWorkspaceAccounts, isUsableWorkspaceAccount, isTeamWorkspaceAccount, webTokenWorkspaceId, workspaceProviderCode, isDeactivatedWorkspaceError } from "./workspace-accounts.mjs";
 
@@ -415,6 +416,10 @@ async function run() {
       return;
     }
     await prepareLoginProxy(`${chatgptBase}/`);
+    if (args.replacePassword) {
+      await runPasswordReplacement({ args, transport, chatgptBase, authBase, webSessionPath });
+      return;
+    }
     if (args.addPassword) {
       const resultPath = path.resolve(args.passwordAddResult || DEFAULT_PASSWORD_ADD_RESULT);
       const newPassword = validateNewAccountPassword(process.env.CHATGPT_NEW_PASSWORD || "");
@@ -459,6 +464,7 @@ async function run() {
               rl,
               deviceId: web?.deviceId || client.jar.value("oai-did", `${chatgptBase}/`) || crypto.randomUUID(),
               password: newPassword,
+              previousPassword: process.env.CHATGPT_LOGIN_PASSWORD || "",
               resultPath,
             });
           } catch (error) {
@@ -487,6 +493,7 @@ async function run() {
             rl,
             deviceId: web.deviceId,
             password: newPassword,
+            previousPassword: process.env.CHATGPT_LOGIN_PASSWORD || "",
             resultPath,
           });
         }
@@ -609,6 +616,8 @@ async function run() {
       codexAuthMode,
       sub2ApiOAuth,
       expectedEmail: email,
+      password: process.env.CHATGPT_LOGIN_PASSWORD || "",
+      totpSecret: process.env.CHATGPT_TOTP_SECRET || "",
       rl,
       phone: args.phone,
       codexClientId: args.codexClientId || DEFAULT_CODEX_CLIENT_ID,
@@ -824,83 +833,124 @@ async function addChatgptPassword(client, {
   rl,
   deviceId,
   password,
+  previousPassword = "",
   resultPath,
 }) {
-  const { data: csrf } = await client.getJson("GET", `${chatgptBase}/api/auth/csrf`, {
-    referer: `${chatgptBase}/`,
-  });
-  if (!csrf.csrfToken) throw new Error("ADD_PASSWORD_CSRF_MISSING: ChatGPT did not return a CSRF token");
-
-  const signinUrl = `${chatgptBase}/api/auth/signin/openai?${new URLSearchParams({
-    connection: "password",
-    login_hint: email,
-    reauth: "password",
-    post_login_add_password: "true",
-    max_age: "0",
-    "ext-oai-did": deviceId,
-  })}`;
-  const { data: signin } = await client.getJson("POST", signinUrl, {
-    origin: chatgptBase,
-    referer: `${chatgptBase}/`,
-    form: {
-      callbackUrl: `${chatgptBase}/`,
-      csrfToken: csrf.csrfToken,
-      json: "true",
-    },
-  });
-  if (!signin.url) throw new Error("ADD_PASSWORD_AUTHORIZE_URL_MISSING: signin/openai did not return a URL");
-
-  const authRequestStartedAt = new Date().toISOString();
-  const authPage = await client.follow(signin.url, { referer: `${chatgptBase}/` });
-  let passwordPageUrl = authPage.finalUrl;
-  if (isEmailVerificationPage(authPage.finalUrl)) {
-    console.log(`[email-otp-requested-at] ${authRequestStartedAt}`);
-    console.log("[3/4] Add-password email verification reached. Enter code, or type r to resend.");
-    const verified = await verifyAddPasswordEmailOtp(client, {
-      authBase,
-      rl,
-      deviceId,
-      referer: authPage.finalUrl,
+  let state = { version: 1, email, operation: "add_password", stage: "prepared", password,
+    previous_password: previousPassword, activation_succeeded: false, confirmation_succeeded: false,
+    prepared_at: new Date().toISOString() };
+  const persist = async next => {
+    state = { ...state, ...next };
+    await recordCredentialHistory(path.dirname(resultPath), { type: "password", stage: state.stage, email,
+      before: { password: previousPassword }, after: state });
+    await writePrivateJsonAtomic(resultPath, state);
+  };
+  // Preserve both values before any upstream request, including a process kill
+  // while waiting for verification or a lost password-submission response.
+  await persist({});
+  let submitted = false;
+  try {
+    const { data: csrf } = await client.getJson("GET", `${chatgptBase}/api/auth/csrf`, {
+      referer: `${chatgptBase}/`,
     });
-    passwordPageUrl = getContinueUrl(verified) || `${authBase}/reset-password/new-password`;
-    if (!isNewPasswordPage(passwordPageUrl)) {
-      throw new Error("ADD_PASSWORD_FLOW_INVALID: Email verification did not advance to the new-password page");
-    }
-    await client.follow(passwordPageUrl, { referer: authPage.finalUrl });
-  } else if (!isNewPasswordPage(authPage.finalUrl)) {
-    if (isAuthLoginPage(authPage.finalUrl)) {
-      throw new Error("ADD_PASSWORD_LOGIN_REQUIRED: Saved login session has expired");
-    }
-    let pathname = authPage.finalUrl;
-    try {
-      pathname = new URL(authPage.finalUrl).pathname;
-    } catch {}
-    throw new Error(`ADD_PASSWORD_PAGE_INVALID: Expected email verification, received ${pathname}`);
-  }
+    if (!csrf.csrfToken) throw new Error("ADD_PASSWORD_CSRF_MISSING: ChatGPT did not return a CSRF token");
 
-  console.log("[4/4] Submit the new account password");
-  const sentinelHeaders = await createSentinelHeaders(client, {
-    authBase,
-    deviceId,
-    flow: "password_reset",
-  });
-  const { data } = await authJsonStep(client, authBase, "POST", "/api/accounts/password/add", {
-    password,
-  }, {
-    referer: passwordPageUrl,
-    headers: sentinelHeaders,
-  });
-  if (data?.page?.type !== "external_url" && !getContinueUrl(data)) {
-    throw new Error("ADD_PASSWORD_RESULT_INVALID: Password submission did not complete the flow");
-  }
+    const signinUrl = `${chatgptBase}/api/auth/signin/openai?${new URLSearchParams({
+      connection: "password",
+      login_hint: email,
+      reauth: "password",
+      post_login_add_password: "true",
+      max_age: "0",
+      "ext-oai-did": deviceId,
+    })}`;
+    const { data: signin } = await client.getJson("POST", signinUrl, {
+      origin: chatgptBase,
+      referer: `${chatgptBase}/`,
+      form: {
+        callbackUrl: `${chatgptBase}/`,
+        csrfToken: csrf.csrfToken,
+        json: "true",
+      },
+    });
+    if (!signin.url) throw new Error("ADD_PASSWORD_AUTHORIZE_URL_MISSING: signin/openai did not return a URL");
+    if (new URL(signin.url).origin !== new URL(authBase).origin) {
+      throw new Error("ADD_PASSWORD_FLOW_INVALID: Reauthentication URL changed origin");
+    }
 
-  await writePrivateJson(resultPath, {
-    version: 1,
-    email,
-    password,
-    added_at: new Date().toISOString(),
-  });
-  console.log("[ok] Account password added and saved securely");
+    const authRequestStartedAt = new Date().toISOString();
+    const authPage = await client.follow(signin.url, { referer: `${chatgptBase}/` });
+    let passwordPageUrl = authPage.finalUrl;
+    if (isEmailVerificationPage(authPage.finalUrl)) {
+      console.log(`[email-otp-requested-at] ${authRequestStartedAt}`);
+      console.log("[3/4] Add-password email verification reached. Enter code, or type r to resend.");
+      const verified = await verifyAddPasswordEmailOtp(client, {
+        authBase,
+        rl,
+        deviceId,
+        referer: authPage.finalUrl,
+      });
+      passwordPageUrl = getContinueUrl(verified) || `${authBase}/reset-password/new-password`;
+      passwordPageUrl = new URL(passwordPageUrl, authBase).href;
+      if (!isNewPasswordPage(passwordPageUrl) || new URL(passwordPageUrl).origin !== new URL(authBase).origin) {
+        throw new Error("ADD_PASSWORD_FLOW_INVALID: Email verification did not advance to the new-password page");
+      }
+      await client.follow(passwordPageUrl, { referer: authPage.finalUrl });
+    } else if (!isNewPasswordPage(authPage.finalUrl)) {
+      if (isAuthLoginPage(authPage.finalUrl)) {
+        throw new Error("ADD_PASSWORD_LOGIN_REQUIRED: Saved login session has expired");
+      }
+      let pathname = authPage.finalUrl;
+      try {
+        pathname = new URL(authPage.finalUrl).pathname;
+      } catch {}
+      throw new Error(`ADD_PASSWORD_PAGE_INVALID: Expected email verification, received ${pathname}`);
+    }
+    if (new URL(passwordPageUrl).origin !== new URL(authBase).origin) {
+      throw new Error("ADD_PASSWORD_FLOW_INVALID: New-password page changed origin");
+    }
+
+    console.log("[4/4] Submit the new account password");
+    await persist({ stage: "submission_pending" });
+    const sentinelHeaders = await createSentinelHeaders(client, {
+      authBase,
+      deviceId,
+      flow: "password_reset",
+    });
+    submitted = true;
+    const { data } = await authJsonStep(client, authBase, "POST", "/api/accounts/password/add", {
+      password,
+    }, {
+      referer: passwordPageUrl,
+      headers: sentinelHeaders,
+    });
+    if (!isPasswordMutationComplete(data, { chatgptBase, authBase })) {
+      throw new Error("ADD_PASSWORD_RESULT_INVALID: Password submission did not complete the flow");
+    }
+
+    await persist({ stage: "confirmed", activation_succeeded: true, confirmation_succeeded: true,
+      added_at: new Date().toISOString() });
+    console.log("[ok] Account password added and saved securely");
+    return state;
+  } catch (error) {
+    if (!state.activation_succeeded) await persist({ stage: submitted ? "submission_unconfirmed" : "verification_failed" });
+    if (submitted) {
+      throw new Error("ADD_PASSWORD_SUBMISSION_UNCONFIRMED: Password addition was submitted but final completion or persistence was not verified; original and candidate values are retained in private history");
+    }
+    let message = String(error?.message || "ADD_PASSWORD_FAILED");
+    for (const secret of [password, previousPassword]) if (secret) message = message.replaceAll(secret, "<redacted>");
+    throw Object.assign(new Error(message), { code: error?.code, remoteStatus: error?.remoteStatus, status: error?.status });
+  }
+}
+
+function isPasswordMutationComplete(data, { chatgptBase, authBase }) {
+  if (data?.error || data?.success === false) return false;
+  const next = getContinueUrl(data);
+  if (!next) return false;
+  try {
+    const target = new URL(next, authBase);
+    return (target.origin === new URL(authBase).origin && target.pathname === "/reset-password/success")
+      || (data?.page?.type === "external_url" && target.origin === new URL(chatgptBase).origin);
+  } catch { return false; }
 }
 
 async function verifyAddPasswordEmailOtp(client, { authBase, rl, deviceId, referer }) {
@@ -923,6 +973,121 @@ async function verifyAddPasswordEmailOtp(client, { authBase, rl, deviceId, refer
       if (!isRejectedEmailOtpError(error)) throw error;
       console.log("[email-otp-rejected] 邮箱验证码错误，请重新输入，或输入 r 重新发送。");
     }
+  }
+}
+
+async function runPasswordReplacement({ args, transport, chatgptBase, authBase, webSessionPath }) {
+  const email = String(args.email || "").trim().toLowerCase();
+  if (!email) throw new Error("PASSWORD_REPLACE_EMAIL_REQUIRED: An account email is required");
+  const password = validateNewAccountPassword(process.env.CHATGPT_NEW_PASSWORD || "");
+  const previousPassword = process.env.CHATGPT_LOGIN_PASSWORD || "";
+  if (previousPassword && password === previousPassword) throw new Error("PASSWORD_REPLACE_REUSED: The replacement must differ from the saved password");
+  const resultPath = path.resolve(args.passwordAddResult || DEFAULT_PASSWORD_ADD_RESULT);
+  const rl = readline.createInterface({ input, output });
+  try {
+    const previous = await reuseSavedWebLogin({ file: webSessionPath, email, transport, chatgptBase, verbose: args.verbose });
+    let client = previous?.client, web = previous?.web;
+    if (previous?.reused) console.log("[password-replace] Reused saved Web session; account login skipped.");
+    else {
+      client ||= new ProtocolClient({ verbose: args.verbose, transport });
+      console.log("[password-replace] Verify the account before replacing its password.");
+      web = await loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password: previousPassword,
+        totpSecret: process.env.CHATGPT_TOTP_SECRET || "" });
+    }
+    await replaceChatgptPassword(client, { chatgptBase, authBase, email, rl,
+      deviceId: client.browserIdentity?.deviceId || web?.deviceId, password, previousPassword,
+      totpSecret: process.env.CHATGPT_TOTP_SECRET || "", resultPath });
+    // Changing a password can affect browser sessions. A successful password
+    // mutation must still be saved even if the new cookie jar cannot be read;
+    // never replace the retained Web file with an unverified jar.
+    try {
+      const { data } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
+      const token = data.accessToken || data.access_token;
+      if (String(data.user?.email || "").toLowerCase() !== email || typeof token !== "string" || !token) throw new Error("Web identity not confirmed");
+      await saveProtocolWebSession(webSessionPath, client, web, { accessToken: token, expiresAt: data.expires || null });
+      console.log(`[ok] Saved web session: ${webSessionPath}`);
+    } catch {
+      console.log("[password-replace] Password changed; retained Web credential file was not replaced by an unverified session.");
+    }
+  } finally { rl.close(); }
+}
+
+// Mirrors the official Settings password-reset entry and the auth new-password
+// page: post_login_password_reset=true -> /api/accounts/password/reset.
+// Reauthentication/MFA is honored; an existing Web session is not proof that
+// this sensitive operation has already passed recent authentication.
+async function replaceChatgptPassword(client, { chatgptBase, authBase, email, rl, deviceId, password,
+  previousPassword = "", totpSecret = "", resultPath }) {
+  let state = { version: 1, email, operation: "replace_password", stage: "prepared", password,
+    previous_password: previousPassword, activation_succeeded: false, confirmation_succeeded: false,
+    prepared_at: new Date().toISOString() };
+  const persist = async next => {
+    state = { ...state, ...next };
+    await recordCredentialHistory(path.dirname(resultPath), { type: "password", stage: state.stage, email,
+      before: { password: previousPassword }, after: state });
+    await writePrivateJsonAtomic(resultPath, state);
+  };
+  await persist({});
+  let submitted = false;
+  try {
+    const { data: csrf } = await client.getJson("GET", `${chatgptBase}/api/auth/csrf`, { referer: `${chatgptBase}/` });
+    if (!csrf.csrfToken) throw new Error("PASSWORD_REPLACE_CSRF_MISSING: ChatGPT did not return a CSRF token");
+    const signinUrl = `${chatgptBase}/api/auth/signin/openai?${new URLSearchParams({ connection: "password", login_hint: email,
+      reauth: "password", post_login_password_reset: "true", max_age: "0", "ext-oai-did": deviceId || "" })}`;
+    const { data: signin } = await client.getJson("POST", signinUrl, { origin: chatgptBase, referer: `${chatgptBase}/`,
+      form: { callbackUrl: `${chatgptBase}/`, csrfToken: csrf.csrfToken, json: "true" } });
+    if (!signin.url) throw new Error("PASSWORD_REPLACE_AUTHORIZE_URL_MISSING: No reauthentication URL was returned");
+    if (new URL(signin.url).origin !== new URL(authBase).origin) throw new Error("PASSWORD_REPLACE_FLOW_INVALID: Reauthentication URL changed origin");
+    let current = await client.follow(signin.url, { referer: `${chatgptBase}/` });
+    let ready = false;
+    for (let step = 0; step < 6; step++) {
+      if (isNewPasswordPage(current.finalUrl)) { ready = true; break; }
+      let payload;
+      if (isPasswordLoginPage(current.finalUrl)) {
+        console.log("[password-replace] Recent authentication requires the current account password.");
+        payload = await verifyPassword(client, { authBase, rl, deviceId, password: previousPassword, referer: current.finalUrl });
+      } else if (isEmailVerificationPage(current.finalUrl)) {
+        console.log(`[email-otp-requested-at] ${new Date().toISOString()}`);
+        console.log("[password-replace] Email verification reached before password replacement.");
+        payload = await verifyAddPasswordEmailOtp(client, { authBase, rl, deviceId, referer: current.finalUrl });
+      } else {
+        throw new Error("PASSWORD_REPLACE_RECENT_AUTH_REQUIRED: Reauthentication did not reach the verified new-password page");
+      }
+      payload = await completeTotpMfaIfNeeded(client, { authBase, rl, deviceId, payload, totpSecret, referer: current.finalUrl });
+      const next = getContinueUrl(payload);
+      if (!next || new URL(next, authBase).origin !== new URL(authBase).origin) {
+        throw new Error("PASSWORD_REPLACE_FLOW_INVALID: Verification did not return an account-authentication step");
+      }
+      current = await client.follow(new URL(next, authBase).href, { referer: current.finalUrl });
+    }
+    if (!ready || new URL(current.finalUrl).origin !== new URL(authBase).origin) {
+      throw new Error("PASSWORD_REPLACE_FLOW_INVALID: Verified new-password page was not reached");
+    }
+    await persist({ stage: "submission_pending" });
+    const sentinelHeaders = await createSentinelHeaders(client, { authBase, deviceId, flow: "password_reset" });
+    submitted = true;
+    const { data } = await authJsonStep(client, authBase, "POST", "/api/accounts/password/reset", { password }, {
+      referer: current.finalUrl, headers: sentinelHeaders,
+    });
+    if (!isPasswordMutationComplete(data, { chatgptBase, authBase })) {
+      throw new Error("PASSWORD_REPLACE_UNCONFIRMED: Password endpoint did not confirm flow completion");
+    }
+    const at = new Date().toISOString();
+    await persist({ stage: "confirmed", activation_succeeded: true, confirmation_succeeded: true, changed_at: at, added_at: at });
+    console.log("[ok] Account password changed and saved securely");
+    return state;
+  } catch (error) {
+    // A lost response after submission is ambiguous, not evidence that the old
+    // password still works. Keep both values without claiming activation.
+    if (!state.activation_succeeded) await persist({ stage: submitted ? "submission_unconfirmed" : "verification_failed" });
+    if (submitted) {
+      // Do not surface a transport retry marker after a potentially accepted
+      // credential mutation: a generic proxy restart could submit it twice.
+      throw new Error("PASSWORD_REPLACE_SUBMISSION_UNCONFIRMED: Password change was submitted but final completion or persistence was not verified; original and candidate values are retained in private history");
+    }
+    let message = String(error?.message || "PASSWORD_REPLACE_FAILED");
+    for (const secret of [password, previousPassword]) if (secret) message = message.replaceAll(secret, "<redacted>");
+    throw Object.assign(new Error(message), { code: error?.code, remoteStatus: error?.remoteStatus, status: error?.status });
   }
 }
 
@@ -1058,9 +1223,9 @@ async function setupChatgptTotp(
 
     const { data: afterDisable } = await getChatgptMfaInfo(client, infoUrl, mfaContext, { raw: true });
     if (hasEnabledTotp(afterDisable)) {
-      rotationState = { ...rotationState, stage: "disable_unconfirmed" };
+      rotationState = { ...rotationState, stage: "disable_unconfirmed", remote_disabled: false, disable_uncertain: true };
       await writePrivateJson(resultPath, rotationState);
-      throw new Error("TOTP_REPLACE_DISABLE_UNCONFIRMED: mfa_info still reports the previous TOTP factor");
+      throw new Error("TOTP_REPLACE_DISABLE_UNCONFIRMED: mfa_info still reports an enabled TOTP factor; replacement has not started");
     }
   } else if (canResumeDisabledRotation) {
     rotationState = {
@@ -1203,6 +1368,9 @@ async function disableChatgptTotp(client, chatgptBase, context, factorId) {
     json: { factor_id: factorId },
   });
   assertOk(result, "POST /backend-api/accounts/mfa/user/disable_in_house");
+  let data;
+  try { data = JSON.parse(result.text); } catch {}
+  if (result.res.status !== 204 && data?.success !== true) throw new Error("TOTP_REPLACE_DISABLE_REJECTED: disable response did not confirm success");
 }
 
 function chatgptMfaHeaders({ chatgptBase, accessToken, deviceId }, targetPath) {
@@ -1863,6 +2031,7 @@ async function runCodexOauth(client, options) {
 async function followCodexAuthorization(client, options, authUrl, session) {
   const { state } = session;
 
+  const requestedAt = new Date().toISOString();
   const authorized = await client.follow(authUrl);
   if (isLocalCallback(authorized.finalUrl)) {
     validateCodexCallback(authorized.finalUrl, { redirectUri: options.codexRedirectUri, expectedState: state });
@@ -1870,18 +2039,21 @@ async function followCodexAuthorization(client, options, authUrl, session) {
     await options.saveCheckpoint?.("callback_ready", { oauth: result });
     return result;
   }
+  if (isPhoneBindingUrl(authorized.finalUrl) && new URL(authorized.finalUrl).origin === new URL(options.authBase).origin) {
+    return continueSelectedCodexAuthorization(client, options,
+      { page: { type: "add_phone" }, continue_url: authorized.finalUrl },
+      { ...session, state, redirectUri: options.codexRedirectUri });
+  }
 
+  if (isAuthLoginPage(authorized.finalUrl)) {
+    const current = await continueCodexLogin(client, options, session, { url: authorized.finalUrl, emailOtpRequestedAt: requestedAt });
+    return continueSelectedCodexAuthorization(client, options, current, { ...session, state, redirectUri: options.codexRedirectUri });
+  }
   const html = authorized.last?.text || "";
   const sessionId = extractFirstSessionId(html);
   if (!sessionId) {
-    if (isAuthLoginPage(authorized.finalUrl)) {
-      throw new Error(
-        "CODEX_AUTH_LOGIN_REQUIRED: Codex authorization returned to the login page because the ChatGPT web session is missing or expired.",
-      );
-    }
     throw new Error(
-      "SESSION_SELECTION_INVALID: Could not find a us_ account session on choose-account page. " +
-        "The authorization page may require a browser security check.",
+      "CODEX_AUTH_PAGE_UNSUPPORTED: Codex 授权页未返回可选账号；Web 会话状态保持不变，请检查授权反馈。",
     );
   }
   if (options.debugAuth || client.verbose) {
@@ -1891,7 +2063,6 @@ async function followCodexAuthorization(client, options, authUrl, session) {
   const { data: selected } = await authJsonStep(client, options.authBase, "POST", "/api/accounts/session/select", {
     session_id: sessionId,
   }, { referer: `${options.authBase}/choose-an-account` });
-  let current = selected;
   const addPhoneUrl = getContinueUrl(selected);
   const oauth = { ...session, state, sessionId, addPhoneUrl, redirectUri: options.codexRedirectUri };
   if (options.debugAuth) {
@@ -1899,9 +2070,15 @@ async function followCodexAuthorization(client, options, authUrl, session) {
     console.log(`[debug] session/select continue_url: ${addPhoneUrl || "<none>"}`);
   }
 
+  return continueSelectedCodexAuthorization(client, options, selected, oauth);
+}
+
+async function continueSelectedCodexAuthorization(client, options, initial, oauth) {
+  let current = initial;
   if (isPhoneBindingRequired(current)) {
+    oauth = { ...oauth, addPhoneUrl: getContinueUrl(current) || `${options.authBase}/add-phone` };
     await options.saveCheckpoint?.("phone_required", { oauth });
-    current = await bindPhoneIfNeeded(client, { ...options, checkpointOauth: oauth }, current, addPhoneUrl);
+    current = await bindPhoneIfNeeded(client, { ...options, checkpointOauth: oauth }, current, oauth.addPhoneUrl);
   } else if (hasWorkspace(current)) {
     console.log("[4/5] Existing workspace/session selected; phone binding was not requested");
   } else if (isLocalCallback(getContinueUrl(current))) {
@@ -1912,6 +2089,78 @@ async function followCodexAuthorization(client, options, authUrl, session) {
 
   await options.saveCheckpoint?.("oauth_continue", { oauth: { ...oauth, current } });
   return finishCodexOauth(client, options, current, oauth);
+}
+
+// ChatGPT Web and the OAuth authorization server have independent login state.
+// Complete the latter in its original state/PKCE context instead of discarding
+// a verified Web session and starting a second ChatGPT login.
+async function continueCodexLogin(client, options, oauth, login) {
+  console.log("[codex-auth-login] Codex requires its own sign-in; preserving the saved Web session.");
+  let current = login.payload || null;
+  let url = login.url;
+  let emailOtpRequestedAt = login.emailOtpRequestedAt || new Date().toISOString();
+  const authOrigin = new URL(options.authBase).origin;
+  for (let step = 0; step < 8; step++) {
+    const target = new URL(url, options.authBase);
+    if (isLocalCallback(target.href)) {
+      validateCodexCallback(target.href, { redirectUri: options.codexRedirectUri, expectedState: oauth.state });
+      return { continue_url: target.href };
+    }
+    if (target.origin !== authOrigin) throw new Error("CODEX_AUTH_ORIGIN_INVALID: Codex 验证页面来源不匹配");
+    if (current && (isPhoneBindingRequired(current) || hasWorkspace(current))) return current;
+    await options.saveCheckpoint?.("oauth_login", { oauth: { ...oauth, login: { url: target.href, payload: current, emailOtpRequestedAt } } });
+    const stepStartedAt = new Date().toISOString();
+    try {
+      if (target.pathname === "/log-in" || target.pathname === "/log-in-or-create-account") {
+        if (!options.expectedEmail) throw new Error("CODEX_AUTH_EMAIL_REQUIRED: Codex 登录缺少账号邮箱");
+        const headers = await createSentinelHeaders(client, { authBase: options.authBase, deviceId: client.browserIdentity?.deviceId || client.jar.value("oai-did", options.authBase), flow: "authorize_continue" });
+        ({ data: current } = await authJsonStep(client, options.authBase, "POST", "/api/accounts/authorize/continue", {
+          username: { kind: "email", value: options.expectedEmail },
+        }, { referer: target.href, headers }));
+      } else if (isPasswordLoginPage(target.href)) {
+        console.log("[3/5] Password login page reached.");
+        current = await verifyPassword(client, { authBase: options.authBase, rl: options.rl,
+          deviceId: client.browserIdentity?.deviceId, password: options.password, referer: target.href });
+      } else if (isEmailVerificationPage(target.href)) {
+        console.log(`[email-otp-requested-at] ${emailOtpRequestedAt}`);
+        console.log("[3/5] Email OTP page reached. Enter code, or type r to resend.");
+        current = await verifyEmailOtp(client, { authBase: options.authBase, rl: options.rl,
+          deviceId: client.browserIdentity?.deviceId, referer: target.href });
+      } else if (!isMfaChallengePayload(current)) {
+        throw new Error(`CODEX_AUTH_PAGE_UNSUPPORTED: Codex 登录需要处理 ${target.pathname}；Web 会话状态保持不变`);
+      }
+      current = await completeTotpMfaIfNeeded(client, { authBase: options.authBase, rl: options.rl,
+        deviceId: client.browserIdentity?.deviceId, payload: current, totpSecret: options.totpSecret, referer: target.href });
+      if (!isEmailVerificationPage(target.href)) emailOtpRequestedAt = stepStartedAt;
+    } catch (error) {
+      if (/invalid_state|invalid_auth_step|no longer valid|session.+(?:invalid|expired)/i.test(error.message || "")) {
+        // The next explicit retry should generate a new OAuth state, not
+        // resume an already-rejected one or discard the separate Web login.
+        await options.saveCheckpoint?.("email_verified", {});
+        throw new Error("CODEX_AUTH_RESTART_REQUIRED: 本次 Codex 授权上下文已失效，请重新开始授权；这不表示 Web 会话失效");
+      }
+      throw error;
+    }
+    url = getContinueUrl(current);
+    if (!url) throw new Error("CODEX_AUTH_CONTINUATION_MISSING: Codex 验证未返回下一步；Web 会话状态保持不变");
+    // Do not send credentials to a continuation merely because the provider
+    // returned it: validate the origin before both navigation and submission.
+    const next = new URL(url, options.authBase);
+    if (!isLocalCallback(next.href) && next.origin !== authOrigin) throw new Error("CODEX_AUTH_ORIGIN_INVALID: Codex 下一步页面来源不匹配");
+    url = next.href;
+    if (isPhoneBindingRequired(current) || hasWorkspace(current) || isLocalCallback(url)) continue;
+    const opened = await client.follow(url, { referer: target.href });
+    url = opened.finalUrl;
+    if (new URL(url).origin !== authOrigin && !isLocalCallback(url)) throw new Error("CODEX_AUTH_ORIGIN_INVALID: Codex 验证跳转来源不匹配");
+    const selectedSessionId = extractFirstSessionId(opened.last?.text || "");
+    if (selectedSessionId && /\/(?:choose-an-account|choose-account)$/.test(new URL(url).pathname)) {
+      const selected = await authJsonStep(client, options.authBase, "POST", "/api/accounts/session/select", { session_id: selectedSessionId }, { referer: url });
+      current = selected.data;
+      url = getContinueUrl(current);
+      if (!url) throw new Error("CODEX_AUTH_CONTINUATION_MISSING: Codex 账号选择未返回下一步");
+    }
+  }
+  throw new Error("CODEX_AUTH_STEP_LIMIT: Codex 验证步骤重复，已停止自动重试；Web 会话状态保持不变");
 }
 
 async function resumeCodexOauth(client, options, checkpoint) {
@@ -1933,6 +2182,12 @@ async function resumeCodexOauth(client, options, checkpoint) {
     oauth.redirectUri = isLocalCallback(oauth.callbackUrl)
       ? new URL(oauth.callbackUrl).origin + new URL(oauth.callbackUrl).pathname
       : options.legacyCodexRedirectUri || "http://localhost:1455/auth/callback";
+  }
+  if (checkpoint.stage === "oauth_login" && oauth.login) {
+    const { login, ...session } = oauth;
+    const resumedOptions = { ...options, codexRedirectUri: oauth.redirectUri };
+    const current = await continueCodexLogin(client, resumedOptions, session, login);
+    return continueSelectedCodexAuthorization(client, resumedOptions, current, session);
   }
   if (checkpoint.stage === "callback_ready" && oauth.callbackUrl) {
     const redirectUri = oauth.redirectUri;
@@ -2700,8 +2955,11 @@ async function readProtocolCheckpoint(checkpointPath) {
 }
 
 async function writePrivateJson(filePath, data) {
-  await writeJsonAtomic(filePath, data, { mode: 0o600 });
-  await fs.chmod(filePath, 0o600);
+  if (["replace_totp", "setup_totp"].includes(data.operation)) {
+    await recordCredentialHistory(path.dirname(filePath), { type: "2fa", stage: data.stage,
+      email: data.email, before: { totpSecret: process.env.CHATGPT_TOTP_SECRET || "" }, after: data });
+  }
+  await writePrivateJsonAtomic(filePath, data);
 }
 
 async function readTotpRotationResult(filePath) {
@@ -2714,6 +2972,15 @@ async function readTotpRotationResult(filePath) {
 }
 
 async function writeJsonAtomic(filePath, data, options = {}) {
+  if (data?.type === "sub2api-data" && Array.isArray(data.accounts)) {
+    let previous = null;
+    try { previous = JSON.parse(await fs.readFile(filePath, "utf8")); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    await recordCredentialHistory(path.dirname(filePath), { type: "codex_oauth", stage: "prepared",
+      email: data.accounts[0]?.credentials?.email, before: previous, after: data });
+    await writePrivateJsonAtomic(filePath, data);
+    return;
+  }
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
@@ -2739,7 +3006,7 @@ async function removeProtocolCheckpoint(checkpointPath) {
 }
 
 function isExpiredCheckpointError(error) {
-  return /WEB_LOGIN_TOKEN_REVOKED|WEB_LOGIN_WORKSPACE_(?:UNAVAILABLE|MISMATCH)|CHECKPOINT_INVALID|SESSION_SELECTION_INVALID|CODEX_AUTH_LOGIN_REQUIRED|TOTP_ACCESS_TOKEN_MISSING|invalid_state|no longer valid|session.+(?:invalid|expired)|expired.+session/i.test(
+  return /WEB_LOGIN_TOKEN_REVOKED|WEB_LOGIN_WORKSPACE_(?:UNAVAILABLE|MISMATCH)|CHECKPOINT_INVALID|SESSION_SELECTION_INVALID|TOTP_ACCESS_TOKEN_MISSING|invalid_state|no longer valid|session.+(?:invalid|expired)|expired.+session/i.test(
     String(error?.message || ""),
   );
 }
@@ -2783,6 +3050,7 @@ function parseArgs(argv) {
     else if (item === "--setup-totp") args.setupTotp = true;
     else if (item === "--replace-totp") args.replaceTotp = true;
     else if (item === "--add-password") args.addPassword = true;
+    else if (item === "--replace-password") args.replacePassword = true;
     else if (item.startsWith("--password-add-result=")) args.passwordAddResult = item.slice("--password-add-result=".length);
     else if (item === "--password-add-result") args.passwordAddResult = argv[++i];
     else if (item.startsWith("--totp-result=")) args.totpResult = item.slice("--totp-result=".length);
@@ -2919,7 +3187,7 @@ function isLocalCallback(url) {
 
 function isAuthLoginPage(value) {
   try {
-    return ["/log-in", "/log-in/password", "/log-in-or-create-account"].includes(new URL(value).pathname);
+    return ["/log-in", "/log-in/password", "/log-in-or-create-account", "/email-verification"].includes(new URL(value).pathname);
   } catch {
     return false;
   }
@@ -2937,6 +3205,7 @@ Options:
   --replace-totp                  Disable the current TOTP factor, enroll a new one, and activate it.
   --totp-result <file>            Private 2FA setup result. Default: ${DEFAULT_TOTP_RESULT}
   --add-password                  Sign in and add a password to a passwordless account.
+  --replace-password              Reauthenticate and replace the account password; skip Codex OAuth.
   --password-add-result <file>    Private add-password result. Default: ${DEFAULT_PASSWORD_ADD_RESULT}
   --out <file>                    Output JSON path. Default: ${DEFAULT_OUT}
   --sub2api-out <file>            sub2api import JSON path. Default: ${DEFAULT_SUB2API_OUT}
@@ -2987,6 +3256,7 @@ export {
   CookieJar, ProtocolClient, browserRequestContext, loginChatgptWeb, reuseSavedWebLogin, runCodexOauth, resumeCodexOauth,
   validateCodexCallback, exchangeOAuthCode, refreshOAuthToken,
   buildSub2apiOauthExport, refreshSub2apiOauthExport,
+  addChatgptPassword, replaceChatgptPassword,
   DEFAULT_CODEX_CLIENT_ID, DEFAULT_CODEX_REDIRECT_URI, CODEX_OAUTH_SCOPE,
 };
 

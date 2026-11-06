@@ -113,6 +113,10 @@ try {
   const passwordAddResult = JSON.parse(await fs.readFile(passwordAddResultPath, "utf8"));
   assert.equal(passwordAddResult.email, "add-password@example.com");
   assert.equal(passwordAddResult.password, newPassword);
+  assert.equal(passwordAddResult.operation, "add_password");
+  assert.equal(passwordAddResult.stage, "confirmed");
+  assert.equal(passwordAddResult.activation_succeeded, true);
+  assert.equal(passwordAddResult.confirmation_succeeded, true);
 
   const passwordCheckpointPath = path.join(tempRoot, "password-add-checkpoint.json");
   const checkpointPasswordResultPath = path.join(tempRoot, "checkpoint-password-add-result.json");

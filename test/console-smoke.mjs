@@ -19,6 +19,7 @@ let uploadedAccounts = [];
 let batchUploadCount = 0;
 const uploadedBatches = [];
 let remoteErrorAccounts = [];
+let nextCreatedAccountId = 10_000;
 const acceptedAdminKeys = new Set(["test-admin-key", "rotated-admin-key"]);
 let openaiGroupsMode = "normal";
 let compositeGroupsMode = "normal";
@@ -87,8 +88,17 @@ const sub2api = http.createServer(async (req, res) => {
     batchUploadCount += 1;
     uploadedAccounts = body.accounts || [];
     uploadedBatches.push(uploadedAccounts);
+    // A successful create must become observable from both list and detail,
+    // just as the real pool does. Upload confirmation now verifies these rows
+    // rather than trusting an aggregate success counter alone.
+    const created = uploadedAccounts.map((account) => ({
+      ...account,
+      id: nextCreatedAccountId++,
+      created_at: new Date().toISOString(),
+    }));
+    remoteErrorAccounts.push(...created);
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ success: uploadedAccounts.length, failed: 0, results: [] }));
+    res.end(JSON.stringify({ success: created.length, failed: 0, accounts: created, results: [] }));
     return;
   }
   if (req.method === "GET" && req.url?.startsWith("/api/v1/admin/accounts?")) {
@@ -891,6 +901,18 @@ try {
   assert.equal(uploadedAccounts[0].extra.openai_oauth_responses_websockets_v2_enabled, true);
   assert.deepEqual(uploadedAccounts[0].credentials.model_mapping, { "gpt-5": "gpt-5", "gpt-5-mini": "gpt-5-mini" });
   assert.equal(uploadedAccounts[0].credentials.email, "account-profile@example.com");
+  const createdProfileAccount = remoteErrorAccounts.find((account) => account.credentials?.email === profileJob.email);
+  assert.ok(createdProfileAccount?.id, "successful upload must create a readable remote row");
+  const createdProfileDetail = await fetch(`${sub2apiUrl}/api/v1/admin/accounts/${createdProfileAccount.id}`, {
+    headers: { "x-api-key": "test-admin-key" },
+  });
+  assert.equal(createdProfileDetail.status, 200);
+  assert.deepEqual((await createdProfileDetail.json()).data, createdProfileAccount);
+  const createdProfileListing = await fetch(`${sub2apiUrl}/api/v1/admin/accounts?page=1&page_size=100`, {
+    headers: { "x-api-key": "test-admin-key" },
+  });
+  assert.equal(createdProfileListing.status, 200);
+  assert.deepEqual((await createdProfileListing.json()).data.items.find((account) => account.id === createdProfileAccount.id), createdProfileAccount);
 
   const profileSettingsResponse = await fetch(`${baseUrl}/api/sub2api/settings`, {
     method: "POST",
@@ -970,6 +992,7 @@ try {
   const activeProfileSaved = JSON.parse(activeProfileSaveText);
   assert.equal(activeProfileSaved.activeProfileId, "free-plan");
   assert.deepEqual(activeProfileSaved.config.groupIds, [71]);
+  const batchCountBeforeProfileUpdate = batchUploadCount;
   const profileUploadResponse = await fetch(`${baseUrl}/api/sub2api/upload`, {
     method: "POST",
     headers,
@@ -987,8 +1010,10 @@ try {
     }),
   });
   assert.equal(profileUploadResponse.status, 200, await profileUploadResponse.text());
-  assert.deepEqual(uploadedAccounts[0].group_ids, [71], "绑定的订阅方案应覆盖默认方案号池");
-  assert.equal(uploadedAccounts[0].extra.codex_fingerprint_mode, "off");
+  assert.equal(batchUploadCount, batchCountBeforeProfileUpdate, "已创建账号再次上传应更新同一记录，不能重复创建");
+  assert.deepEqual(updatedRemoteAccounts.get(createdProfileAccount.id).group_ids, [71], "绑定的订阅方案应覆盖默认方案号池");
+  assert.equal(updatedRemoteAccounts.get(createdProfileAccount.id).extra.codex_fingerprint_mode, "off");
+  assert.equal(remoteErrorAccounts.filter((account) => account.credentials?.email === profileJob.email).length, 1);
 
   const restoreSettingsResponse = await fetch(`${baseUrl}/api/sub2api/settings`, {
     method: "POST",

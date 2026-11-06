@@ -200,8 +200,11 @@ async (page) => {
       await row().getByRole("checkbox").check();
       await page.locator(".bulk-actions").getByRole("button", { name: "重新授权", exact: true }).click();
       await page.waitForSelector(".workflow-busy");
-      for (const name of ["重新授权", "重新开始授权", "设置 2FA", "添加密码", "检测 Web 会话"]) {
+      for (const name of ["重新授权", "重新开始授权", "检测 Web 会话"]) {
         check(await row().getByRole("button", { name, exact: true }).isDisabled(), name + " enabled while batch busy");
+      }
+      for (const name of ["设置 2FA", "添加密码"]) {
+        check(await row().getByRole("button", { name, exact: true }).count() === 0, name + " still appears in the row action column");
       }
       for (const name of ["查看协议日志", "查看或修改账号凭据", "查看已登录设备和会话", "查看并切换工作空间", "下载导入文件"]) {
         check(await row().getByRole("button", { name, exact: true }).isEnabled(), name + " unnecessarily disabled while batch busy");

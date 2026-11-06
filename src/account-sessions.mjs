@@ -2,6 +2,9 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { isIP } from "node:net";
 import { CookieJar, ProtocolClient } from "./protocol-login.mjs";
+import { recordCredentialHistory } from "./account-history.mjs";
+import { normalizeSecurityState } from "./account-security.mjs";
+import path from "node:path";
 import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, setWebSessionState, attachHelperLoginProxies } from "./account-web-session.mjs";
 import { uniqueWorkspaceAccounts, webTokenWorkspaceId, workspaceProviderCode, isDeactivatedWorkspaceError } from "./workspace-accounts.mjs";
 
@@ -44,6 +47,13 @@ export async function listAccountWorkspaces(job, { forceWebRefresh = false, refr
   return normalizeAccountWorkspaces(result.data, result.session.web?.workspaceId);
 }
 
+export async function readAccountSecurityState(job) {
+  const result = await requestWithWebSession(job, "GET", "/accounts/mfa_info", undefined, { refreshOnUnauthorized: false });
+  const state = normalizeSecurityState({ ...result.data, checkedAt: new Date().toISOString() });
+  if (state.totpEnabled === null && state.passwordEnabled === null) throw new Error("SECURITY_STATE_UNAVAILABLE: 上游未返回可确认的安全状态");
+  return state;
+}
+
 // A live check, unlike inspectAccountWebSession(), which only reads a file.
 // Confirm workspace loss from a successful account listing, never from 403/5xx.
 export async function probeAccountWebSession(job) {
@@ -82,8 +92,17 @@ export async function probeAccountWebSession(job) {
   const workspaces = listing.workspaces.map(w => ({ id: w.id, name: w.name, structure: w.structure,
     planType: w.planType, current: w.current, canAccess: w.canAccess, deactivated: w.deactivated,
     availabilityReason: w.availabilityReason }));
+  let securityState, securitySyncError = null;
+  try { securityState = await readAccountSecurityState(job); }
+  catch (error) {
+    if ([error.status, error.remoteStatus].some(status => Number(status) === 401)
+      || /^SESSION_(?:TOKEN_EXPIRED|CREDENTIALS_UNAVAILABLE|WORKSPACE_UNAVAILABLE):/.test(error.message || "")
+      || /account_(?:deactivated|suspended|banned)|user_(?:deactivated|deleted)|account has been deactivated/i.test(error.message || "")) throw error;
+    securitySyncError = "安全状态未完成核对，保留上次结果";
+  }
   return {
-    devices, deviceSyncError, workspaces, currentWorkspaceId: savedId,
+    ...(securityState ? { securityState } : {}), securitySyncError,
+    devices, deviceSyncError, workspaces, currentWorkspaceId: savedId, expiresAt: session.expiresAt || null,
     planType: available ? selected.planType : null,
     repairReason: invalidTokenWorkspace ? "web_workspace_unavailable"
       : !available ? "workspace_unavailable"
@@ -494,6 +513,7 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
     });
   const client = new ProtocolClient({ jar: CookieJar.fromJSON(session.cookies), transport, browserIdentity: session.identity });
   let loggedOut = false;
+  let persistCookies = false;
   const parse = (response) => {
     try { return JSON.parse(response.text); }
     catch {
@@ -502,18 +522,18 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
     }
   };
   async function refreshWebToken() {
-    session.accessToken = null;
     const response = await client.request("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/`, timeoutMs: REQUEST_TIMEOUT_MS });
     const data = parse(response);
     const email = String(data.user?.email || "").trim().toLowerCase();
-    if (email && email !== session.email) throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: Web 会话返回了其他账号，请重新登录");
     const token = data.accessToken || data.access_token;
     if (response.res.status === 401 || (response.res.ok && (typeof token !== "string" || !token))) {
       throw new Error("SESSION_TOKEN_EXPIRED: Web 登录态已失效，请为此账号重新登录");
     }
     if (!response.res.ok) throw providerError(response.res.status, data);
+    if (!email || email !== session.email) throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: Web 会话返回了其他账号或缺少当前账号身份，请重新登录");
     session.accessToken = token;
     session.expiresAt = data.expires || null;
+    persistCookies = true;
   }
   async function send() {
     const headers = { authorization: `Bearer ${session.accessToken}`, accept: "application/json",
@@ -536,6 +556,7 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
       if (response.res.status === 401) throw new Error("SESSION_TOKEN_EXPIRED: Web 登录态已失效，请重新登录 Web");
       throw providerError(response.res.status, data);
     }
+    persistCookies = true;
     const tokenWorkspaceId = webTokenWorkspaceId(session.accessToken);
     const accounts = endpoint === "/accounts/check/v4-2023-04-27" ? normalizeAccountWorkspaces(data).workspaces : [];
     if (tokenWorkspaceId && accounts.length && !isAccountWorkspaceAvailable(accounts.find(w => w.id === tokenWorkspaceId))) {
@@ -560,9 +581,14 @@ async function performWebRequest(job, method, endpoint, jsonBody, { forceWebRefr
     }
     throw error;
   } finally {
-    session.cookies = client.jar.toJSON();
+    // Error/challenge responses can clear cookies. Only commit a jar whose
+    // identity/session (or authenticated backend response) was verified.
+    if (persistCookies) session.cookies = client.jar.toJSON();
     try {
-      if (loggedOut) { await fs.rm(webSessionPathForJob(job), { force: true }); setWebSessionState(job, "absent"); }
+      if (loggedOut) {
+        await recordCredentialHistory(path.dirname(webSessionPathForJob(job)), { type: "web_session", stage: "logged_out", email: session.email, before: session, after: null });
+        await fs.rm(webSessionPathForJob(job), { force: true }); setWebSessionState(job, "absent");
+      }
       else await writeAccountWebSession(webSessionPathForJob(job), session);
     }
     finally { if (transport) await transport.close(); }

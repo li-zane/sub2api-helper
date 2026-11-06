@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { validateAccountBrowserIdentity } from "./account-browser-identity.mjs";
 import { webTokenWorkspaceId } from "./workspace-accounts.mjs";
+import { recordCredentialHistory, writePrivateJsonAtomic } from "./account-history.mjs";
 
 export function webSessionPathForJob(job) {
   if (!job?.outputPath && !job?.webSessionPath) throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: 缺少账号会话目录");
@@ -42,14 +43,29 @@ export async function readAccountWebSession(job) {
   return session;
 }
 
-export async function writeAccountWebSession(file, session) {
-  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(temporary, `${JSON.stringify({ ...session, version: 1, updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
-    await fs.rename(temporary, file);
-    await fs.chmod(file, 0o600);
-  } finally { await fs.rm(temporary, { force: true }); }
+const sessionWrites = new Map();
+export async function writeAccountWebSession(file, session, { expectedHash } = {}) {
+  const key = path.resolve(file), next = structuredClone(session);
+  const pending = (sessionWrites.get(key) || Promise.resolve()).catch(() => {}).then(async () => {
+    let previous = null;
+    let previousBytes = null;
+    try { previousBytes = await fs.readFile(file); previous = JSON.parse(previousBytes.toString("utf8")); }
+    catch (error) {
+      if (error instanceof SyntaxError) previous = { invalidJson: await fs.readFile(file, "utf8") };
+      else if (error.code !== "ENOENT") throw error;
+    }
+    const currentHash = previousBytes ? crypto.createHash("sha256").update(previousBytes).digest("hex") : null;
+    if (expectedHash !== undefined && currentHash !== expectedHash) throw new Error("WEB_SESSION_UPDATE_CONFLICT: 原会话已被其他成功刷新更新，已保留当前会话及候选历史，请重新检测");
+    const material = value => JSON.stringify([value?.cookies, value?.accessToken, value?.expiresAt, value?.web?.workspaceId]);
+    if (material(previous) !== material(next)) {
+      await recordCredentialHistory(path.dirname(file), { type: "web_session", stage: "prepared", email: next.email,
+        file: path.basename(file), before: previous, after: next });
+    }
+    await writePrivateJsonAtomic(file, { ...next, version: 1, updatedAt: new Date().toISOString() });
+  });
+  sessionWrites.set(key, pending);
+  try { await pending; }
+  finally { if (sessionWrites.get(key) === pending) sessionWrites.delete(key); }
 }
 
 // Only a display label and stable pool ID cross into session metadata. Never
@@ -91,10 +107,12 @@ export function attachHelperLoginProxies(devices, session) {
 export async function saveProtocolWebSession(file, client, web, credentials = {}) {
   if (!client.browserIdentity) return;
   let helperDeviceProxies = [];
+  let previousCredentials = {};
   try {
     const previous = JSON.parse(await fs.readFile(file, "utf8"));
     if (previous.email === client.browserIdentity.email && previous.identity?.deviceId === client.browserIdentity.deviceId) {
       helperDeviceProxies = Array.isArray(previous.helperDeviceProxies) ? previous.helperDeviceProxies.slice(-500) : [];
+      if (previous.web?.workspaceId === web?.workspaceId) previousCredentials = previous;
     }
   } catch (error) { if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; }
   const helperLoginProxy = normalizeHelperLoginProxy(web?.helperLoginProxy);
@@ -104,7 +122,10 @@ export async function saveProtocolWebSession(file, client, web, credentials = {}
   await writeAccountWebSession(file, {
     email: client.browserIdentity.email, identity: client.browserIdentity,
     cookies: client.jar.toJSON(), web: storedWeb, helperDeviceProxies,
-    ...(credentials.accessToken ? { validation: { status: "valid", verifiedAt: new Date().toISOString() } } : {}), accessToken: credentials.accessToken || null, expiresAt: credentials.expiresAt || null,
+    ...(credentials.accessToken ? { validation: { status: "valid", verifiedAt: new Date().toISOString() } }
+      : previousCredentials.validation ? { validation: previousCredentials.validation } : {}),
+    accessToken: credentials.accessToken || previousCredentials.accessToken || null,
+    expiresAt: credentials.expiresAt || previousCredentials.expiresAt || null,
   });
 }
 

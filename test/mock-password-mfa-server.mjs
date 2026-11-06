@@ -205,6 +205,8 @@ const server = http.createServer(async (req, res) => {
       if (payload.factor_id !== replacementOldFactorId) {
         return sendJson(res, 400, { error: { message: "unexpected replacement factor" } });
       }
+      if (selectedEmail === "replace-totp-business-rejected@example.com") return sendJson(res, 200, { success: false });
+      if (selectedEmail === "replace-totp-unconfirmed@example.com") return sendJson(res, 200, { success: true });
       replacementTotpEnabled = false;
       res.writeHead(204);
       res.end();
@@ -320,6 +322,8 @@ function mfaPayload() {
 
 function isReplacementEmail() {
   return selectedEmail === "replace-totp@example.com"
+    || selectedEmail === "replace-totp-business-rejected@example.com"
+    || selectedEmail === "replace-totp-unconfirmed@example.com"
     || selectedEmail === "replace-totp-enroll-failure@example.com";
 }
 

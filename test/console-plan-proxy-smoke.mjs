@@ -34,14 +34,28 @@ const remote = http.createServer(async (req, res) => {
   if (url.pathname.startsWith("/api/v1/admin/proxies/")) return send(res, { data: proxies.find((item) => item.id === Number(url.pathname.split("/").at(-1))) });
   if (url.pathname === "/api/v1/admin/groups/all") return send(res, []);
   if (url.pathname === "/api/v1/admin/accounts" && req.method === "GET") return send(res, { data: { items: accounts, total: accounts.length, pages: 1 } });
-  if (url.pathname === "/api/v1/admin/accounts/batch") {
-    for (const account of body.accounts) accounts.push({ ...account, id: 100 + accounts.length });
-    return send(res, { success: body.accounts.length, failed: 0 });
+  if (url.pathname === "/api/v1/admin/accounts/batch" && req.method === "POST") {
+    const created = [];
+    for (const account of body.accounts) {
+      const row = { ...account, id: 100 + accounts.length };
+      accounts.push(row);
+      created.push(row);
+    }
+    return send(res, { success: created.length, failed: 0, accounts: created });
   }
   if (/\/api\/v1\/admin\/accounts\/\d+$/.test(url.pathname)) {
     const account = accounts.find((item) => item.id === Number(url.pathname.split("/").at(-1)));
-    if (account) Object.assign(account, body);
-    return send(res, { success: true });
+    if (!account) {
+      res.writeHead(404, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: "account not found" }));
+    }
+    if (req.method === "GET") return send(res, { data: account });
+    if (["PUT", "PATCH"].includes(req.method)) {
+      Object.assign(account, body);
+      return send(res, { success: true, data: account });
+    }
+    res.writeHead(405, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ error: "method not allowed" }));
   }
   return send(res, {});
 });

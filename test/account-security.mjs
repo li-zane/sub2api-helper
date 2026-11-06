@@ -1,0 +1,18 @@
+import assert from "node:assert/strict";
+import { normalizeSecurityState, mergeSecurityState, publicSecurityState } from "../src/account-security.mjs";
+const early = "2026-11-06T00:00:00Z", later = "2026-11-06T01:00:00Z";
+assert.equal(normalizeSecurityState(null).totpEnabled, null);
+assert.equal(publicSecurityState({ password: "stored", hasPasswordCredential: true, totpSecret: "stored", hasTotpCredential: true }).passwordEnabled, null);
+assert.equal(publicSecurityState({ password: "stored", hasPasswordCredential: true, totpSecret: "stored", hasTotpCredential: true }).totpEnabled, null);
+const initial = mergeSecurityState(null, { totpEnabled: true, passwordEnabled: true }, early);
+const remoteOff = mergeSecurityState(initial, { mfa_enabled_v2: false, checkedAt: later });
+assert.equal(remoteOff.totpEnabled, false); assert.equal(remoteOff.passwordEnabled, true);
+assert.equal(remoteOff.totpCheckedAt, later); assert.equal(remoteOff.passwordCheckedAt, early);
+assert.deepEqual(mergeSecurityState(remoteOff, {}, "2026-11-07T00:00:00Z"), remoteOff, "empty patch invented fresh evidence");
+const uncertain = mergeSecurityState(initial, { totpEnabled: null, totpCheckedAt: later });
+assert.equal(publicSecurityState({ securityState: uncertain, lastAuthRequirements: { mfa: true }, lastAuthAutomatedAt: early }).totpEnabled, null);
+const cleared = publicSecurityState({ securityState: initial, password: "", hasPasswordCredential: false, totpSecret: "", hasTotpCredential: false });
+assert.equal(cleared.passwordEnabled, true); assert.equal(cleared.totpEnabled, true);
+assert.equal(publicSecurityState({ passwordAddedAt: early }).passwordEnabled, true);
+assert.equal(publicSecurityState({ securityState: remoteOff, totpRotationStage: "confirmed" }).totpEnabled, false);
+console.log("ACCOUNT_SECURITY_PASS confirmed green/red; unknown not inferred from storage; local clear preserves remote facts; independent observation clocks; uncertain override; historical confirmation fallback");

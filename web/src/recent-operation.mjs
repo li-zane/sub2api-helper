@@ -1,7 +1,7 @@
 const LABELS = {
   initial_authorization: "首次授权", reauthorize: "重新授权", relogin: "重新开始授权",
   web_login: "Web 登录", automatic_relogin: "自动授权", resume: "继续授权",
-  setup_2fa: "设置 2FA", replace_2fa: "更换 2FA", add_password: "添加密码",
+  setup_2fa: "设置 2FA", replace_2fa: "更换 2FA", add_password: "添加密码", replace_password: "轮换密码",
   account_update: "更新账号资料", credential_update: "更新凭据", proxy_update: "更新代理 IP",
   cooldown: "账号冷却", workspace_switch: "切换空间",
 };
@@ -43,7 +43,7 @@ export function recentOperation(job, statusLabels = {}) {
     error = job.totpSetupError;
     if (error) { result = "失败"; tone = "error"; }
     message = error || job.prompt;
-  } else if (type === "add_password") {
+  } else if (["add_password", "replace_password"].includes(type)) {
     error = job.passwordAddError;
     if (error) { result = "失败"; tone = "error"; }
     message = error || job.prompt;

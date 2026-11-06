@@ -24,6 +24,7 @@ const accounts = [{
   credentials: { email: "existing@example.com", access_token: "old" },
   extra: { email: "existing@example.com" },
 }];
+let nextAccountId = 200;
 const accountUpdates = [];
 const oauthRequests = [];
 const protocolTrace = path.join(temp, "protocol-trace.jsonl");
@@ -53,18 +54,20 @@ const sub2 = http.createServer(async (req, res) => {
   }
   if (url.pathname === "/api/v1/admin/accounts/batch" && req.method === "POST") {
     const payload = JSON.parse(body || "{}");
-    payload.accounts.forEach((account, index) => accounts.push({ ...account, id: 200 + accounts.length + index }));
+    payload.accounts.forEach(account => accounts.push({ ...structuredClone(account), id: nextAccountId++ }));
     return send(res, 200, { success: payload.accounts.length, failed: 0 });
   }
   const accountMatch = /^\/api\/v1\/admin\/accounts\/(\d+)$/.exec(url.pathname);
-  if (accountMatch && req.method === "PUT") {
+  if (accountMatch && ["GET", "PUT"].includes(req.method)) {
     const id = Number(accountMatch[1]);
+    const index = accounts.findIndex(account => account.id === id);
+    if (index < 0) return send(res, 404, { message: "fixture account not found" });
+    if (req.method === "GET") return send(res, 200, { data: accounts[index] });
     const update = JSON.parse(body || "{}");
     if (rejectCredentialUpdates && update.credentials) return send(res, 503, { message: "fixture credential sync failure" });
     accountUpdates.push({ id, body: update });
-    const index = accounts.findIndex((account) => account.id === id);
-    if (index >= 0) accounts[index] = { ...accounts[index], ...update };
-    return send(res, 200, { success: true });
+    accounts[index] = { ...accounts[index], ...structuredClone(update) };
+    return send(res, 200, { data: accounts[index] });
   }
   return send(res, 404, { message: `Unknown Sub2API route ${req.method} ${url.pathname}` });
 });

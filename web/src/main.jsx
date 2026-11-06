@@ -7,6 +7,7 @@ import { recentOperation } from "./recent-operation.mjs";
 import { formatUsageTotal } from "./usage-totals.mjs";
 import { MONITOR_FIELDS, DEFAULT_MONITORING, normalizeMonitoring } from "./monitor-settings.mjs";
 import { normalizeTaskUploadActions, toggleTaskAutoAction } from "./task-auto-actions.mjs";
+import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes } from "./login-settings.mjs";
 import {
   Ban,
   Check,
@@ -276,6 +277,7 @@ function App() {
   const [smsSettingsOpen, setSmsSettingsOpen] = useState(false);
   const [smsSettingsDraft, setSmsSettingsDraft] = useState(readSmsProviderSettings);
   const [smsSettingsError, setSmsSettingsError] = useState("");
+  const [smsSettingsSaving, setSmsSettingsSaving] = useState(false);
   const [smsNumberOptions, setSmsNumberOptions] = useState([]);
   const [smsOptionsLoading, setSmsOptionsLoading] = useState(false);
   const [mailRequestSettings, setMailRequestSettings] = useState(readMailRequestSettings);
@@ -339,6 +341,14 @@ function App() {
     .join("|");
 
   useEffect(() => writeLocalJson(SMS_PROVIDER_SETTINGS_KEY, smsSettings), [smsSettings]);
+  useEffect(() => {
+    if (!token) return undefined;
+    let stopped = false;
+    apiFetch(token, "/api/sms-provider-settings").then(data => {
+      if (!stopped && data.configured) setSmsSettings(current => ({ ...data.settings, configs: { ...current.configs, ...data.settings.configs } }));
+    }).catch(error => { if (!stopped) setSmsSettingsError(error.message); });
+    return () => { stopped = true; };
+  }, [token]);
   useEffect(() => writeLocalJson(MAIL_REQUEST_SETTINGS_KEY, mailRequestSettings), [mailRequestSettings]);
   useEffect(() => {
     const browserSettings = { ...sub2apiSettings };
@@ -1293,8 +1303,9 @@ function App() {
     }));
   }
 
-  function saveSmsSettings(event) {
+  async function saveSmsSettings(event) {
     event.preventDefault();
+    if (smsSettingsSaving) return;
     const resolved = resolveSmsProvider(smsProviderDefinitions, smsSettingsDraft);
     if (!resolved.definition) {
       setSmsSettingsError("请选择接码平台");
@@ -1314,9 +1325,16 @@ function App() {
         return;
       }
     }
-    setSmsSettings(withSmsProviderDefaults(smsProviderDefinitions, smsSettingsDraft));
-    setSmsSettingsOpen(false);
+    setSmsSettingsSaving(true);
     setSmsSettingsError("");
+    try {
+      const data = await apiFetch(token, "/api/sms-provider-settings", {
+        method: "POST", body: JSON.stringify({ settings: withSmsProviderDefaults(smsProviderDefinitions, smsSettingsDraft) }),
+      });
+      setSmsSettings({ ...data.settings, configs: { ...smsSettingsDraft.configs, ...data.settings.configs } });
+      setSmsSettingsOpen(false);
+    } catch (error) { setSmsSettingsError(error.message); }
+    finally { setSmsSettingsSaving(false); }
   }
 
   useEffect(() => {
@@ -2442,6 +2460,10 @@ function App() {
           readOnlyReason={accountMutationBlockReason(activeCredentialJob, { workflowBusy: Boolean(batchAction) })}
           accountProxyUrl={accountProxyUrl}
           totpReplaceAvailable={Boolean(features.totpReplace)}
+          onJobUpdate={(nextJob) => {
+            setJobs(current => current.map(item => item.id === nextJob.id ? shareSnapshot(item, nextJob) : item));
+            setCredentialJob(current => current?.id === nextJob.id ? shareSnapshot(current, nextJob) : current);
+          }}
           onClose={() => setCredentialJob(null)}
           onError={setError}
         />
@@ -2664,14 +2686,15 @@ function App() {
       )}
       {smsSettingsOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setSmsSettingsOpen(false);
+          if (event.target === event.currentTarget && !smsSettingsSaving) setSmsSettingsOpen(false);
         }}>
-          <ModalForm onClose={() => setSmsSettingsOpen(false)} className="batch-dialog sms-settings-dialog" onSubmit={saveSmsSettings} role="dialog" aria-modal="true" aria-labelledby="sms-settings-title">
+          <ModalForm onClose={() => setSmsSettingsOpen(false)} closeDisabled={smsSettingsSaving} className="batch-dialog sms-settings-dialog" onSubmit={saveSmsSettings} role="dialog" aria-modal="true" aria-labelledby="sms-settings-title">
             <div className="dialog-header">
               <div>
                 <h2 id="sms-settings-title">接码平台配置</h2>
                 <HelpTip title="接码平台说明" label="查看接码平台配置说明">
-                  <div>配置保存在当前浏览器。</div>
+                  <div>保存后同步到服务端；自动取号开启后，关闭浏览器也会继续收码。</div>
+                  <div>旧浏览器配置需在此保存一次。自动取号每次授权最多一次，失败后手动重试。</div>
                   {draftSmsProvider.definition?.description && <div>{draftSmsProvider.definition.description}</div>}
                 </HelpTip>
               </div>
@@ -2687,7 +2710,7 @@ function App() {
                     {SMS_PROVIDER_EXTERNAL_LINKS[draftSmsProvider.id].label}
                   </a>
                 )}
-                <button type="button" className="icon-button" onClick={() => setSmsSettingsOpen(false)} title="关闭">
+                <button type="button" className="icon-button" onClick={() => setSmsSettingsOpen(false)} disabled={smsSettingsSaving} title="关闭">
                   <X size={18} />
                 </button>
               </div>
@@ -2787,11 +2810,16 @@ function App() {
               </div>
             )}
 
+            <label className="proxy-fallback-option">
+              <input type="checkbox" checked={smsSettingsDraft.autoAcquire === true} disabled={smsSettingsSaving}
+                onChange={event => setSmsSettingsDraft(current => ({ ...current, autoAcquire: event.target.checked }))} />
+              需要手机号时自动取号并接码
+            </label>
             {smsSettingsError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{smsSettingsError}</div>}
             <div className="dialog-footer">
-              <button type="button" className="cancel-button" onClick={() => setSmsSettingsOpen(false)}>取消</button>
-              <button type="submit" className="primary-button" disabled={!draftSmsProvider.definition}>
-                <Check size={17} />保存配置
+              <button type="button" className="cancel-button" onClick={() => setSmsSettingsOpen(false)} disabled={smsSettingsSaving}>取消</button>
+              <button type="submit" className="primary-button" disabled={!draftSmsProvider.definition || smsSettingsSaving}>
+                {smsSettingsSaving ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}保存配置
               </button>
             </div>
           </ModalForm>
@@ -3827,39 +3855,6 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
     finally { setSubmitting(false); }
   }
 
-  async function setupTotp() {
-    if (workflowBusy || submitting) return;
-    setSubmitting(true);
-    try {
-      await apiFetch(token, `/api/jobs/${job.id}/setup-2fa`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      onError("");
-    } catch (requestError) {
-      onError(requestError.message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function addPassword() {
-    if (workflowBusy || submitting) return;
-    if (!window.confirm("确定为该账号生成并添加随机强密码吗？成功后会自动更新账号原始信息。")) return;
-    setSubmitting(true);
-    try {
-      await apiFetch(token, `/api/jobs/${job.id}/add-password`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      onError("");
-    } catch (requestError) {
-      onError(requestError.message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   async function copyTotpSecret() {
     try {
       await navigator.clipboard.writeText(job.totpSetupSecret || "");
@@ -4017,7 +4012,10 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
           </div>
         </div>
       </td>
-      <td className="status-cell"><StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} /></td>
+      <td className="status-cell">
+        <StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} />
+        <AccountSecurityLights state={job.securityState} />
+      </td>
       <td className="step-cell recent-operation-cell">
         <div className="recent-operation-overview">
           <div className="recent-operation-summary">
@@ -4191,7 +4189,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             <FileText size={13} />
           </button>
 
-          {/* Row 2: 授权、重试与安全 (7 buttons) */}
+          {/* Row 2: 授权、重试与会话 */}
           <button
             type="button"
             className="regenerate-button icon-only-action"
@@ -4237,26 +4235,6 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
           )}
           <button
             type="button"
-            className="icon-button"
-            onClick={setupTotp}
-            disabled={rowBusy || !totpSetupAvailable || !job.canSetupTotp}
-            title={job.hasTotpKey ? "已设置 2FA（可在凭据管理中查看或更换）" : !rowBusy && job.canSetupTotp ? "设置 2FA" : mutationReason || "请先完成登录，再设置 2FA"}
-            aria-label="设置 2FA"
-          >
-            {submitting ? <LoaderCircle className="spin" size={13} /> : <ShieldCheck size={13} />}
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={addPassword}
-            disabled={rowBusy || !passwordAddAvailable || !job.canAddPassword}
-            title={job.hasPassword ? "已设置密码（可在凭据管理中查看或修改）" : !rowBusy && job.canAddPassword ? "添加密码" : mutationReason || "请先完成登录，再添加密码"}
-            aria-label="添加密码"
-          >
-            {submitting ? <LoaderCircle className="spin" size={13} /> : <Lock size={13} />}
-          </button>
-          <button
-            type="button"
             className="icon-button danger"
             onClick={onLogoutAllSessions}
             disabled={rowBusy || deleteDisabled || !job.canLogoutAllSessions || !sessionsAvailable}
@@ -4284,6 +4262,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
 function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSaved }) {
   const dialogRef = useRef(null);
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
+  const [loginTimeout, setLoginTimeout] = useState(() => String(settings.loginTimeoutMinutes ?? DEFAULT_LOGIN_TIMEOUT_MINUTES));
   const [monitoring, setMonitoring] = useState(() => Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
   const [fingerprintDefaults, setFingerprintDefaults] = useState(() => ({ intervalMinutes: String(settings.modelFingerprint?.intervalMinutes ?? 360), maxConcurrentAccounts: String(settings.modelFingerprint?.maxConcurrentAccounts ?? 3) }));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
@@ -4323,6 +4302,9 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       return;
     }
     const cooldownValue = Number(cooldownMinutes);
+    let loginTimeoutMinutes;
+    try { loginTimeoutMinutes = normalizeLoginTimeoutMinutes(Number(loginTimeout)); }
+    catch (error) { setError(error.message); return; }
     if (!Number.isInteger(cooldownValue) || cooldownValue < 1 || cooldownValue > 43_200) {
       setError("冷却时长必须是 1 到 43200 分钟的整数");
       return;
@@ -4372,7 +4354,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
+        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4443,6 +4425,12 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             </label>
           </div>
           <div className="task-auth-mode-fields">
+            <label className="settings-field" htmlFor="task-login-timeout">
+              <span className="field-label-row">登录超时
+                <HelpTip label="登录超时说明">Web、Codex 及相关登录任务共用此上限，默认 3 分钟。任务开始执行后计时，包含验证码等待，不含排队，自动重试不重置预算；超时终止本次尝试并释放并发，保留已有凭据。修改后按已经运行的时长重新计算。</HelpTip>
+              </span>
+              <div><input id="task-login-timeout" type="number" min="1" max="1440" step="1" required value={loginTimeout} disabled={saving} onChange={event => setLoginTimeout(event.target.value)} /><span>分钟</span></div>
+            </label>
             <label className="settings-field task-auth-mode-field" htmlFor="task-proxy-mode">
               <span className="field-label-row">
                 账号代理分配
@@ -4599,7 +4587,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
-          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setFingerprintDefaults({ intervalMinutes: "360", maxConcurrentAccounts: "3" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
+          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES)); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setFingerprintDefaults({ intervalMinutes: "360", maxConcurrentAccounts: "3" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>
@@ -4623,13 +4611,14 @@ function LogDialog({ token, job, onClose }) {
   const [logs, setLogs] = useState("正在读取日志...");
   const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [fullHistory, setFullHistory] = useState(false);
   const viewerRef = useRef(null);
   const initialLoadedRef = useRef(false);
 
   const load = async ({ manual = false } = {}) => {
     if (manual) setRefreshing(true);
     try {
-      const data = await apiFetch(token, `/api/jobs/${job.id}/logs`);
+      const data = await apiFetch(token, `/api/jobs/${job.id}/logs${fullHistory ? "?full=1&credentials=1" : ""}`);
       setLogs(data.logs || "暂无日志");
       if (!initialLoadedRef.current) {
         initialLoadedRef.current = true;
@@ -4648,7 +4637,7 @@ function LogDialog({ token, job, onClose }) {
     let stopped = false;
     const poll = async () => {
       try {
-        const data = await apiFetch(token, `/api/jobs/${job.id}/logs`);
+        const data = await apiFetch(token, `/api/jobs/${job.id}/logs${fullHistory ? "?full=1&credentials=1" : ""}`);
         if (stopped) return;
         setLogs(data.logs || "暂无日志");
         if (!initialLoadedRef.current) {
@@ -4662,12 +4651,12 @@ function LogDialog({ token, job, onClose }) {
       }
     };
     void poll();
-    const timer = window.setInterval(poll, 1_200);
+    const timer = fullHistory ? null : window.setInterval(poll, 1_200);
     return () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [job.id, token]);
+  }, [job.id, token, fullHistory]);
 
   async function copyLogs() {
     if (!logs) return;
@@ -4704,10 +4693,14 @@ function LogDialog({ token, job, onClose }) {
           </div>
         </div>
         <div className="log-dialog-body">
+          <button type="button" className="secondary-button compact-button" aria-pressed={fullHistory}
+            onClick={() => setFullHistory(value => !value)} title="查看永久保留的完整日志与原始、新凭据">
+            {fullHistory ? "实时日志" : "完整日志与凭据历史"}
+          </button>
           <pre ref={viewerRef} className="log-dialog-viewer" tabIndex="0">{logs}</pre>
         </div>
         <div className="dialog-actions log-dialog-actions">
-          <span className="log-dialog-meta">每 1.2 秒自动同步实时输出</span>
+          <span className="log-dialog-meta">{fullHistory ? "完整历史保留至删除账号；凭据按阶段记录，候选值不代表已生效" : "每 1.2 秒同步最近输出；完整历史永久保留"}</span>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose}>关闭</button>
         </div>
@@ -4715,7 +4708,7 @@ function LogDialog({ token, job, onClose }) {
   );
 }
 
-function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, totpReplaceAvailable, onClose, onError }) {
+function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, totpReplaceAvailable, onJobUpdate, onClose, onError }) {
   const [details, setDetails] = useState(null);
   const [password, setPassword] = useState("");
   const [totpSecret, setTotpSecret] = useState("");
@@ -4731,8 +4724,11 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [replacing, setReplacing] = useState(false);
+  const [passwordReplacing, setPasswordReplacing] = useState(false);
+  const mutationRequestRef = useRef(false);
   const [dialogError, setDialogError] = useState("");
   const [notice, setNotice] = useState("");
+  const credentialBusy = saving || replacing || passwordReplacing;
 
   useEffect(() => {
     let stopped = false;
@@ -4817,12 +4813,12 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
 
   async function save(event) {
     event.preventDefault();
-    if (readOnlyReason) return;
+    if (readOnlyReason || credentialBusy || mutationRequestRef.current) return;
     const body = {};
     if (passwordDirty) body.password = password;
     if (totpDirty) {
       const normalized = totpSecret.toUpperCase().replace(/[\s=]/g, "");
-      if (!/^[A-Z2-7]{16,128}$/.test(normalized)) {
+      if (normalized && !/^[A-Z2-7]{16,128}$/.test(normalized)) {
         setDialogError("2FA 密钥必须是 16 到 128 位 Base32 字符");
         return;
       }
@@ -4832,6 +4828,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
       setNotice("没有需要保存的修改");
       return;
     }
+    mutationRequestRef.current = true;
     setSaving(true);
     setDialogError("");
     setNotice("");
@@ -4854,16 +4851,18 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     } catch (error) {
       setDialogError(error.message);
     } finally {
+      mutationRequestRef.current = false;
       setSaving(false);
     }
   }
 
   async function replaceTotp() {
-    if (readOnlyReason) return;
+    if (readOnlyReason || credentialBusy || mutationRequestRef.current || passwordDirty || totpDirty) return;
     const confirmed = window.confirm(
       "确定轮换该账号的 2FA 吗？服务会先停用旧 2FA，再创建并激活新密钥；如果远端创建失败，账号可能暂时没有 2FA，需要在本窗口重试。",
     );
     if (!confirmed) return;
+    mutationRequestRef.current = true;
     setReplacing(true);
     setDialogError("");
     setNotice("");
@@ -4879,7 +4878,42 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     } catch (error) {
       setDialogError(error.message);
     } finally {
+      mutationRequestRef.current = false;
       setReplacing(false);
+    }
+  }
+
+  async function replacePassword() {
+    if (readOnlyReason || credentialBusy || mutationRequestRef.current || passwordDirty || totpDirty || !job.canReplacePassword) return;
+    if (!window.confirm("确定为该账号生成并轮换强密码吗？原密码和候选新密码会保留在凭据历史中，成功后更新本地记录。")) return;
+    mutationRequestRef.current = true;
+    setPasswordReplacing(true);
+    setDialogError("");
+    setNotice("");
+    try {
+      const data = await apiFetch(token, `/api/jobs/${job.id}/replace-password`, { method: "POST", body: JSON.stringify({}) });
+      if (data.job) onJobUpdate?.(data.job);
+      setNotice("密码轮换请求已提交，请等待任务完成后重新读取凭据");
+      onError("");
+    } catch (error) {
+      setDialogError(error.message);
+    } finally {
+      mutationRequestRef.current = false;
+      setPasswordReplacing(false);
+    }
+  }
+
+  async function copyCredential(kind) {
+    const value = kind === "password" ? password : totpSecret;
+    if (!value) return;
+    const name = kind === "password" ? "密码" : "2FA 密钥";
+    try {
+      await navigator.clipboard.writeText(value);
+      setNotice(`${name}已复制`);
+      setDialogError("");
+      onError("");
+    } catch {
+      setDialogError(`${name}复制失败，请手动选择输入框内容`);
     }
   }
 
@@ -4907,9 +4941,9 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !saving && !replacing) onClose();
+      if (event.target === event.currentTarget && !credentialBusy) onClose();
     }}>
-      <ModalForm onClose={onClose} closeDisabled={saving || replacing} className="batch-dialog credential-dialog" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="credential-dialog-title">
+      <ModalForm onClose={onClose} closeDisabled={credentialBusy} className="batch-dialog credential-dialog" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="credential-dialog-title">
         <div className="dialog-header">
           <div>
             <h2 id="credential-dialog-title">账号凭据</h2>
@@ -4920,13 +4954,13 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
               type="button"
               className="icon-button"
               onClick={refreshCredentials}
-              disabled={loading || refreshing || saving || replacing || passwordDirty || totpDirty}
+              disabled={loading || refreshing || credentialBusy || passwordDirty || totpDirty}
               title={passwordDirty || totpDirty ? "请先保存当前修改" : "重新读取凭据"}
               aria-label="重新读取凭据"
             >
               <RefreshCw className={refreshing ? "spin" : ""} size={17} />
             </button>
-            <button type="button" className="icon-button" onClick={onClose} disabled={saving || replacing} title="关闭">
+            <button type="button" className="icon-button" onClick={onClose} disabled={credentialBusy} title="关闭">
               <X size={18} />
             </button>
           </div>
@@ -4937,14 +4971,23 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
         ) : (
           <>
             <div className="credential-field">
-              <span>密码</span>
+              <div className="credential-json-heading">
+                <strong>密码</strong>
+                <button type="button" className="text-action" onClick={replacePassword}
+                  disabled={Boolean(readOnlyReason) || credentialBusy || !job.canReplacePassword || passwordDirty || totpDirty}
+                  aria-busy={passwordReplacing}
+                  title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : !job.canReplacePassword ? "当前账号暂不具备密码轮换条件" : "生成强密码并加入共享登录队列") }>
+                  {passwordReplacing ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}一键轮换密码
+                </button>
+              </div>
               <div className="secret-input-row">
                 <KeyRound size={15} aria-hidden="true" />
                 <input
                   aria-label="密码"
                   type={showPassword ? "text" : "password"}
                   value={password}
-                  readOnly={Boolean(readOnlyReason)}
+                  readOnly={Boolean(readOnlyReason) || credentialBusy}
+                  style={{ minWidth: 0 }}
                   onChange={(event) => { setPassword(event.target.value); setPasswordDirty(true); }}
                   placeholder={details?.passwordAvailable ? "凭据已保存" : details?.hasPassword ? "原文不可恢复，请重新录入" : "未保存密码"}
                   autoComplete="off"
@@ -4952,6 +4995,10 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
                 />
                 <button type="button" className="secret-toggle" onClick={() => setShowPassword((value) => !value)} title={showPassword ? "隐藏密码" : "显示密码"}>
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+                <button type="button" className="secret-toggle" onClick={() => copyCredential("password")}
+                  disabled={!password} title="复制密码原文" aria-label="复制密码原文">
+                  <Copy size={16} />
                 </button>
               </div>
             </div>
@@ -4968,7 +5015,8 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
                   aria-label="2FA 密钥"
                   type={showTotp ? "text" : "password"}
                   value={totpSecret}
-                  readOnly={Boolean(readOnlyReason)}
+                  readOnly={Boolean(readOnlyReason) || credentialBusy}
+                  style={{ minWidth: 0 }}
                   onChange={(event) => { setTotpSecret(event.target.value); setTotpDirty(true); }}
                   placeholder={details?.totpSecretAvailable ? "密钥已保存" : details?.hasTotpKey ? "原文不可恢复，请重新录入" : "未保存 2FA 密钥"}
                   autoComplete="off"
@@ -4978,8 +5026,13 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
                 <button type="button" className="secret-toggle" onClick={() => setShowTotp((value) => !value)} title={showTotp ? "隐藏 2FA 密钥" : "显示 2FA 密钥"}>
                   {showTotp ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
+                <button type="button" className="secret-toggle" onClick={() => copyCredential("totp")}
+                  disabled={!totpSecret.trim()} title="复制 2FA 密钥原文" aria-label="复制 2FA 密钥原文">
+                  <Copy size={16} />
+                </button>
               </div>
             </div>
+            <p className="prompt-line" style={{ display: "block", whiteSpace: "normal", overflow: "visible", textOverflow: "clip" }}>清空密码或 2FA 后保存，仅删除本地记录；原值保留在凭据历史中，远端开启状态另行核对。</p>
             {details?.hasTotpKey && !details?.totpSecretAvailable && (
               <div className="credential-warning credential-warning-block">
                 该账号只保留了 2FA 存在标记，旧版本没有保存密钥原文。请重新录入并保存，之后即可生成动态验证码。
@@ -5038,19 +5091,19 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
               {details?.persisted === false && <span className="credential-warning">系统未提供持久凭据存储</span>}
             </div>
             {job.totpRotationIncomplete && (
-              <div className="credential-warning credential-warning-block">上次 2FA 轮换未完成：远端旧密钥状态可能已变化，请重试完成轮换后再继续登录。</div>
+              <div className="credential-warning credential-warning-block">上次 2FA 轮换未完成；有效 Web 会话仍可用于授权。清空并保存仅删除本地密钥，历史保留，远端 MFA 状态不变。</div>
             )}
             {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{dialogError}</div>}
             {notice && <div className="credential-notice" role="status"><Check size={15} />{notice}</div>}
-            <div className="dialog-actions credential-dialog-actions">
+            <div className="dialog-actions credential-dialog-actions" style={{ flexWrap: "wrap" }}>
               {totpReplaceAvailable && job.canReplaceTotp && (
-                <button type="button" className="danger-button" onClick={replaceTotp} disabled={saving || replacing || Boolean(readOnlyReason)} title={readOnlyReason || undefined}>
+                <button type="button" className="danger-button" onClick={replaceTotp} disabled={credentialBusy || Boolean(readOnlyReason) || passwordDirty || totpDirty} title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : undefined)}>
                   {replacing ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}轮换 2FA
                 </button>
               )}
               <span className="dialog-actions-spacer" />
-              <button type="button" className="cancel-button" onClick={onClose} disabled={saving || replacing}>关闭</button>
-              <button type="submit" className="primary-button" disabled={Boolean(readOnlyReason) || loading || saving || replacing || (!passwordDirty && !totpDirty)} title={readOnlyReason || undefined}>
+              <button type="button" className="cancel-button" onClick={onClose} disabled={credentialBusy}>关闭</button>
+              <button type="submit" className="primary-button" disabled={Boolean(readOnlyReason) || loading || credentialBusy || (!passwordDirty && !totpDirty)} title={readOnlyReason || undefined}>
                 {saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存凭据
               </button>
             </div>
@@ -5737,6 +5790,25 @@ function formatWorkspaceRole(role) {
     viewer: "只读",
   };
   return map[normalized] || String(role).trim();
+}
+
+function AccountSecurityLights({ state }) {
+  return (
+    <div className="account-security-lights" role="group" aria-label="账号安全状态"
+      style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8, marginTop: 5, fontSize: 10.5, color: "var(--muted)" }}>
+      {[["2FA", state?.totpEnabled, "totpCheckedAt"], ["密码", state?.passwordEnabled, "passwordCheckedAt"]].map(([label, enabled, timeKey]) => {
+        const known = enabled === true || enabled === false;
+        const checkedAt = state && Object.hasOwn(state, timeKey) ? state[timeKey] : state?.checkedAt;
+        const description = `${label}：${known ? enabled ? "已开启" : "未开启" : "待确认"}`;
+        return <span key={label} role="img" aria-label={description}
+          title={`${description}${checkedAt ? `；核对时间：${formatDateTime(checkedAt)}` : known ? "；已有成功验证记录，时间未记录" : "；尚无远端确认结果"}`}
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+          <i aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: known ? enabled ? "var(--emerald)" : "var(--danger)" : "var(--subtle)" }} />
+          {label}
+        </span>;
+      })}
+    </div>
+  );
 }
 
 function StatusBadge({ status, webSessionStatus = "absent" }) {
@@ -6571,7 +6643,7 @@ function withSmsProviderDefaults(definitions, settings) {
   const selectedProviderId = definitions.some((provider) => provider.id === settings?.selectedProviderId)
     ? settings.selectedProviderId
     : definitions[0]?.id || settings?.selectedProviderId || "luban";
-  return { selectedProviderId, configs };
+  return { selectedProviderId, configs, autoAcquire: settings?.autoAcquire === true };
 }
 
 function resolveSmsProvider(definitions, settings) {

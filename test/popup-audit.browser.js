@@ -116,7 +116,9 @@ async (page) => {
       check(b.x >= 0 && b.y >= 0 && b.x + b.width <= 375 && b.y + b.height <= 320, 'long help exceeds viewport: ' + JSON.stringify(b));
       check(await tip.evaluate(el => { el.scrollTop = el.scrollHeight; return el.scrollTop > 0; }), 'overflowing help cannot scroll');
       await tip.focus(); check(await tip.isVisible(), 'focusing help content dismissed it');
-      await page.keyboard.press('Escape'); check(await tip.count() === 0, 'help Escape failed');
+      await page.keyboard.press('Escape');
+      await tip.waitFor({ state: 'hidden' });
+      check(await tip.count() === 0, 'help Escape failed');
     } finally { await page.evaluate(() => window.__cleanupPopupFixture?.()); }
   });
   await test('pending-form-save-cannot-dismiss-or-leak-focus', async () => {

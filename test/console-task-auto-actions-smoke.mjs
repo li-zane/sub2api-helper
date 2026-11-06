@@ -57,6 +57,7 @@ try {
   assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, "utf8")), {
     version: 2,
     maxActiveJobs: 6,
+    loginTimeoutMinutes: 3,
     proxyUrl: "",
     allowDirectFallback: false,
     accountProxyMode: "global",

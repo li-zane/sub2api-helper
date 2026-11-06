@@ -89,7 +89,7 @@ if (!process.argv.includes('--web-only')) { console.log('Email OTP (r=resend, q=
 else {
 const f=process.env.TOSUB2_WEB_SESSION_PATH;const s=JSON.parse(await fs.readFile(f,'utf8'));
 await fs.appendFile(${JSON.stringify(trace)}, s.email+'\\n');
-s.web={workspaceId:'personal'};s.cookies=s.cookies.map(c=>c.name==='session'?{...c,value:'valid'}:c);s.validation={status:'valid',verifiedAt:new Date().toISOString()};
+s.web={workspaceId:'personal'};s.cookies=s.cookies.map(c=>c.name==='session'?{...c,value:'valid'}:c);s.accessToken=${JSON.stringify(tokenFor("valid", "session=valid"))};s.validation={status:'valid',verifiedAt:new Date().toISOString()};
 await fs.writeFile(f,JSON.stringify(s));console.log('[ok] Saved web session: '+f);
 }
 `);

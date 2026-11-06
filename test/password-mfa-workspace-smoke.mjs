@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { readCredentialHistory } from "../src/account-history.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-password-mfa-"));
@@ -332,6 +333,20 @@ try {
     if (scenario.mode === "web" || !scenario.recover) assert.equal(await fs.readFile(outputPath, "utf8"), beforeOAuth, "failed and Web-only recovery preserve existing OAuth output");
     if (scenario.mode === "web") assert.equal(after.oauthAuthorizationCount, before.oauthAuthorizationCount);
   }
+  const history = await readCredentialHistory(tempRoot);
+  assert(history.some(e => e.email === "replace-totp@example.com" && e.stage === "activation_pending"
+    && e.before.totpSecret === "GEZDGNBVGY3TQOJQ" && e.after.secret === "MZXW6YTBON2GK3TB"));
+  for (const [email, code] of [["replace-totp-business-rejected@example.com", "TOTP_REPLACE_DISABLE_REJECTED"], ["replace-totp-unconfirmed@example.com", "TOTP_REPLACE_DISABLE_UNCONFIRMED"]]) {
+    const file = path.join(tempRoot, email + ".json");
+    const result = await runNode([path.join(projectRoot, "src/protocol-login.mjs"), "--email", email, "--replace-totp", "--totp-result", file,
+      "--chatgpt-base", baseUrl, "--auth-base", baseUrl], { CHATGPT_LOGIN_PASSWORD: "local-test-password", CHATGPT_TOTP_SECRET: "GEZDGNBVGY3TQOJQ" });
+    assert.equal(result.code, 1); assert.match(result.output, new RegExp(code));
+    const record = JSON.parse(await fs.readFile(file, "utf8"));
+    assert.equal(record.remote_disabled, false); assert.equal(Boolean(record.secret), false);
+    const state = await fetch(`${baseUrl}/__test/state`).then(r => r.json());
+    assert(!state.replacementRequestLog.some(e => e.operation === "enroll"), "enrollment followed an unconfirmed disable");
+  }
+  console.log("TOTP_HISTORY_PROTOCOL_PASS durable old/new candidate; business-200 rejection; enabled-factor confirmation rejection; no false disabled/activation claims");
   console.log("REVOKED_WEB_LOGIN_PASS cached-200/workspace-401 -> real sign-in; Web-only; checkpoint; bounded retry; 403/503 stop; identity/OAuth preserved");
   console.log("WORKSPACE_TOKEN_LOGIN_PASS explicit-402 and mismatched-token -> real sign-in; personal fallback; actual token verified; bounded failure; generic-402 no reauth");
   console.log("password/email OTP + 2FA workspace smoke tests passed");

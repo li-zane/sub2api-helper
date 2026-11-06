@@ -84,6 +84,12 @@ export class WebSessionMonitor {
           // while this check waited for admission. Only confirmed ENOENT is missing.
           if (!hasSession) throw new Error("SESSION_CREDENTIALS_MISSING: Web 会话文件缺失");
           const result = await this.probeWithRetries(job, entry);
+          entry.sessionExpiresAt = result.expiresAt || null;
+          const expires = Date.parse(result.expiresAt);
+          if (Number.isFinite(expires)) {
+            const renewAt = Math.max(this.now() + 60_000, expires - 2 * 60_000);
+            entry.nextCheckAt = new Date(Math.min(Date.parse(entry.nextCheckAt), renewAt)).toISOString();
+          }
           if (Array.isArray(result.devices)) { entry.devices = result.devices; entry.devicesUpdatedAt = at; }
           entry.deviceSyncError = result.deviceSyncError || null;
           entry.workspaces = result.workspaces || [];

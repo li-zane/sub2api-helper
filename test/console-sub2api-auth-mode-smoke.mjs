@@ -24,6 +24,7 @@ const tokenRequests = [];
 const accounts = [];
 const sessions = new Map();
 let sequence = 0;
+let nextAccountId = 501;
 let child;
 let officialChild;
 let headers;
@@ -62,13 +63,16 @@ const pool = http.createServer(async (req, res) => {
   if (url.pathname === "/api/v1/admin/proxies/all") return send(res, 200, phased ? proxies : []);
   if (url.pathname === "/api/v1/admin/proxies/17") return send(res, 200, { data: proxies[0] });
   if (url.pathname === "/api/v1/admin/accounts" && req.method === "GET") return send(res, 200, { data: { items: accounts, total: accounts.length, pages: 1 } });
-  if (url.pathname === "/api/v1/admin/accounts/batch") {
-    body.accounts.forEach((account) => accounts.push({ ...account, id: 501, status: "active" }));
+  if (url.pathname === "/api/v1/admin/accounts/batch" && req.method === "POST") {
+    body.accounts.forEach((account) => accounts.push({ ...structuredClone(account), id: nextAccountId++, status: "active" }));
     return send(res, 200, { success: body.accounts.length, failed: 0 });
   }
-  if (url.pathname === "/api/v1/admin/accounts/501" && req.method === "PUT") {
-    accounts[0] = { ...accounts[0], ...body };
-    return send(res, 200, { success: true });
+  const accountMatch = /^\/api\/v1\/admin\/accounts\/(\d+)$/.exec(url.pathname);
+  if (accountMatch && ["GET", "PUT"].includes(req.method)) {
+    const index = accounts.findIndex(account => account.id === Number(accountMatch[1]));
+    if (index < 0) return send(res, 404, { message: "fixture account not found" });
+    if (req.method === "PUT") accounts[index] = { ...accounts[index], ...structuredClone(body) };
+    return send(res, 200, { data: accounts[index] });
   }
   return send(res, 404, { message: "unknown fixture route" });
 });

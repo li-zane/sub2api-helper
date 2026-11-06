@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {createCredentialStore} from "../src/credential-store.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-fingerprint-console-")), output = path.join(temp, "output");
@@ -36,7 +36,7 @@ const inference = http.createServer(async (req, res) => {
 await Promise.all([listen(pool), listen(inference)]);
 const port = await freePort(), base = `http://127.0.0.1:${port}`;
 async function start() {
-  child = spawn(process.execPath, ["src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: temp, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_FINGERPRINT_TEST_URL: `http://127.0.0.1:${inference.address().port}/responses`, ONBOARDING_PROTOCOL_SCRIPT:path.join(temp,"protocol.mjs"), SUB2API_MONITOR_ENABLED: "0" } });
+  child = spawn(process.execPath, ["--import", pathToFileURL(path.join(root, "test/fingerprint-auth-reference-loader.mjs")).href, "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: temp, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_FINGERPRINT_TEST_URL: `http://127.0.0.1:${inference.address().port}/responses`, ONBOARDING_PROTOCOL_SCRIPT:path.join(temp,"protocol.mjs"), SUB2API_MONITOR_ENABLED: "0" } });
   child.stdout.on("data", c => logs += c); child.stderr.on("data", c => logs += c);
   await waitFor(async () => { try { const r = await fetch(base + "/api/bootstrap"); const b = await r.json(); headers = { "x-console-token": b.token, "content-type": "application/json" }; return b.features.modelFingerprint; } catch { return false; } });
 }
@@ -69,7 +69,20 @@ try {
     assert(j.autoRepairLastAttemptAt,'persisted repair cooldown');
     console.log('FINGERPRINT_RECOVERY_HTTP_PASS active pool account + 401 -> one shared Web/OAuth login; persistent cooldown; no duplicate model samples');
   }
-} catch (error) { error.message += "\n" + logs; throw error; }
+} catch (error) {
+  const job = await get('/api/jobs').then(result => result.jobs.find(job => job.email === account.email), () => null);
+  error.message += "\n" + JSON.stringify({ samples, calls: calls.map(({ method, path }) => ({ method, path })), job: job && {
+    id: job.id, status: job.status, step: job.step, error: job.error, lastOperationType: job.lastOperationType,
+    autoRepairBlocked: job.autoRepairBlocked, autoRepairLastAttemptAt: job.autoRepairLastAttemptAt,
+    modelFingerprint: job.modelFingerprint && {
+      enabled: job.modelFingerprint.enabled, phase: job.modelFingerprint.phase,
+      lastError: job.modelFingerprint.lastError, resultStatus: job.modelFingerprint.result?.status,
+      failureCode: job.modelFingerprint.result?.failure?.code,
+    },
+  } }) + "\n" + logs;
+  for (const value of ["private-fixture-token", "fixture-password", "fixture-key"]) error.message = error.message.replaceAll(value, "[fixture-secret-redacted]");
+  throw error;
+}
 finally { await stop(); await Promise.all([pool, inference].map(server => { server.closeAllConnections(); return new Promise(r => server.close(r)); })); await fs.rm(temp, { recursive: true, force: true }); }
 async function listen(server) { do { await new Promise(r => server.listen(0, "127.0.0.1", r)); if(server.address().port>10080) return; await new Promise(r=>server.close(r)); } while(true); }
 async function freePort() { const s = http.createServer(); await listen(s); const p = s.address().port; await new Promise(r => s.close(r)); return p; }

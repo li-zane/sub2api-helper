@@ -135,10 +135,14 @@ try {
   const activeSession = await readAccountWebSession(job);
   teamUnavailable = true;
   await writeAccountWebSession(webPath, { ...activeSession, web: { ...activeSession.web, workspaceId: "b" } });
+  const managementBeforeUnavailableProbe = management.length;
   const changed = await probeAccountWebSession(job);
   assert.equal(changed.repairReason, "workspace_unavailable");
   assert.equal(changed.planType, null, "an inaccessible space does not by itself mean Free");
-  assert(!management.at(-1).headers["chatgpt-account-id"], "listing is independent of the dead selected space");
+  const unavailableListings = management.slice(managementBeforeUnavailableProbe)
+    .filter(request => request.url.endsWith("/accounts/check/v4-2023-04-27"));
+  assert.equal(unavailableListings.length, 1, "the unavailable-space probe must read a fresh workspace listing");
+  assert.equal(unavailableListings[0].headers["chatgpt-account-id"], undefined, "listing is independent of the dead selected space");
   teamUnavailable = false;
   await writeAccountWebSession(webPath, activeSession);
   await assert.rejects(listAccountSessions({ ...job, email: "other@example.test" }), /浏览器身份文件无效/);
