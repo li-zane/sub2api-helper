@@ -1,0 +1,36 @@
+%%{init: {"theme":"base","fontFamily":"Microsoft YaHei, Arial, sans-serif","htmlLabels":false,"flowchart":{"htmlLabels":false,"curve":"basis","wrappingWidth":320,"nodeSpacing":30,"rankSpacing":44},"themeVariables":{"fontFamily":"Microsoft YaHei, PingFang SC, sans-serif","fontSize":"16px","primaryColor":"#eff6ff","primaryTextColor":"#172554","primaryBorderColor":"#93c5fd","lineColor":"#64748b","edgeLabelBackground":"#ffffff","background":"#ffffff"}}}%%
+flowchart TB
+    accTitle: toSub2 自动化全景与触发恢复流程
+    accDescr: 覆盖 OAuth 凭据失效联动 Web 补登、Web 巡检保活、Team 空间切换、过载智能冷却与封禁熔断。
+
+    TRIGGER_OAUTH["号池异常巡检 / 降智检测<br/>捕获 OAuth 凭据失效 · 401"] --> CLASSIFY{"错误特征与资格审查"}
+    TRIGGER_WEB["Web 会话定时例行巡检<br/>Cookie 实际测活"] --> CLASSIFY
+    TRIGGER_OVERLOAD["滚动窗口过载激增<br/>≥ 阈值 (默认 10 次)"] --> COOLDOWN["暂停号池调度 · 自动冷却 60m<br/>到期自愈唤醒 · 不覆盖手动停用"]
+
+    CLASSIFY -->|"明确永久封禁"| BLOCK["停用账号 · 关闭所有探测<br/>解绑代理 IP · 彻底阻断重登"]
+    CLASSIFY -->|"临时网络波动 / 限流"| RETRY["按配置冷却退避重试<br/>保留原绑定，不猜测套餐"]
+    CLASSIFY -->|"具备全自动资料"| QUEUE["共享任务队列 (限制 1-20 并发)<br/>账号互斥 · 防抖冷却"]
+
+    QUEUE --> CHECK_WEB{"Web 会话是否有效？"}
+
+    CHECK_WEB -->|"有效 Cookie"| REUSE_WEB["快速复用现有 Web 会话<br/>免输账密，直接进行换票"]
+    CHECK_WEB -->|"失效 / 缺失"| WEB_LOGIN["触发 Web 自动登录 (Web 补登)<br/>加载密码 + 2FA / 邮箱 API + 专属代理<br/>模拟协议登录，产出全新 Web Cookie"]
+
+    WEB_LOGIN --> PLAN["核对工作空间与套餐<br/>优先激活可用 Team 空间<br/>联动切换代理方案与规则"]
+    REUSE_WEB --> PLAN
+
+    PLAN --> OAUTH["无缝执行 Codex OAuth 换票<br/>签发全新 Access & Refresh Token"]
+    OAUTH --> POOL["回写更新 Sub2API 原账号记录<br/>精准按 ID 增量更新 · 绝不重复创建"]
+    POOL --> NEXT["重置错误标记 · 继续周期巡检"]
+
+    classDef normal fill:#eff6ff,stroke:#93c5fd,color:#172554,stroke-width:1.5px;
+    classDef success fill:#ecfdf5,stroke:#6ee7b7,color:#064e3b,stroke-width:1.5px;
+    classDef danger fill:#fff1f2,stroke:#fda4af,color:#881337,stroke-width:1.5px;
+    classDef pending fill:#fffbeb,stroke:#fcd34d,color:#78350f,stroke-width:1.5px;
+    classDef core fill:#fef3c7,stroke:#f59e0b,color:#78350f,stroke-width:2px;
+
+    class TRIGGER_OAUTH,TRIGGER_WEB,QUEUE,PLAN,OAUTH normal;
+    class REUSE_WEB,POOL,NEXT success;
+    class BLOCK danger;
+    class CLASSIFY,CHECK_WEB,RETRY,TRIGGER_OVERLOAD,COOLDOWN pending;
+    class WEB_LOGIN core;

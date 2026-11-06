@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 540" width="100%" height="100%" style="background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;">
+  <defs>
+    <filter id="card-shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.05" />
+    </filter>
+    <filter id="active-shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#3b82f6" flood-opacity="0.12" />
+    </filter>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#94a3b8" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#3b82f6" />
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#f59e0b" />
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 z" fill="#10b981" />
+    </marker>
+  </defs>
+
+  <!-- Canvas Header -->
+  <text x="460" y="38" text-anchor="middle" font-size="19" font-weight="700" fill="#0f172a">toSub2 自动化流转与恢复流程</text>
+  <text x="460" y="58" text-anchor="middle" font-size="12.5" fill="#64748b">会话智能巡检 · OAuth 异常恢复 · Web 协议补登 · Team 空间联动</text>
+
+  <!-- Step 1: Trigger (Top Center) -->
+  <g transform="translate(300, 78)" filter="url(#active-shadow)">
+    <rect width="320" height="66" rx="12" fill="#ffffff" stroke="#3b82f6" stroke-width="1.5" />
+    <rect x="12" y="10" width="70" height="18" rx="9" fill="#eff6ff" />
+    <text x="47" y="23" text-anchor="middle" font-size="10.5" font-weight="600" fill="#2563eb">异常感知</text>
+    <text x="92" y="24" font-size="12" font-weight="600" fill="#64748b">号池巡检 / 降智检测</text>
+    <text x="12" y="48" font-size="14.5" font-weight="700" fill="#0f172a">OAuth 凭据失效 (401 / Token 过期)</text>
+  </g>
+
+  <!-- Flow Arrow from Step 1 to Decision -->
+  <path d="M 460 144 L 460 178" stroke="#3b82f6" stroke-width="2" fill="none" marker-end="url(#arrow-blue)" />
+
+  <!-- Decision: Web Session Check -->
+  <g transform="translate(380, 180)">
+    <rect width="160" height="40" rx="20" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" />
+    <text x="80" y="25" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1e293b">核验 Web 会话？</text>
+  </g>
+
+  <!-- Branch Left: Web Invalid -> Web Relogin (Amber Flow) -->
+  <path d="M 380 200 L 220 200 L 220 240" stroke="#f59e0b" stroke-width="2" fill="none" marker-end="url(#arrow-amber)" />
+  <rect x="238" y="188" width="104" height="20" rx="10" fill="#fffbeb" stroke="#fef3c7" stroke-width="1" />
+  <text x="290" y="202" text-anchor="middle" font-size="10.5" font-weight="600" fill="#d97706">会话失效 / 缺失</text>
+
+  <!-- Branch Right: Web Valid -> Fast Reuse (Green Flow) -->
+  <path d="M 540 200 L 700 200 L 700 240" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrow-green)" />
+  <rect x="578" y="188" width="94" height="20" rx="10" fill="#ecfdf5" stroke="#d1fae5" stroke-width="1" />
+  <text x="625" y="202" text-anchor="middle" font-size="10.5" font-weight="600" fill="#059669">会话仍然有效</text>
+
+  <!-- Step 2A (Left): Web Auto-Relogin Card (UI Style) -->
+  <g transform="translate(60, 246)" filter="url(#card-shadow)">
+    <rect width="320" height="114" rx="14" fill="#ffffff" stroke="#fde68a" stroke-width="1.5" />
+    <rect x="14" y="12" width="112" height="20" rx="10" fill="#fffbeb" />
+    <text x="70" y="26" text-anchor="middle" font-size="10.5" font-weight="700" fill="#b45309">⚡ 触发 Web 补登</text>
+    <text x="14" y="54" font-size="15" font-weight="700" fill="#0f172a">协议级 Web 自动登录</text>
+    <text x="14" y="76" font-size="12" fill="#475569">• 加载已存密码、2FA / 验证码与独立代理</text>
+    <text x="14" y="96" font-size="12" fill="#475569">• 激活可用 Team 空间，产出新 Web Cookie</text>
+  </g>
+
+  <!-- Step 2B (Right): Fast Reuse Card (UI Style) -->
+  <g transform="translate(540, 246)" filter="url(#card-shadow)">
+    <rect width="320" height="114" rx="14" fill="#ffffff" stroke="#a7f3d0" stroke-width="1.5" />
+    <rect x="14" y="12" width="94" height="20" rx="10" fill="#ecfdf5" />
+    <text x="61" y="26" text-anchor="middle" font-size="10.5" font-weight="700" fill="#047857">免密直接复用</text>
+    <text x="14" y="54" font-size="15" font-weight="700" fill="#0f172a">复用当前有效 Web 会话</text>
+    <text x="14" y="76" font-size="12" fill="#475569">• 本地 Cookie 正常，跳过输入账密流程</text>
+    <text x="14" y="96" font-size="12" fill="#475569">• 毫秒级直接发起新一轮授权换票</text>
+  </g>
+
+  <!-- Converge Arrows to OAuth -->
+  <path d="M 220 360 L 220 385 L 430 385 L 430 405" stroke="#f59e0b" stroke-width="2" fill="none" marker-end="url(#arrow-amber)" />
+  <path d="M 700 360 L 700 385 L 490 385 L 490 405" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrow-green)" />
+
+  <!-- Step 3: Codex OAuth Exchange -->
+  <g transform="translate(260, 410)" filter="url(#active-shadow)">
+    <rect width="400" height="52" rx="12" fill="#ffffff" stroke="#3b82f6" stroke-width="1.5" />
+    <rect x="12" y="16" width="76" height="20" rx="10" fill="#eff6ff" />
+    <text x="50" y="30" text-anchor="middle" font-size="10.5" font-weight="700" fill="#2563eb">OAuth 换票</text>
+    <text x="98" y="32" font-size="13" font-weight="700" fill="#0f172a">签发全新 Access &amp; Refresh Token</text>
+  </g>
+
+  <!-- Flow to Pool Sync -->
+  <path d="M 460 462 L 460 482" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrow-green)" />
+
+  <!-- Step 4: Pool Sync & Reset -->
+  <g transform="translate(230, 485)">
+    <rect width="460" height="38" rx="19" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.2" />
+    <text x="230" y="24" text-anchor="middle" font-size="12" font-weight="600" fill="#065f46">增量回写 Sub2API 原账号 · 恢复 PlanType 与 IP 绑定 · 继续巡检</text>
+  </g>
+</svg>

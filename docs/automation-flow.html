@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>toSub2 自动化能力与触发流程全景</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: rgba(22, 30, 49, 0.75);
+      --card-border: rgba(148, 163, 184, 0.14);
+      --card-hover: rgba(30, 41, 69, 0.9);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-glow: rgba(56, 189, 248, 0.25);
+      --success: #34d399;
+      --success-glow: rgba(52, 211, 153, 0.2);
+      --warning: #fbbf24;
+      --warning-glow: rgba(251, 191, 36, 0.2);
+      --danger: #f87171;
+      --danger-glow: rgba(248, 113, 113, 0.2);
+      --purple: #c084fc;
+      --purple-glow: rgba(192, 132, 252, 0.2);
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font);
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.12) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(192, 132, 252, 0.1) 0px, transparent 50%),
+        radial-gradient(at 50% 50%, rgba(15, 23, 42, 0.8) 0px, transparent 100%);
+      color: var(--text-main);
+      padding: 40px 24px 80px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    .badge-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      color: var(--primary);
+      margin-bottom: 14px;
+    }
+    h1 {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, #ffffff 30%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    p.subtitle {
+      font-size: 15px;
+      color: var(--text-muted);
+      max-width: 720px;
+      margin: 0 auto;
+    }
+
+    /* Filter tabs */
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 36px;
+    }
+    .filter-btn {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      padding: 8px 16px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      backdrop-filter: blur(8px);
+    }
+    .filter-btn:hover {
+      border-color: rgba(148, 163, 184, 0.3);
+      color: var(--text-main);
+    }
+    .filter-btn.active {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: var(--primary);
+      color: var(--primary);
+      box-shadow: 0 0 16px var(--primary-glow);
+    }
+
+    /* Section Container */
+    .section-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 18px;
+      padding: 30px;
+      margin-bottom: 36px;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+    }
+    .section-title {
+      font-size: 18px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .section-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* Flowchart Canvas */
+    .flow-pipeline {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      position: relative;
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      position: relative;
+    }
+
+    .flow-node {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 18px;
+      position: relative;
+      transition: all 0.25s ease;
+      cursor: default;
+    }
+    .flow-node:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+    }
+    .flow-node.active-highlight {
+      border-color: var(--primary);
+      background: rgba(14, 165, 233, 0.15);
+      box-shadow: 0 0 20px var(--primary-glow);
+    }
+    .flow-node.featured-core {
+      border-color: rgba(251, 191, 36, 0.4);
+      background: rgba(251, 191, 36, 0.08);
+      box-shadow: 0 0 20px var(--warning-glow);
+    }
+    .flow-node.danger-node {
+      border-color: rgba(248, 113, 113, 0.35);
+      background: rgba(248, 113, 113, 0.08);
+    }
+    .flow-node.success-node {
+      border-color: rgba(52, 211, 153, 0.35);
+      background: rgba(52, 211, 153, 0.08);
+    }
+
+    .node-tag {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+    .tag-blue { background: rgba(56, 189, 248, 0.2); color: #7dd3fc; }
+    .tag-green { background: rgba(52, 211, 153, 0.2); color: #6ee7b7; }
+    .tag-yellow { background: rgba(251, 191, 36, 0.2); color: #fde047; }
+    .tag-red { background: rgba(248, 113, 113, 0.2); color: #fca5a5; }
+    .tag-purple { background: rgba(192, 132, 252, 0.2); color: #d8b4fe; }
+
+    .node-title {
+      font-size: 14.5px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .node-text {
+      font-size: 12.5px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .node-highlight-alert {
+      margin-top: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(251, 191, 36, 0.12);
+      border: 1px dashed rgba(251, 191, 36, 0.35);
+      font-size: 12px;
+      color: #fef08a;
+      line-height: 1.45;
+    }
+
+    /* Flow connector arrows */
+    .flow-connector {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: 18px;
+      margin: -6px 0;
+    }
+    .flow-connector span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      padding: 3px 10px;
+      background: rgba(15, 23, 42, 0.8);
+      border-radius: 9999px;
+      border: 1px solid var(--card-border);
+    }
+
+    /* Key Flow Highlight Box */
+    .key-flow-banner {
+      background: linear-gradient(135deg, rgba(30, 58, 138, 0.3) 0%, rgba(88, 28, 135, 0.25) 100%);
+      border: 1px solid rgba(147, 197, 253, 0.25);
+      border-radius: 14px;
+      padding: 20px 24px;
+      margin-bottom: 30px;
+      display: flex;
+      align-items: flex-start;
+      gap: 18px;
+    }
+    .key-flow-icon {
+      font-size: 28px;
+      line-height: 1;
+      padding: 10px;
+      background: rgba(56, 189, 248, 0.15);
+      border-radius: 12px;
+    }
+    .key-flow-content h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #bae6fd;
+      margin-bottom: 6px;
+    }
+    .key-flow-content p {
+      font-size: 13px;
+      color: #cbd5e1;
+      line-height: 1.6;
+    }
+    .key-flow-steps {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      font-size: 12px;
+    }
+    .step-pill {
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      padding: 4px 10px;
+      border-radius: 6px;
+      color: #f1f5f9;
+      font-weight: 500;
+    }
+    .step-arrow {
+      color: var(--primary);
+      font-weight: bold;
+    }
+
+    /* Feature Grid */
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 18px;
+    }
+    .feature-card {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 20px;
+      transition: all 0.2s ease;
+    }
+    .feature-card:hover {
+      border-color: rgba(148, 163, 184, 0.3);
+      background: rgba(22, 32, 56, 0.75);
+    }
+    .feature-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .feature-name {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .feature-table {
+      width: 100%;
+      font-size: 12.5px;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    .feature-table td {
+      padding: 6px 0;
+      vertical-align: top;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+    }
+    .feature-table td.col-label {
+      width: 72px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    .feature-table td.col-val {
+      color: #e2e8f0;
+    }
+
+    /* Collapsible Details */
+    details.tech-details {
+      margin-top: 16px;
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    details.tech-details summary {
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--primary);
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    details.tech-details summary:hover {
+      background: rgba(56, 189, 248, 0.06);
+    }
+    .details-content {
+      padding: 14px;
+      font-size: 12.5px;
+      color: var(--text-muted);
+      line-height: 1.6;
+      border-top: 1px solid var(--card-border);
+      background: rgba(10, 15, 30, 0.4);
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11.5px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(148, 163, 184, 0.12);
+      color: #e2e8f0;
+    }
+
+    @media (max-width: 768px) {
+      body { padding: 20px 14px; }
+      .section-card { padding: 20px 16px; }
+      .key-flow-banner { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="badge-pill">toSub2 · Server-side Automation Engine</div>
+      <h1>自动化能力与触发恢复流程全景</h1>
+      <p class="subtitle">全自动服务端后台调度，覆盖 Web 会话保活、OAuth 凭据自动修复、Team 空间与 IP 联动、过载智能冷却与封禁防御</p>
+    </header>
+
+    <!-- Key Flow Focus: OAuth Failure Triggers Web Login & Repair -->
+    <div class="key-flow-banner">
+      <div class="key-flow-icon">⚡</div>
+      <div class="key-flow-content">
+        <h3>核心触发联动：OAuth 凭据失效 ➔ 自动触发 Web 补登与授权恢复</h3>
+        <p>
+          当号池巡检或降智检测发现账号的 Codex OAuth 凭据失效（401 / Token Expired / Invalid Grant）时，系统自动核验 Web 会话状态：
+          若 Web 会话已同步过期或缺失，<strong>自动触发 Web 登录（Web 自动补登）</strong>，加载已保存的密码、2FA 密钥或邮箱 API，经由专属代理完成浏览器协议登录，重新选定优先的 Team 空间；登录成功取得新 Web 会话后，<strong>紧接着无缝驱动 Codex OAuth 换票</strong>，并将新凭据回写至原有 Sub2API 账号记录，全程无需人工干预！
+        </p>
+        <div class="key-flow-steps">
+          <span class="step-pill">1. 发现 OAuth 失效</span>
+          <span class="step-arrow">➔</span>
+          <span class="step-pill">2. 检查 Web 会话 (失效)</span>
+          <span class="step-arrow">➔</span>
+          <span class="step-pill" style="border-color: #fbbf24; color: #fde047;">3. 触发 Web 自动补登 (账密+2FA+代理)</span>
+          <span class="step-arrow">➔</span>
+          <span class="step-pill">4. 核对/激活 Team 空间</span>
+          <span class="step-arrow">➔</span>
+          <span class="step-pill" style="border-color: #38bdf8; color: #7dd3fc;">5. 完成 Codex OAuth 换票</span>
+          <span class="step-arrow">➔</span>
+          <span class="step-pill" style="border-color: #34d399; color: #6ee7b7;">6. 回写 Sub2API 号池并恢复绑定</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filter Buttons -->
+    <div class="filter-bar">
+      <button class="filter-btn active" onclick="setFlowView('all')">全景流转视图</button>
+      <button class="filter-btn" onclick="setFlowView('oauth-recovery')">★ OAuth 失效 ➔ 联动 Web 补登</button>
+      <button class="filter-btn" onclick="setFlowView('web-patrol')">Web 会话例行巡检</button>
+      <button class="filter-btn" onclick="setFlowView('overload')">过载激增与冷却</button>
+      <button class="filter-btn" onclick="setFlowView('ban-circuit')">封禁联动熔断</button>
+    </div>
+
+    <!-- Interactive Pipeline Section -->
+    <div class="section-card">
+      <div class="section-header">
+        <div>
+          <div class="section-title">
+            <span>⚙️ 自动化流转引擎架构</span>
+          </div>
+          <div class="section-desc">展示事件触发、状态分类、Web 补登、空间核对、OAuth 恢复与号池同步的闭环生命周期</div>
+        </div>
+      </div>
+
+      <div class="flow-pipeline" id="pipelineFlow">
+        <!-- Tier 1: Triggers -->
+        <div class="flow-row">
+          <div class="flow-node active-highlight" id="node-trigger-oauth">
+            <span class="node-tag tag-yellow">Trigger A · 异常感知</span>
+            <div class="node-title">OAuth 凭据失效 / 401</div>
+            <div class="node-text">
+              号池异常巡检或降智检测调用模型时捕获 <code>401 Unauthorized</code>、<code>token_expired</code>、<code>invalid_grant</code>。
+            </div>
+            <div class="node-highlight-alert">
+              ⚡ 重点路径：将触发 Web 会话核验与联动补登！
+            </div>
+          </div>
+
+          <div class="flow-node" id="node-trigger-web">
+            <span class="node-tag tag-blue">Trigger B · 例行巡检</span>
+            <div class="node-title">Web 会话周期测活</div>
+            <div class="node-text">
+              后台定时（默认 15m）使用保存的 Cookie 请求 <code>/api/auth/session</code> 测活，发现会话失效、缺失或绑定的空间已停用。
+            </div>
+          </div>
+
+          <div class="flow-node" id="node-trigger-overload">
+            <span class="node-tag tag-purple">Trigger C · 流量指标</span>
+            <div class="node-title">过载频次超过阈值</div>
+            <div class="node-text">
+              15 分钟滚动窗口内从号池日志统计的 <code>429 / overload</code> 次数达到设定阈值（默认 10 次）。
+            </div>
+          </div>
+
+          <div class="flow-node danger-node" id="node-trigger-ban">
+            <span class="node-tag tag-red">Trigger D · 明确封禁</span>
+            <div class="node-title">账号已被永久禁用</div>
+            <div class="node-text">
+              上游任何请求返回 <code>account_deactivated</code>、<code>user_suspended</code> 等确凿永久封禁标识。
+            </div>
+          </div>
+        </div>
+
+        <!-- Connector -->
+        <div class="flow-connector">
+          <span>↓ 状态分流与安全审查</span>
+        </div>
+
+        <!-- Tier 2: Classification -->
+        <div class="flow-row">
+          <div class="flow-node danger-node" id="node-classify-ban">
+            <span class="node-tag tag-red">Circuit Breaker · 熔断隔离</span>
+            <div class="node-title">永久封禁停用</div>
+            <div class="node-text">
+              立即停用号池账号、关闭过载/冷却/降智巡检、解除代理 IP 绑定，<strong>永不发起盲目重登</strong>。
+            </div>
+          </div>
+
+          <div class="flow-node active-highlight" id="node-classify-eligible">
+            <span class="node-tag tag-blue">Filter · 资格核查</span>
+            <div class="node-title">自动恢复资格与并发排队</div>
+            <div class="node-text">
+              核对是否保存完整账密、2FA 密钥或邮箱 API；具备全自动条件的账号进入共享队列（限制 1–20 任务槽位），遵循重试冷却。
+            </div>
+          </div>
+
+          <div class="flow-node" id="node-classify-retry">
+            <span class="node-tag tag-yellow">Backoff · 网络退避</span>
+            <div class="node-title">临时故障与限流退避</div>
+            <div class="node-text">
+              普通 502/503 网络抖动或代理断连，保留原绑定与空间属性，不把未知套餐猜成 Free，按冷却退避重试。
+            </div>
+          </div>
+        </div>
+
+        <!-- Connector -->
+        <div class="flow-connector">
+          <span>↓ 核心判断：Web 会话可用性</span>
+        </div>
+
+        <!-- Tier 3: Web Login & Verification (The user's key focus!) -->
+        <div class="flow-row">
+          <div class="flow-node featured-core" id="node-web-relogin">
+            <span class="node-tag tag-yellow">关键枢纽 · Web 自动补登</span>
+            <div class="node-title">Web 会话失效 ➔ 触发 Web 补登</div>
+            <div class="node-text">
+              当 Web 会话缺失或失效时，调度器<strong>自动执行协议级 Web 登录</strong>：
+              加载本地加密保存的密码、2FA 密钥（或调用接码/邮箱 API），通过指定代理出口完成登录，获取全新的 Web 会话 Cookie。
+            </div>
+            <div class="node-highlight-alert">
+              💡 当 OAuth 失败且 Web 会话过期时，由该节点无缝拉起登录！
+            </div>
+          </div>
+
+          <div class="flow-node" id="node-web-reuse">
+            <span class="node-tag tag-green">快速通道 · 会话复用</span>
+            <div class="node-title">Web 会话有效 ➔ 直接复用</div>
+            <div class="node-text">
+              若 Web 会话仍然有效（Cookie 正常），则跳过耗时的密码登录与 2FA 流程，直接复用当前 Web 会话，毫秒级进入下一步授权。
+            </div>
+          </div>
+
+          <div class="flow-node" id="node-plan-sync">
+            <span class="node-tag tag-purple">空间仲裁 · PlanType 核对</span>
+            <div class="node-title">优先可用 Team 空间</div>
+            <div class="node-text">
+              读取多工作空间列表；若存在多个空间，优先匹配并激活可用 Team 空间；登录确认套餐变动后，自动切换绑定的代理出口方案。
+            </div>
+          </div>
+        </div>
+
+        <!-- Connector -->
+        <div class="flow-connector">
+          <span>↓ 驱动 Codex 授权与号池数据回写</span>
+        </div>
+
+        <!-- Tier 4: OAuth Repair & Sub2API Sync -->
+        <div class="flow-row">
+          <div class="flow-node active-highlight" id="node-oauth-repair">
+            <span class="node-tag tag-blue">OAuth 恢复 · Token 签发</span>
+            <div class="node-title">恢复 Codex OAuth 授权</div>
+            <div class="node-text">
+              使用刚补登取得（或直接复用）的 Web 会话，发起 OAuth 授权流程，换取新鲜的 <code>access_token</code> 与 <code>refresh_token</code>。
+            </div>
+          </div>
+
+          <div class="flow-node success-node" id="node-pool-update">
+            <span class="node-tag tag-green">号池同步 · 增量回写</span>
+            <div class="node-title">更新原有 Sub2API 记录</div>
+            <div class="node-text">
+              将新凭据精准回写更新至 Sub2API 已有账号 ID，保留历史累计用量与绑定属性，<strong>绝不生成重复多余账号</strong>。
+            </div>
+          </div>
+
+          <div class="flow-node success-node" id="node-next-cycle">
+            <span class="node-tag tag-green">闭环收敛 · 巡检待命</span>
+            <div class="node-title">重置状态 · 继续周期巡检</div>
+            <div class="node-text">
+              清除待修复错误标记，恢复正常调度节拍；若仅重传失败则优先重传同步，不推倒重来。
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Supported Features Grid Section -->
+    <div class="section-card">
+      <div class="section-header">
+        <div>
+          <div class="section-title">
+            <span>📋 支持的自动化功能矩阵</span>
+          </div>
+          <div class="section-desc">服务端后台自驱运行，关掉控制台浏览器不影响持续调度</div>
+        </div>
+      </div>
+
+      <div class="feature-grid">
+        <!-- Feature 1 -->
+        <div class="feature-card">
+          <div class="feature-title-row">
+            <div class="feature-name">🌐 Web 会话智能巡检</div>
+            <span class="node-tag tag-blue">保活 / 补登</span>
+          </div>
+          <p class="node-text">使用已存 Cookie 对 <code>/api/auth/session</code> 进行实际测活，发现会话失效或文件缺失时自动恢复 Web 登录。</p>
+          <table class="feature-table">
+            <tr>
+              <td class="col-label">触发时机</td>
+              <td class="col-val">按间隔定时扫描（默认 15 分钟），或手动点击全量巡检。</td>
+            </tr>
+            <tr>
+              <td class="col-label">异常防护</td>
+              <td class="col-val">网络断连、403/5xx 瞬时错误不误判为掉线；自动重登具备 60 分钟冷却。</td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- Feature 2 -->
+        <div class="feature-card" style="border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.05);">
+          <div class="feature-title-row">
+            <div class="feature-name">🔑 OAuth 异常授权恢复</div>
+            <span class="node-tag tag-yellow">核心联动</span>
+          </div>
+          <p class="node-text">当号池巡检或降智检测发现凭据失效时自动重新授权；<strong>若 Web 亦失效则联动触发 Web 补登</strong>。</p>
+          <table class="feature-table">
+            <tr>
+              <td class="col-label">触发时机</td>
+              <td class="col-val">号池返回 401、Token 过期或降智挑战授权失败。</td>
+            </tr>
+            <tr>
+              <td class="col-label">执行特点</td>
+              <td class="col-val">优先复用有效 Web 会话；Web 失效则全自动补登；只更新已有号池记录。</td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- Feature 3 -->
+        <div class="feature-card">
+          <div class="feature-title-row">
+            <div class="feature-name">🏢 设备与空间自动同步</div>
+            <span class="node-tag tag-purple">空间仲裁</span>
+          </div>
+          <p class="node-text">同步登录设备、可用空间与套餐快照，优先激活 Team 空间，可靠识别的 Helper 设备展示代理节点。</p>
+          <table class="feature-table">
+            <tr>
+              <td class="col-label">触发时机</td>
+              <td class="col-val">随会话巡检或登录完成执行。</td>
+            </tr>
+            <tr>
+              <td class="col-label">异常防护</td>
+              <td class="col-val">设备接口临时失败不阻塞空间与套餐核对，不影响主流程。</td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- Feature 4 -->
+        <div class="feature-card">
+          <div class="feature-title-row">
+            <div class="feature-name">❄️ 过载监测与自动冷却</div>
+            <span class="node-tag tag-blue">防封保护</span>
+          </div>
+          <p class="node-text">从号池运行日志读取请求与过载计数，滚动窗口内达到阈值自动暂停号池调度，到期自愈唤醒。</p>
+          <table class="feature-table">
+            <tr>
+              <td class="col-label">触发时机</td>
+              <td class="col-val">15 分钟滚动窗口过载计数 ≥ 10 次（默认）。</td>
+            </tr>
+            <tr>
+              <td class="col-label">保护机制</td>
+              <td class="col-val">冷却时长（默认 60m）可配置；恢复调度绝不覆盖用户手动停用。</td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- Feature 5 -->
+        <div class="feature-card">
+          <div class="feature-title-row">
+            <div class="feature-name">🎯 降智检测与条件分组</div>
+            <span class="node-tag tag-purple">模型指纹</span>
+          </div>
+          <p class="node-text">使用账号凭据与专属代理向模型发起探针挑战，本地指纹评分并维护号池条件分组。</p>
+          <table class="feature-table">
+            <tr>
+              <td class="col-label">触发时机</td>
+              <td class="col-val">按配置间隔采样（默认 360m，1–16 并发）。</td>
+            </tr>
+            <tr>
+              <td class="col-label">联动反馈</td>
+              <td class="col-val">探针遇 401 立即派发授权修复；遇永久封禁立刻进入熔断停用。</td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- Feature 6 -->
+        <div class="feature-card" style="border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.05);">
+          <div class="feature-title-row">
+            <div class="feature-name">🛡️ 封禁联动与 IP 隔离</div>
+            <span class="node-tag tag-red">熔断防御</span>
+          </div>
+          <p class="node-text">一旦识别到上游确凿封禁证据，毫秒级停用号池、关闭探测、解除出口 IP 绑定，杜绝代理池污染。</p>
+          <table class="feature-table">
+            <tr>
+              <td class="col-label">触发时机</td>
+              <td class="col-val">出现 <code>account_deactivated</code> 等永久停用特征。</td>
+            </tr>
+            <tr>
+              <td class="col-label">执行保障</td>
+              <td class="col-val">保留解绑重试与只读状态查看，彻底阻断任何后续自动重登。</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- Collapsible Detailed Scenarios -->
+      <details class="tech-details">
+        <summary>
+          <span>🔍 查看【OAuth 失败联动 Web 补登】的内部详细时序</span>
+          <span>展开 ▾</span>
+        </summary>
+        <div class="details-content">
+          <p><strong>1. 捕获失效：</strong>Sub2API 号池巡检发现账号处于 <code>status: error</code> 且返回 <code>token_expired</code> 或 <code>invalid_grant</code>，或模型降智采样返回 <code>HTTP 401</code>。</p>
+          <p><strong>2. 资格与防抖审查：</strong>系统调取 <code>getAutoRepairEligibility(job)</code>，检查是否已保存该账号的完整密码、2FA 密钥或邮箱 API。若处于冷却中或缺少凭据，则只打标签等待人工介入，避免无序重试。</p>
+          <p><strong>3. Web 会话探活：</strong>调度器首先调用 <code>probeAccountWebSession(job)</code> 校验本地缓存的 Web Cookie。若 Web 仍然有效，直接生成 OAuth 链接并换票，跳过耗时的全登录流程。</p>
+          <p><strong>4. 联动触发 Web 补登：</strong>若 Web 会话已失效，由 <code>forceReloginJob(job, ..., { autoRepair })</code> 拉起浏览器底层协议登录，绑定账号设定的专属代理出口，自动填充密码并通过 2FA 校验。</p>
+          <p><strong>5. 空间与套餐重构：</strong>登录成功后，读取 <code>/backend-api/accounts/check</code>，自动匹配最佳可用 Team 空间并重构 Web Session。</p>
+          <p><strong>6. 授权换票并增量回写：</strong>调用 <code>startOAuthFromWebSession()</code> 签发新 Access/Refresh Token，通过 <code>createSub2ApiAutoRepairOperation()</code> 将新凭据精准 PUT 回 Sub2API 原账号 ID，同步刷新 PlanType 与 IP 绑定。</p>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <script>
+    function setFlowView(type) {
+      document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+      event.target.classList.add('active');
+
+      const nodes = {
+        'all': ['node-trigger-oauth', 'node-trigger-web', 'node-trigger-overload', 'node-trigger-ban', 'node-classify-ban', 'node-classify-eligible', 'node-classify-retry', 'node-web-relogin', 'node-web-reuse', 'node-plan-sync', 'node-oauth-repair', 'node-pool-update', 'node-next-cycle'],
+        'oauth-recovery': ['node-trigger-oauth', 'node-classify-eligible', 'node-web-relogin', 'node-plan-sync', 'node-oauth-repair', 'node-pool-update', 'node-next-cycle'],
+        'web-patrol': ['node-trigger-web', 'node-classify-eligible', 'node-web-relogin', 'node-plan-sync', 'node-next-cycle'],
+        'overload': ['node-trigger-overload', 'node-classify-retry', 'node-next-cycle'],
+        'ban-circuit': ['node-trigger-ban', 'node-classify-ban']
+      };
+
+      const activeSet = new Set(nodes[type] || nodes['all']);
+
+      document.querySelectorAll('.flow-node').forEach(node => {
+        if (activeSet.has(node.id)) {
+          node.style.opacity = '1';
+          node.style.transform = 'scale(1)';
+          node.style.filter = 'none';
+        } else {
+          node.style.opacity = '0.28';
+          node.style.transform = 'scale(0.97)';
+          node.style.filter = 'grayscale(80%)';
+        }
+      });
+    }
+  </script>
+</body>
+</html>
