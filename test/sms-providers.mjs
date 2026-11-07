@@ -1,3 +1,4 @@
+import { withRankedFixture } from "./smsbower-ranked-fixture.mjs";
 import assert from "node:assert/strict";
 
 import { createSmsProvider, publicSmsProviderDefinitions } from "../src/sms-providers.mjs";
@@ -13,6 +14,7 @@ const requests = [];
 let smsChecks = 0;
 const fetchImpl = async (url) => {
   const requestUrl = new URL(url);
+  if(requestUrl.searchParams.has("serviceId") || requestUrl.searchParams.get("action") === "getPricesV3") return withRankedFixture(() => {throw Error("unexpected fixture call")})(url);
   requests.push(requestUrl);
   const action = requestUrl.searchParams.get("action");
   let body;
@@ -42,7 +44,7 @@ const fetchImpl = async (url) => {
 
 const client = createSmsBowerClient({ apiKey: "test-api-key", fetchImpl });
 const order = await client.getNumber("dr", "1001", "0.42");
-assert.deepEqual(order, { requestId: "activation-1", number: "+60123456789" });
+assert.deepEqual(order, { requestId: "activation-1", number: "+60123456789", providerId: "3253", rank: "gold", quotedPrice: "0.42", country: "1001", countryName: "Japan" });
 assert.equal((await client.getSms(order.requestId)).status, "waiting");
 assert.deepEqual(await client.getSms(order.requestId), { status: "received", code: "654321" });
 assert.equal(await client.markReady(order.requestId), true);
@@ -53,16 +55,16 @@ assert.equal(requests[0].searchParams.get("service"), "dr");
 assert.equal(requests[0].searchParams.get("country"), "1001");
 assert.equal(requests[0].searchParams.get("maxPrice"), "0.42");
 assert.deepEqual(await client.getPriceOptions("dr"), [
-  { country: "12", title: "美国（虚拟号码）", iso: "", prefix: "", price: 0.004, count: 366063 },
-  { country: "7", title: "马来西亚", iso: "", prefix: "", price: 0.18, count: 8 },
-  { country: "1001", title: "日本", iso: "", prefix: "", price: 0.42, count: 12 },
+  { country: "12", title: "美国（虚拟号码）", iso: "", prefix: "", price: 0.004, currency: "USD", count: 366063 },
+  { country: "7", title: "马来西亚", iso: "", prefix: "", price: 0.18, currency: "USD", count: 8 },
+  { country: "1001", title: "日本", iso: "", prefix: "", price: 0.42, currency: "USD", count: 12 },
 ]);
 
 const badClient = createSmsBowerClient({
   apiKey: "test-api-key",
-  fetchImpl: async () => new Response("NO_NUMBERS", { status: 200 }),
+  fetchImpl: withRankedFixture(async () => new Response("NO_NUMBERS", { status: 200 })),
 });
-await assert.rejects(() => badClient.getNumber("dr", "1001"), /暂无可用号码/);
+await assert.rejects(() => badClient.getNumber("dr", "1001", "0.42"), /价格上限内没有可用/);
 await assert.rejects(
   () => createSmsBowerClient({
     apiKey: "test-api-key",
@@ -82,7 +84,7 @@ const provider = createSmsProvider("smsbower", {
 }, { fetchImpl });
 assert.equal(provider.name, "SMSBower");
 assert.equal(provider.serviceLabel, "日本");
-assert.deepEqual(await provider.getNumber(), { requestId: "activation-1", number: "+60123456789" });
+assert.deepEqual(await provider.getNumber(), { requestId: "activation-1", number: "+60123456789", providerId: "3253", rank: "gold", quotedPrice: "0.42", country: "1001", countryName: "Japan" });
 assert.equal((await provider.listNumberOptions())[0].country, "12");
 assert.throws(() => createSmsProvider("smsbower", { apiKey: "short", service: "dr", country: "1001" }), /API Key/);
 assert.deepEqual(parseCustomSmsEntries([

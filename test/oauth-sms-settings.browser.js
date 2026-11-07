@@ -1,4 +1,5 @@
 async (page) => {
+  await page.route("**/api/sms-providers/smsbower/inventory", route => route.fulfill({ json: { estimate: { totalCount: 10, byRank: { gold: 10, silver: 0, bronze: 0 }, countryCount: 1, providerCount: 1 }, fetchedAt: new Date().toISOString() } }));
   const results = [], errors = [], evidence = "__UI_TEST_EVIDENCE_DIR__";
   const test = async (name, fn) => { try { await fn(); results.push({ name, passed: true }); } catch (e) { results.push({ name, passed: false, error: e.message }); } };
   const check = (v, message) => { if (!v) throw Error(message); };

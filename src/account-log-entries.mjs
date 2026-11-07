@@ -1,3 +1,4 @@
+import { hasSmsActivity } from "../web/src/protocol-sms-log.mjs";
 import fs from "node:fs/promises";
 import sync from "node:fs";
 import path from "node:path";
@@ -26,8 +27,8 @@ export function beginAccountLogOperation(job, type, at = new Date().toISOString(
   hydrateAccountLog(job);
   if (job.logOperation) finishAccountLogOperation(job, job.logOperation, terminal(job.status) ? "completed" : "interrupted");
   const entry = { id: crypto.randomUUID(), type, label: labels[type] || type, at,
-    start: sync.statSync(path.join(root(job), "account.log")).size, end: null, status: "running" };
-  save(job, entry); job.logOperation = entry;
+    start: sync.statSync(path.join(root(job), "account.log")).size, end: null, status: "running", tags: [] };
+  save(job, entry); job.logOperation = entry; job.smsLogTagTail = "";
   return entry;
 }
 export function finishAccountLogOperation(job, entry = job.logOperation, status = "completed") {
@@ -36,6 +37,47 @@ export function finishAccountLogOperation(job, entry = job.logOperation, status 
   entry.status = status; entry.finishedAt ||= new Date().toISOString();
   save(job, entry);
   if (job.logOperation?.id === entry.id) job.logOperation = null;
+}
+
+export function markAccountLogSms(job, text) {
+  const entry = job.logOperation;
+  if (!entry || entry.tags?.includes("sms")) return;
+  const joined = (job.smsLogTagTail || "") + String(text || "");
+  job.smsLogTagTail = joined.slice(-128);
+  if (hasSmsActivity(joined)) { entry.tags = [...(entry.tags || []), "sms"]; entry.smsTagVersion = 1; save(job, entry); }
+}
+
+async function annotateSmsEntries(job, entries, size) {
+  // One-time migration for old task ranges, incremental scanning for a live
+  // task. Never re-read the entire account history on each 1.2s UI poll.
+  const cache = job.smsLogTagCache ||= new Map();
+  for (const entry of entries) {
+    if (entry.id === job.logOperation?.id && job.logOperation.tags?.includes("sms")) { entry.tags = job.logOperation.tags; continue; }
+    if (entry.tags?.includes("sms") || (entry.smsTagVersion === 1 && entry.status !== "running")) continue;
+    const start = Math.max(0, Math.min(size, entry.start)), end = Math.max(start, Math.min(size, entry.end ?? size));
+    const previous = cache.get(entry.id), continued = previous?.start === start && previous.end <= end;
+    let from = continued ? previous.end : start, tail = continued ? previous.tail : "", found = continued && previous.found;
+    if (!found && from < end) {
+      for await (const text of sync.createReadStream(path.join(root(job), "account.log"), { start: from, end: end - 1, encoding: "utf8", highWaterMark: 64 * 1024 })) {
+        const joined = tail + text; found = hasSmsActivity(joined); tail = joined.slice(-128); if (found) break;
+      }
+    }
+    const onDisk = /^[a-f0-9-]{36}$/.test(entry.id) ? JSON.parse(sync.readFileSync(indexFile(job, entry.id), "utf8")) : null;
+    // A task can finish while the asynchronous range scan is in flight.
+    // Keep its final boundary/status, and never tag it with a following task's SMS.
+    if (onDisk?.end !== null && onDisk?.end !== undefined && onDisk.end < end) {
+      cache.delete(entry.id); Object.assign(entry, onDisk);
+      await annotateSmsEntries(job, [entry], size); continue;
+    }
+    cache.set(entry.id, { start, end, tail, found: Boolean(found) });
+    if (cache.size > 512) cache.delete(cache.keys().next().value);
+    entry.tags = found ? [...new Set([...(entry.tags || []), "sms"])] : (entry.tags || []);
+    if (found || entry.status !== "running") {
+      entry.smsTagVersion = 1;
+      if (onDisk) { Object.assign(entry, { ...onDisk, tags: [...new Set([...(onDisk.tags || []), ...entry.tags])], smsTagVersion: 1 }); save(job, entry); }
+      if (job.logOperation?.id === entry.id) Object.assign(job.logOperation, { tags: entry.tags, smsTagVersion: 1 });
+    }
+  }
 }
 
 export async function readAccountLogEntries(job, { view = "protocol", entryId = null } = {}) {
@@ -69,6 +111,8 @@ export async function readAccountLogEntries(job, { view = "protocol", entryId = 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     if (entry.end === null && entry.id !== job.logOperation?.id) {
+      const latest = JSON.parse(await fs.readFile(indexFile(job, entry.id), "utf8"));
+      if (latest.end !== null) { Object.assign(entry, latest); continue; }
       entry.end = entries[i + 1]?.start ?? size;
       entry.status = "interrupted"; entry.finishedAt ||= new Date().toISOString(); save(job, entry);
     }
@@ -83,6 +127,7 @@ export async function readAccountLogEntries(job, { view = "protocol", entryId = 
   }
   if (cursor < size) grouped.push({ id: `background-${cursor}`, type: "background", label: "后台同步 / 补充日志", at: null, start: cursor, end: size, status: "completed" });
   entries = grouped;
+  await annotateSmsEntries(job, entries, size);
   const selected = entryId ? entries.find(entry => entry.id === entryId) : null;
   if (entryId && !selected) throw Object.assign(new Error("日志记录不存在"), { status: 404 });
   let content = "";
@@ -93,6 +138,6 @@ export async function readAccountLogEntries(job, { view = "protocol", entryId = 
     try { const buffer = Buffer.alloc(end - start); await handle.read(buffer, 0, buffer.length, start); content = buffer.toString("utf8"); }
     finally { await handle.close(); }
   }
-  return { view, entries: entries.reverse().map(({ start, end, ...entry }) => entry), selectedId: selected?.id || null,
+  return { view, entries: entries.reverse().map(({ start, end, smsTagVersion, ...entry }) => entry), selectedId: selected?.id || null,
     content, retention: "任务协议日志保留至删除账号" };
 }

@@ -1,3 +1,4 @@
+import { rankedFixtureReply } from "./smsbower-ranked-fixture.mjs";
 import "./legacy-import-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -15,6 +16,7 @@ const accessToken = jwt({ email, exp: Math.floor(Date.now() / 1000) + 3600, "htt
 let callback, upstreamBase, helper, headers, logs = "", smsCount = 0;
 const calls = [], upstream = http.createServer(async (req, res) => {
   const u = new URL(req.url, upstreamBase), chunks = []; for await (const c of req) chunks.push(c);
+  const metadata = rankedFixtureReply(u); if (metadata !== null) return res.end(metadata);
   const raw = Buffer.concat(chunks).toString(), body = raw ? (req.headers["content-type"]?.includes("json") ? JSON.parse(raw) : Object.fromEntries(new URLSearchParams(raw))) : {};
   calls.push(u.pathname);
   const json = (data, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
@@ -59,7 +61,7 @@ try {
   helper = spawn(process.execPath, [process.env.OAUTH_SMS_TEST_SERVER || "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], {
     cwd: project, windowsHide: true, env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: root, LOCALAPPDATA: root,
       TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(root, "credentials"),
-      CHATGPT_BASE: upstreamBase, AUTH_BASE: upstreamBase, TOSUB2_TEST_SENTINEL_TOKEN: "fixture", SMSBOWER_API_BASE: upstreamBase + "/sms", SMS_POLL_INTERVAL_MS: "20", SMS_POLL_TIMEOUT_MS: "3000", SUB2API_MONITOR_ENABLED: "0" }, stdio: ["ignore", "pipe", "pipe"] });
+      CHATGPT_BASE: upstreamBase, AUTH_BASE: upstreamBase, TOSUB2_TEST_SENTINEL_TOKEN: "fixture", SMSBOWER_API_BASE: upstreamBase + "/sms", SMSBOWER_CATALOG_BASE: upstreamBase + "/catalog", SMS_POLL_INTERVAL_MS: "20", SMS_POLL_TIMEOUT_MS: "3000", SUB2API_MONITOR_ENABLED: "0" }, stdio: ["ignore", "pipe", "pipe"] });
   helper.stdout.on("data", d => logs += d); helper.stderr.on("data", d => logs += d);
   const b = await wait(async () => { const r = await fetch(base + "/api/bootstrap"); return r.ok ? r.json() : null; }); headers = { "x-console-token": b.token, "content-type": "application/json" };
   const post = async (route, body) => { const r = await fetch(base + route, { method: "POST", headers, body: JSON.stringify(body) }); const d = await r.json(); assert.equal(r.status, 200, JSON.stringify(d)); return d; };
@@ -75,6 +77,9 @@ try {
   for (const route of ["/api/accounts/authorize/continue", "/api/accounts/password/verify", "/api/accounts/mfa/verify", "/api/accounts/add-phone/send", "/api/accounts/phone-otp/validate", "/oauth/token"]) assert(calls.includes(route), route);
   const exportData = JSON.parse(await fs.readFile(path.join(dir, "sub2api-import-oauth.json"), "utf8")); assert.equal(exportData.accounts[0].credentials.email, email);
   const protocolLog = (await fetch(base + `/api/jobs/${id}/logs`, { headers }).then(r => r.json())).logs;
+  const grouped = await fetch(base + `/api/jobs/${id}/logs?view=protocol`, { headers }).then(r => r.json());
+  assert(grouped.entries.some(e => e.tags?.includes("sms")), "SMS OAuth entry has no durable sms tag");
+  assert.match(protocolLog, /国家 Japan（ID 1001）/);
   assert(protocolLog.includes("[codex-auth-login]") && protocolLog.includes("自动取号"));
   for (const secret of ["Fixture-Password-123!", "JBSWY3DPEHPK3PXP", "fixture-sms-key"]) assert(!protocolLog.includes(secret) && !logs.includes(secret));
   console.log("REAL_OAUTH_SMS_HTTP_PASS verified saved Web -> same OAuth state -> password+TOTP -> add_phone -> automatic SMSBower purchase/poll/submit -> validated callback/token export; first phone HTTP400 risk rejection -> release and automatic second purchase; password/MFA confirmed; post-OAuth inspection due; no Web relogin or credential logs");

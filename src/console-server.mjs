@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { generateAccountPassword } from "./account-password.mjs";
-import { beginAccountLogOperation, finishAccountLogOperation, readAccountLogEntries } from "./account-log-entries.mjs";
+import { beginAccountLogOperation, finishAccountLogOperation, readAccountLogEntries, markAccountLogSms } from "./account-log-entries.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -35,7 +35,7 @@ import {
   filterMailboxOtpCandidatesByRequestTime,
   validateMailApiUrl,
 } from "./mail-otp.mjs";
-import { createSmsProvider, publicSmsProviderDefinitions } from "./sms-providers.mjs";
+import { createSmsProvider, publicSmsProviderDefinitions, readSmsProviderBalance } from "./sms-providers.mjs";
 import { loadSmsSettings, saveSmsSettings } from "./sms-settings.mjs";
 import { oauthErrorMessage } from "./oauth-errors.mjs";
 import { hasJobTotpKey, isReauthorizationComplete, isTotpRotationComplete } from "./task-auto-state.mjs";
@@ -219,7 +219,7 @@ const smsCancellations = new SmsCancellations({
   retryMs: process.env.NODE_ENV === "test" ? Number(process.env.TOSUB2_SMS_CANCEL_RETRY_MS || 30_000) : 30_000,
   getClient: providerId => {
     const config = smsProviderSettingsState.settings.configs[providerId];
-    return config ? createSmsProvider(providerId, config, { lubanApiBase: process.env.LUBAN_SMS_API_BASE, smsBowerApiBase: process.env.SMSBOWER_API_BASE, acquireCustomSmsEntry }) : null;
+    return config ? createSmsProvider(providerId, config, { lubanApiBase: process.env.LUBAN_SMS_API_BASE, smsBowerApiBase: process.env.SMSBOWER_API_BASE, smsBowerCatalogBase: process.env.SMSBOWER_CATALOG_BASE, acquireCustomSmsEntry }) : null;
   },
   onEvent: (record, success) => {
     const job = jobs.get(record.jobId);
@@ -1479,6 +1479,32 @@ async function handleApi(req, res, requestUrl) {
     for (const job of jobs.values()) maybeAcquireAutomaticSms(job);
     return;
   }
+  const providerBalanceMatch = /^\/api\/sms-providers\/([a-z0-9_-]+)\/balance$/.exec(requestUrl.pathname);
+  if (req.method === "POST" && providerBalanceMatch) {
+    const body = await readJson(req);
+    try {
+      const balance = await readSmsProviderBalance(providerBalanceMatch[1], body.config, { smsBowerApiBase: process.env.SMSBOWER_API_BASE });
+      sendJson(res, 200, { providerId: providerBalanceMatch[1], balance, fetchedAt: new Date().toISOString() });
+    } catch (error) {
+      throw httpError(error?.status || (/请输入有效的/.test(error.message) ? 400 : 502), safeSmsProviderError(error, body.config?.apiKey));
+    }
+    return;
+  }
+  const providerInventoryMatch = /^\/api\/sms-providers\/([a-z0-9_-]+)\/inventory$/.exec(requestUrl.pathname);
+  if (req.method === "POST" && providerInventoryMatch) {
+    const body = await readJson(req);
+    let smsClient;
+    try {
+      smsClient = createSmsProvider(providerInventoryMatch[1], body.config, { smsBowerApiBase: process.env.SMSBOWER_API_BASE, smsBowerCatalogBase: process.env.SMSBOWER_CATALOG_BASE });
+      if (!smsClient.estimateNumberAvailability) throw httpError(400, "该接码平台不支持库存预估");
+      if (!/^\d{1,12}(?:\.\d{1,6})?$/.test(String(body.config?.maxPrice || "")) || Number(body.config.maxPrice) <= 0) throw httpError(400, "请填写有效的最高价格（USD）");
+    } catch (error) { throw httpError(error.status || 400, safeSmsProviderError(error, body.config?.apiKey)); }
+    try {
+      const estimate = await smsClient.estimateNumberAvailability();
+      sendJson(res, 200, { providerId: smsClient.id, estimate, fetchedAt: new Date().toISOString() });
+    } catch (error) { throw httpError(502, safeSmsProviderError(error, body.config?.apiKey)); }
+    return;
+  }
   const providerOptionsMatch = /^\/api\/sms-providers\/([a-z0-9_-]+)\/options$/.exec(requestUrl.pathname);
   if (req.method === "POST" && providerOptionsMatch) {
     const body = await readJson(req);
@@ -1486,7 +1512,7 @@ async function handleApi(req, res, requestUrl) {
     try {
       smsClient = createSmsProvider(providerOptionsMatch[1], body.config, {
         lubanApiBase: process.env.LUBAN_SMS_API_BASE,
-        smsBowerApiBase: process.env.SMSBOWER_API_BASE,
+        smsBowerApiBase: process.env.SMSBOWER_API_BASE, smsBowerCatalogBase: process.env.SMSBOWER_CATALOG_BASE,
       });
       if (!smsClient.listNumberOptions) throw httpError(400, "该接码平台不支持价格查询");
       const options = await smsClient.listNumberOptions();
@@ -3391,6 +3417,7 @@ function consumeOutput(job, rawText) {
   }
   const text = `${proxyAttemptNotices}${sanitizeLog(rawText)}`
     .replace(/^\[proxy-session-attempt\][^\r\n]*(?:\r?\n)?/gim, "");
+  markAccountLogSms(job, text);
   appendTimestampedAccountLog(job, text);
   const scan = `${job.parserTail}${text}`;
   job.parserTail = scan.slice(-2_000);
@@ -3983,7 +4010,7 @@ async function acquireSmsNumber(job, providerId, config) {
   try {
     smsClient = createSmsProvider(providerId, config, {
       lubanApiBase: process.env.LUBAN_SMS_API_BASE,
-      smsBowerApiBase: process.env.SMSBOWER_API_BASE,
+      smsBowerApiBase: process.env.SMSBOWER_API_BASE, smsBowerCatalogBase: process.env.SMSBOWER_CATALOG_BASE,
       acquireCustomSmsEntry,
     });
   } catch (error) {
@@ -10478,6 +10505,7 @@ function stopMailPolling(job) {
 }
 
 function appendJobLog(job, text) {
+  markAccountLogSms(job, text);
   appendTimestampedAccountLog(job, sanitizeLog(text));
 }
 

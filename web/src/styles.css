@@ -7806,3 +7806,14 @@ select option {
 .fingerprint-dialog .fingerprint-sample > summary span { color: var(--muted); margin-left: 10px; white-space: nowrap; }
 .fingerprint-dialog .fingerprint-sample > strong { font-size: 12px; }
 .fingerprint-dialog .fingerprint-sample pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 var(--font-mono, monospace); background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin: 6px 0 12px; }
+
+/* SMSBower balance query and explicit price currency. */
+.sms-balance-panel { margin-bottom: 14px; }
+.sms-balance-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.sms-balance-value { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.sms-settings-dialog .sms-price-note { flex-basis: 100%; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.sms-settings-dialog .price-select-row:has(.sms-price-note) { flex-wrap: wrap; }
+
+/* SMS protocol markers, scoped to the account-log dialog. */
+.account-log-dialog .account-log-sms-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border: 1px solid var(--accent-line); border-radius: var(--radius-sm); color: var(--accent); background: var(--accent-soft); font-size: 10px; font-weight: 500; vertical-align: middle; }
+.account-log-dialog .protocol-log-phone { color: #ff6b7a; font-weight: 600; }

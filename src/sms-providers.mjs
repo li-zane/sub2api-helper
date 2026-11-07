@@ -15,13 +15,16 @@ export const SMS_PROVIDER_DEFINITIONS = [
   {
     id: "smsbower",
     name: "SMSBower",
-    description: "查询 OpenAI 实时价格和库存后选择国家",
+    description: "指定国家或不限国家，预算内优先 Gold → Silver → Bronze",
     optionsEndpoint: "/api/sms-providers/smsbower/options",
+    balanceEndpoint: "/api/sms-providers/smsbower/balance",
+    inventoryEndpoint: "/api/sms-providers/smsbower/inventory",
     fields: [
       { key: "apiKey", label: "API Key", type: "password", placeholder: "输入 SMSBower API Key" },
       { key: "service", label: "服务代码", type: "hidden", defaultValue: "dr" },
+      { key: "selectionMode", label: "选号方式", type: "select", defaultValue: "country", options: [{ value: "country", label: "指定国家" }, { value: "global", label: "不限国家" }] },
       { key: "country", label: "国家与价格", type: "price-select", defaultValue: "1001", summaryKey: "countryLabel" },
-      { key: "maxPrice", label: "最高价格", type: "hidden", required: false },
+      { key: "maxPrice", label: "最高价格（USD）", type: "number", min: "0.000001", step: "0.000001", placeholder: "例如 0.05", required: true },
       { key: "countryLabel", label: "国家名称", type: "hidden", required: false },
     ],
   },
@@ -70,21 +73,24 @@ export function createSmsProvider(providerIdValue, configValue = {}, options = {
   if (providerId === "smsbower") {
     const apiKey = validateApiKey(config.apiKey, "SMSBower");
     const service = String(config.service || "dr").trim().toLowerCase();
+    const selectionMode = String(config.selectionMode || "country").trim();
+    if (!["country", "global"].includes(selectionMode)) throw new Error("请选择有效的 SMSBower 选号方式");
     const country = String(config.country || "").trim();
     const maxPrice = String(config.maxPrice || "").trim();
     if (!/^[a-z0-9_]{1,32}$/.test(service)) throw new Error("请输入有效的 SMSBower 服务代码");
-    if (!/^\d{1,5}$/.test(country)) throw new Error("请输入有效的 SMSBower 国家 ID");
+    if (selectionMode === "country" && !/^\d{1,5}$/.test(country)) throw new Error("请输入有效的 SMSBower 国家 ID");
     if (maxPrice && (!/^\d+(?:\.\d{1,6})?$/.test(maxPrice) || Number(maxPrice) <= 0)) {
-      throw new Error("请重新查询 SMSBower 国家价格");
+      throw new Error("请输入大于 0、最多 6 位小数的 SMSBower 最高价格（USD）");
     }
-    const client = createSmsBowerClient({ apiKey, apiBase: options.smsBowerApiBase, fetchImpl: options.fetchImpl });
+    const client = createSmsBowerClient({ apiKey, apiBase: options.smsBowerApiBase, catalogBase: options.smsBowerCatalogBase, fetchImpl: options.fetchImpl });
     return {
       id: "smsbower",
       name: "SMSBower",
       apiKey,
-      serviceLabel: config.countryLabel || `${service} / ${country}`,
-      getNumber: () => client.getNumber(service, country, maxPrice),
+      serviceLabel: selectionMode === "global" ? "不限国家" : config.countryLabel || `${service} / ${country}`,
+      getNumber: () => client.getNumber(service, country, maxPrice, selectionMode),
       listNumberOptions: () => client.getPriceOptions(service),
+      estimateNumberAvailability: () => client.estimateNumbers(service, country, maxPrice, selectionMode),
       getSms: (requestId) => client.getSms(requestId),
       markReady: (requestId) => client.markReady(requestId),
       complete: (requestId) => client.complete(requestId),
@@ -110,6 +116,13 @@ export function createSmsProvider(providerIdValue, configValue = {}, options = {
   }
 
   throw new Error("请选择受支持的接码平台");
+}
+
+// Balance lookup only needs a key; incomplete/invalid purchase fields must not block it.
+export async function readSmsProviderBalance(providerId, config = {}, options = {}) {
+  if (providerId !== "smsbower") throw Object.assign(new Error("该接码平台暂不支持余额查询"), { status: 400 });
+  const apiKey = validateApiKey(config?.apiKey, "SMSBower");
+  return createSmsBowerClient({ apiKey, apiBase: options.smsBowerApiBase, fetchImpl: options.fetchImpl }).getBalance();
 }
 
 function validateApiKey(value, providerName) {

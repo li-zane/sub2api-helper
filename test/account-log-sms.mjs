@@ -1,0 +1,30 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import { pathToFileURL } from "node:url";
+import { appendAccountLog } from "../src/account-history.mjs";
+import { hasSmsActivity, splitSmsPhoneHighlights } from "../web/src/protocol-sms-log.mjs";
+const { beginAccountLogOperation, finishAccountLogOperation, readAccountLogEntries, markAccountLogSms } = await import(process.env.ACCOUNT_LOG_SMS_SOURCE ? pathToFileURL(process.env.ACCOUNT_LOG_SMS_SOURCE).href : "../src/account-log-entries.mjs");
+const root = await fs.mkdtemp(path.join(os.tmpdir(), "helper-sms-log-"));
+try {
+  const job = { outputPath: path.join(root, "oauth.json"), status: "completed", createdAt: new Date().toISOString() };
+  const sms = beginAccountLogOperation(job, "reauthorize"); appendAccountLog(job, "[sms-order] 国家 Brazil（ID 73）；手机号 +5511999999999；金额 0.02 USD\nOTP 654321\n"); finishAccountLogOperation(job, sms);
+  let entries = (await readAccountLogEntries(job)).entries;
+  assert(entries.find(e => e.id === sms.id).tags?.includes("sms"), "SMS authorization entry must carry the sms tag");
+  assert(JSON.parse(await fs.readFile(path.join(root, "operation-logs", sms.id + ".json"), "utf8")).tags.includes("sms"));
+  const plain = beginAccountLogOperation(job, "web_login"); appendAccountLog(job, "[mfa] TOTP 654321\nemail OTP requested\n"); finishAccountLogOperation(job, plain);
+  entries = (await readAccountLogEntries(job)).entries; assert(!entries.find(e => e.id === plain.id).tags?.includes("sms"));
+  const live = beginAccountLogOperation(job, "reauthorize"); markAccountLogSms(job, "[sm"); markAccountLogSms(job, "s] requesting number\n"); appendAccountLog(job, "[sms] requesting number\n");
+  assert((await readAccountLogEntries(job)).entries.find(e => e.id === live.id).tags.includes("sms")); finishAccountLogOperation(job, live);
+  job.logOperation = null; assert((await readAccountLogEntries(job)).entries.find(e => e.id === sms.id).tags.includes("sms"));
+  const old = JSON.parse(await fs.readFile(path.join(root, "operation-logs", sms.id + ".json"), "utf8")); delete old.tags; delete old.smsTagVersion; await fs.writeFile(path.join(root, "operation-logs", sms.id + ".json"), JSON.stringify(old));
+  assert((await readAccountLogEntries(job)).entries.find(e => e.id === sms.id).tags.includes("sms"), "historical entry not migrated");
+  const content = (await readAccountLogEntries(job, { entryId: sms.id })).content, parts = splitSmsPhoneHighlights(content);
+  assert.equal(parts.map(p => p.text).join(""), content); assert.deepEqual(parts.filter(p => p.phone).map(p => p.text), ["+5511999999999"]);
+  const xss = '手机号 +12025550123 <img src=x onerror=alert(1)> 2026/11/07 05:31:10 OTP 654321 id=1234567890123456';
+  const safe = splitSmsPhoneHighlights(xss); assert.equal(safe.map(p => p.text).join(""), xss); assert.deepEqual(safe.filter(p => p.phone).map(p => p.text), ["+12025550123"]);
+  assert.equal(splitSmsPhoneHighlights('"phone_number":"5511999999999"')[1].text, "5511999999999");
+  assert(!hasSmsActivity("[mfa] TOTP verification accepted; email OTP pending")); assert(hasSmsActivity('> POST https://auth.openai.com/api/accounts/add-phone/send')); assert(hasSmsActivity('> POST https://auth.openai.com/api/accounts/phone-otp/validate'));
+  console.log("ACCOUNT_LOG_SMS_PASS persisted/live/historical SMS tags; no email/TOTP false tag; actual-phone-only highlights; OTP/time/IDs plain; exact text/XSS-safe rendering");
+} finally { assert(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)); await fs.rm(root, { recursive: true, force: true }); }

@@ -11,5 +11,5 @@ export function smsOrderCost(amount, currency) {
 export function smsOrderLog(provider, order, { maxPrice = "", late = false, invalid = false } = {}) {
   const safe = value => String(value ?? "").replace(/[\r\n\x00-\x1f]/g, " ").slice(0, 120);
   const cost = order.cost && smsOrderCost(order.cost.amount, order.cost.currency);
-  return `[sms-order] ${invalid ? "取号响应异常，已保留订单待取消" : late ? "任务结束后取号返回" : "取号成功"}；平台 ${safe(provider)}；订单 ${safe(order.requestId) || "手动号码"}；手机号 ${safe(order.number)}；金额 ${cost ? `${cost.amount} ${cost.currency || "（币种未返回，按平台订单计价）"}` : "未知（平台未返回订单金额）"}${maxPrice ? `；价格上限 ${safe(maxPrice)}（非实际金额）` : ""}。\n`;
+  return `[sms-order] ${invalid ? "取号响应异常，已保留订单待取消" : late ? "任务结束后取号返回" : "取号成功"}；平台 ${safe(provider)}${order.rank && order.providerId ? `；等级 ${safe(order.rank)}；供应商 ${safe(order.providerId)}` : ""}；订单 ${safe(order.requestId) || "手动号码"}；国家 ${order.country ? `${safe(order.countryName) || "未知"}（ID ${safe(order.country)}）` : "未知（平台未返回）"}；手机号 ${safe(order.number)}；金额 ${cost ? `${cost.amount} ${cost.currency || "（币种未返回，按平台订单计价）"}` : "未知（平台未返回订单金额）"}${maxPrice ? `；价格上限 ${safe(maxPrice)}（非实际金额）` : ""}。\n`;
 }

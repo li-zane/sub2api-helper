@@ -1,3 +1,6 @@
+import { SmsNumberEstimate } from "./sms-number-estimate.jsx";
+import { SmsProviderBalance } from "./sms-provider-balance.jsx";
+import { formatSmsMoney } from "./sms-money.mjs";
 import { AccountLogDialog } from "./account-log-dialog.jsx";
 import { AccountSecurityLights } from "./account-security-lights.jsx";
 import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone, setDisplayTimeZone, compactDateTime, displayTimeParts, displayProtocolLog } from "./display-time.mjs";
@@ -1284,13 +1287,12 @@ function App() {
       });
       const options = Array.isArray(data.options) ? data.options : [];
       setSmsNumberOptions(options);
-      const current = resolved.config.maxPrice
-        ? options.find((option) => option.country === resolved.config.country) || options[0]
-        : options[0];
+      const current = options.find((option) => option.country === resolved.config.country);
+      // Do not change country or budget just because stock was queried.
+      if (!current && options.length) return;
       if (!current) throw new Error("当前没有可购买的国家号码");
       updateSmsProviderConfig(resolved.id, {
         country: current.country,
-        maxPrice: String(current.price),
         countryLabel: formatSmsCountryName(current),
       });
     } catch (requestError) {
@@ -1323,7 +1325,7 @@ function App() {
       return;
     }
     const missing = resolved.definition.fields.find((field) => (
-      field.required !== false && !String(resolved.config[field.key] || "").trim()
+      !(resolved.id === "smsbower" && field.key === "country" && resolved.config.selectionMode === "global") && field.required !== false && !String(resolved.config[field.key] || "").trim()
     ));
     if (missing) {
       setSmsSettingsError(`请填写${missing.label}`);
@@ -2674,7 +2676,7 @@ function App() {
                 <h2 id="sms-settings-title">接码平台配置</h2>
                 <HelpTip title="接码平台说明" label="查看接码平台配置说明">
                   <div>保存后同步到服务端；自动取号开启后，关闭浏览器也会继续收码。</div>
-                  <div>旧浏览器配置需在此保存一次。自动取号每次授权最多一次，失败后手动重试。</div>
+                  <div>旧浏览器配置需在此保存一次。自动取号受下方“每次授权自动取号上限”限制，达到上限后手动处理。</div>
                   {draftSmsProvider.definition?.description && <div>{draftSmsProvider.definition.description}</div>}
                 </HelpTip>
               </div>
@@ -2719,11 +2721,19 @@ function App() {
 
             {draftSmsProvider.definition && (
               <div className="provider-config-section">
+                {draftSmsProvider.definition.balanceEndpoint && <SmsProviderBalance token={token} endpoint={draftSmsProvider.definition.balanceEndpoint} apiKey={draftSmsProvider.config.apiKey} disabled={smsSettingsSaving} />}
                 <div className="provider-config-grid">
-                  {draftSmsProvider.definition.fields.filter((field) => field.type !== "hidden").map((field) => (
-                    <label key={field.key} className={`settings-field ${["price-select", "textarea"].includes(field.type) ? "wide-settings-field" : ""}`}>
+                  {draftSmsProvider.definition.fields.filter((field) => field.type !== "hidden" && !(draftSmsProvider.id === "smsbower" && field.key === "country" && draftSmsProvider.config.selectionMode === "global")).map((field) => {
+                    const Field = ["select", "price-select"].includes(field.type) ? "div" : "label";
+                    return <Field key={field.key} className={`settings-field ${["price-select", "textarea"].includes(field.type) ? "wide-settings-field" : ""}`}>
                       <span>{field.label}</span>
-                      {field.type === "price-select" ? (
+                      {field.type === "select" ? (
+                        <div><Settings2 size={15} /><CustomSelect value={draftSmsProvider.config[field.key] || field.defaultValue || ""}
+                          aria-label={draftSmsProvider.id === "smsbower" ? "SMSBower 选号方式" : field.label}
+                          onChange={event => updateSmsProviderConfig(draftSmsProvider.id, { [field.key]: event.target.value })}>
+                          {(field.options || []).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        </CustomSelect></div>
+                      ) : field.type === "price-select" ? (
                         <div className="price-select-row">
                           <div className="price-select-box">
                             <Settings2 size={15} />
@@ -2734,7 +2744,6 @@ function App() {
                                 if (!selected) return;
                                 updateSmsProviderConfig(draftSmsProvider.id, {
                                   country: selected.country,
-                                  maxPrice: String(selected.price),
                                   countryLabel: formatSmsCountryName(selected),
                                 });
                               }}
@@ -2745,6 +2754,9 @@ function App() {
                                 <option value={draftSmsProvider.config.country || ""}>
                                   {smsOptionsLoading ? "正在查询实时价格..." : "请先查询实时价格"}
                                 </option>
+                              )}
+                              {!!smsNumberOptions.length && !smsNumberOptions.some(option => option.country === draftSmsProvider.config.country) && (
+                                <option value={draftSmsProvider.config.country || ""}>{draftSmsProvider.config.countryLabel || draftSmsProvider.config.country}（暂无报价，请选择国家）</option>
                               )}
                               {smsNumberOptions.map((option) => (
                                 <option key={option.country} value={option.country}>{formatSmsPriceOption(option)}</option>
@@ -2760,6 +2772,7 @@ function App() {
                             {smsOptionsLoading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
                             {smsOptionsLoading ? "查询中" : "查询价格"}
                           </button>
+                          <small className="sms-price-note">报价单位 USD，国家汇总价仅供参考。按手填价格上限内 Gold → Silver → Bronze 取号，同等级优先低价；指定国家模式不跨国；不限国家模式在所有国家内寻找。均不加价。查询不改预算，保存后生效。</small>
                         </div>
                       ) : field.type === "textarea" ? (
                         <textarea
@@ -2776,6 +2789,9 @@ function App() {
                           {field.type === "password" ? <KeyRound size={15} /> : <Settings2 size={15} />}
                           <input
                             type={field.type || "text"}
+                            min={field.min}
+                            step={field.step}
+                            required={field.required !== false}
                             value={draftSmsProvider.config[field.key] || ""}
                             onChange={(event) => updateSmsProviderConfig(draftSmsProvider.id, { [field.key]: event.target.value })}
                             placeholder={field.placeholder}
@@ -2784,9 +2800,10 @@ function App() {
                           />
                         </div>
                       )}
-                    </label>
-                  ))}
+                    </Field>;
+                  })}
                 </div>
+                {draftSmsProvider.definition.inventoryEndpoint && <SmsNumberEstimate token={token} endpoint={draftSmsProvider.definition.inventoryEndpoint} config={draftSmsProvider.config} disabled={smsSettingsSaving} />}
               </div>
             )}
 
@@ -6843,12 +6860,13 @@ function resolveSmsProvider(definitions, settings) {
   const definition = definitions.find((provider) => provider.id === normalized.selectedProviderId) || null;
   const config = definition ? normalized.configs[definition.id] || {} : {};
   const requiredFieldsReady = Boolean(definition) && definition.fields.every((field) => (
-    field.required === false || String(config[field.key] || "").trim()
+    (definition.id === "smsbower" && field.key === "country" && config.selectionMode === "global") || field.required === false || String(config[field.key] || "").trim()
   ));
   const customEntries = definition?.id === "custom" ? inspectCustomSmsEntries(config.entries) : null;
   const ready = requiredFieldsReady && !customEntries?.error;
   const summary = definition?.id === "custom"
     ? (customEntries?.count ? `${customEntries.count} 个号码` : "")
+    : definition?.id === "smsbower" && config.selectionMode === "global" ? "不限国家"
     : definition
     ? definition.fields
       .filter((field) => field.summary || field.summaryKey)
@@ -6901,7 +6919,7 @@ function formatSmsCountryName(option) {
 
 function formatSmsPriceOption(option) {
   const name = formatSmsCountryName(option);
-  return `${name} | 价格 ${option.price} | 库存 ${option.count}`;
+  return `${name} | 价格 ${formatSmsMoney(option.price, option.currency)} | 库存 ${option.count}`;
 }
 
 function writeLocalJson(key, value) {

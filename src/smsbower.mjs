@@ -1,4 +1,6 @@
+import { rankedSmsBowerOffers, smsPriceUnits, summarizeSmsBowerOffers } from "./smsbower-ranked.mjs";
 import { smsOrderCost } from "./sms-order-cost.mjs";
+import { SMSBOWER_CURRENCY } from "../web/src/sms-money.mjs";
 
 const DEFAULT_API_BASE = "https://smsbower.page/stubs/handler_api.php";
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -17,6 +19,7 @@ export function createSmsBowerClient(options = {}) {
   const apiBase = new URL(options.apiBase || DEFAULT_API_BASE);
   const fetchImpl = options.fetchImpl || fetch;
   const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
+  const catalogBase = new URL(options.catalogBase || "https://smsbower.app/activations/getPricesByService");
 
   if (!apiKey) return null;
   if (!/^https?:$/.test(apiBase.protocol)) throw new Error("SMSBower API 地址必须使用 HTTP 或 HTTPS");
@@ -55,10 +58,38 @@ export function createSmsBowerClient(options = {}) {
     throw responseError(text, "更新号码状态失败");
   }
 
-  return {
-    async getNumber(service, country, maxPrice = "") {
-      const params = { service, country };
-      if (maxPrice !== "") params.maxPrice = maxPrice;
+  async function readCatalog(service) {
+    async function read(serviceId) {
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const url = new URL(catalogBase);
+        url.searchParams.set("serviceId", String(serviceId));
+        url.searchParams.set("withPopular", "1");
+        // Public catalogue only: never send the paid API key or account cookies.
+        const response = await fetchImpl(url, { headers: { accept: "application/json" }, redirect: "error", signal: controller.signal });
+        if (!response.ok) throw new Error();
+        return await response.json();
+      } catch { throw new SmsBowerError("SMSBower 等级数据读取失败，已停止取号", { code: "RANKS_UNAVAILABLE", terminal: true }); }
+      finally { clearTimeout(timer); }
+    }
+    // The public catalogue also returns its service-code to internal-ID directory.
+    let catalog = await read(247);
+    const record = Object.values(catalog?.services || {}).find(item => item?.activate_org_code === service);
+    if (!record?.id) throw new SmsBowerError("SMSBower 服务等级数据不可用，已停止取号", { terminal: true });
+    if (String(record.id) !== "247") catalog = await read(record.id);
+    return catalog;
+  }
+
+  async function loadOffers(service, country, maxPrice, selectionMode) {
+    if (!["country", "global"].includes(selectionMode)) throw new SmsBowerError("请选择有效的 SMSBower 选号方式", { terminal: true });
+    if (selectionMode === "country" && !/^\d{1,5}$/.test(String(country))) throw new SmsBowerError("请输入有效的 SMSBower 国家 ID", { terminal: true });
+    if (smsPriceUnits(maxPrice) === null || smsPriceUnits(maxPrice) <= 0n) throw new SmsBowerError("请设置 SMSBower 最高价格（USD）", { terminal: true });
+    const params = selectionMode === "country" ? { service, country } : { service };
+    const [text, catalog] = await Promise.all([request("getPricesV3", params), readCatalog(service)]);
+    return rankedSmsBowerOffers(parseJsonResponse(text, "供应商价格响应不正确"), catalog, service, country, maxPrice, selectionMode);
+  }
+
+  async function purchaseNumber(params) {
       // V2 returns the allocated order's activationCost. Retry a purchase using
       // legacy V1 ONLY after an explicit unsupported-action response, never
       // after a timeout, malformed success or ambiguous HTTP error.
@@ -66,10 +97,16 @@ export function createSmsBowerClient(options = {}) {
       if (text === "BAD_ACTION") text = await request("getNumber", params);
       if (text.startsWith("{")) {
         const order = parseJsonResponse(text, "获取手机号响应格式不正确");
-        const cost = smsOrderCost(order.activationCost, order.currency ?? order.activationCurrency);
+        const cost = smsOrderCost(order.activationCost, order.currency ?? order.activationCurrency ?? SMSBOWER_CURRENCY);
         if (!["string", "number"].includes(typeof order.activationId) || !String(order.activationId).trim()) throw new SmsBowerError("获取手机号响应缺少订单编号");
         const allocated = { requestId: String(order.activationId), ...(cost ? { cost } : {}) };
-        try { return { ...allocated, number: normalizePhoneNumber(order.phoneNumber ?? "") }; }
+        try {
+          const result = { ...allocated, number: normalizePhoneNumber(order.phoneNumber ?? "") };
+          if (order.activationCost !== undefined && (!cost || cost.currency !== "USD" || smsPriceUnits(cost.amount) > smsPriceUnits(params.maxPrice))) {
+            throw new SmsBowerError("取号金额或币种超出预算约束，已保留订单待取消", { terminal: true });
+          }
+          return result;
+        }
         catch (error) {
           // Preserve a known paid order even when its phone payload is broken;
           // the console can log it and durably cancel instead of losing it.
@@ -77,12 +114,39 @@ export function createSmsBowerClient(options = {}) {
           throw error;
         }
       }
-      const match = /^ACCESS_NUMBER:([^:]+):(\+?\d+)$/.exec(text);
+      const match = /^ACCESS_NUMBER:([^:]+):([^:]*)$/.exec(text);
       if (!match) throw responseError(text, "获取手机号失败");
-      return {
-        number: normalizePhoneNumber(match[2]),
-        requestId: match[1],
-      };
+      try { return { number: normalizePhoneNumber(match[2]), requestId: match[1] }; }
+      catch (error) { error.smsOrder = { requestId: match[1], number: "未知" }; throw error; }
+  }
+
+  return {
+    async getBalance() {
+      const text = await request("getBalance");
+      const match = /^ACCESS_BALANCE:(\d{1,12}(?:\.\d{1,12})?)$/.exec(text);
+      if (match) return { amount: match[1], currency: SMSBOWER_CURRENCY };
+      if (/^(?:BAD_KEY|BAD_ACTION|BANNED)$/.test(text)) throw responseError(text, "查询余额失败");
+      throw new SmsBowerError("余额接口返回格式不正确", { code: "INVALID_BALANCE", terminal: true });
+    },
+
+    async estimateNumbers(service, country, maxPrice, selectionMode = "country") {
+      const offers = await loadOffers(service, country, maxPrice, selectionMode);
+      return { ...summarizeSmsBowerOffers(offers), selectionMode, country: selectionMode === "country" ? String(country) : null, maxPrice: String(maxPrice), currency: SMSBOWER_CURRENCY };
+    },
+
+    async getNumber(service, country, maxPrice = "", selectionMode = "country") {
+      const offers = await loadOffers(service, country, maxPrice, selectionMode);
+      for (const offer of offers) {
+        try {
+          const order = await purchaseNumber({ service, country: offer.country, maxPrice: offer.price, providerIds: offer.providerId });
+          return { ...order, providerId: offer.providerId, rank: offer.rank, quotedPrice: offer.price, country: offer.country, countryName: offer.countryName };
+        } catch (error) {
+          if (error.smsOrder) error.smsOrder = { ...error.smsOrder, providerId: offer.providerId, rank: offer.rank, quotedPrice: offer.price, country: offer.country, countryName: offer.countryName };
+          // Only an explicit no-stock response proves that no paid order exists.
+          if (error.code !== "NO_NUMBERS" || error.smsOrder) throw error;
+        }
+      }
+      throw new SmsBowerError("所选范围价格上限内没有可用的 Gold / Silver / Bronze 号码", { code: "NO_NUMBERS", terminal: true });
     },
 
     async getPriceOptions(service) {
@@ -181,6 +245,7 @@ function normalizePriceOptions(prices, countries, service) {
         : "",
       prefix: String(countryInfo.prefix || "").replace(/\D/g, "").slice(0, 4),
       price: cost,
+      currency: SMSBOWER_CURRENCY,
       count: Math.floor(count),
     };
     const existing = options.get(country);

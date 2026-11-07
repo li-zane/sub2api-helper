@@ -1,3 +1,4 @@
+import { rankedFixtureReply } from "./smsbower-ranked-fixture.mjs";
 import "./legacy-import-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -9,6 +10,7 @@ const project = path.resolve(import.meta.dirname, ".."), root = await fs.mkdtemp
 let helper, headers, base, logs = "", noStock = false, gets = 0, statuses = [], hold = null, releaseHold;
 const sms = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://fixture"), action = url.searchParams.get("action");
+  const metadata = rankedFixtureReply(url); if (metadata !== null) return res.end(metadata);
   assert.equal(url.searchParams.get("api_key"), "fixture-sms-key");
   if (action === "getNumber") {
     const n = ++gets; if (hold) { await hold; hold = null; }
@@ -29,7 +31,7 @@ const settings = (autoAcquire, maxAutoNumbers = 3) => api("/api/sms-provider-set
 async function start() {
   helper = spawn(process.execPath, [process.env.SMS_TEST_SERVER || "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: project, windowsHide: true,
     env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: root, LOCALAPPDATA: root, TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(root, "credentials"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32),
-      ONBOARDING_PROTOCOL_SCRIPT: path.join(project, "test/mock-oauth-sms-protocol.mjs"), SMSBOWER_API_BASE: `http://127.0.0.1:${sms.address().port}/handler_api.php`, SMS_POLL_INTERVAL_MS: "20", SMS_POLL_TIMEOUT_MS: "3000", SUB2API_MONITOR_ENABLED: "0" }, stdio: ["ignore", "pipe", "pipe"] });
+      ONBOARDING_PROTOCOL_SCRIPT: path.join(project, "test/mock-oauth-sms-protocol.mjs"), SMSBOWER_CATALOG_BASE: `http://127.0.0.1:${sms.address().port}/catalog`, SMSBOWER_API_BASE: `http://127.0.0.1:${sms.address().port}/handler_api.php`, SMS_POLL_INTERVAL_MS: "20", SMS_POLL_TIMEOUT_MS: "3000", SUB2API_MONITOR_ENABLED: "0" }, stdio: ["ignore", "pipe", "pipe"] });
   helper.stdout.on("data", d => logs += d); helper.stderr.on("data", d => logs += d);
   const b = await wait(async () => { const r = await fetch(base + "/api/bootstrap"); return r.ok ? r.json() : null; }); headers = { "x-console-token": b.token, "content-type": "application/json" }; assert(!JSON.stringify(b).includes("fixture-sms-key"));
 }

@@ -1,3 +1,4 @@
+import { rankedFixtureReply } from "./smsbower-ranked-fixture.mjs";
 import "./legacy-import-fixture.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -29,6 +30,7 @@ const smsServer = http.createServer((req, res) => {
     res.end(JSON.stringify({ messages }));
     return;
   }
+  const metadata = rankedFixtureReply(url); if (metadata !== null) return res.end(metadata);
   const action = url.searchParams.get("action");
   smsActions.push({ action, id: url.searchParams.get("id"), status: url.searchParams.get("status"), maxPrice: url.searchParams.get("maxPrice") });
   let body = "BAD_ACTION";
@@ -61,7 +63,7 @@ const child = spawn(process.execPath, [process.env.SMS_PROVIDER_TEST_SERVER || p
     TOSUB2_MAC_CREDENTIAL_ROOT: path.join(outputRoot, "test-mac-credentials"),
     ONBOARDING_PROTOCOL_SCRIPT: path.join(projectRoot, "test", "mock-protocol-login.mjs"),
     TOSUB2_TLS_PROFILE: "chrome142",
-    SMSBOWER_API_BASE: `http://127.0.0.1:${smsServer.address().port}/handler_api.php`,
+    SMSBOWER_CATALOG_BASE: `http://127.0.0.1:${smsServer.address().port}/catalog`, SMSBOWER_API_BASE: `http://127.0.0.1:${smsServer.address().port}/handler_api.php`,
     SMS_POLL_INTERVAL_MS: "20",
     SMS_POLL_TIMEOUT_MS: "3000",
   },

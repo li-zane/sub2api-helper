@@ -1,3 +1,4 @@
+import { splitSmsPhoneHighlights } from "./protocol-sms-log.mjs";
 import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronRight, Copy, RefreshCw, X } from "lucide-react";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
@@ -22,13 +23,14 @@ function time(value, view) {
 }
 
 export function AccountLogDialog({ request, job, onClose, statusBadge }) {
-  useDisplayTimeZone();
+  const timeZone = useDisplayTimeZone();
   const [view, setView] = useState("protocol"), [selected, setSelected] = useState(null);
   const [data, setData] = useState({ entries: [], content: "" }), [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false), [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set());
   const groupId = useId();
   const credentialGroups = useMemo(() => view === "credentials" ? groupCredentialHistory(data.entries) : [], [view, data.entries]);
+  const protocolParts = useMemo(() => splitSmsPhoneHighlights(displayProtocolLog(data.content)), [data.content, timeZone]);
   const sequence = useRef(0), alive = useRef(true), pending = useRef(null);
   useEffect(() => () => { alive.current = false; sequence.current++; }, []);
   const load = async () => {
@@ -65,7 +67,7 @@ export function AccountLogDialog({ request, job, onClose, statusBadge }) {
   }
   const entryButton = (entry, className = "", key = entry.id) => <button type="button" key={key} data-entry-id={entry.id} aria-pressed={entry.id === selected}
     className={`account-log-entry ${entry.id === selected ? "is-selected" : ""} ${className}`.trim()} onClick={() => selectEntry(entry)}>
-    <strong>{title(entry, view)}</strong><time>{time(entry.at, view)}</time>
+    <strong>{title(entry, view)}{view === "protocol" && entry.tags?.includes("sms") && <span className="account-log-sms-tag">接码</span>}</strong><time>{time(entry.at, view)}</time>
     {view === "protocol" && <small>{({ running: "进行中", completed: "已结束", failed: "未完成", interrupted: "已中断", canceled: "已取消" })[entry.status] || entry.status}</small>}
   </button>;
   return <AccessibleDialog className="log-dialog account-log-dialog" labelledBy="account-log-title" onClose={onClose}>
@@ -110,7 +112,7 @@ export function AccountLogDialog({ request, job, onClose, statusBadge }) {
         <section className="account-log-content" aria-label="记录详情">
           {error ? <div className="dialog-error" role="alert">{error}</div> : selected ? <>
             <div className="account-log-content-heading">{current ? title(current, view) : "正在读取记录…"}</div>
-            <pre className="log-dialog-viewer" tabIndex="0">{data.content ? view === "protocol" ? displayProtocolLog(data.content) : data.content : (data.selectedId === selected ? "该记录暂无输出" : "正在读取内容…")}</pre>
+            <pre className="log-dialog-viewer" tabIndex="0">{data.content ? view === "protocol" ? protocolParts.map((part, index) => part.phone ? <span key={index} className="protocol-log-phone">{part.text}</span> : part.text) : data.content : (data.selectedId === selected ? "该记录暂无输出" : "正在读取内容…")}</pre>
           </> : <div className="account-log-placeholder">选择记录，查看详细内容</div>}
         </section>
       </div>
