@@ -27,7 +27,7 @@ const api = async (route, body, method = "POST") => { const r = await fetch(base
 const job = async id => (await api("/api/jobs")).data.jobs.find(j => j.id === id);
 const waitJob = (id, test) => wait(async () => { const j = await job(id); return j && test(j) ? j : null; });
 const create = async prefix => { const r = await api("/api/jobs", { email: prefix + "@example.test" }); assert.equal(r.status, 201); return r.data.job.id; };
-const settings = (autoAcquire, maxAutoNumbers = 3) => api("/api/sms-provider-settings", { settings: { selectedProviderId: "smsbower", autoAcquire, maxAutoNumbers, configs: { smsbower: { apiKey: "fixture-sms-key", service: "dr", country: "1001", maxPrice: "0.42" } } } });
+const settings = (autoAcquire, maxAutoNumbers = 3) => api("/api/sms-provider-settings", { settings: { selectedProviderId: "smsbower", autoAcquire, maxAutoNumbers, maxFailuresPerPool: 10, configs: { smsbower: { apiKey: "fixture-sms-key", service: "dr", country: "1001", maxPrice: "0.42" } } } });
 async function start() {
   helper = spawn(process.execPath, [process.env.SMS_TEST_SERVER || "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: project, windowsHide: true,
     env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: root, LOCALAPPDATA: root, TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(root, "credentials"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32),

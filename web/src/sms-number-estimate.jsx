@@ -46,7 +46,7 @@ export function SmsNumberEstimate({ token, endpoint, config, disabled = false })
       </button>
     </div>
     {estimate && <div className="sms-price-note">Gold {number(estimate.byRank.gold)} · Silver {number(estimate.byRank.silver)} · Bronze {number(estimate.byRank.bronze)} · {estimate.countryCount} 个国家</div>}
-    <div className="sms-price-note">库存为平台合计估算，可能共享；预估不买号，实际以取号为准。</div>
+    <div className="sms-price-note">已排除虚拟号码；库存为平台合计估算，可能共享，实际以取号为准。</div>
     {current?.error && <p className="dialog-error" role="alert">{current.error}</p>}
   </section>;
 }

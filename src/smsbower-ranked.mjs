@@ -1,3 +1,4 @@
+import { isVirtualSmsPool, smsPoolKey } from "./sms-pool-policy.mjs";
 // Prices are USD decimals. Integer comparison avoids rounding across a budget boundary.
 export function smsPriceUnits(value) {
   const text = typeof value === "number" && Number.isFinite(value) ? String(value) : typeof value === "string" ? value.trim() : "";
@@ -6,8 +7,10 @@ export function smsPriceUnits(value) {
   return BigInt(whole) * 10n ** 12n + BigInt(fraction.padEnd(12, "0"));
 }
 
-export function rankedSmsBowerOffers(prices, catalog, service, country, maxPrice, selectionMode = "country") {
+export function rankedSmsBowerOffers(prices, catalog, service, country, maxPrice, selectionMode = "country", excludedPools = []) {
   if (!["country", "global"].includes(selectionMode)) throw new Error("请选择有效的 SMSBower 选号方式");
+  if (!Array.isArray(excludedPools) || excludedPools.some(key => typeof key !== "string")) throw new Error("SMSBower 号池排除规则格式不正确");
+  const excluded = new Set(excludedPools);
   const cap = smsPriceUnits(maxPrice);
   if (cap === null || cap <= 0n) throw new Error("请设置 SMSBower 最高价格（USD），取号不会自动提高上限");
   const record = Object.values(catalog?.services || {}).find(item => item?.activate_org_code === service);
@@ -17,11 +20,11 @@ export function rankedSmsBowerOffers(prices, catalog, service, country, maxPrice
   const allOffers = [], seen = new Set();
   for (const selected of selectedCountries) {
     const countryCode = String(selected?.activate_org_code ?? "");
-    if (!/^\d{1,5}$/.test(countryCode) || seen.has(countryCode)) continue;
+    if (!/^\d{1,5}$/.test(countryCode) || seen.has(countryCode) || isVirtualSmsPool(selected, countryCode)) continue;
     seen.add(countryCode);
     allOffers.push(...countryOffers(prices, selected, service, countryCode, cap));
   }
-  return sortOffers(allOffers);
+  return sortOffers(allOffers.filter(offer => !excluded.has(smsPoolKey({ ...offer, service }))));
 }
 
 function countryOffers(prices, selected, service, country, cap) {
@@ -32,7 +35,7 @@ function countryOffers(prices, selected, service, country, cap) {
   const ranks = new Map(), conflicts = new Set();
   for (const position of Object.values(selected.positions)) {
     const rank = position?.rank?.description;
-    if (!["gold", "silver", "bronze"].includes(rank) || !Array.isArray(position.agent_ids) || !(Number(position.count) > 0)) continue;
+    if (isVirtualSmsPool(position, "") || !["gold", "silver", "bronze"].includes(rank) || !Array.isArray(position.agent_ids) || !(Number(position.count) > 0)) continue;
     for (const id of position.agent_ids) {
       const providerId = String(id);
       if (!/^\d+$/.test(providerId)) continue;
@@ -49,7 +52,7 @@ function countryOffers(prices, selected, service, country, cap) {
   const offers = [];
   for (const [key, provider] of Object.entries(providers)) {
     const id = String(provider?.provider_id ?? key), meta = ranks.get(id), price = smsPriceUnits(provider?.price);
-    if (String(key) !== id || conflicts.has(id) || !meta || price === null || price <= 0n || price > cap || (!Number.isSafeInteger(Number(provider.count)) || Number(provider.count) <= 0)) continue;
+    if (isVirtualSmsPool(provider, "") || String(key) !== id || conflicts.has(id) || !meta || price === null || price <= 0n || price > cap || (!Number.isSafeInteger(Number(provider.count)) || Number(provider.count) <= 0)) continue;
     offers.push({ country: String(country), countryName, providerId: id, rank: meta.rank, price: String(provider.price), count: Number(provider.count) });
   }
   return offers;

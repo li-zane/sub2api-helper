@@ -1,3 +1,4 @@
+import { isVirtualSmsPool } from "./sms-pool-policy.mjs";
 import { rankedSmsBowerOffers, smsPriceUnits, summarizeSmsBowerOffers } from "./smsbower-ranked.mjs";
 import { smsOrderCost } from "./sms-order-cost.mjs";
 import { SMSBOWER_CURRENCY } from "../web/src/sms-money.mjs";
@@ -80,13 +81,14 @@ export function createSmsBowerClient(options = {}) {
     return catalog;
   }
 
-  async function loadOffers(service, country, maxPrice, selectionMode) {
+  async function loadOffers(service, country, maxPrice, selectionMode, excludedPools = []) {
     if (!["country", "global"].includes(selectionMode)) throw new SmsBowerError("请选择有效的 SMSBower 选号方式", { terminal: true });
     if (selectionMode === "country" && !/^\d{1,5}$/.test(String(country))) throw new SmsBowerError("请输入有效的 SMSBower 国家 ID", { terminal: true });
     if (smsPriceUnits(maxPrice) === null || smsPriceUnits(maxPrice) <= 0n) throw new SmsBowerError("请设置 SMSBower 最高价格（USD）", { terminal: true });
+    if (selectionMode === "country" && isVirtualSmsPool({}, country)) return [];
     const params = selectionMode === "country" ? { service, country } : { service };
     const [text, catalog] = await Promise.all([request("getPricesV3", params), readCatalog(service)]);
-    return rankedSmsBowerOffers(parseJsonResponse(text, "供应商价格响应不正确"), catalog, service, country, maxPrice, selectionMode);
+    return rankedSmsBowerOffers(parseJsonResponse(text, "供应商价格响应不正确"), catalog, service, country, maxPrice, selectionMode, excludedPools);
   }
 
   async function purchaseNumber(params) {
@@ -134,8 +136,9 @@ export function createSmsBowerClient(options = {}) {
       return { ...summarizeSmsBowerOffers(offers), selectionMode, country: selectionMode === "country" ? String(country) : null, maxPrice: String(maxPrice), currency: SMSBOWER_CURRENCY };
     },
 
-    async getNumber(service, country, maxPrice = "", selectionMode = "country") {
-      const offers = await loadOffers(service, country, maxPrice, selectionMode);
+    async getNumber(service, country, maxPrice = "", selectionMode = "country", options = {}) {
+      if (selectionMode === "country" && isVirtualSmsPool({}, country)) throw new SmsBowerError("所选国家属于虚拟号码池，已直接排除，请更换非虚拟国家或选择不限国家", { code: "VIRTUAL_COUNTRY_EXCLUDED", terminal: true });
+      const offers = await loadOffers(service, country, maxPrice, selectionMode, options.excludedPools || []);
       for (const offer of offers) {
         try {
           const order = await purchaseNumber({ service, country: offer.country, maxPrice: offer.price, providerIds: offer.providerId });
@@ -146,7 +149,7 @@ export function createSmsBowerClient(options = {}) {
           if (error.code !== "NO_NUMBERS" || error.smsOrder) throw error;
         }
       }
-      throw new SmsBowerError("所选范围价格上限内没有可用的 Gold / Silver / Bronze 号码", { code: "NO_NUMBERS", terminal: true });
+      throw new SmsBowerError("所选范围价格上限内没有可用的非虚拟 Gold / Silver / Bronze 号码（已跳过被排除的号池）", { code: "NO_NUMBERS", terminal: true });
     },
 
     async getPriceOptions(service) {
@@ -236,7 +239,7 @@ function normalizePriceOptions(prices, countries, service) {
     if (!Number.isFinite(cost) || cost < 0 || !Number.isFinite(count) || count <= 0) return;
     const countryInfo = countryIndex.get(String(countryKey).toLowerCase()) || {};
     const country = String(countryInfo.activate_org_code ?? countryKey);
-    if (!/^\d{1,5}$/.test(country)) return;
+    if (!/^\d{1,5}$/.test(country) || isVirtualSmsPool(countryInfo, country)) return;
     const option = {
       country,
       title: safeMessage(countryInfo.chn || countryInfo.title || countryInfo.eng || fallbackCountryName(country)),

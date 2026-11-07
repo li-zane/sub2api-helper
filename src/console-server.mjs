@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createSmsPoolPolicy, restoreSmsPoolPolicy, normalizeSmsPoolRoute, excludedSmsPools, recordSmsPoolFailure, DEFAULT_SMS_POOL_FAILURE_LIMIT } from "./sms-pool-policy.mjs";
 import { generateAccountPassword } from "./account-password.mjs";
 import { beginAccountLogOperation, finishAccountLogOperation, readAccountLogEntries, markAccountLogSms } from "./account-log-entries.mjs";
 import crypto from "node:crypto";
@@ -3641,7 +3642,8 @@ function consumeOutput(job, rawText) {
     job.currentPhone = latest[1];
     job.phoneError = friendlyPhoneError(latest[2]);
     if (job.smsOrderId && job.smsNumber === job.currentPhone) {
-      releaseSmsNumber(job, "error", "该平台手机号无法接收验证码，请重新取号或手动输入其他手机号");
+      rememberRejectedSmsPool(job, latest[2]);
+      releaseSmsNumber(job, "error", job.phoneError || "该平台手机号无法接收验证码，请重新取号或手动输入其他手机号");
     }
     setStage(job, "phone", job.smsAutoStopped
       ? "短信发送失败，自动换号已暂停，请检查错误后手动重试"
@@ -3664,6 +3666,7 @@ function consumeOutput(job, rawText) {
       job.currentPhone ? `请重新输入发送至 ${job.currentPhone} 的验证码` : "请重新输入手机验证码",
     );
     if (shouldReplaceRejectedPhone(validationMessage)) {
+      rememberRejectedSmsPool(job, validationMessage);
       job.smsAutoStopped = false;
       job.smsAutoRetryReady = false;
       job.smsError = job.phoneError;
@@ -3940,6 +3943,7 @@ function markResumeAvailable(job, reason = "登录流程中断") {
 
 function friendlyPhoneError(message) {
   const text = String(message || "");
+  if (/voip_phone_disallowed/i.test(text)) return "上游不接受虚拟/VoIP 号码，请更换非虚拟号码";
   if (/suspicious behavior/i.test(text)) return "该手机号触发了风控，请更换手机号或稍后重试";
   if (/too many|rate.?limit|HTTP 429/i.test(text)) return "短信发送过于频繁，请稍后重试或更换手机号";
   if (/already|used|unsupported|invalid phone/i.test(text)) return "该手机号不可用或已被使用，请更换手机号";
@@ -3985,10 +3989,25 @@ function friendlyPhoneOtpError(message) {
 function shouldReplaceRejectedPhone(message) {
   const text = String(message || "");
   // Upstream sometimes uses HTTP 429 for an explicitly number-scoped refusal.
-  if (/phone_recently_used|phone number was recently used|phone_number_in_use|phone number already in use/i.test(text)) return true;
+  if (/voip_phone_disallowed|phone_recently_used|phone number was recently used|phone_number_in_use|phone number already in use/i.test(text)) return true;
   // Account/session/global throttling is not repaired by buying another number.
   if (/HTTP 429|rate.?limit|too many|account_(?:deactivated|suspended)|invalid_auth|session.*expired/i.test(text)) return false;
   return /suspicious behavior from phone numbers|phone_recently_used|phone number was recently used|phone_number_in_use|phone number already in use|phone.*already.*used|phone.*unsupported|invalid phone|unsupported.*phone/i.test(text);
+}
+
+function currentSmsPoolPolicy(job) {
+  const attemptKey = `${job.lastOperationAt || job.createdAt}:${job.attempt}`;
+  if (job.smsPoolPolicy?.attemptKey !== attemptKey) job.smsPoolPolicy = createSmsPoolPolicy(attemptKey);
+  return job.smsPoolPolicy;
+}
+
+function rememberRejectedSmsPool(job, message) {
+  if (job.smsProviderId !== "smsbower" || !job.smsOrderId || job.smsOrderRoute?.requestId !== job.smsOrderId || job.smsNumber !== job.currentPhone || !shouldReplaceRejectedPhone(message)) return;
+  const limit = smsProviderSettingsState.settings.maxFailuresPerPool ?? DEFAULT_SMS_POOL_FAILURE_LIMIT;
+  const result = recordSmsPoolFailure(currentSmsPoolPolicy(job), job.smsOrderRoute, message, limit);
+  if (!result) return;
+  const route = job.smsOrderRoute;
+  appendJobLog(job, `[sms-pool] ${route.countryName}（ID ${route.country}）/供应商 ${route.providerId}：本次授权明确拒绝 ${result.count}/${limit} 次；${result.immediate ? "上游禁止 VoIP，立即排除该号池" : result.excluded ? "达到阈值，排除该号池并尝试下一候选" : "未达排除阈值，可继续换号"}。\n`);
 }
 
 function acquireCustomSmsEntry(entries) {
@@ -4028,7 +4047,11 @@ async function acquireSmsNumber(job, providerId, config) {
 
   let order, cancellationQueued = false;
   try {
-    order = await smsClient.getNumber();
+    const policy = smsClient.id === "smsbower" ? currentSmsPoolPolicy(job) : null;
+    const excludedPools = policy ? excludedSmsPools(policy, smsProviderSettingsState.settings.maxFailuresPerPool ?? DEFAULT_SMS_POOL_FAILURE_LIMIT) : [];
+    await saveJobMetadata(job);
+    if (job.status !== "phone" || !job.child || job.runId !== runId || job.child !== child) throw httpError(409, "任务已离开手机号步骤，未发起取号");
+    order = await smsClient.getNumber({ excludedPools });
     const late = job.status !== "phone" || !job.child || job.runId !== runId || job.child !== child;
     appendJobLog(job, smsOrderLog(smsClient.name, order, { maxPrice: config?.maxPrice, late }));
     if (late) {
@@ -4037,6 +4060,7 @@ async function acquireSmsNumber(job, providerId, config) {
       throw httpError(409, "任务已经不在手机号输入步骤，已提交号码取消请求");
     }
     job.smsOrderId = order.requestId;
+    job.smsOrderRoute = smsClient.id === "smsbower" ? normalizeSmsPoolRoute({ ...order, service: String(config.service || "dr").trim().toLowerCase() }) : null;
     job.smsNumber = order.number;
     job.smsStatus = "number_acquired";
     job.smsError = null;
@@ -4192,6 +4216,7 @@ function releaseSmsNumber(job, nextStatus = "idle", errorMessage = null) {
   const providerName = job.smsProviderName || smsClient?.name || "接码平台";
   stopSmsPolling(job);
   job.smsOrderId = null;
+  job.smsOrderRoute = null;
   job.smsNumber = null;
   job.smsClient = null;
   job.smsLastSubmittedCode = null;
@@ -4223,6 +4248,7 @@ function completeSmsNumber(job) {
   if (!requestId || !smsClient) return;
   stopSmsPolling(job);
   job.smsOrderId = null;
+  job.smsOrderRoute = null;
   job.smsClient = null;
   job.smsLastSubmittedCode = null;
   job.smsStatus = "completed";
@@ -4244,6 +4270,8 @@ function newSmsState() {
     smsProviderName: null,
     smsServiceLabel: null,
     smsOrderId: null,
+    smsOrderRoute: null,
+    smsPoolPolicy: null,
     smsNumber: null,
     smsClient: null,
     smsStatus: "idle",
@@ -4256,8 +4284,11 @@ function newSmsState() {
 function restoredSmsState(metadata = {}) {
   const orderId = metadata.sms_order_id || metadata.luban_request_id;
   const number = metadata.sms_number || metadata.luban_number;
-  if (!orderId || !number) return newSmsState();
+  const base = { ...newSmsState(), smsPoolPolicy: restoreSmsPoolPolicy(metadata.sms_pool_policy) };
+  if (!orderId || !number) return base;
   return {
+    ...base,
+    smsOrderRoute: normalizeSmsPoolRoute(metadata.sms_order_route),
     smsProviderId: metadata.sms_provider_id || "luban",
     smsProviderName: metadata.sms_provider_name || (metadata.sms_provider_id === "smsbower" ? "SMSBower" : "LubanSMS"),
     smsServiceLabel: metadata.sms_service_label || metadata.luban_service_id || null,
@@ -10336,6 +10367,8 @@ async function saveJobMetadata(job) {
         sms_provider_name: job.smsProviderName || null,
         sms_service_label: job.smsServiceLabel || null,
         sms_order_id: job.smsOrderId || null,
+        sms_order_route: job.smsOrderRoute || null,
+        sms_pool_policy: restoreSmsPoolPolicy(job.smsPoolPolicy),
         sms_number: job.smsNumber || null,
         sms_status: job.smsStatus || null,
         last_auth_automated: Boolean(job.lastAuthAutomated),

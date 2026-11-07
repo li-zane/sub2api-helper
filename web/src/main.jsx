@@ -2772,7 +2772,7 @@ function App() {
                             {smsOptionsLoading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
                             {smsOptionsLoading ? "查询中" : "查询价格"}
                           </button>
-                          <small className="sms-price-note">报价单位 USD，国家汇总价仅供参考。按手填价格上限内 Gold → Silver → Bronze 取号，同等级优先低价；指定国家模式不跨国；不限国家模式在所有国家内寻找。均不加价。查询不改预算，保存后生效。</small>
+                          <small className="sms-price-note">报价单位 USD，国家汇总价仅供参考，已排除虚拟号码。按手填价格上限内 Gold → Silver → Bronze 取号，同等级优先低价；指定国家模式不跨国；不限国家模式在所有国家内寻找。均不加价。查询不改预算，保存后生效。</small>
                         </div>
                       ) : field.type === "textarea" ? (
                         <textarea
@@ -2819,6 +2819,12 @@ function App() {
                 onChange={event => setSmsSettingsDraft(current => ({ ...current, maxAutoNumbers: event.target.value === "" ? "" : Number(event.target.value) }))} />
               <small>手机号被风控或已被使用时自动换号；达到上限或平台取号失败时停止。</small>
             </label>
+            {draftSmsProvider.id === "smsbower" && <label className="settings-field">
+              <span>单个号池失败排除阈值</span>
+              <input type="number" min="1" max="10" step="1" required aria-label="单个号池失败排除阈值" aria-describedby="sms-pool-failure-help" value={smsSettingsDraft.maxFailuresPerPool ?? 2} disabled={smsSettingsSaving}
+                onChange={event => setSmsSettingsDraft(current => ({ ...current, maxFailuresPerPool: event.target.value === "" ? "" : Number(event.target.value) }))} />
+              <small id="sms-pool-failure-help">同次授权，国家＋供应商累计拒绝达阈值即排除。虚拟号码直接排除；VoIP 禁用立即排除。总取号上限仍有效。</small>
+            </label>}
             {smsSettingsError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{smsSettingsError}</div>}
             <div className="dialog-footer">
               <button type="button" className="cancel-button" onClick={() => setSmsSettingsOpen(false)} disabled={smsSettingsSaving}>取消</button>
@@ -6852,7 +6858,7 @@ function withSmsProviderDefaults(definitions, settings) {
   const selectedProviderId = definitions.some((provider) => provider.id === settings?.selectedProviderId)
     ? settings.selectedProviderId
     : definitions[0]?.id || settings?.selectedProviderId || "luban";
-  return { selectedProviderId, configs, autoAcquire: settings?.autoAcquire === true, maxAutoNumbers: settings?.maxAutoNumbers ?? 3 };
+  return { selectedProviderId, configs, autoAcquire: settings?.autoAcquire === true, maxAutoNumbers: settings?.maxAutoNumbers ?? 3, maxFailuresPerPool: settings?.maxFailuresPerPool ?? 2 };
 }
 
 function resolveSmsProvider(definitions, settings) {

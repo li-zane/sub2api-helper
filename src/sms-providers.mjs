@@ -88,7 +88,7 @@ export function createSmsProvider(providerIdValue, configValue = {}, options = {
       name: "SMSBower",
       apiKey,
       serviceLabel: selectionMode === "global" ? "不限国家" : config.countryLabel || `${service} / ${country}`,
-      getNumber: () => client.getNumber(service, country, maxPrice, selectionMode),
+      getNumber: (options = {}) => client.getNumber(service, country, maxPrice, selectionMode, options),
       listNumberOptions: () => client.getPriceOptions(service),
       estimateNumberAvailability: () => client.estimateNumbers(service, country, maxPrice, selectionMode),
       getSms: (requestId) => client.getSms(requestId),

@@ -1,8 +1,9 @@
+import { DEFAULT_SMS_POOL_FAILURE_LIMIT } from "./sms-pool-policy.mjs";
 import fs from "node:fs/promises";
 import { createSmsProvider, SMS_PROVIDER_DEFINITIONS } from "./sms-providers.mjs";
 import { writePrivateJsonAtomic } from "./account-history.mjs";
 
-export const emptySmsSettings = () => ({ selectedProviderId: "luban", autoAcquire: false, maxAutoNumbers: 3, configs: {} });
+export const emptySmsSettings = () => ({ selectedProviderId: "luban", autoAcquire: false, maxAutoNumbers: 3, maxFailuresPerPool: DEFAULT_SMS_POOL_FAILURE_LIMIT, configs: {} });
 
 export function normalizeSmsSettings(value, { validate = true } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("接码配置格式不正确");
@@ -11,6 +12,8 @@ export function normalizeSmsSettings(value, { validate = true } = {}) {
   if (value.autoAcquire !== undefined && typeof value.autoAcquire !== "boolean") throw new Error("自动取号开关必须为布尔值");
   const maxAutoNumbers = value.maxAutoNumbers ?? 3;
   if (!Number.isInteger(maxAutoNumbers) || maxAutoNumbers < 1 || maxAutoNumbers > 10) throw new Error("自动取号上限必须为 1 到 10 的整数");
+  const maxFailuresPerPool = value.maxFailuresPerPool ?? DEFAULT_SMS_POOL_FAILURE_LIMIT;
+  if (!Number.isInteger(maxFailuresPerPool) || maxFailuresPerPool < 1 || maxFailuresPerPool > 10) throw new Error("单个号池失败排除阈值必须为 1 到 10 的整数");
   const config = {};
   const raw = value.configs?.[definition.id] || {};
   for (const field of definition.fields) {
@@ -19,7 +22,7 @@ export function normalizeSmsSettings(value, { validate = true } = {}) {
     config[field.key] = input.trim();
   }
   if (validate) createSmsProvider(definition.id, config);
-  return { selectedProviderId: definition.id, autoAcquire: value.autoAcquire === true, maxAutoNumbers, configs: { [definition.id]: config } };
+  return { selectedProviderId: definition.id, autoAcquire: value.autoAcquire === true, maxAutoNumbers, maxFailuresPerPool, configs: { [definition.id]: config } };
 }
 
 export async function loadSmsSettings(file) {
