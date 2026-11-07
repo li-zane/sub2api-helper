@@ -20,7 +20,7 @@ async page => {
   const banned=page.locator('tr.job-row.status-banned').first(),limited=page.locator('tr.job-row').first();
   await run('banned-web-enabled-OAuth-controls-disabled',async()=>{
     check(await banned.getByRole('button',{name:'登录 Web',exact:true}).isEnabled(),'manual Web is disabled');
-    for(const name of['重新授权','重新开始授权','重试授权'])check(await banned.getByRole('button',{name,exact:true}).isDisabled(),`${name} unexpectedly enabled`);
+    for(const name of['Codex 授权'])check(await banned.getByRole('button',{name,exact:true}).isDisabled(),`${name} unexpectedly enabled`);
     await banned.getByRole('button',{name:'登录 Web',exact:true}).click();
     check(requests.some(u=>u.endsWith('/web-login')),'Web button used OAuth or stale check endpoint');
   });

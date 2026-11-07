@@ -10,7 +10,7 @@ export function normalizeUsageTotals(payload, fetchedAt) {
     accountCost: amount(data?.total_account_cost),
     userCost: amount(data?.total_actual_cost),
     tokens: amount(data?.total_tokens),
-    fetchedAt, stale: false,
+    fetchedAt, updatedAt: fetchedAt, stale: false,
   };
   if ([totals.accountCost, totals.userCost, totals.tokens].every(value => value === null)) throw new Error("Sub2API 累计统计缺少数据");
   return totals;
@@ -24,13 +24,25 @@ export function combineUsageTotals(ids, records) {
   const times = values.map(value => value?.fetchedAt).filter(Boolean).sort();
   return { accountCost: sum("accountCost"), userCost: sum("userCost"), tokens: sum("tokens"),
     fetchedAt: times[0] || null, stale: values.some(value => !value || value.stale),
+    updatedAt: values.map(value => value?.updatedAt || value?.fetchedAt).filter(Boolean).sort().at(-1) || null,
   };
+}
+
+export function mergeUsageTotals(current, next) {
+  if (!next) return current || null;
+  if (!current) return next;
+  const fields = ["accountCost", "userCost", "tokens"];
+  const retained = fields.some(key => next[key] == null && current[key] != null);
+  return { ...next, ...Object.fromEntries(fields.map(key => [key, next[key] ?? current[key] ?? null])),
+    fetchedAt: retained ? [current.fetchedAt, next.fetchedAt].filter(Boolean).sort()[0] || null : next.fetchedAt,
+    updatedAt: next.updatedAt || next.fetchedAt || current.updatedAt || current.fetchedAt || null,
+    stale: next.stale === true || retained };
 }
 
 // All-history accounting is separate from upstream 5h/7d quota snapshots.
 // Bound concurrency and cache both successful and failed attempts to avoid fan-out on list polling.
 export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, isBlocked = () => false, getSettings = () => ({ ttlMs, concurrency }), now = Date.now }) {
-  let backend = "", cache = new Map(), inflight = new Map(), active = 0;
+  let backend = "", cache = new Map(), inflight = new Map(), active = 0, sequence = 0;
   const queue = [];
   function schedule(action) {
     return new Promise((resolve, reject) => {
@@ -55,6 +67,7 @@ export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency =
       if (!forceRefresh && saved && now() - saved.checkedAt < getSettings().ttlMs) return [id, saved.value];
       const key = manual ? `manual:${id}` : id;
       if (!currentInflight.has(key)) {
+        const requestSequence = ++sequence;
         const task = schedule(async () => {
           if (!manual && isBlocked(id)) return null;
           let value;
@@ -62,11 +75,13 @@ export function createUsageTotalsReader({ request, ttlMs = 60_000, concurrency =
             const query = new URLSearchParams({ account_id: id, start_date: "1970-01-01", end_date: new Date(now()).toISOString().slice(0, 10), timezone: "UTC" });
             if (forceRefresh) query.set("nocache", "true");
             const payload = await request(config, `/api/v1/admin/usage/stats?${query}`, { timeoutMs: 10_000 });
-            value = normalizeUsageTotals(payload, new Date(now()).toISOString());
+            value = mergeUsageTotals(currentCache.get(id)?.value, normalizeUsageTotals(payload, new Date(now()).toISOString()));
           } catch {
-            value = { ...(saved?.value || { accountCost: null, userCost: null, tokens: null, fetchedAt: null }), stale: true };
+            value = { ...(currentCache.get(id)?.value || saved?.value || { accountCost: null, userCost: null, tokens: null, fetchedAt: null }), stale: true };
           }
-          currentCache.set(id, { checkedAt: now(), value });
+          const latest = currentCache.get(id);
+          if (latest && latest.sequence > requestSequence) return latest.value;
+          currentCache.set(id, { checkedAt: now(), value, sequence: requestSequence });
           return value;
         }).finally(() => currentInflight.delete(key));
         currentInflight.set(key, task);

@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-fingerprint-console-")), output = path.join(temp, "output");
 let child, headers, logs = "", samples = 0;
 const account = { id: 42, name: "fingerprint@example.test", email: "fingerprint@example.test", platform: "openai", type: "oauth", status: "active", schedulable: true, group_ids: [10, 20, 99], credentials: { email: "fingerprint@example.test", plan_type: "free", access_token: "private-fixture-token", chatgpt_account_id: "fixture-account" }, extra: {} };
-const calls = [];
+const calls = [], transcriptInputs = [], transcriptReplies = [];
 const pool = http.createServer(async (req, res) => {
   let raw = ""; for await (const chunk of req) raw += chunk;
   calls.push({ method: req.method, path: req.url, body: JSON.parse(raw || "{}") });
@@ -24,10 +24,11 @@ const pool = http.createServer(async (req, res) => {
   return send({});
 });
 const inference = http.createServer(async (req, res) => {
-  let raw = ""; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); samples++;
+  let raw = ""; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); samples++; transcriptInputs.push(body.input[0].content[0].text);
   assert.equal(req.headers.authorization, "Bearer private-fixture-token"); assert.equal(req.headers["chatgpt-account-id"], "fixture-account");
   assert(body.input[0].content[0].text.length > 70); assert.notEqual(body.input[0].content[0].text, "hi");
   const reply = Array.from({ length: 332 }, (_, i) => i % 355 + 1).join(", ");
+  transcriptReplies.push(reply);
   res.setHeader("content-type", "text/event-stream");
   res.end([{ type: "response.output_text.delta", delta: reply }, { type: "response.completed", response: {} }].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""));
 });
@@ -62,6 +63,17 @@ try {
   assert(!calls.slice(before).some(c => c.method === "PUT"), "unknown evidence leaves existing groups unchanged");
   const history = await get(`/api/jobs/${job.id}/model-fingerprint/history`); assert.equal(history.records.length, 1); assert.equal(history.records[0].models.length, 2); assert.equal(typeof history.records[0].models[0].probabilityStatus, "string"); assert(!JSON.stringify(history).includes("private-fixture-token"));
   assert.equal((await fetch(base + `/api/jobs/${job.id}/model-fingerprint/history`)).status, 403);
+  const round = history.records[0]; assert.equal(round.requestCount, 6); assert(round.id);
+  assert(!JSON.stringify(history).includes(transcriptInputs[0])); assert(!JSON.stringify(checked.data).includes(transcriptInputs[0]));
+  assert(!Object.hasOwn(round.models[0], "requests")); assert(!Object.hasOwn(checked.data.job.modelFingerprint.result.models[0], "requests"));
+  const detailPath = `/api/jobs/${job.id}/model-fingerprint/history?round=${encodeURIComponent(round.id)}`;
+  assert.equal((await fetch(base + detailPath)).status, 403);
+  const detail = await get(detailPath); assert.equal(detail.record.models.length, 2);
+  const requests = detail.record.models.flatMap(m => m.requests); assert.equal(requests.length, 6);
+  assert.deepEqual(requests.map(r => r.prompt), transcriptInputs); assert.deepEqual(requests.map(r => r.response), transcriptReplies);
+  assert(!JSON.stringify(detail).includes("private-fixture-token"));
+  assert.equal((await fetch(base + `/api/jobs/${job.id}/model-fingerprint/history?round=missing`, { headers })).status, 404);
+  assert.equal((await fetch(base + `/api/jobs/${job.id}/model-fingerprint/history?round=`, { headers })).status, 404);
   const withConcurrency = { ...settings, maxConcurrentAccounts: 2 };
   assert.equal((await post("/api/model-fingerprint/settings", { settings: { ...withConcurrency, maxConcurrentAccounts: 0 } })).status, 400);
   assert.equal((await post("/api/model-fingerprint/settings", { settings: withConcurrency })).status, 200);
@@ -69,6 +81,7 @@ try {
   await stop(); await start();
   const restored = (await get("/api/jobs")).jobs.find(j => j.email === account.email);
   assert.equal(restored.modelFingerprint.intervalMinutes, 20); assert.equal(restored.modelFingerprint.override.enabled, false);
+  assert.equal((await get(detailPath)).record.models[0].requests[0].prompt, transcriptInputs[0]);
   assert.equal((await get(`/api/jobs/${job.id}/model-fingerprint/history`)).records.length, 1); assert.equal((await get("/api/model-fingerprint/settings")).settings.maxConcurrentAccounts, 2);
   const task = await post("/api/task-settings", { modelFingerprint: { models: ["gpt-5.4"], intervalMinutes: 60, minProbability: .85 } }); assert.equal(task.status, 200);
   assert.equal((await get("/api/model-fingerprint/settings")).settings.groupPolicies.default[20], "verified", "task defaults retain profile group policies");
@@ -77,7 +90,7 @@ try {
   const updated = await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20, 30] }], planTypeBindings: { free: "default" } }); assert.equal(updated.status, 200);
   const groupPut = calls.filter(c => c.method === "PUT").slice(puts).find(c => c.body.group_ids);
   assert.deepEqual(groupPut.body.group_ids.map(String), ["10", "20", "30"], "unknown evidence preserves existing conditional membership during profile updates");
-  console.log("PASS: fingerprint HTTP authentication, defaults-off, plan/group discovery, real per-account prompt transport, multi-model three-sample checks, unknown preservation, restart/overrides, task defaults and profile admission gating");
+  console.log("PASS: fingerprint lazy transcript HTTP auth/404, full prompts/replies, lightweight polling and restart; fingerprint HTTP authentication, defaults-off, plan/group discovery, real per-account prompt transport, multi-model three-sample checks, unknown preservation, restart/overrides, task defaults and profile admission gating");
   if (process.argv.includes("--serve")) {
     await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20] }], planTypeBindings: { free: "default" } });
     if (process.env.MODEL_FINGERPRINT_FIXTURE_FILE) await fs.writeFile(process.env.MODEL_FINGERPRINT_FIXTURE_FILE, JSON.stringify({ url: base, output, temp }));

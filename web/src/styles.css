@@ -7735,3 +7735,74 @@ select option {
 .account-log-dialog { width: min(1100px, calc(100vw - 32px)); max-width: none; }
 .account-log-dialog .dialog-header > div:first-child { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; gap: 8px; }
 .account-log-dialog .dialog-header > div:first-child > span { max-width: 100%; overflow-wrap: anywhere; }
+/* Task result toasts and local account pricing. Scoped to the new controls. */
+.task-toast-region {
+  position: fixed;
+  inset: 72px 20px auto auto;
+  width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  overflow: visible;
+  display: grid;
+  gap: 10px;
+  z-index: 20000;
+  pointer-events: none;
+}
+.task-toast-region::backdrop { background: transparent; pointer-events: none; }
+.task-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 12px 12px 14px;
+  border: 1px solid var(--emerald-line);
+  border-radius: 12px;
+  background: var(--emerald-soft);
+  color: var(--emerald-strong);
+  box-shadow: var(--shadow-md);
+  font-size: 13px;
+  line-height: 1.5;
+  pointer-events: auto;
+  animation: task-toast-enter 150ms ease-out;
+}
+.task-toast.error { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-strong); }
+.task-toast > svg { flex-shrink: 0; margin-top: 2px; }
+.task-toast-message { flex: 1; min-width: 0; overflow-wrap: anywhere; max-height: 28vh; overflow: auto; }
+.toast-dismiss { display: grid; place-items: center; width: 44px; height: 44px; margin: -10px -10px -10px 0; flex-shrink: 0; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.toast-dismiss:hover { background: var(--line); }
+.toast-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+@keyframes task-toast-enter { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+.account-cost-line .account-remark-button { flex: 0 1 auto; min-width: 0; }
+.account-cost-button { flex-shrink: 0; height: 19px; max-width: 92px; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-subtle); color: var(--ink-2); font-size: 10.5px; font-variant-numeric: tabular-nums; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-cost-button:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.account-cost-dialog > input { width: 100%; }
+.account-cost-help { display: block; margin-top: 8px; color: var(--muted); line-height: 1.5; }
+.task-display-pricing-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; }
+.task-display-pricing-row > .settings-field { min-width: 0; }
+.pool-price-multiplier-input { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pool-price-multiplier-input input { width: 96px !important; min-width: 0; }
+.usage-column, .usage-cell-column { width: 238px; min-width: 224px; }
+.usage-total-pills { flex-wrap: nowrap; max-width: none; }
+.usage-profit-pill { max-width: 114px; overflow: hidden; text-overflow: ellipsis; }
+.usage-profit-pill.positive { color: var(--emerald-strong); border-color: var(--emerald-line); background: var(--emerald-soft); }
+.usage-profit-pill.negative { color: var(--danger-strong); border-color: var(--danger-line); background: var(--danger-soft); }
+.usage-profit-pill.unknown, .usage-profit-pill.zero { color: var(--muted); }
+@media (max-width: 700px) {
+  .task-toast-region { inset: 64px 16px auto 16px; width: auto; }
+  .task-display-pricing-row { grid-template-columns: minmax(0,1fr); gap: 8px; }
+}
+@media (prefers-reduced-motion: reduce) { .task-toast { animation: none; } }
+
+/* Lazy fingerprint transcripts; scoped to the history dialog. */
+.fingerprint-dialog .fingerprint-transcript-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 8px 0; overflow-wrap: anywhere; }
+.fingerprint-dialog .fingerprint-transcripts { min-width: 0; margin-top: 10px; }
+.fingerprint-dialog .fingerprint-transcript-content { min-width: 0; padding: 6px 0; }
+.fingerprint-dialog .fingerprint-request-model h4 { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 10px 0; overflow-wrap: anywhere; }
+.fingerprint-dialog .fingerprint-request-model h4 small { color: var(--muted); font-size: 11px; font-weight: 400; }
+.fingerprint-dialog .fingerprint-sample { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0; min-width: 0; }
+.fingerprint-dialog .fingerprint-sample > summary { cursor: pointer; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.fingerprint-dialog .fingerprint-sample > summary span { color: var(--muted); margin-left: 10px; white-space: nowrap; }
+.fingerprint-dialog .fingerprint-sample > strong { font-size: 12px; }
+.fingerprint-dialog .fingerprint-sample pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 var(--font-mono, monospace); background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin: 6px 0 12px; }

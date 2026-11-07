@@ -1,0 +1,22 @@
+import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import{pathToFileURL}from'node:url';
+const source=process.env.FINGERPRINT_TRANSCRIPT_SOURCE||path.resolve('src/model-fingerprint.mjs');
+const{ModelFingerprintService}=await import(pathToFileURL(source));
+const dir=await fs.mkdtemp(path.join(os.tmpdir(),'helper-fingerprint-transcripts-'));let tick=Date.parse('2026-11-07T01:00:00Z'),round=0,calls=0;
+const email='transcript@example.test',account={id:9,email,type:'apikey',status:'active',credentials:{api_key:'private-fixture-token'},group_ids:[]};
+const prompts=['unique-prompt-one','unique-prompt-two','unique-prompt-three'];const full=Array.from({length:100},(_,i)=>i+1).join(', ');
+const options={filePath:path.join(dir,'fingerprint.json'),now:()=>tick,getContext:()=>({backend:'test',config:{baseUrl:'https://fixture.test',adminApiKey:'private-fixture-token'},profiles:[]}),listTargets:async()=>[account],getAccount:async()=>account,updateGroups:async()=>{},challenges:()=>prompts.map(prompt=>({prompt:prompt+'-'+round,expected_count:100})),sample:async(_c,_a,_m,p)=>{calls++;return p.includes('three')?'short answer '+round:full+' '+round;},detectorLoader:async()=>({builtAt:'fixture',analyze:()=>({used_outputs:2,decision:'unscorable',prediction_name:'Not scored',results:[],diagnostics:[0,1,2].map(i=>({index:i,accepted:i<2,minimum_numbers:80}))})})};
+let s=new ModelFingerprintService(options);
+try{
+ await s.load();await s.saveSettings({models:['fixture-model']});await s.saveOverride(email,{enabled:true});await s.run(email,'free',{manual:true});
+ let h=s.history(email,'free');assert.equal(h.records[0].requestCount,3,'round must retain prompt/answer details for all three actual requests');
+ assert.equal(h.records[0].models[0].usedOutputs,2);assert(!JSON.stringify(h).includes('unique-prompt'));assert(!JSON.stringify(s.snapshot(email,'free')).includes('unique-prompt'));
+ const firstId=h.records[0].id,detail=s.historyDetail(email,firstId);assert.equal(detail.record.models[0].requests.length,3);assert.equal(detail.record.models[0].requests[0].prompt,prompts[0]+'-0');assert.equal(detail.record.models[0].requests[0].response,full+' 0');assert.equal(detail.record.models[0].requests[2].accepted,false);assert.equal(detail.record.models[0].requests[2].minimumCount,80);assert.equal(calls,3);assert(!JSON.stringify(detail).includes('private-fixture-token'));
+ assert.throws(()=>s.historyDetail('other@example.test',firstId),e=>e.status===404);
+ for(round=1;round<8;round++){await s.run(email,'free',{manual:true});}
+ h=s.history(email,'free');assert.equal(h.records.length,6);assert.equal(new Set(h.records.map(r=>r.id)).size,6,'equal timestamps still represent distinct rounds');assert.throws(()=>s.historyDetail(email,firstId),e=>e.status===404);
+ await s.stop();let disk=await fs.readFile(options.filePath,'utf8');assert(!disk.includes('unique-prompt-one-0'));assert(!disk.includes('unique-prompt-one-1'));assert(!Object.hasOwn(JSON.parse(disk).accounts[email],'history'));assert.equal(JSON.parse(disk).accounts[email].recentResults.length,6);
+ s=new ModelFingerprintService(options);await s.load();assert.equal(s.history(email,'free').records.length,6);assert.equal(s.historyDetail(email,h.records[0].id).record.models[0].requests.length,3);assert.throws(()=>s.historyDetail(email,firstId),e=>e.status===404);
+ // Legacy migration prunes the persisted 200-per-hour list, retaining summary information without inventing raw text.
+ await s.stop();const legacy={version:1,settings:{models:['fixture-model']},accounts:{[email]:{override:{enabled:true},history:Array.from({length:12},(_,i)=>({checkedAt:new Date(tick-i*1000).toISOString(),status:'unknown',models:[{model:'fixture-model',status:'unknown',predictionName:'Not scored'}]}))}}};await fs.writeFile(options.filePath,JSON.stringify(legacy));s=new ModelFingerprintService(options);await s.load();h=s.history(email,'free');assert.equal(h.records.length,6);assert.equal(s.historyDetail(email,h.records[0].checkedAt).record.transcriptVersion,undefined);disk=JSON.parse(await fs.readFile(options.filePath,'utf8'));assert(!Object.hasOwn(disk.accounts[email],'history'));assert.equal(disk.accounts[email].recentResults.length,6);
+ console.log('FINGERPRINT_TRANSCRIPTS_PASS prompts/replies=3 summary_without_text=true not_scored=2/3 retained=6 equal_timestamp_ids=true evicted_404=true restart=true legacy_disk_pruned=true');
+}finally{await s.stop();await fs.rm(dir,{recursive:true,force:true});}

@@ -136,10 +136,15 @@ try {
   assert.equal(usage.resetCredits.availableCount, 4, "explicit refresh reads Sub2API quota endpoint");
   assert.equal(usage.primary.usedPercent, 37);
   assert(!JSON.stringify(usage).includes("private-credit-id"));
+  liveCount = null; usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
+  assert.equal(usage.resetCredits.availableCount, 4, "unknown response retains last known card count");
+  assert.equal(usage.resetCreditsStale, true, "retained count must be identified as cached, not currently verified");
   liveCount = 0; usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
   assert.equal(usage.resetCredits.availableCount, 0, "zero replaces previously positive count");
+  assert.equal(usage.resetCreditsStale, false);
   liveCount = null; usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
-  assert.equal(usage.resetCredits, null, "a live unknown result does not retain a stale positive count");
+  assert.equal(usage.resetCredits.availableCount, 0, "unknown is not a new value and must retain the last confirmed zero");
+  assert.equal(usage.resetCreditsStale, true);
   quotaAvailable = false; usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
   assert.equal(usage.primary.usedPercent, 37, "older backend without reset-card endpoint retains ordinary usage");
   assert(!calls.some(c => c.path.includes("reset-quota") || c.path.includes("redeem")), "view and refresh never call consume endpoints");

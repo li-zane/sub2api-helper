@@ -32,7 +32,7 @@ async page => {
     writes.push({url:route.request().url(),method:route.request().method()});
     await route.fulfill({json:route.request().url().includes("/usage") ? {usage:{allowed:true,primary:{usedPercent:37},totals:{tokens:2048}}} : {job:{}}});
   });
-  await page.route("**/api/jobs/relogin-batch", async route => {
+  await page.route("**/api/jobs/reauthorize-batch", async route => {
     batches.push(route.request().postDataJSON());
     await route.fulfill({json:{started:1,skipped:0}});
   });
@@ -41,7 +41,7 @@ async page => {
     await page.reload();await page.locator("tr.job-row").nth(2).waitFor();
     const row = i => page.locator("tr.job-row").nth(i);
     const oauthDisabled = async r => {
-      for (const name of ["重新授权","重新开始授权","重试授权"]) check(await r.getByRole("button",{name,exact:true}).isDisabled(),`${name} unexpectedly enabled`);
+      for (const name of ["Codex 授权"]) check(await r.getByRole("button",{name,exact:true}).isDisabled(),`${name} unexpectedly enabled`);
     };
     await run("already-banned-row-ignores-stale-true-OAuth-capabilities", async () => {
       await oauthDisabled(row(2));
@@ -60,7 +60,7 @@ async page => {
         check(await page.locator(".bulk-button").filter({hasText:/^重新授权$/}).isDisabled(),"batch reauthorization enabled for banned selection");
         check(await page.locator(".bulk-button").filter({hasText:/^检测 Web 会话$/}).isEnabled(),"batch manual Web disabled for eligible banned selection");
         await page.locator(".bulk-more-trigger").click();
-        check(await page.getByRole("menuitem",{name:"重新开始授权",exact:true}).isDisabled(),"batch forced authorization enabled");
+        check(await page.getByRole("menuitem",{name:"重新开始授权",exact:true}).count()===0,"duplicate forced authorization remains");
         await page.keyboard.press("Escape");
         await row(i).getByRole("checkbox").uncheck();
       }
@@ -75,13 +75,10 @@ async page => {
     await run("mixed-forced-authorization-batch-excludes-banned-IDs", async () => {
       await row(0).getByRole("checkbox").check();await row(3).getByRole("checkbox").check();
       check(await page.locator(".bulk-button").filter({hasText:/^重新授权$/}).isDisabled(),"mixed normal batch must not authorize a banned account");
-      // This isolated fixture approves the app's batch confirmation, not a
-      // browser/App permission prompt. Keep native dialogs out of CLI run-code.
-      await page.evaluate(() => { window.confirm = () => true; });
-      await page.locator(".bulk-more-trigger").click();
+      await row(0).getByRole("checkbox").uncheck();
       await Promise.all([
-        page.waitForResponse(r=>r.url().endsWith("/relogin-batch")),
-        page.getByRole("menuitem",{name:"重新开始授权",exact:true}).click(),
+        page.waitForResponse(r=>r.url().endsWith("/reauthorize-batch")),
+        page.locator(".bulk-button").filter({hasText:/^重新授权$/}).click(),
       ]);
       check(batches.length===1 && batches[0].ids.length===1,"mixed batch must include exactly one healthy ID");
       const bannedId=new URL(writes.find(r=>r.url.endsWith("/web-login")).url).pathname.split("/")[3];

@@ -35,8 +35,8 @@ function formatTimelineTime(val) {
   }
 }
 
-async function api(token, url, body) {
-  const response = await fetch(url, { method: body === undefined ? "GET" : "POST", headers: { "x-console-token": token, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function api(token, url, body, signal) {
+  const response = await fetch(url, { signal, method: body === undefined ? "GET" : "POST", headers: { "x-console-token": token, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const data = await response.json(); if (!response.ok) throw new Error(data.error || "指纹检测请求失败"); return data;
 }
 function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRef, children }) {
@@ -187,6 +187,7 @@ function AttributionModels({ models, parentStatus }) {
         </div>
       </div>
 
+      {modelStatus === "unknown" && r.reason && <p className="fingerprint-transcript-note">未评分说明：{r.reason}</p>}
       {r.failure && (
         <div className="fingerprint-error-note">
           <span>错误分类：{r.failure.code}</span>
@@ -260,6 +261,40 @@ function AttributionModels({ models, parentStatus }) {
       )}
     </div>;
   })}</div>;
+}
+function RoundRequests({ jobId, token, record }) {
+  const [open, setOpen] = useState(false), [data, setData] = useState(null), [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  const roundId = record.id || record.checkedAt;
+  useEffect(() => {
+    if (!open || data) return;
+    const controller = new AbortController();
+    setError("");
+    api(token, `/api/jobs/${jobId}/model-fingerprint/history?round=${encodeURIComponent(roundId)}`, undefined, controller.signal)
+      .then(result => { if (!controller.signal.aborted) setData(result.record); })
+      .catch(e => { if (!controller.signal.aborted) setError(e.message); });
+    return () => controller.abort();
+  }, [open, jobId, token, roundId, retry, data]);
+  if (!record.transcriptVersion) return <p className="fingerprint-transcript-note">旧记录未保存原文；新检测后可查看 prompt 与回答。</p>;
+  if (!record.requestCount) return <p className="fingerprint-transcript-note">本轮在采样前结束，未发出模型请求。</p>;
+  return <details className="fingerprint-timeline-details fingerprint-transcripts" onToggle={e => setOpen(e.currentTarget.open)}>
+    <summary className="timeline-details-summary"><ChevronDown size={13} className="details-chevron" /><span>Prompt 与回答（{record.requestCount} 次请求）</span></summary>
+    {open && <div className="fingerprint-transcript-content">
+      {!data && !error && <p role="status">正在读取采样原文…</p>}
+      {error && <div role="alert" className="proxy-quality-error">{error} <button type="button" className="secondary-button compact-btn" onClick={() => setRetry(n => n + 1)}>重试读取</button></div>}
+      {data?.models?.map((model, i) => <section className="fingerprint-request-model" key={i}>
+        <h4>{model.model}<small>号池账号 {model.accountId || "—"}</small></h4>
+        {model.requests?.map((request, j) => <details className="fingerprint-sample" key={j}>
+          <summary>样本 {request.sample} · 请求 {request.attempt} · {request.status === "error" ? "请求失败" : request.accepted ? "有效" : "数字不足"}<span>{request.count ?? 0} / {request.expectedCount ?? "—"} 个数字</span></summary>
+          <p className="fingerprint-transcript-note">{displayDateTime(request.startedAt)} · {((request.durationMs || 0) / 1000).toFixed(1)}s · 最低有效数字数 {request.minimumCount ?? "—"}</p>
+          {request.failure && <p className="proxy-quality-error">{request.failure.code}{request.failure.httpStatus ? ` · HTTP ${request.failure.httpStatus}` : ""}：{request.failure.message}</p>}
+          <strong>Prompt</strong><pre className="fingerprint-request-prompt" tabIndex={0}>{request.prompt}</pre>
+          <strong>{request.status === "error" && request.response ? "回答（未完成，未参与评分）" : "回答"}</strong>
+          {request.response === null ? <p className="fingerprint-transcript-note">本次请求未收到回答正文。</p> : <pre className="fingerprint-request-response" tabIndex={0}>{request.response || "（空回答）"}</pre>}
+        </details>)}
+      </section>)}
+    </div>}
+  </details>;
 }
 function FingerprintHistoryDialog({ job, token, onClose }) {
   useDisplayTimeZone();
@@ -354,7 +389,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
         {data.records.map((record, index) => {
           const { time, date } = formatTimelineTime(record.checkedAt);
           const statusKey = record.status || "unknown";
-          return <div key={`${record.checkedAt}-${index}`} className={`fingerprint-timeline-node status-${statusKey}`} role="listitem">
+          return <div key={record.id || `${record.checkedAt}-${index}`} className={`fingerprint-timeline-node status-${statusKey}`} role="listitem">
             <div className="timeline-node-marker" aria-hidden="true">
               <span className={`marker-dot status-${statusKey}`} />
             </div>
@@ -380,6 +415,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
                 <span className={`fingerprint-status ${record.status}`}>{TITLES[record.status] || "证据不足"}</span>
               </div>
               <AttributionModels models={record.models || []} parentStatus={record.status} />
+              <RoundRequests jobId={job.id} token={token} record={record} />
               {record.error && <p className="proxy-quality-error timeline-record-error">{record.error}</p>}
             </div>
           </div>;
@@ -424,7 +460,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
       {rounds.map((round, index) => {
         const status = !round ? "empty" : round.status === "match" ? "match" : round.status === "mismatch" ? "mismatch" : "error";
         const label = `${retainedHistory ? "检测已暂停 · " : effectiveEnabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${retainedHistory ? "历史结果 · " : ""}${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${displayDateTime(round.checkedAt)}`}`;
-        return <button key={round?.checkedAt || `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
+        return <button key={round ? `${round.checkedAt}-${index}` : `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
       })}
     </div>
     {showHistory && <FingerprintHistoryDialog job={job} token={token} onClose={() => setShowHistory(false)} />}

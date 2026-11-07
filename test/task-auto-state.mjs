@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import vm from "node:vm";
-import { ROTATE_UPLOAD_ACTION, normalizeTaskUploadActions, toggleTaskAutoAction, isRedundantTaskUpload } from "../web/src/task-auto-actions.mjs";
+import { accountMutationBlockReason } from "../web/src/account-action-state.mjs";
+import { ROTATE_UPLOAD_ACTION, normalizeTaskUploadActions, toggleTaskAutoAction, isRedundantTaskUpload, isRedundantTaskAuthorization } from "../web/src/task-auto-actions.mjs";
 import {
   hasJobTotpKey,
   isReauthorizationComplete,
@@ -45,13 +46,15 @@ assert.equal(isReauthorizationComplete({
 console.log("task auto-state predicate smoke passed: internal job fields and subsequent stages");
 
 const rotate = ROTATE_UPLOAD_ACTION, detection = "enable-overload-detection", cooldown = "enable-overload-cooldown";
+for (const phase of ["pending", "running"]) assert(accountMutationBlockReason({ status: "completed", autoTaskStatus: phase }).includes("自动化任务"));
 for (const actions of [["upload", rotate], [rotate, "upload"], [detection, "upload", rotate, cooldown]]) {
   const original = [...actions];
   assert.deepEqual(normalizeTaskUploadActions(actions), actions.filter(action => action !== "upload"));
   assert.deepEqual(actions, original, "normalization mutates input");
 }
+assert.deepEqual(normalizeTaskUploadActions(["authorize-codex", rotate, "upload"]), [rotate]);
 assert.deepEqual(normalizeTaskUploadActions(["upload", detection]), ["upload", detection]);
-assert.deepEqual(toggleTaskAutoAction(["upload", detection], rotate, true), [detection, rotate, "authorize-codex"]);
+assert.deepEqual(toggleTaskAutoAction(["upload", detection], rotate, true), [detection, rotate]);
 assert.deepEqual(toggleTaskAutoAction([rotate, cooldown], "upload", true), [cooldown, "upload", "authorize-codex"]);
 assert.deepEqual(toggleTaskAutoAction([rotate, detection], rotate, false), [detection]);
 assert.deepEqual(toggleTaskAutoAction(["upload"], detection, true), ["upload", detection]);
@@ -68,10 +71,13 @@ for (const [actions, index, expected] of [
   [[rotate, "upload"], 1, []],
   [["upload"], 0, ["upload"]],
   [[rotate], 0, [rotate]],
+  [["authorize-codex", rotate, "upload", detection], 0, [rotate, detection]],
+  [["authorize-codex", rotate], 1, [rotate]],
+  [[rotate, "authorize-codex"], 1, []],
 ]) {
   const calls = [], logs = [];
   const run = vm.runInNewContext(runnerSource + "\nrunConfiguredTaskActions;", {
-    isRedundantTaskUpload, accountAutomationBlocked: () => false, assertCodexMonitoringAllowed: async () => {},
+    isRedundantTaskUpload, isRedundantTaskAuthorization, accountAutomationBlocked: () => false, assertCodexMonitoringAllowed: async () => {},
     touch() {}, saveJobMetadata: async () => {},
     runConfiguredUploadAction: async () => calls.push("upload"),
     runConfiguredRotateAndUploadAction: async () => calls.push(rotate),

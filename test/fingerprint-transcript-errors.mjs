@@ -1,0 +1,19 @@
+import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';
+import { ModelFingerprintService } from '../src/model-fingerprint.mjs';
+import { extractFingerprintReply, fingerprintFailure } from '../src/model-fingerprint-request.mjs';
+const dir=await fs.mkdtemp(path.join(os.tmpdir(),'helper-fingerprint-errors-'));const email='retry@example.test',reply='1, 2, 3';
+const sse=events=>events.map(e=>'data: '+JSON.stringify(e)).join('\n\n');
+for(const raw of [sse([{type:'response.output_text.delta',delta:reply}]),sse([{type:'response.output_text.delta',delta:reply},{type:'response.incomplete',response:{error:{message:'private-error-envelope'}}}]),JSON.stringify({status:'incomplete',error:{message:'private-error-envelope'},output:[{content:[{type:'output_text',text:reply}]}]})]){
+ assert.throws(()=>extractFingerprintReply(raw),e=>{assert.equal(e.fingerprintReply,reply);assert(!e.fingerprintReply.includes('private-error-envelope'));return fingerprintFailure(e).retryable;});
+}
+let mode='retry',calls=0,reads=0;
+const account={id:9,email,type:'oauth',status:'active',credentials:{access_token:'private-token'}};
+const options={filePath:path.join(dir,'f.json'),getContext:()=>({backend:'fixture',config:{baseUrl:'https://fixture.test',adminApiKey:'private-token'},profiles:[]}),listTargets:async()=>[account],getAccount:async()=>{reads++;if(mode==='outer'&&reads===2)throw Error('private-error-envelope');return account;},updateGroups:async()=>{},challenges:()=>[1,2,3].map(i=>({prompt:'sample-'+i,expected_count:100})),detectorLoader:async()=>({analyze:()=>({used_outputs:3,decision:'scored',probability_status:'reference_calibrated',probability:.99,prediction:'fixture',results:[{model:'fixture',probability:.99}],diagnostics:[0,1,2].map(index=>({index,accepted:true,minimum_numbers:80}))})}),sample:async(_c,_a,_m,p)=>{calls++;if(mode==='retry'&&calls===2)extractFingerprintReply(sse([{type:'response.output_text.delta',delta:'partial reply'}]));if(mode==='error')throw Object.assign(Error('private-error-envelope'),{httpStatus:401,fingerprintFailure:true,code:'AUTH',retryable:false});return reply;}};
+const s=new ModelFingerprintService(options);
+try{
+ await s.load();await s.saveSettings({models:['fixture']});await s.saveOverride(email,{enabled:true});await s.run(email,'free',{manual:true});
+ let round=s.history(email,'free').records[0],raw=s.historyDetail(email,round.id).record;assert.equal(calls,4);assert.equal(round.requestCount,4);assert.equal(raw.models[0].requests[1].sample,2);assert.equal(raw.models[0].requests[1].attempt,1);assert.equal(raw.models[0].requests[1].response,'partial reply');assert.equal(raw.models[0].requests[1].accepted,false);assert.equal(raw.models[0].requests[2].attempt,2);assert.equal(raw.models[0].requests[1].status,'error');assert.equal(raw.models[0].sampleFailures.length,1);
+ mode='outer';calls=reads=0;await assert.rejects(s.run(email,'free',{manual:true}));round=s.history(email,'free').records[0];raw=s.historyDetail(email,round.id).record;assert.equal(round.status,'error');assert.equal(round.requestCount,3);assert.equal(raw.models[0].requests.length,3,'collected texts survive a later account-verification failure');
+ mode='error';calls=reads=0;await s.run(email,'free',{manual:true});round=s.history(email,'free').records[0];raw=s.historyDetail(email,round.id).record;assert.equal(calls,1);assert.equal(raw.models[0].requests.length,1);assert.equal(raw.models[0].requests[0].response,null);assert.equal(raw.models[0].requests[0].failure.code,'AUTH');assert(!JSON.stringify(raw).includes('private-error-envelope'));assert(!JSON.stringify(raw).includes('private-token'));
+ console.log('FINGERPRINT_TRANSCRIPT_ERRORS_PASS retry_attempts=4 partial_reply_preserved=true outer_failure_preserved=true auth_no_retry=true error_envelopes_excluded=true extra_model_requests=0');
+}finally{await s.stop();await fs.rm(dir,{recursive:true,force:true});}

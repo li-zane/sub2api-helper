@@ -493,7 +493,7 @@ try {
   assert.equal(reloggedJob.hasTotpKey, true);
   assert.equal(reloggedJob.lastOperationType, "relogin");
   const reloginLogs = await fetch(`${baseUrl}/api/jobs/${jobId}/logs`, { headers }).then((response) => response.json());
-  assert.match(reloginLogs.logs, /\[relogin\].*跳过刷新令牌并强制重新登录/);
+  assert.match(reloginLogs.logs, /\[relogin\].*跳过 OAuth 刷新，检测 Web 会话；失效时先重新登录 Web/);
 
   const mfaPromptResponse = await fetch(`${baseUrl}/api/jobs`, {
     method: "POST",

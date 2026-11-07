@@ -14,7 +14,7 @@ export function isTotpRotationComplete(job) {
 export function isReauthorizationComplete(job) {
   return Boolean(
     job?.status === "completed"
-      && job?.lastOperationType === "relogin"
+      && ["relogin", "reauthorize"].includes(job?.lastOperationType)
       && job?.resultSaved,
   );
 }

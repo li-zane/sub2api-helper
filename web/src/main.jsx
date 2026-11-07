@@ -11,6 +11,9 @@ import { accountMutationBlockReason } from "./account-action-state.mjs";
 import { shareSnapshot, shareJobList } from "./polling-snapshot.mjs";
 import { recentOperation } from "./recent-operation.mjs";
 import { formatUsageTotal } from "./usage-totals.mjs";
+import { hasUsageSnapshot, mergeUsageSnapshot } from "./usage-snapshot.mjs";
+import { TaskToasts } from "./task-toasts.jsx";
+import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier, normalizeAccountCost, formatAccountCost, accountProfitCents, formatCnyCents, preserveNewerAccountCosts } from "./account-pricing.mjs";
 import { MONITOR_FIELDS, DEFAULT_MONITORING, normalizeMonitoring } from "./monitor-settings.mjs";
 import { normalizeTaskUploadActions, toggleTaskAutoAction } from "./task-auto-actions.mjs";
 import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "./login-settings.mjs";
@@ -38,7 +41,6 @@ import {
   ListPlus,
   LoaderCircle,
   Lock,
-  LogIn,
   Mail,
   MailCheck,
   LogOut,
@@ -314,7 +316,9 @@ function App() {
     lastResult: null,
     intervalMinutes: 5,
   });
-  const [uploadNotice, setUploadNotice] = useState("");
+  const [taskNotice, setTaskNotice] = useState({ text: "", revision: 0 });
+  const uploadNotice = taskNotice.text;
+  const setUploadNotice = text => setTaskNotice(current => ({ text, revision: current.revision + 1 }));
   const [accountProxyUrl, setAccountProxyUrl] = useState("");
   const [accountProxyMode, setAccountProxyMode] = useState("global");
   const [accountProxyDistribution, setAccountProxyDistribution] = useState([]);
@@ -336,6 +340,7 @@ function App() {
   useModalFocus(planTypeMappingRef, planTypeMappingOpen);
   const [credentialJob, setCredentialJob] = useState(null);
   const [remarkJob, setRemarkJob] = useState(null);
+  const [costJob, setCostJob] = useState(null);
   const [sessionJob, setSessionJob] = useState(null);
   const [workspaceJob, setWorkspaceJob] = useState(null);
   const [operationDetail, setOperationDetail] = useState(null);
@@ -345,7 +350,7 @@ function App() {
   const [accountUsageByJobId, setAccountUsageByJobId] = useState({});
 
   const accountUsageJobKey = jobs
-    .filter((job) => job.canDownload || job.sub2apiInPool === true)
+    .filter((job) => job.canDownload || job.sub2apiInPool === true || job.sub2apiUsage)
     .map((job) => `${job.id}:${job.lastOperationAt || job.updatedAt || ""}:${JSON.stringify(job.sub2apiUsage || null)}`)
     .join("|");
 
@@ -534,11 +539,11 @@ function App() {
               ...(filters.sub2apiEnabled ? { sub2apiEnabled: filters.sub2apiEnabled } : {}),
             }).toString()}`, { signal: controller.signal });
         if (!stopped) {
-          setJobs(current => shareJobList(current, data.jobs));
+          setJobs(current => shareJobList(current, preserveNewerAccountCosts(current, data.jobs)));
           setCredentialJob(current => shareSnapshot(current, data.jobs.find(job => job.id === current?.id) || current));
           setSessionJob(current => shareSnapshot(current, data.jobs.find(job => job.id === current?.id) || current));
           setWorkspaceJob(current => shareSnapshot(current, data.jobs.find(job => job.id === current?.id) || current));
-          setJobSelectionIndex(current => shareJobList(current, data.selection || data.jobs));
+          setJobSelectionIndex(current => shareJobList(current, preserveNewerAccountCosts(current, data.selection || data.jobs)));
           setPagination(current => shareSnapshot(current, data.pagination || { page, pageSize: 20, total: data.jobs.length, totalPages: 1 }));
           setStats(current => shareSnapshot(current, data.stats || { active: 0, queued: 0, completed: 0 }));
           if (data.taskSettings) setTaskSettings(current => shareSnapshot(current, data.taskSettings));
@@ -634,7 +639,7 @@ function App() {
 
   useEffect(() => {
     if (!token || !features.accountUsage) return undefined;
-    const usageJobs = jobs.filter((job) => job.canDownload || job.sub2apiInPool === true);
+    const usageJobs = jobs.filter((job) => job.canDownload || job.sub2apiInPool === true || job.sub2apiUsage);
     const usageJobIds = usageJobs.map((job) => job.id);
     setAccountUsageByJobId((current) => {
       const next = { ...current };
@@ -644,7 +649,7 @@ function App() {
       for (const jobId of usageJobIds) {
         const job = usageJobs.find((item) => item.id === jobId);
         next[jobId] = job?.sub2apiUsage
-          ? { status: "ready", ...job.sub2apiUsage }
+          ? { ...mergeUsageSnapshot(next[jobId], job.sub2apiUsage), status: next[jobId]?.status === "loading" ? "loading" : "ready" }
           : { status: "ready", source: "sub2api", primary: null, secondary: null, credits: null, allowed: null, limitReached: null };
       }
       return shareSnapshot(current, next);
@@ -682,12 +687,9 @@ function App() {
   const canDownloadSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && downloadableSelectedCount > 0;
   const canReauthorizeSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
-    && selectedJobs.every((job) => !isBlockedAccount(job) && (job.canRegenerate || job.canRetry));
-  const forceReloginSelectedCount = selectedJobs.filter((job) => !isBlockedAccount(job) && job.canForceRelogin).length;
+    && selectedJobs.every((job) => !isBlockedAccount(job) && job.canForceRelogin);
   const webLoginSelectedCount = selectedJobs.filter((job) => job.canLoginWeb).length;
   const canLoginWebSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size && webLoginSelectedCount > 0;
-  const canForceReloginSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
-    && forceReloginSelectedCount > 0;
   const canLogoutSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && selectedJobs.some((job) => job.canLogoutAllSessions);
   const sessionEligibleSelectedCount = selectedJobs.filter((job) => job.canLogoutAllSessions && job.canForceRelogin).length;
@@ -725,19 +727,19 @@ function App() {
 
   async function refreshAccountUsage(jobId) {
     if (!token || !features.accountUsage) return;
-    setAccountUsageByJobId((current) => ({ ...current, [jobId]: { status: "loading" } }));
+    setAccountUsageByJobId((current) => ({ ...current, [jobId]: { ...current[jobId], status: "loading", error: null } }));
     try {
       const data = await apiFetch(token, `/api/jobs/${encodeURIComponent(jobId)}/usage?refresh=1`);
       setJobs((current) => current.map((job) => job.id === jobId ? data.job ? shareSnapshot(job, data.job) : { ...job, sub2apiUsage: data.usage || null } : job));
       setJobSelectionIndex((current) => current.map((job) => job.id === jobId ? data.job ? shareSnapshot(job, data.job) : { ...job, sub2apiUsage: data.usage || null } : job));
       setAccountUsageByJobId((current) => ({
         ...current,
-        [jobId]: { status: "ready", ...(data.usage || {}) },
+        [jobId]: { ...mergeUsageSnapshot(current[jobId], data.usage), status: "ready", error: null },
       }));
     } catch (requestError) {
       setAccountUsageByJobId((current) => ({
         ...current,
-        [jobId]: { status: "error", error: requestError.message },
+        [jobId]: { ...current[jobId], status: "error", stale: true, error: requestError.message },
       }));
     }
   }
@@ -1677,26 +1679,6 @@ function App() {
     finally { setBatchAction(""); }
   }
 
-  async function forceReloginSelected() {
-    if (!canForceReloginSelected || batchAction) return;
-    const skipped = selectedJobIds.size - forceReloginSelectedCount;
-    const message = `确定让选中的 ${forceReloginSelectedCount} 个账号跳过刷新令牌、清除旧 Codex 授权检查点并重新开始授权吗？有效的 Web 会话仍会复用。${skipped ? `另有 ${skipped} 个封禁或进行中账号将自动跳过。` : ""}`;
-    if (!window.confirm(message)) return;
-    setBatchAction("relogin");
-    try {
-      const data = await apiFetch(token, "/api/jobs/relogin-batch", {
-        method: "POST",
-        body: JSON.stringify({ ids: selectedJobs.filter(job => !isBlockedAccount(job) && job.canForceRelogin).map(job => job.id) }),
-      });
-      setUploadNotice(`已开始重新开始授权 ${data.started} 个账号${data.skipped ? `，跳过 ${data.skipped} 个` : ""}`);
-      setSelectedJobIds(new Set());
-      setError("");
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setBatchAction("");
-    }
-  }
 
   async function exportSelectedSource() {
     if (!selectedJobIds.size || batchAction) return;
@@ -2112,28 +2094,10 @@ function App() {
           </div>
         </div>
 
-        {sessionActionError && (
-          <div className="global-error" role="alert">
-            <CircleAlert size={17} />
-            <span>{sessionActionError}</span>
-            <button type="button" onClick={() => setSessionActionError("")} title="关闭"><X size={16} /></button>
-          </div>
-        )}
-        {error && (
-          <div className="global-error" role="alert">
-            <CircleAlert size={17} />
-            <span>{error}</span>
-            <button type="button" onClick={() => setError("")} title="关闭"><X size={16} /></button>
-          </div>
-        )}
+        <TaskToasts notice={uploadNotice} revision={taskNotice.revision} busy={Boolean(batchAction)} error={error} sessionError={sessionActionError}
+          onDismissNotice={() => setTaskNotice(current => current.revision === taskNotice.revision ? { ...current, text: "" } : current)}
+          onDismissError={() => setError("")} onDismissSessionError={() => setSessionActionError("")} />
         {webBatch && <WebLoginBatch token={token} batch={webBatch} onRetry={loginWebSelected} onClose={() => setWebBatch(null)} busy={Boolean(batchAction)} />}
-        {uploadNotice && (
-          <div className="global-success" role="status">
-            {batchAction ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}
-            <span>{uploadNotice}</span>
-            <button type="button" onClick={() => setUploadNotice("")} title="关闭"><X size={16} /></button>
-          </div>
-        )}
 
         {features.bulkActions && jobs.length > 0 && (
           <div className={`selection-toolbar ${selectedJobIds.size ? "has-selection" : ""}`}>
@@ -2237,8 +2201,6 @@ function App() {
                   features={features}
                   batchAction={batchAction}
                   selectedCount={selectedJobIds.size}
-                  canForceReloginSelected={canForceReloginSelected}
-                  forceReloginSelected={forceReloginSelected}
                   canSwitchProxySelected={canSwitchProxySelected}
                   proxySwitchSelection={proxySwitchSelection}
                   runSelectedPoolAction={runSelectedPoolAction}
@@ -2408,7 +2370,6 @@ function App() {
                   onUpdateSub2ApiPriority={(priority) => updateSub2ApiPriority(job, priority)}
                   totpSetupAvailable={Boolean(features.totpSetup)}
                   passwordAddAvailable={Boolean(features.passwordAdd)}
-                  forceReloginAvailable={Boolean(features.forceRelogin)}
                   webLoginAvailable={Boolean(features.webLogin)}
                   accountProxyUrl={accountProxyUrl}
                   planTypeMapping={planTypeMapping}
@@ -2419,6 +2380,9 @@ function App() {
                   onOpenCredentials={() => setCredentialJob(job)}
                   remarksAvailable={Boolean(features.accountRemarks)}
                   onOpenRemark={() => setRemarkJob(job)}
+                  pricingAvailable={Boolean(features.accountPricing)}
+                  onOpenCost={() => setCostJob(job)}
+                  poolPriceMultiplier={taskSettings?.poolPriceMultiplier ?? DEFAULT_POOL_PRICE_MULTIPLIER}
                   sessionsAvailable={Boolean(features.accountSessions)}
                   onOpenSessions={() => setSessionJob(job)}
                   onLogoutAllSessions={() => logoutAllDevices([job])}
@@ -2443,6 +2407,12 @@ function App() {
           </nav>
         )}
       </section>
+      {costJob && <AccountCostDialog token={token} job={costJob} onClose={() => setCostJob(null)} onSaved={({ job }) => {
+        const merge = current => current.map(item => item.email.toLowerCase() === job.email.toLowerCase()
+          ? { ...item, accountCostCny: job.accountCostCny, accountCostUpdatedAt: job.accountCostUpdatedAt } : item);
+        setJobs(merge); setJobSelectionIndex(merge); setCostJob(null);
+        setUploadNotice(`${job.email} 的账号成本已保存为 ${formatAccountCost(job.accountCostCny)}`);
+      }} />}
       {remarkJob && (
         <RemarkDialog
           token={token}
@@ -3488,6 +3458,32 @@ function CredentialSyncNote({ sync, planTypeMapping }) {
   return <span className="plan-sync-note credential-sync-note" title={title} aria-label={label}>{label}</span>;
 }
 
+function AccountCostDialog({ token, job, onClose, onSaved }) {
+  const [cost, setCost] = useState(String(job.accountCostCny ?? 0)), [saving, setSaving] = useState(false), [error, setError] = useState("");
+  async function save(event) {
+    event.preventDefault(); if (saving) return;
+    let accountCostCny;
+    try { accountCostCny = normalizeAccountCost(cost); } catch (error) { setError(error.message); return; }
+    setSaving(true); setError("");
+    try { onSaved(await apiFetch(token, `/api/jobs/${job.id}/cost`, { method: "POST", body: JSON.stringify({ accountCostCny }) })); }
+    catch (error) { setError(error.message); }
+    finally { setSaving(false); }
+  }
+  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+    <ModalForm className="batch-dialog remark-dialog account-cost-dialog" role="dialog" aria-modal="true" aria-labelledby="account-cost-title" onSubmit={save} onClose={onClose} closeDisabled={saving}>
+      <div className="dialog-header"><div><h2 id="account-cost-title">账号成本</h2><span>{job.email}</span></div>
+        <button type="button" className="icon-button" onClick={onClose} disabled={saving} aria-label="关闭账号成本"><X size={18} /></button></div>
+      <label className="batch-label" htmlFor="account-cost-cny">账号成本（人民币）</label>
+      <input id="account-cost-cny" aria-label="账号成本（人民币）" type="number" min="0" max="1000000000" step="0.01" required autoFocus
+        value={cost} onChange={event => setCost(event.target.value)} disabled={saving} />
+      <small className="account-cost-help">仅保存在 Helper；利润按 U × 号池价格倍率 − 账号成本计算，不修改号池额度或凭据。</small>
+      {error && <div className="dialog-error" role="alert">{error}</div>}
+      <div className="dialog-footer"><button type="button" className="cancel-button" disabled={saving} onClick={onClose}>取消</button>
+        <button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存成本</button></div>
+    </ModalForm>
+  </div>;
+}
+
 function RemarkDialog({ token, job, onClose, onSaved }) {
   const [remark, setRemark] = useState(job.remark || "");
   const [saving, setSaving] = useState(false);
@@ -3570,8 +3566,6 @@ function BulkMoreMenu({
   features,
   batchAction,
   selectedCount,
-  canForceReloginSelected,
-  forceReloginSelected,
   canSwitchProxySelected,
   proxySwitchSelection,
   runSelectedPoolAction,
@@ -3612,7 +3606,7 @@ function BulkMoreMenu({
     "setup-2fa", "add-password", "source",
   ].includes(batchAction);
 
-  const hasSessionItems = Boolean(features.forceRelogin || features.accountSessions);
+  const hasSessionItems = Boolean(features.accountSessions);
   const hasSecurityItems = Boolean(features.totpSetup || features.passwordAdd || features.sourceExport);
 
   if (!hasSessionItems && !hasSecurityItems) return null;
@@ -3641,19 +3635,6 @@ function BulkMoreMenu({
           {hasSessionItems && (
             <div className="bulk-dropdown-section">
               <div className="bulk-dropdown-label">会话与网络</div>
-              {features.forceRelogin && (
-                <button
-                  type="button"
-                  className="bulk-dropdown-item"
-                  role="menuitem"
-                  disabled={!canForceReloginSelected || Boolean(batchAction)}
-                  onClick={() => { setOpen(false); forceReloginSelected(); }}
-                  title="清除旧 Codex 授权检查点，重新申请授权；有效 Web 会话仍会复用"
-                >
-                  {batchAction === "relogin" ? <LoaderCircle className="spin" size={14} /> : <LogIn size={14} />}
-                  <span>重新开始授权</span>
-                </button>
-              )}
               {features.accountSessions && (
                 <button
                   type="button"
@@ -3748,7 +3729,7 @@ function BulkMoreMenu({
 
 // The boundary keeps event handlers fresh without invalidating unchanged memoized rows.
 const MemoizedJobRow = React.memo(JobRow);
-const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
+const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onOpenCost", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
 function JobRowBoundary(props) {
   const latest = useRef(props);
   useLayoutEffect(() => { latest.current = props; });
@@ -3756,7 +3737,7 @@ function JobRowBoundary(props) {
   return <MemoizedJobRow {...props} {...callbacks} />;
 }
 
-function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, forceReloginAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
+function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
   useDisplayTimeZone();
   const [value, setValue] = useState("");
   const [smsPopoverOpen, setSmsPopoverOpen] = useState(false);
@@ -3819,43 +3800,11 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
     }
   }
 
-  async function retry() {
-    if (isBlockedAccount(job) || workflowBusy || submitting) return;
-    setSubmitting(true);
-    try {
-      await apiFetch(token, `/api/jobs/${job.id}/retry`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      onError("");
-    } catch (requestError) {
-      onError(requestError.message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   async function regenerate() {
     if (isBlockedAccount(job) || workflowBusy || submitting) return;
     setSubmitting(true);
     try {
-      await apiFetch(token, `/api/jobs/${job.id}/regenerate`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      onError("");
-    } catch (requestError) {
-      onError(requestError.message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function forceRelogin() {
-    if (isBlockedAccount(job) || workflowBusy || submitting) return;
-    setSubmitting(true);
-    try {
-      await apiFetch(token, `/api/jobs/${job.id}/relogin`, {
+      await apiFetch(token, `/api/jobs/${job.id}/authorize`, {
         method: "POST",
         body: JSON.stringify({}),
       });
@@ -3960,11 +3909,15 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
                 )}
               </div>
               {remarksAvailable && (
-                <div className="account-meta-line">
+                <div className="account-meta-line account-cost-line">
                   <button type="button" className={`account-remark-button ${job.remark ? "has-remark" : ""}`} onClick={onOpenRemark} title={job.remark || "添加备注"} aria-label={`编辑 ${job.email} 的备注`}>
                     <FileText size={11} aria-hidden="true" />
                     <span>{job.remark || "备注"}</span>
                   </button>
+                  {pricingAvailable && <button type="button" className="account-cost-button" onClick={onOpenCost}
+                    title={`账号成本 ${formatAccountCost(job.accountCostCny)}；点击修改`} aria-label={`编辑 ${job.email} 的账号成本`}>
+                    {formatAccountCost(job.accountCostCny)}
+                  </button>}
                 </div>
               )}
             </div>
@@ -3986,7 +3939,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
         )}
       </td>
       <td className="usage-cell-column">
-        <AccountUsageCell usage={accountUsage} available={job.canDownload || job.sub2apiInPool === true} enabled={accountUsageAvailable} onRefresh={onRefreshUsage} />
+        <AccountUsageCell usage={accountUsage} available={job.canDownload || job.sub2apiInPool === true || hasUsageSnapshot(accountUsage)} enabled={accountUsageAvailable} onRefresh={onRefreshUsage} accountCostCny={job.accountCostCny ?? 0} poolPriceMultiplier={poolPriceMultiplier} />
       </td>
       <td className="pool-status-cell">
         <div className="pool-account-controls">
@@ -4237,43 +4190,16 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="regenerate-button icon-only-action"
             onClick={regenerate}
-            disabled={isBlockedAccount(job) || rowBusy || !job.canRegenerate}
-            title={isBlockedAccount(job) || rowBusy || !job.canRegenerate ? mutationReason || "需要先完成一次 Codex 授权，再使用刷新令牌更新" : "重新授权：优先使用刷新令牌；令牌失效后转入登录授权，可能需要验证"}
-            aria-label="重新授权"
+            disabled={isBlockedAccount(job) || rowBusy || !job.canForceRelogin}
+            title={isBlockedAccount(job) || rowBusy || !job.canForceRelogin ? mutationReason || "请先结束当前任务，再进行授权" : "Codex 授权：优先刷新已有凭据；缺失或明确失效时，复用有效 Web 会话或先登录 Web，再通过授权链接授权"}
+            aria-label="Codex 授权"
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}
           </button>
-          <button
-            type="button"
-            className="relogin-button icon-only-action"
-            onClick={forceRelogin}
-            disabled={isBlockedAccount(job) || rowBusy || !forceReloginAvailable || !job.canForceRelogin}
-            title={isBlockedAccount(job) || rowBusy || !job.canForceRelogin ? mutationReason || "请先结束当前任务，再重新开始授权" : "跳过刷新令牌并清除旧 Codex 授权检查点；有效 Web 会话仍会复用，失效后补登 Web"}
-            aria-label="重新开始授权"
-          >
-            {submitting ? <LoaderCircle className="spin" size={13} /> : <LogIn size={13} />}
-          </button>
-          {!terminal ? (
-            <button
-              type="button"
-              className="icon-button danger"
-              onClick={cancel}
-              disabled={rowBusy}
-              title="取消任务"
-              aria-label="取消任务"
-            >
+          {!terminal && (
+            <button type="button" className="icon-button danger" onClick={cancel}
+              disabled={rowBusy} title="取消任务" aria-label="取消任务">
               <Ban size={13} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="retry-button icon-only-action"
-              onClick={retry}
-              disabled={isBlockedAccount(job) || rowBusy || !job.canRetry}
-              title={isBlockedAccount(job) || rowBusy || !job.canRetry ? mutationReason || "当前没有需要重试的授权任务" : job.canResume ? "继续已有 Codex 授权检查点；可能仍需完成手机、邮箱或 2FA 验证" : "当前没有可恢复的授权检查点，将重新尝试授权"}
-              aria-label={job.canResume ? "继续授权" : "重试授权"}
-            >
-              {submitting ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
             </button>
           )}
           <button
@@ -4308,6 +4234,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [loginTimeout, setLoginTimeout] = useState(() => String(settings.loginTimeoutMinutes ?? DEFAULT_LOGIN_TIMEOUT_MINUTES));
   const [smsTimeout, setSmsTimeout] = useState(() => String(settings.smsTimeoutMinutes ?? DEFAULT_SMS_TIMEOUT_MINUTES));
   const [displayTimeZone, setTimeZone] = useState(settings.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE);
+  const [priceMultiplier, setPriceMultiplier] = useState(String(settings.poolPriceMultiplier ?? DEFAULT_POOL_PRICE_MULTIPLIER));
   const [monitoring, setMonitoring] = useState(() => Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
   const [fingerprintDefaults, setFingerprintDefaults] = useState(() => ({ intervalMinutes: String(settings.modelFingerprint?.intervalMinutes ?? 360), maxConcurrentAccounts: String(settings.modelFingerprint?.maxConcurrentAccounts ?? 3) }));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
@@ -4341,8 +4268,8 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   async function save(event) {
     event.preventDefault();
     if (saving) return;
-    let validTimeZone;
-    try { validTimeZone = normalizeDisplayTimeZone(displayTimeZone); } catch (error) { setError(error.message); return; }
+    let validTimeZone, poolPriceMultiplier;
+    try { validTimeZone = normalizeDisplayTimeZone(displayTimeZone); poolPriceMultiplier = normalizePoolPriceMultiplier(priceMultiplier); } catch (error) { setError(error.message); return; }
     const value = Number(limit);
     if (!Number.isInteger(value) || value < settings.min || value > settings.max) {
       setError(`同时运行任务数必须是 ${settings.min} 到 ${settings.max} 的整数`);
@@ -4401,7 +4328,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
+        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4472,11 +4399,18 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             </label>
           </div>
           <div className="task-auth-mode-fields">
+            <div className="task-display-pricing-row">
             <label className="settings-field" htmlFor="task-display-time-zone">
               <span className="field-label-row">显示时区<HelpTip label="显示时区说明">全局页面时间与日志时间使用此时区。原始时间戳保持 UTC，不改变检测间隔或任务调度。支持 IANA 时区，例如 Asia/Shanghai、UTC、America/New_York。</HelpTip></span>
               <input id="task-display-time-zone" aria-label="显示时区" list="display-time-zones" value={displayTimeZone} onChange={event => setTimeZone(event.target.value)} disabled={saving} required style={{ width: "min(320px, 60%)", minWidth: 0, textAlign: "left" }} />
               <datalist id="display-time-zones">{["Asia/Shanghai", "UTC", "Asia/Tokyo", "America/Los_Angeles", "America/New_York", "Europe/London"].map(zone => <option key={zone} value={zone} />)}</datalist>
             </label>
+            <label className="settings-field" htmlFor="task-pool-price-multiplier">
+              <span className="field-label-row">号池价格倍率<HelpTip label="号池价格倍率说明">自定义 1 美元号池用户收费折合多少人民币，仅用于利润展示，不是实时汇率；不会修改号池计费或额度。默认 1，支持最多 6 位小数。</HelpTip></span>
+              <div className="pool-price-multiplier-input"><span>1$ =</span><input id="task-pool-price-multiplier" aria-label="号池价格倍率" type="number" required min="0.000001" max="1000000" step="0.000001"
+                value={priceMultiplier} onChange={event => setPriceMultiplier(event.target.value)} disabled={saving} /><span>元</span></div>
+            </label>
+            </div>
             <label className="settings-field" htmlFor="task-login-timeout">
               <span className="field-label-row">登录超时
                 <HelpTip label="登录超时说明">Web、Codex 登录默认限时 3 分钟，包含邮箱和 2FA 等待、不含排队。进入手机号验证后改用独立接码时限，换号、重发和授权收尾都不重置或切回登录时限。超时保留原凭据；2FA 未通过时暂停自动登录，手动触发可恢复。</HelpTip>
@@ -4600,7 +4534,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             <div className="section-title-row">
               <h3 id="task-auto-settings-title">批量导入后的自动任务</h3>
               <HelpTip label="自动任务说明">
-                按授权完成后识别到的原始 PlanType 执行命令。没有规则的 PlanType 不会自动执行其它操作。
+                按首次 Web 登录识别到的原始 PlanType 执行命令。没有规则的 PlanType 不会自动执行其它操作。
               </HelpTip>
             </div>
             <button type="button" className="secondary-button" onClick={() => setAutoRows((current) => [...current, { planType: "", actions: [] }])} disabled={saving}>
@@ -4625,7 +4559,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
                   <div className="task-auto-action-options" aria-label={`${row.planType || "PlanType"} 自动命令`}>
                     {actionOptions.map((option) => (
                       <label key={option.value} className="task-auto-action-option">
-                        <input type="checkbox" checked={row.actions.includes(option.value)} disabled={saving}
+                        <input type="checkbox" checked={row.actions.includes(option.value)} disabled={saving || (option.value === "authorize-codex" && row.actions.includes("rotate-logout-reauthorize-upload"))}
                           onChange={(event) => setAutoRows((current) => current.map((item, itemIndex) => {
                             if (itemIndex !== index) return item;
                             return { ...item, actions: toggleTaskAutoAction(item.actions, option.value, event.target.checked) };
@@ -4634,7 +4568,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
                       </label>
                     ))}
                   </div>
-                  <small className="task-auto-empty">新账号先登录 Web；上传需先完成 Codex 授权。一键轮换已包含上传。</small>
+                  <small className="task-auto-empty">新账号先登录 Web；一键轮换依次完成 2FA、登出设备、重登 Web、授权与上传，无需额外勾选 Codex 授权。</small>
                 </div>
                 <button type="button" className="icon-button danger" title="删除自动任务规则" aria-label="删除自动任务规则" onClick={() => setAutoRows((current) => current.filter((_, itemIndex) => itemIndex !== index))} disabled={saving}>
                   <Trash2 size={15} />
@@ -5812,23 +5746,24 @@ function formatUsageCreditBalance(value) {
   return null;
 }
 
-function AccountUsageCell({ usage, available, enabled, onRefresh }) {
+function AccountUsageCell({ usage, available, enabled, onRefresh, accountCostCny = 0, poolPriceMultiplier = DEFAULT_POOL_PRICE_MULTIPLIER }) {
   if (!enabled) {
     return <span className="usage-state muted" title="服务端尚未启用 Sub2API 用量同步">未启用</span>;
   }
   if (!available) {
     return <span className="usage-state muted">待授权</span>;
   }
-  if (!usage || usage.status === "loading") {
+  if (!usage || usage.status === "loading" && !hasUsageSnapshot(usage)) {
     return <span className="usage-state muted">查询中...</span>;
   }
-  if (usage.status === "error") {
+  if (usage.status === "error" && !hasUsageSnapshot(usage)) {
     return (
       <button type="button" className="usage-retry" onClick={onRefresh} title={usage.error || "重新读取 Sub2API 用量"}>
         <RefreshCw size={13} />重试
       </button>
     );
   }
+  const profitCents = accountProfitCents(usage.totals?.userCost, poolPriceMultiplier, accountCostCny);
   const primary = usage.primary;
   const secondary = usage.secondary;
   const credits = usage.credits;
@@ -5854,16 +5789,20 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
     ? `重置卡到期时间：${resetCredits.credits.map((credit) => formatDateTime(credit.expiresAt)).join("、")}`
     : "从 Sub2API 同步可用重置卡数量；点击刷新可查询最新数量";
   return (
-    <div className={`account-usage ${restricted ? "restricted" : ""}`} title={usage.fetchedAt ? `Sub2API 同步于 ${formatDateTime(usage.fetchedAt)}` : "Sub2API 用量"}>
+    <div className={`account-usage ${restricted ? "restricted" : ""}`} title={`${usage.fetchedAt ? `Sub2API 同步于 ${formatDateTime(usage.fetchedAt)}` : "Sub2API 用量"}${usage.status === "loading" ? "；正在同步，保留上次数据" : usage.error ? `；同步失败，保留上次数据：${usage.error}` : usage.stale ? "；当前显示上次缓存，等待同步更新" : ""}`}>
       <div className="usage-state-row">
         <span className="usage-state">{restricted ? "受限" : usage.allowed === true ? "可用" : "已读取"}</span>
-        {onRefresh && <button type="button" className="usage-refresh-icon" onClick={onRefresh} title="从 Sub2API 同步用量" aria-label="从 Sub2API 同步用量"><RefreshCw size={13} /></button>}
+        {onRefresh && <button type="button" className="usage-refresh-icon" onClick={onRefresh} disabled={usage.status === "loading"} aria-busy={usage.status === "loading"} title="从 Sub2API 同步用量" aria-label="从 Sub2API 同步用量"><RefreshCw className={usage.status === "loading" ? "spin" : ""} size={13} /></button>}
       </div>
       {windows.map((item) => <UsageWindowProgress key={item.key} tone={item.key} label={item.label} window={item.value} />)}
       {usage.totals && <div className={`usage-total-pills${usage.totals.stale ? " is-stale" : ""}`} title={`账号累计用量（Sub2API 留存的全部历史）${usage.totals.stale ? "；同步失败，保留上次数据，待重试" : ""}${usage.totals.fetchedAt ? `；同步于 ${formatDateTime(usage.totals.fetchedAt)}` : ""}`}>
         <span className="usage-total-pill" title={`账号实际用量：${usage.totals.accountCost ?? "未知"} USD`}>A {usage.totals.accountCost == null ? "—" : `$${formatUsageTotal(usage.totals.accountCost)}`}</span>
         <span className="usage-total-pill" title={`用户收费：${usage.totals.userCost ?? "未知"} USD`}>U {usage.totals.userCost == null ? "—" : `$${formatUsageTotal(usage.totals.userCost)}`}</span>
         <span className="usage-total-pill" title={`Token 总消耗：${usage.totals.tokens ?? "未知"}（含缓存 Token）`}>T {formatUsageTotal(usage.totals.tokens, { tokens: true })}</span>
+        <span className={`usage-total-pill usage-profit-pill ${profitCents === null ? "unknown" : profitCents > 0n ? "positive" : profitCents < 0n ? "negative" : "zero"}`}
+          title={`利润 ${formatCnyCents(profitCents)} = U ${usage.totals.userCost ?? "未知"} USD × ${poolPriceMultiplier} 元/美元 − 账号成本 ${formatAccountCost(accountCostCny)}${usage.totals.stale ? "；按上次缓存的 U 计算" : ""}`}>
+          利润 {formatCnyCents(profitCents)}
+        </span>
       </div>}
       <div className="usage-meta-pills">
         {credits && credits.unlimited === true && (
@@ -5878,7 +5817,7 @@ function AccountUsageCell({ usage, available, enabled, onRefresh }) {
         )}
         <span
           className={`usage-meta-pill usage-reset-credits ${resetCreditCount === null ? "is-unknown" : resetCreditCount > 0 ? "has-cards" : "is-zero"}`}
-          title={resetCreditsTitle}
+          title={`${resetCreditsTitle}${usage.resetCreditsStale ? "；显示上次缓存，当前数量待同步确认" : ""}`}
         >
           <span>重置卡 <strong>{resetCreditCount !== null ? `${resetCreditCount} 张` : "未知"}</strong></span>
         </span>
@@ -5911,14 +5850,15 @@ function UsageWindowProgress({ tone, label, window }) {
 }
 
 function usageWindowPercent(window) {
-  const direct = Number(window?.usedPercent);
+  const numeric = value => value === null || value === undefined || typeof value === "boolean" || value === "" ? NaN : Number(value);
+  const direct = numeric(window?.usedPercent);
   if (Number.isFinite(direct)) return Math.min(100, Math.max(0, direct));
-  const used = Number(window?.used);
-  const limit = Number(window?.limit);
+  const used = numeric(window?.used);
+  const limit = numeric(window?.limit);
   if (Number.isFinite(used) && Number.isFinite(limit) && limit > 0) {
     return Math.min(100, Math.max(0, (used / limit) * 100));
   }
-  const remaining = Number(window?.remaining);
+  const remaining = numeric(window?.remaining);
   if (Number.isFinite(remaining) && Number.isFinite(limit) && limit > 0) {
     return Math.min(100, Math.max(0, ((limit - remaining) / limit) * 100));
   }

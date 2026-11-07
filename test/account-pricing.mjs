@@ -1,0 +1,20 @@
+import assert from "node:assert/strict";
+import { normalizeAccountCost, normalizePoolPriceMultiplier, restoredAccountCost, accountProfitCents, formatCnyCents, formatAccountCost, preserveNewerAccountCosts } from "../web/src/account-pricing.mjs";
+
+assert.equal(normalizePoolPriceMultiplier(undefined),1); assert.equal(restoredAccountCost(undefined),0);
+assert.equal(normalizeAccountCost("12.3400"),12.34);assert.equal(normalizePoolPriceMultiplier("0.000001"),0.000001);
+for(const value of [null,true,{},[],"",-1,1.001,1e9+1])assert.throws(()=>normalizeAccountCost(value));
+for(const value of [null,false,{},[],"",0,-1,0.0000001,1000001])assert.throws(()=>normalizePoolPriceMultiplier(value));
+assert.equal(accountProfitCents(2,7,12.34),166n);
+assert.equal(accountProfitCents(2,7,20),-600n);
+assert.equal(accountProfitCents(0,7,12.34),-1234n);
+assert.equal(accountProfitCents(0.1,0.2,0.02),0n,"binary floating-point artifacts must not leak into profit");
+assert.equal(accountProfitCents(117.005,1,0),11701n,"currency rounding is decimal half-up");
+for(const value of [undefined,null,NaN,Infinity,-1,"2"])assert.equal(accountProfitCents(value,7,12.34),null,"unknown U must not become a fake loss");
+assert.equal(formatCnyCents(166n),"￥1.66");assert.equal(formatCnyCents(-600n),"-￥6.00");assert.equal(formatCnyCents(null),"—");
+assert.equal(formatAccountCost(0),"￥0");assert.equal(formatAccountCost(12.34),"￥12.34");
+const before=[{id:"a",accountCostCny:12.34,accountCostUpdatedAt:"2026-11-07T02:00:00Z"}];
+assert.equal(preserveNewerAccountCosts(before,[{id:"a",accountCostCny:0,accountCostUpdatedAt:null}])[0].accountCostCny,12.34);
+assert.equal(preserveNewerAccountCosts(before,[{id:"b",accountCostCny:0,accountCostUpdatedAt:null}])[0].accountCostCny,0);
+assert.equal(preserveNewerAccountCosts(before,[{id:"a",accountCostCny:20,accountCostUpdatedAt:"2026-11-07T03:00:00Z"}])[0].accountCostCny,20);
+console.log("ACCOUNT_PRICING_PASS strict decimal limits/defaults; U-only profit; exact cents/rounding; positive/negative/zero/unknown; CNY labels; late-poll and row-ID isolation");

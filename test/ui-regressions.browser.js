@@ -31,7 +31,7 @@ async (page) => {
     check(await banned.getByText("账号封禁", { exact: true }).isVisible(), "ban must override the ordinary Web state");
     check(await banned.getByRole("button", { name: "登录 Web", exact: true }).isEnabled(), "known bans must retain the explicit manual Web-only login");
     check((await banned.getByRole("button", { name: "登录 Web", exact: true }).getAttribute("title")).includes("不执行 Codex 授权"), "manual Web login must explain the ban and OAuth boundary");
-    for (const name of ["重新授权", "重新开始授权"]) check(await banned.getByRole("button", { name, exact: true }).isDisabled(), "banned OAuth must remain disabled: " + name);
+    for (const name of ["Codex 授权"]) check(await banned.getByRole("button", { name, exact: true }).isDisabled(), "banned OAuth must remain disabled: " + name);
     check(await banned.locator(".bound-ip-cell").innerText() === "未绑定", "released ban must not appear as direct or bound");
     let reads = 0;
     const providerReads = /\/api\/jobs\/[^/]+\/(?:sessions|workspaces)$/;
@@ -201,7 +201,7 @@ async (page) => {
       await row().getByRole("checkbox").check();
       await page.locator(".bulk-actions").getByRole("button", { name: "重新授权", exact: true }).click();
       await page.waitForSelector(".workflow-busy");
-      for (const name of ["重新授权", "重新开始授权", "检测 Web 会话"]) {
+      for (const name of ["Codex 授权", "检测 Web 会话"]) {
         check(await row().getByRole("button", { name, exact: true }).isDisabled(), name + " enabled while batch busy");
       }
       for (const name of ["设置 2FA", "添加密码"]) {
@@ -287,7 +287,7 @@ async (page) => {
   });
 
   await test("authorization-buttons-phone-and-checkpoint-states", async () => {
-    let mode = "phone", single = 0, restart = 0;
+    let mode = "phone", single = 0;
     const pattern = /\/api\/jobs(?:\?|$)/;
     await page.route(pattern, async route => {
       const response = await route.fetch(), data = await response.json();
@@ -300,13 +300,12 @@ async (page) => {
       } : job);
       await route.fulfill({ json: data });
     });
-    const mutations = ["**/api/jobs/*/retry", "**/api/jobs/*/relogin"];
+    const mutations = ["**/api/jobs/*/authorize"];
     await page.route(mutations[0], route => { single++; return route.fulfill({ json: {} }); });
-    await page.route(mutations[1], route => { restart++; return route.fulfill({ json: {} }); });
     try {
       await page.reload();
       await row().getByRole("button", { name: "取消任务", exact: true }).waitFor();
-      for (const name of ["检测 Web 会话", "重新授权", "重新开始授权", "登出所有设备"]) {
+      for (const name of ["检测 Web 会话", "Codex 授权", "登出所有设备"]) {
         const button = row().getByRole("button", { name, exact: true });
         check(await button.isDisabled(), name + " overlaps phone input");
         check((await button.getAttribute("title")).includes("等待绑定手机号"), name + " hides phone lock reason");
@@ -314,20 +313,14 @@ async (page) => {
       for (const name of ["查看或修改账号凭据", "查看已登录设备和会话", "查看并切换工作空间", "下载导入文件"]) {
         check(await row().getByRole("button", { name, exact: true }).isEnabled(), name + " blocked during phone input");
       }
-      mode = "continue"; await page.reload();
-      await row().getByRole("button", { name: "继续授权", exact: true }).click();
-      check(single === 1, "continue does not use retry endpoint");
-      const restartButton = row().getByRole("button", { name: "重新开始授权", exact: true });
-      await page.waitForFunction(() => {
-        const target = [...document.querySelectorAll("tr.job-row")].find(row => row.textContent.includes("review-1@example.test"));
-        return target?.querySelector('button[aria-label="重新开始授权"]')?.title.includes("清除旧 Codex 授权检查点");
-      });
-      const title = await restartButton.getAttribute("title");
-      check(title.includes("清除旧 Codex 授权检查点") && title.includes("Web 会话仍会复用"), "restart overpromises fresh Web login");
-      await restartButton.click(); check(restart === 1, "restart must use relogin endpoint");
-      mode = "missing"; await page.reload();
-      check(await row().getByRole("button", { name: "重试授权", exact: true }).isEnabled(), "missing checkpoint prevents retry");
-      check((await row().getByRole("button", { name: "重试授权", exact: true }).getAttribute("title")).includes("没有可恢复"), "missing checkpoint looks resumable");
+      for (mode of ["continue", "missing"]) {
+        await page.reload();
+        const button = row().getByRole("button", { name: "Codex 授权", exact: true });
+        check(await button.isEnabled(), "single OAuth entry disabled for " + mode);
+        for (const name of ["继续授权", "重试授权", "重新开始授权"]) check(await row().getByRole("button", {name,exact:true}).count() === 0, "duplicate authorization entry remains");
+        await Promise.all([page.waitForResponse(r => r.url().endsWith('/authorize')), button.click()]);
+      }
+      check(single === 2, "both terminal states must use the unified endpoint");
     } finally { await page.unrouteAll({ behavior: "wait" }); await page.reload(); }
   });
 

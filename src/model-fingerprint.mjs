@@ -8,6 +8,7 @@ import { fingerprintFailure, fingerprintRecovery } from "./model-fingerprint-req
 const invalid = message => Object.assign(new Error(message), { status: 400 });
 export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, planDefaults: {}, groupPolicies: {} });
 const HISTORY_WINDOW_MS = 60 * 60_000;
+const roundSummary = record => record ? { ...record, models: record.models?.map(({ requests, ...model }) => model) } : null;
 export function normalizeFingerprintModels(value) {
   if (!Array.isArray(value) || value.length > 8) throw invalid("检测模型必须是最多 8 项的列表");
   const seen = new Set();
@@ -113,11 +114,13 @@ export class ModelFingerprintService {
       const data = JSON.parse(await fs.readFile(this.filePath, "utf8"));
       if (data.version !== 1) throw new Error("版本无效");
       this.settings = normalizeFingerprintSettings(data.settings);
-      for (const [email, entry] of Object.entries(data.accounts || {})) this.accounts.set(email, { ...entry, override: normalizeFingerprintOverride(entry.override), recentResults: this.latestRounds(entry), history: this.recentHistory(entry), phase: "idle" });
+      for (const [email, entry] of Object.entries(data.accounts || {})) this.accounts.set(email, { ...entry, override: normalizeFingerprintOverride(entry.override), recentResults: this.latestRounds(entry), result: roundSummary(entry.result), phase: "idle" });
+      // Persist pruning immediately, including legacy histories that previously kept 200 rounds.
+      await this.persist();
     } catch (error) { if (error.code !== "ENOENT") throw new Error(`模型指纹配置读取失败：${error.message}`); }
   }
   persist() {
-    for (const entry of this.accounts.values()) { entry.recentResults = this.latestRounds(entry); entry.history = this.recentHistory(entry); }
+    for (const entry of this.accounts.values()) { entry.recentResults = this.latestRounds(entry); entry.result = roundSummary(entry.result); delete entry.history; }
     const text = JSON.stringify({ version: 1, settings: this.settings, accounts: Object.fromEntries(this.accounts) }, null, 2);
     const operation = this.writePromise.catch(() => {}).then(async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
@@ -136,26 +139,37 @@ export class ModelFingerprintService {
     const entry = this.accounts.get(label(email));
     const current = entry?.result?.signature === this.signature(email, planType);
     const config = this.effective(email, planType), queued = this.queued.has(email);
-    return { ...config, override: entry?.override || { enabled: null, models: null, intervalMinutes: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status }) => ({ checkedAt, status })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? entry?.result || null : null, previousResult: !current ? entry?.result || null : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncError: entry?.groupSyncError || null };
+    return { ...config, override: entry?.override || { enabled: null, models: null, intervalMinutes: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status }) => ({ checkedAt, status })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? roundSummary(entry?.result) : null, previousResult: !current ? roundSummary(entry?.result) : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncError: entry?.groupSyncError || null };
   }
   latestRounds(entry) {
     const records = new Map();
+    const richness = r => (r.transcriptVersion ? 1000 : 0) + (r.models?.length || 0);
     for (const record of [...(entry?.recentResults || []), ...(entry?.history || []), ...(entry?.result ? [this.historyRecord(entry.result)] : [])]) {
-      if (Number.isFinite(Date.parse(record.checkedAt)) && Date.parse(record.checkedAt) <= this.now()) records.set(record.checkedAt, record);
+      if (!Number.isFinite(Date.parse(record.checkedAt)) || Date.parse(record.checkedAt) > this.now()) continue;
+      const key = record.id || record.checkedAt, previous = records.get(key);
+      if (!previous || richness(record) > richness(previous)) records.set(key, record);
     }
     return [...records.values()].sort((a, b) => Date.parse(b.checkedAt) - Date.parse(a.checkedAt)).slice(0, 6);
   }
   recentHistory(entry) {
-    const cutoff = this.now() - HISTORY_WINDOW_MS, records = [...(entry?.history || [])];
-    if (entry?.result && !records.some(r => r.checkedAt === entry.result.checkedAt)) records.push(this.historyRecord(entry.result));
-    return records.filter(r => Date.parse(r.checkedAt) >= cutoff && Date.parse(r.checkedAt) <= this.now()).sort((a, b) => Date.parse(b.checkedAt) - Date.parse(a.checkedAt)).slice(0, 200);
+    return this.latestRounds(entry).filter(r => Date.parse(r.checkedAt) >= this.now() - HISTORY_WINDOW_MS);
   }
-  historyRecord(result) { return { checkedAt: result.checkedAt, status: result.status, models: result.models, error: result.error || null, failure: result.failure || null, durationMs: result.durationMs ?? null, source: result.source || "legacy", legacy: !result.models?.every(m => m.probabilityStatus || m.status === "error") }; }
-  recordResult(entry, result) { entry.recentResults = this.latestRounds(entry); entry.history = this.recentHistory(entry); entry.result = result; entry.recentResults = this.latestRounds(entry); entry.history = this.recentHistory(entry); }
+  historyRecord(result) { return { id: result.id, transcriptVersion: result.transcriptVersion, requestCount: result.requestCount, checkedAt: result.checkedAt, status: result.status, models: result.models, error: result.error || null, failure: result.failure || null, durationMs: result.durationMs ?? null, source: result.source || "legacy", legacy: !result.models?.every(m => m.probabilityStatus || m.status === "error") }; }
+  recordResult(entry, result) {
+    const record = this.historyRecord({ ...result, id: crypto.randomUUID(), transcriptVersion: 1, requestCount: (result.models || []).reduce((n, m) => n + (m.requests?.length || 0), 0) });
+    entry.recentResults = this.latestRounds({ recentResults: [record, ...this.latestRounds(entry)] });
+    entry.result = roundSummary({ ...result, id: record.id, transcriptVersion: 1, requestCount: record.requestCount });
+    delete entry.history;
+  }
   history(email, planType) {
     const state = this.snapshot(email, planType);
-    const records = this.latestRounds(this.accounts.get(label(email)));
+    const records = this.latestRounds(this.accounts.get(label(email))).map(roundSummary);
     return { since: records.at(-1)?.checkedAt || new Date(this.now()).toISOString(), until: new Date(this.now()).toISOString(), records, phase: state.phase, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, lastError: state.lastError, groupSyncError: state.groupSyncError, groupSyncPending: Boolean(this.accounts.get(label(email))?.groupSyncPending) };
+  }
+  historyDetail(email, roundId) {
+    const record = this.latestRounds(this.accounts.get(label(email))).find(r => (r.id || r.checkedAt) === roundId);
+    if (!record) throw Object.assign(new Error("该轮记录已轮换或不存在，请刷新最近 6 轮记录"), { status: 404 });
+    return { record };
   }
   saveSettings(raw) {
     const next = normalizeFingerprintSettings(raw);
@@ -234,12 +248,13 @@ export class ModelFingerprintService {
     const entry = { ...previous, lastAttemptAt: new Date(this.now()).toISOString(), nextCheckAt: new Date(this.now() + config.intervalMinutes * 60000).toISOString(), lastError: null };
     this.accounts.set(email, entry);
     let recoveryFailure = null;
+    const results = [];
     try {
       await this.mutate(async () => { controller.signal.throwIfAborted(); await this.persist(); });
       const targets = (await this.listTargets(context.config)).filter(item => label(item.email) === email);
       if (!targets.length) throw new Error("账号尚未加入 Sub2API 号池");
       const detector = await this.detector(controller.signal);
-      const results = [], identities = {}, routingIdentities = {};
+      const identities = {}, routingIdentities = {};
       sampling: for (const target of targets) {
         const account = await this.getAccount(context.config, target.id);
         identities[target.id] = fingerprintAccountIdentity(account);
@@ -248,16 +263,23 @@ export class ModelFingerprintService {
         for (const model of config.models) {
           controller.signal.throwIfAborted();
           if (this.isBlocked(email)) return this.snapshot(email, planType);
-          const outputs = [], sampleFailures = [];
+          const outputs = [], sampleFailures = [], requests = [];
           try {
             for (const challenge of this.challenges(3)) {
               for (let attempt = 1; attempt <= 2; attempt++) {
+                const request = { sample: outputs.length + 1, attempt, prompt: challenge.prompt, response: null, startedAt: new Date(this.now()).toISOString(), expectedCount: challenge.expected_count, minimumCount: Math.max(80, Math.ceil((challenge.expected_count || 0) * 0.55)) };
+                const requestStart = this.now();
+                requests.push(request);
                 try {
                   const text = await this.sample(context.config, account, model.model, challenge.prompt, controller.signal);
+                  Object.assign(request, { response: text, status: "success", count: parseNumbers(text).length, durationMs: this.now() - requestStart });
+                  request.accepted = request.count >= request.minimumCount;
                   outputs.push({ text, expected_count: challenge.expected_count }); break;
                 } catch (error) {
                   controller.signal.throwIfAborted();
                   const detail = fingerprintFailure(error);
+                  Object.assign(request, { status: "error", response: typeof error.fingerprintReply === "string" ? error.fingerprintReply : null, failure: detail, accepted: false, durationMs: this.now() - requestStart });
+                  request.count = request.response === null ? 0 : parseNumbers(request.response).length;
                   sampleFailures.push({ sample: outputs.length + 1, attempt, ...detail });
                   if (!detail.retryable || attempt === 2) throw error;
                   await delay(1000, undefined, { signal: controller.signal });
@@ -265,11 +287,15 @@ export class ModelFingerprintService {
               }
             }
             const analysis = detector.analyze(outputs, { strict: true });
-            results.push({ accountId: String(target.id), model: model.model, expected: model.expected, ...fingerprintEvaluation(analysis, model.expected, config.minProbability), prediction: analysis.prediction || null, predictionName: analysis.prediction_name || null, probability: analysis.probability ?? null, probabilityStatus: analysis.probability_status, decision: analysis.decision, usedOutputs: analysis.used_outputs, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })), candidates: analysis.results.slice(0, 5).map(r => ({ model: r.model, name: r.display_name, probability: r.probability })), referenceBuiltAt: detector.builtAt, sampleFailures });
+            for (const request of requests.filter(r => r.status === "success")) {
+              const diagnostic = analysis.diagnostics?.[request.sample - 1];
+              if (diagnostic) Object.assign(request, { accepted: diagnostic.accepted, minimumCount: diagnostic.minimum_numbers ?? request.minimumCount });
+            }
+            results.push({ accountId: String(target.id), model: model.model, expected: model.expected, ...fingerprintEvaluation(analysis, model.expected, config.minProbability), prediction: analysis.prediction || null, predictionName: analysis.prediction_name || null, probability: analysis.probability ?? null, probabilityStatus: analysis.probability_status, decision: analysis.decision, usedOutputs: analysis.used_outputs, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })), candidates: analysis.results.slice(0, 5).map(r => ({ model: r.model, name: r.display_name, probability: r.probability })), referenceBuiltAt: detector.builtAt, sampleFailures, requestCount: requests.length, requests });
           } catch (error) {
             controller.signal.throwIfAborted();
             const detail = fingerprintFailure(error);
-            results.push({ accountId: String(target.id), ...model, status: "error", error: detail.message, failure: detail, sampleFailures, completedSamples: outputs.length, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })) });
+            results.push({ accountId: String(target.id), ...model, status: "error", error: detail.message, failure: detail, sampleFailures, requestCount: requests.length, requests, completedSamples: outputs.length, samples: outputs.map(o => ({ expected: o.expected_count, count: parseNumbers(o.text).length })) });
             if (detail.code === "QUOTA" || detail.httpStatus === 429 || account.type === "oauth" && fingerprintRecovery(detail)) { recoveryFailure = detail; break sampling; }
           }
         }
@@ -294,7 +320,7 @@ export class ModelFingerprintService {
           if (controller.signal.aborted || revision !== this.revision || this.accounts.get(email) !== entry) return;
           const detail = fingerprintFailure(error);
           entry.lastError = detail.message;
-          this.recordResult(entry, { signature, backend, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source: manual ? "manual" : "scheduled", status: "error", models: [], error: entry.lastError, failure: detail });
+          this.recordResult(entry, { signature, backend, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source: manual ? "manual" : "scheduled", status: "error", models: results, error: entry.lastError, failure: detail });
           await this.persist();
         });
       }

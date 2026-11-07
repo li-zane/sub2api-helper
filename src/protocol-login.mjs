@@ -2661,13 +2661,14 @@ async function refreshOAuthToken({ authBase, clientId, refreshToken, transport }
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error(`REFRESH_TOKEN_INVALID: OAuth 刷新接口返回非 JSON，HTTP ${res.status}`);
+    throw new Error(`OAUTH_REFRESH_RESPONSE: OAuth 刷新接口返回非 JSON，HTTP ${res.status}`);
   }
   if (!res.ok) {
-    const message = data?.error_description || data?.error?.message || data?.error || "刷新令牌已失效";
-    throw new Error(`REFRESH_TOKEN_INVALID: OAuth 刷新失败，HTTP ${res.status}：${String(message).slice(0, 180)}`);
+    const code = typeof data?.error === "string" ? data.error : data?.error?.code || data?.code;
+    const invalid = [400, 401, 403].includes(res.status) && /^(invalid_grant|refresh_token_(expired|reused|invalidated))$/i.test(code || "");
+    throw new Error(`${invalid ? "REFRESH_TOKEN_INVALID" : "OAUTH_REFRESH_REQUEST"}: OAuth 刷新失败，HTTP ${res.status}`);
   }
-  if (!data.access_token) throw new Error("REFRESH_TOKEN_INVALID: OAuth 刷新响应缺少 access_token");
+  if (!data.access_token) throw new Error("OAUTH_REFRESH_RESPONSE: OAuth 刷新响应缺少 access_token");
   return data;
 }
 

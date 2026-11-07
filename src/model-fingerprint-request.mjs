@@ -68,6 +68,9 @@ export function createFingerprintAccountReader(request) {
   };
 }
 
+const replyText = value => value?.output?.flatMap(item => (item.content || []).filter(p => p.type === "output_text").map(p => p.text || "")).join("") || value?.choices?.[0]?.message?.content || "";
+const withPartialReply = (error, text) => Object.assign(error, { fingerprintReply: typeof text === "string" ? text : "" });
+
 export function extractFingerprintReply(text) {
   let deltas = "", completed = null, streaming = false;
   for (const line of text.split(/\r?\n/)) {
@@ -77,12 +80,12 @@ export function extractFingerprintReply(text) {
     if (event.type === "response.output_text.delta") deltas += event.delta || "";
     if (event.choices?.[0]?.delta?.content) deltas += event.choices[0].delta.content;
     if (event.type === "response.completed") completed = event.response;
-    if (["response.failed", "response.incomplete", "error"].includes(event.type)) throw upstreamFailure(event);
+    if (["response.failed", "response.incomplete", "error"].includes(event.type)) throw withPartialReply(upstreamFailure(event), deltas || replyText(event.response));
   }
-  if (streaming && !completed) throw failure("INCOMPLETE", { retryable: true });
+  if (streaming && !completed) throw withPartialReply(failure("INCOMPLETE", { retryable: true }), deltas);
   if (deltas) return deltas;
   if (!completed) { try { completed = JSON.parse(text); } catch {} }
-  if (completed?.error || completed?.status && completed.status !== "completed") throw upstreamFailure(completed);
+  if (completed?.error || completed?.status && completed.status !== "completed") throw withPartialReply(upstreamFailure(completed), replyText(completed));
   const output = completed?.output?.flatMap(item => (item.content || []).filter(p => p.type === "output_text").map(p => p.text || "")).join("") || completed?.choices?.[0]?.message?.content;
   if (typeof output !== "string" || !output.trim()) throw failure("EMPTY");
   return output;

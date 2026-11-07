@@ -21,9 +21,9 @@ export function accountMutationBlockReason(job, { workflowBusy = false, submitti
   if (stages[job.status]) return stages[job.status];
   if (job.webLoginPending) return "Web 登录正在进行，请等待完成或取消当前任务";
   if (job.webSessionCheckPending) return "Web 会话检测正在进行，请等待完成";
-  if (["queued", "running"].includes(job.autoTaskStatus)) return "账号自动化任务正在进行，请等待完成";
+  if (["pending", "queued", "running"].includes(job.autoTaskStatus)) return "账号自动化任务正在进行，请等待完成";
   if (job.poolRefreshAction) return job.poolRefreshError
-    ? "授权或号池同步尚未完成，可重试或重新开始授权"
+    ? "授权或号池同步尚未完成，可点击 Codex 授权重试"
     : "授权结果正在等待更新号池，请等待当前操作完成";
   return "";
 }
