@@ -42,8 +42,9 @@ async page => {
     check(!(await log.innerText()).includes('WEB_TASK_ONLY'),'another task leaked into detail');
   });
   await run('credential-history-selects-individual-old-and-current-records',async()=>{
-    await log.getByRole('tab',{name:'凭据历史',exact:true}).click();await log.getByRole('button',{name:/密码 · 导入/}).waitFor();
+    await log.getByRole('tab',{name:'凭据历史',exact:true}).click();await log.getByRole('button',{name:/密码 · 已确认/}).waitFor();
     check(await log.locator('pre').count()===0,'old protocol or credential remained selected after tab change');
+    await log.getByRole('button',{name:'展开 密码 的 1 条历史记录',exact:true}).click();
     await log.getByRole('button',{name:/密码 · 导入/}).click();await log.locator('pre').filter({hasText:'old-password-fixture'}).waitFor();
     await log.getByRole('button',{name:/Web 会话 \/ Cookie/}).click();await log.locator('pre').filter({hasText:'CURRENT_WEB_ONLY'}).waitFor();
     check(!(await log.innerText()).includes('old-password-fixture'),'old secret remains after selection');
