@@ -5,6 +5,10 @@ async page => {
   page.on('pageerror',e=>errors.push(e.message));
   await page.route(/\/api\/jobs(?:\?|$)/,async route=>{
     const response=await route.fetch(),data=await response.json();
+    // Server sorting may put the sole banned fixture first. Do not overwrite
+    // that row when creating the separate 429 fixture.
+    const limitedJob=data.jobs.find(j=>j.status!=='banned');
+    if(limitedJob)data.jobs=[limitedJob,...data.jobs.filter(j=>j.id!==limitedJob.id)];
     data.jobs=data.jobs.map((j,i)=>i===0?{...j,status:'completed',sub2apiInPool:true,sub2apiEnabled:true,sub2apiRateLimited:true,codexStatusEligible:false,
       overloadDetection:{configured:true,enabled:true,revision:1,points:[]},overloadAutoCooldown:{configured:true,enabled:true,revision:1},modelFingerprint:{enabled:true,models:[],override:{},phase:'idle'}}:j.status==='banned'?{...j,sub2apiInPool:true,sub2apiEnabled:false,sub2apiUsage:{allowed:true,primary:{usedPercent:10},totals:{accountCost:1,userCost:2,tokens:1000}}}:j);
     await route.fulfill({json:data});

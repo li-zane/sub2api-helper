@@ -1,4 +1,4 @@
-import { codexStatusEligible, codexStatusBlockReason } from "./codex-eligibility.mjs";
+import { codexStatusEligible, codexStatusBlockReason, usageRestricted } from "./codex-eligibility.mjs";
 import { CustomSelect } from "./custom-select.jsx";
 import React, { useEffect, useRef, useState } from "react";
 import { Activity, Check, ChevronDown, RefreshCw, Settings2, X } from "lucide-react";
@@ -398,6 +398,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
   useEffect(() => setState(job.modelFingerprint), [job.modelFingerprint]);
   const eligible = codexStatusEligible(job);
   const effectiveEnabled = eligible && state?.enabled === true;
+  const retainedHistory = !eligible && (job.sub2apiRateLimited === true || job.sub2apiQuotaRestricted === true || usageRestricted(job.sub2apiUsage));
   if (!state) return <span className="muted">—</span>;
   async function update(body, check = false) {
     if (!eligible || requestPending.current || check && ["running", "queued"].includes(state.phase)) return;
@@ -409,7 +410,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
   const recent = (state.recentResults || (result || state.previousResult ? [result || state.previousResult] : [])).slice(0, 6).reverse();
   const rounds = [...Array(6 - recent.length).fill(null), ...recent];
   const checking = state.phase === "running" || state.phase === "queued";
-  return <div className={`fingerprint-cell-body${effectiveEnabled ? "" : " is-disabled"}`}>
+  return <div className={`fingerprint-cell-body${effectiveEnabled ? "" : " is-disabled"}${retainedHistory ? " has-retained-history" : ""}`}>
     <div className="fingerprint-cell-actions">
       <div className="overload-control fingerprint-toggle-control"><span>降智</span>
       <button type="button" role="switch" aria-checked={effectiveEnabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${effectiveEnabled ? "on" : ""}`} disabled={!eligible || !token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
@@ -422,7 +423,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
     <div className="fingerprint-rounds" role="group" aria-label={`${job.email} 最近 6 轮检测结果`}>
       {rounds.map((round, index) => {
         const status = !round ? "empty" : round.status === "match" ? "match" : round.status === "mismatch" ? "mismatch" : "error";
-        const label = `${effectiveEnabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${displayDateTime(round.checkedAt)}`}`;
+        const label = `${retainedHistory ? "检测已暂停 · " : effectiveEnabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${retainedHistory ? "历史结果 · " : ""}${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${displayDateTime(round.checkedAt)}`}`;
         return <button key={round?.checkedAt || `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
       })}
     </div>

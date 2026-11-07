@@ -5,7 +5,7 @@ import { ChevronDown, Check } from "lucide-react";
 // Existing class names and visual rules belong to the current design unchanged.
 export function CustomSelect({ id, name, value, defaultValue = "", onChange, disabled = false,
   options, children, placeholder = "请选择...", className = "", "aria-label": ariaLabel,
-  "aria-labelledby": labelledBy, "aria-describedby": describedBy, width, required, form }) {
+  "aria-labelledby": labelledBy, "aria-describedby": describedBy, width, required, form, editable = false }) {
   const uid = useId();
   const triggerId = id || `${uid}-trigger`;
   const listId = `${uid}-list`;
@@ -66,6 +66,8 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
       setPosition(previous => previous?.left === left && previous?.top === top && previous?.minWidth === minWidth ? previous : next);
     };
     place();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(place) : null;
+    observer?.observe(menu);
     const outside = event => { if (!containerRef.current?.contains(event.target)) close(); };
     // Focusing a partially visible trigger can scroll the modal just after
     // click. Re-anchor instead of dismissing the menu on that delayed scroll.
@@ -74,6 +76,7 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
     window.addEventListener("scroll", scroll, true);
     window.addEventListener("resize", place);
     return () => {
+      observer?.disconnect();
       document.removeEventListener("pointerdown", outside, true);
       window.removeEventListener("scroll", scroll, true);
       window.removeEventListener("resize", place);
@@ -97,14 +100,15 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
     const next = String(val ?? "");
     if (nativeSelectRef.current) nativeSelectRef.current.value = next;
     if (value === undefined) setInternalValue(next);
-    if (String(currentValue ?? "") !== next) onChange?.({ target: { value: next, id, name: name || id }, currentTarget: nativeSelectRef.current });
+    if (String(currentValue ?? "") !== next) onChange?.({ target: { value: next, id, name: name || id }, currentTarget: editable ? triggerRef.current : nativeSelectRef.current });
     close(true);
   };
   const handleKeyDown = event => {
     if (disabled) return;
+    if (editable && (event.nativeEvent?.isComposing || event.keyCode === 229)) return;
     if (event.key === "Escape" && open) { event.preventDefault(); event.stopPropagation(); close(true); return; }
     if (event.key === "Tab") { close(); return; }
-    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    if (["ArrowDown", "ArrowUp", ...(!editable ? ["Home", "End"] : [])].includes(event.key)) {
       event.preventDefault();
       setKeyboardNavigation(true);
       if (!open) { show(event.key === "ArrowUp" || event.key === "End"); return; }
@@ -113,13 +117,19 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
         : enabledIndexes[(at + (event.key === "ArrowDown" ? 1 : -1) + enabledIndexes.length) % enabledIndexes.length];
       setActiveIndex(next ?? -1); return;
     }
-    if (event.key === "Enter" || event.key === " ") {
+    if (editable && event.key === "Enter") {
+      event.preventDefault();
+      if (open && keyboardNavigation && activeIndex >= 0 && !parsedOptions[activeIndex]?.disabled) handleSelect(parsedOptions[activeIndex].value);
+      else close();
+      return;
+    }
+    if (!editable && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       setKeyboardNavigation(true);
       if (!open) show(); else if (activeIndex >= 0 && !parsedOptions[activeIndex]?.disabled) handleSelect(parsedOptions[activeIndex].value);
       return;
     }
-    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    if (!editable && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault();
       setKeyboardNavigation(true);
       const now = Date.now(), text = (now - searchRef.current.at < 700 ? searchRef.current.text : "") + event.key.toLocaleLowerCase();
@@ -128,24 +138,36 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
       if (match !== undefined) { setActiveIndex(match); setOpen(true); }
     }
   };
-  return <div className={`custom-select-container ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""} ${className}`.trim()}
+  return <div className={`custom-select-container ${editable ? "is-editable" : ""} ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""} ${className}`.trim()}
     ref={containerRef} style={width ? { width } : undefined} onKeyDown={handleKeyDown}
     onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(); }}>
-    <select ref={nativeSelectRef} id={id ? `${id}-native` : undefined} name={name || id} form={form} value={currentValue ?? ""}
+    {!editable && <select ref={nativeSelectRef} id={id ? `${id}-native` : undefined} name={name || id} form={form} value={currentValue ?? ""}
       onChange={event => { if (value === undefined) setInternalValue(event.target.value); onChange?.(event); }} disabled={disabled}
       required={required} aria-hidden="true" tabIndex={-1} className="custom-select-native-hidden"
       onFocus={() => triggerRef.current?.focus()}
       onClick={event => { event.preventDefault(); triggerRef.current?.focus(); show(); }}
       onInvalid={event => { event.preventDefault(); triggerRef.current?.focus(); }}>
       {parsedOptions.map(opt => <option key={opt.value} value={opt.value} disabled={opt.disabled}>{opt.label}</option>)}
-    </select>
-    <button ref={triggerRef} type="button" id={triggerId} role="combobox" className={`custom-select-trigger ${open ? "active" : ""}`}
+    </select>}
+    {editable ? <>
+      <input ref={triggerRef} type="text" id={triggerId} name={name || id} form={form} value={currentValue ?? ""}
+        className={`custom-select-trigger custom-select-input ${open ? "active" : ""}`} role="combobox" autoComplete="off"
+        placeholder={placeholder} disabled={disabled} required={required} aria-label={ariaLabel} aria-labelledby={labelledBy} aria-describedby={describedBy}
+        aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={open} aria-controls={listId}
+        aria-activedescendant={open && keyboardNavigation && activeIndex >= 0 ? `${uid}-option-${activeIndex}` : undefined}
+        onClick={() => { setKeyboardNavigation(false); show(); }}
+        onChange={event => {
+          if (value === undefined) setInternalValue(event.target.value);
+          setKeyboardNavigation(false); setActiveIndex(-1); setOpen(true); onChange?.(event);
+        }} />
+      <ChevronDown size={14} className={`custom-select-chevron custom-select-input-chevron ${open ? "rotated" : ""}`} aria-hidden="true" />
+    </> : <button ref={triggerRef} type="button" id={triggerId} role="combobox" className={`custom-select-trigger ${open ? "active" : ""}`}
       onClick={() => { setKeyboardNavigation(false); open ? close() : show(); }} disabled={disabled} aria-haspopup="listbox" aria-expanded={open} aria-controls={listId}
       aria-label={ariaLabel || (labelledBy || id ? undefined : displayLabel)} aria-labelledby={labelledBy} aria-describedby={describedBy}
       aria-activedescendant={open && activeIndex >= 0 ? `${uid}-option-${activeIndex}` : undefined} aria-required={required}>
       <span className="custom-select-value">{displayLabel}</span><ChevronDown size={14} className={`custom-select-chevron ${open ? "rotated" : ""}`} aria-hidden="true" />
-    </button>
-    {open && !disabled && <div ref={menuRef} id={listId} popover="manual" className="custom-select-dropdown" style={position || { position: "fixed", left: 0, top: 0, right: "auto", bottom: "auto", margin: 0, minWidth: 0, visibility: "hidden" }}
+    </button>}
+    {open && !disabled && <div ref={menuRef} id={listId} popover="manual" className={`custom-select-dropdown ${editable ? "is-editable" : ""}`.trim()} style={position || { position: "fixed", left: 0, top: 0, right: "auto", bottom: "auto", margin: 0, minWidth: 0, visibility: "hidden" }}
       role="listbox" aria-label={ariaLabel || displayLabel}>
       <div className="custom-select-options">{parsedOptions.map((opt, index) => {
         const isSelected = index === selectedIndex;
@@ -153,7 +175,7 @@ export function CustomSelect({ id, name, value, defaultValue = "", onChange, dis
           className={`custom-select-option ${(keyboardNavigation ? activeIndex === index : isSelected) ? "selected" : ""} ${opt.disabled ? "disabled" : ""}`}
           onPointerMove={() => { setKeyboardNavigation(false); if (!opt.disabled && activeIndex !== index) setActiveIndex(index); }}
           onPointerDown={event => event.preventDefault()} onClick={() => { if (!opt.disabled) handleSelect(opt.value); }}>
-          <span className="custom-select-option-label">{opt.label}</span>{isSelected && <Check size={14} className="custom-select-check" aria-hidden="true" />}
+          <span className="custom-select-option-label">{opt.label}{editable && opt.description && <small className="custom-select-option-description">{opt.description}</small>}</span>{isSelected && <Check size={14} className="custom-select-check" aria-hidden="true" />}
         </div>;
       })}</div>
     </div>}

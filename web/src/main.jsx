@@ -682,8 +682,8 @@ function App() {
   const canDownloadSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && downloadableSelectedCount > 0;
   const canReauthorizeSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
-    && selectedJobs.every((job) => job.canRegenerate || job.canRetry);
-  const forceReloginSelectedCount = selectedJobs.filter((job) => job.canForceRelogin).length;
+    && selectedJobs.every((job) => !isBlockedAccount(job) && (job.canRegenerate || job.canRetry));
+  const forceReloginSelectedCount = selectedJobs.filter((job) => !isBlockedAccount(job) && job.canForceRelogin).length;
   const webLoginSelectedCount = selectedJobs.filter((job) => job.canLoginWeb).length;
   const canLoginWebSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size && webLoginSelectedCount > 0;
   const canForceReloginSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
@@ -1680,13 +1680,13 @@ function App() {
   async function forceReloginSelected() {
     if (!canForceReloginSelected || batchAction) return;
     const skipped = selectedJobIds.size - forceReloginSelectedCount;
-    const message = `确定让选中的 ${forceReloginSelectedCount} 个账号跳过刷新令牌、清除旧 Codex 授权检查点并重新开始授权吗？有效的 Web 会话仍会复用。${skipped ? `另有 ${skipped} 个进行中账号将自动跳过。` : ""}`;
+    const message = `确定让选中的 ${forceReloginSelectedCount} 个账号跳过刷新令牌、清除旧 Codex 授权检查点并重新开始授权吗？有效的 Web 会话仍会复用。${skipped ? `另有 ${skipped} 个封禁或进行中账号将自动跳过。` : ""}`;
     if (!window.confirm(message)) return;
     setBatchAction("relogin");
     try {
       const data = await apiFetch(token, "/api/jobs/relogin-batch", {
         method: "POST",
-        body: JSON.stringify({ ids: [...selectedJobIds] }),
+        body: JSON.stringify({ ids: selectedJobs.filter(job => !isBlockedAccount(job) && job.canForceRelogin).map(job => job.id) }),
       });
       setUploadNotice(`已开始重新开始授权 ${data.started} 个账号${data.skipped ? `，跳过 ${data.skipped} 个` : ""}`);
       setSelectedJobIds(new Set());
@@ -3759,6 +3759,8 @@ function JobRowBoundary(props) {
 function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, forceReloginAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
   useDisplayTimeZone();
   const [value, setValue] = useState("");
+  const [smsPopoverOpen, setSmsPopoverOpen] = useState(false);
+  const smsTriggerRef = useRef(null);
   const [submitting, setSubmitting] = useState(false);
   const [priorityValue, setPriorityValue] = useState(() => job.sub2apiPriority === null || job.sub2apiPriority === undefined ? "" : String(job.sub2apiPriority));
   const priorityInputRef = useRef(null);
@@ -3818,7 +3820,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
   }
 
   async function retry() {
-    if (workflowBusy || submitting) return;
+    if (isBlockedAccount(job) || workflowBusy || submitting) return;
     setSubmitting(true);
     try {
       await apiFetch(token, `/api/jobs/${job.id}/retry`, {
@@ -3834,7 +3836,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
   }
 
   async function regenerate() {
-    if (workflowBusy || submitting) return;
+    if (isBlockedAccount(job) || workflowBusy || submitting) return;
     setSubmitting(true);
     try {
       await apiFetch(token, `/api/jobs/${job.id}/regenerate`, {
@@ -3850,7 +3852,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
   }
 
   async function forceRelogin() {
-    if (workflowBusy || submitting) return;
+    if (isBlockedAccount(job) || workflowBusy || submitting) return;
     setSubmitting(true);
     try {
       await apiFetch(token, `/api/jobs/${job.id}/relogin`, {
@@ -4051,16 +4053,61 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             </button>
           </div>
         </div>
-        {job.currentPhone && ["working", "phone", "phone_otp"].includes(job.status) && (
-          <div className="phone-target"><Smartphone size={13} />当前手机号：<strong>{job.currentPhone}</strong></div>
-        )}
-        {job.phoneError && <div className="phone-error"><CircleAlert size={13} />{job.phoneError}</div>}
-        {job.smsStatus && !["idle", "unavailable"].includes(job.smsStatus) && (
-          <div className={`sms-status ${job.smsStatus === "error" ? "error" : ""}`}>
-            {job.smsStatus === "error" ? <CircleAlert size={13} /> : <PhoneIncoming size={13} />}
-            <span>{smsStatusText(job)}</span>
-          </div>
-        )}
+        {(() => {
+          const isPhoneStep = ["phone", "phone_otp"].includes(job.status);
+          const hasPhoneTarget = Boolean(job.currentPhone && ["working", "phone", "phone_otp"].includes(job.status));
+          const hasActiveSms = Boolean(job.smsStatus && !["idle", "unavailable"].includes(job.smsStatus)) || Boolean(job.smsError);
+          if (!isPhoneStep && !hasPhoneTarget && !job.phoneError && !hasActiveSms) {
+            return null;
+          }
+          const compactEntry = getSmsCompactEntry(job);
+          const closeSmsPopover = (restoreFocus = true) => {
+            setSmsPopoverOpen(false);
+            if (restoreFocus) {
+              const trigger = smsTriggerRef.current;
+              if (trigger?.isConnected) {
+                trigger.focus();
+                window.requestAnimationFrame(() => {
+                  if (trigger.isConnected) trigger.focus();
+                });
+              }
+            }
+          };
+          return (
+            <div className="sms-compact-entry-row">
+              <button
+                ref={smsTriggerRef}
+                type="button"
+                className={`sms-compact-trigger tone-${compactEntry.tone} ${compactEntry.isCompleted ? "is-completed" : ""} ${smsPopoverOpen ? "is-open" : ""}`.trim()}
+                title={compactEntry.fullSummary}
+                aria-label={compactEntry.ariaLabel}
+                aria-haspopup="dialog"
+                aria-expanded={smsPopoverOpen}
+                onClick={() => setSmsPopoverOpen((prev) => !prev)}
+              >
+                <span className="sms-compact-trigger-icon" aria-hidden="true">
+                  {compactEntry.icon}
+                </span>
+                <span className="sms-compact-trigger-label">{compactEntry.shortLabel}</span>
+              </button>
+              {smsPopoverOpen && (
+                <SmsTaskPopover
+                  job={job}
+                  anchorRef={smsTriggerRef}
+                  onClose={closeSmsPopover}
+                  inputConfig={isPhoneStep ? inputConfig : null}
+                  value={value}
+                  setValue={setValue}
+                  submitting={submitting}
+                  sendInput={sendInput}
+                  smsProviderAvailable={smsProviderAvailable}
+                  smsProvider={smsProvider}
+                  requestSmsNumber={requestSmsNumber}
+                />
+              )}
+            </div>
+          );
+        })()}
         {job.status === "totp_setup_otp" && job.totpSetupSecret && (
           <div className="totp-setup-secret">
             <span>2FA 密钥</span>
@@ -4070,7 +4117,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             </button>
           </div>
         )}
-        {inputConfig && (
+        {inputConfig && !["phone", "phone_otp"].includes(job.status) && (
           <div className="inline-entry">
             <div className="compact-input">
               {inputConfig.icon}
@@ -4083,7 +4130,7 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
                 inputMode={inputConfig.inputMode}
                 type={inputConfig.type || "text"}
                 placeholder={inputConfig.placeholder}
-                aria-label={inputConfig.placeholder}
+                aria-label={inputConfig.ariaLabel || inputConfig.placeholder}
                 autoComplete={inputConfig.autoComplete || "one-time-code"}
               />
             </div>
@@ -4100,31 +4147,6 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               <button type="button" className="text-action" onClick={() => sendInput("resend_email", "")} disabled={submitting}>
                 <RefreshCw size={14} />重发
               </button>
-            )}
-            {job.status === "phone_otp" && (
-              <>
-                <button type="button" className="text-action" onClick={() => sendInput("resend_phone", "")} disabled={submitting}>
-                  <RefreshCw size={14} />重发
-                </button>
-                <button type="button" className="text-action" onClick={() => sendInput("change_phone", "")} disabled={submitting}>
-                  <RotateCcw size={14} />换号
-                </button>
-              </>
-            )}
-            {job.status === "phone" && smsProviderAvailable && (
-              <>
-                <span className="input-separator" aria-hidden="true" />
-                <button
-                  type="button"
-                  className="platform-number-button"
-                  onClick={requestSmsNumber}
-                  disabled={!smsProvider.ready || submitting || job.smsStatus === "requesting"}
-                  title={smsProvider.ready ? `使用 ${smsProvider.name} 取号` : "请先完成接码平台配置"}
-                >
-                  {submitting || job.smsStatus === "requesting" ? <LoaderCircle className="spin" size={15} /> : <PhoneIncoming size={15} />}
-                  {smsProvider.name || "平台"}取号
-                </button>
-              </>
             )}
           </div>
         )}
@@ -4215,8 +4237,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="regenerate-button icon-only-action"
             onClick={regenerate}
-            disabled={rowBusy || !job.canRegenerate}
-            title={rowBusy || !job.canRegenerate ? mutationReason || "需要先完成一次 Codex 授权，再使用刷新令牌更新" : "重新授权：优先使用刷新令牌；令牌失效后转入登录授权，可能需要验证"}
+            disabled={isBlockedAccount(job) || rowBusy || !job.canRegenerate}
+            title={isBlockedAccount(job) || rowBusy || !job.canRegenerate ? mutationReason || "需要先完成一次 Codex 授权，再使用刷新令牌更新" : "重新授权：优先使用刷新令牌；令牌失效后转入登录授权，可能需要验证"}
             aria-label="重新授权"
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}
@@ -4225,8 +4247,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
             type="button"
             className="relogin-button icon-only-action"
             onClick={forceRelogin}
-            disabled={rowBusy || !forceReloginAvailable || !job.canForceRelogin}
-            title={rowBusy || !job.canForceRelogin ? mutationReason || "请先结束当前任务，再重新开始授权" : "跳过刷新令牌并清除旧 Codex 授权检查点；有效 Web 会话仍会复用，失效后补登 Web"}
+            disabled={isBlockedAccount(job) || rowBusy || !forceReloginAvailable || !job.canForceRelogin}
+            title={isBlockedAccount(job) || rowBusy || !job.canForceRelogin ? mutationReason || "请先结束当前任务，再重新开始授权" : "跳过刷新令牌并清除旧 Codex 授权检查点；有效 Web 会话仍会复用，失效后补登 Web"}
             aria-label="重新开始授权"
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <LogIn size={13} />}
@@ -4247,8 +4269,8 @@ function JobRow({ job, token, workflowBusy = false, expanded, onToggleLogs, onEr
               type="button"
               className="retry-button icon-only-action"
               onClick={retry}
-              disabled={rowBusy || !job.canRetry}
-              title={rowBusy || !job.canRetry ? mutationReason || "当前没有需要重试的授权任务" : job.canResume ? "继续已有 Codex 授权检查点；可能仍需完成手机、邮箱或 2FA 验证" : "当前没有可恢复的授权检查点，将重新尝试授权"}
+              disabled={isBlockedAccount(job) || rowBusy || !job.canRetry}
+              title={isBlockedAccount(job) || rowBusy || !job.canRetry ? mutationReason || "当前没有需要重试的授权任务" : job.canResume ? "继续已有 Codex 授权检查点；可能仍需完成手机、邮箱或 2FA 验证" : "当前没有可恢复的授权检查点，将重新尝试授权"}
               aria-label={job.canResume ? "继续授权" : "重试授权"}
             >
               {submitting ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
@@ -4585,20 +4607,20 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
               <Plus size={15} />添加规则
             </button>
           </div>
-          <datalist id="task-plan-type-suggestions">
-            {planTypeSuggestions.map((planType) => <option key={planType} value={planType}>{formatPlanTypeLabel(planType, planTypeMapping)}</option>)}
-          </datalist>
           {autoRows.length === 0 && <div className="task-auto-empty">暂未配置自动任务</div>}
           <div className="task-auto-rule-list">
             {autoRows.map((row, index) => (
               <div className="task-auto-rule" key={index}>
-                <label className="settings-field task-auto-plan-field">
-                  <span>PlanType</span>
-                  <input list="task-plan-type-suggestions" value={row.planType} placeholder="例如 self_serve_business_prolite"
+                <div className="settings-field task-auto-plan-field">
+                  <span><label htmlFor={`task-auto-plan-${index}`}>PlanType</label></span>
+                  <CustomSelect editable id={`task-auto-plan-${index}`} value={row.planType} placeholder="选择或输入 PlanType" width="100%"
+                    aria-label={`第 ${index + 1} 条自动任务的 PlanType`}
+                    options={planTypeSuggestions.map(planType => ({ value: planType, label: planType,
+                      description: formatPlanTypeLabel(planType, planTypeMapping) !== planType ? formatPlanTypeLabel(planType, planTypeMapping) : undefined }))}
                     onChange={(event) => setAutoRows((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, planType: event.target.value } : item))}
                     disabled={saving} />
                   {row.planType && <small>{formatPlanTypeLabel(row.planType, planTypeMapping)}</small>}
-                </label>
+                </div>
                 <div className="task-auto-action-group">
                   <div className="task-auto-action-options" aria-label={`${row.planType || "PlanType"} 自动命令`}>
                     {actionOptions.map((option) => (
@@ -5070,7 +5092,7 @@ function AccountBlockedWebState({ job }) {
       <div className="dialog-state-text">
         <strong>账号已封禁</strong>
         <span>{extractResponseMessage(job.autoRepairBlockedReason || "账号已被删除、封禁或永久停用")}</span>
-        <small>已停止读取设备、会话和工作空间，Web 重登及自动维护已关闭。{job.banProxyReleasePending ? "IP 解绑待重试。" : job.boundProxyStatus === "unbound" ? "IP 绑定已解除。" : "IP 解绑状态待同步。"}确认解封后可使用“重新开始授权”验证恢复。</small>
+        <small>已停止读取设备、会话和工作空间，自动维护及 Codex 授权已关闭。{job.banProxyReleasePending ? "IP 解绑待重试。" : job.boundProxyStatus === "unbound" ? "IP 绑定已解除。" : "IP 解绑状态待同步。"}可在操作列手动“登录 Web”核查；不会自动恢复号池及检测。</small>
       </div>
     </div>
   );
@@ -6022,7 +6044,7 @@ function getInputConfig(status, currentPhone) {
     return { action: "phone", placeholder: "+60123456789", submitLabel: "发送手机验证码", inputMode: "tel", icon: <Smartphone size={15} /> };
   }
   if (status === "phone_otp") {
-    return { action: "phone_otp", placeholder: currentPhone ? `${currentPhone} 的验证码` : "手机验证码", submitLabel: "提交手机验证码", inputMode: "numeric", icon: <Smartphone size={15} /> };
+    return { action: "phone_otp", placeholder: "输入 6 位验证码", ariaLabel: currentPhone ? `${currentPhone} 的验证码` : "手机验证码", submitLabel: "提交手机验证码", inputMode: "numeric", icon: <Smartphone size={14} /> };
   }
   return null;
 }
@@ -6039,6 +6061,332 @@ function smsStatusText(job) {
     manual_submitted: `${providerName}：已停止自动读取，正在验证手动输入的验证码`,
     completed: `${providerName}：手机验证已通过，订单已完成`,
   }[job.smsStatus] || `${providerName}：处理中`;
+}
+
+function getSmsCompactEntry(job) {
+  const isPhoneStep = ["phone", "phone_otp"].includes(job.status);
+  const hasPhoneTarget = Boolean(job.currentPhone && ["working", "phone", "phone_otp"].includes(job.status));
+  const hasActiveSms = Boolean(job.smsStatus && !["idle", "unavailable"].includes(job.smsStatus)) || Boolean(job.smsError);
+  const hasError = Boolean(job.smsError) || job.smsStatus === "error" || Boolean(job.phoneError);
+
+  const parts = [];
+  if (hasActiveSms) {
+    parts.push(smsStatusText(job));
+  } else if (job.status === "phone") {
+    parts.push("待输入或获取绑定手机号");
+  } else if (job.status === "phone_otp") {
+    parts.push("待输入 6 位短信验证码");
+  }
+  if (hasPhoneTarget) {
+    parts.push(`当前手机号：${job.currentPhone}`);
+  }
+  if (job.phoneError) {
+    parts.push(`手机验证反馈：${job.phoneError}`);
+  }
+  const fullSummary = parts.join(" · ") || "手机验证与接码";
+
+  if (hasError) {
+    return {
+      tone: "error",
+      isCompleted: false,
+      shortLabel: job.phoneError && !job.smsError && job.smsStatus !== "error" ? "号码异常" : "接码异常",
+      icon: <CircleAlert size={11} />,
+      fullSummary,
+      ariaLabel: fullSummary,
+    };
+  }
+  if (job.smsStatus === "completed" && !isPhoneStep) {
+    return {
+      tone: "success",
+      isCompleted: true,
+      shortLabel: "已接码",
+      icon: <Check size={10} strokeWidth={2.6} />,
+      fullSummary,
+      ariaLabel: fullSummary,
+    };
+  }
+  const compactStates = {
+    requesting: { tone: "running", shortLabel: "取号中", icon: <LoaderCircle className="spin" size={11} /> },
+    number_acquired: { tone: "running", shortLabel: "发码中", icon: <LoaderCircle className="spin" size={11} /> },
+    waiting_sms: { tone: "waiting", shortLabel: "等验证码", icon: <LoaderCircle className="spin" size={11} /> },
+    submitting: { tone: "running", shortLabel: "提交中", icon: <LoaderCircle className="spin" size={11} /> },
+    submitted: { tone: "running", shortLabel: "已提交", icon: <PhoneIncoming size={11} /> },
+    manual_submitted: { tone: "running", shortLabel: "核验中", icon: <LoaderCircle className="spin" size={11} /> },
+  };
+  if (compactStates[job.smsStatus]) {
+    return {
+      ...compactStates[job.smsStatus],
+      isCompleted: false,
+      fullSummary,
+      ariaLabel: fullSummary,
+    };
+  }
+  if (job.status === "phone_otp") {
+    return {
+      tone: "waiting",
+      isCompleted: false,
+      shortLabel: "填验证码",
+      icon: <Smartphone size={11} />,
+      fullSummary,
+      ariaLabel: fullSummary,
+    };
+  }
+  if (job.status === "phone") {
+    return {
+      tone: "waiting",
+      isCompleted: false,
+      shortLabel: "绑手机号",
+      icon: <Smartphone size={11} />,
+      fullSummary,
+      ariaLabel: fullSummary,
+    };
+  }
+  return {
+    tone: "running",
+    isCompleted: false,
+    shortLabel: "手机验证",
+    icon: <Smartphone size={11} />,
+    fullSummary,
+    ariaLabel: fullSummary,
+  };
+}
+
+function getSmsStatusView(job) {
+  const providerName = job.smsProviderName || "接码平台";
+  const fullText = smsStatusText(job);
+  const errorText = typeof job.smsError === "string" ? job.smsError.trim() : "";
+  if (errorText || job.smsStatus === "error") {
+    return {
+      tone: "error",
+      spinning: false,
+      providerName,
+      primary: "接码任务异常",
+      secondary: errorText || "请检查平台或重试",
+      fullText,
+    };
+  }
+  const states = {
+    requesting: { tone: "running", spinning: true, primary: "正在请求号码", secondary: "向接码平台申请可用手机号" },
+    number_acquired: { tone: "running", spinning: true, primary: "已获号 · 发码中", secondary: "已获取手机号，正在请求下发短信" },
+    waiting_sms: { tone: "waiting", spinning: true, primary: "等待短信回传", secondary: "验证码已发送，正在轮询短信回传" },
+    submitting: { tone: "running", spinning: true, primary: "自动提交验证码", secondary: "已收到短信验证码，正在提交校验" },
+    submitted: { tone: "running", spinning: false, primary: "验证码已提交", secondary: "等待平台校验结果" },
+    manual_submitted: { tone: "running", spinning: true, primary: "验证手动验证码", secondary: "已停止自动读取，正在核验手动验证码" },
+    completed: { tone: "success", spinning: false, primary: "手机验证已通过", secondary: "接码订单已完成" },
+  };
+  const matched = states[job.smsStatus] || { tone: "running", spinning: true, primary: "接码处理中", secondary: null };
+  return {
+    ...matched,
+    providerName,
+    fullText,
+  };
+}
+
+function SmsStatusCard({ job }) {
+  const view = getSmsStatusView(job);
+  const isError = view.tone === "error";
+  const isSuccess = view.tone === "success";
+  return (
+    <div
+      className={`sms-status sms-status-card tone-${view.tone} ${isError ? "error" : ""}`.trim()}
+      title={view.fullText}
+      aria-label={view.fullText}
+    >
+      <div className="sms-status-header">
+        <span className="sms-status-lead">
+          <span className="sms-status-icon" aria-hidden="true">
+            {isError ? (
+              <CircleAlert size={13} />
+            ) : isSuccess ? (
+              <Check size={13} />
+            ) : view.spinning ? (
+              <LoaderCircle className="spin" size={13} />
+            ) : (
+              <PhoneIncoming size={13} />
+            )}
+          </span>
+          <span className="sms-status-primary">{view.primary}</span>
+        </span>
+        <span className="sms-status-provider">{view.providerName}</span>
+      </div>
+      {view.secondary && (
+        <span className={`sms-status-secondary ${isError ? "is-error-detail" : ""}`.trim()}>
+          {view.secondary}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SmsTaskPopover({
+  job,
+  anchorRef,
+  onClose,
+  inputConfig,
+  value,
+  setValue,
+  submitting,
+  sendInput,
+  smsProviderAvailable,
+  smsProvider,
+  requestSmsNumber,
+}) {
+  const panelRef = useRef(null);
+  const inputRef = useRef(null);
+  const closeBtnRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const focusTarget = inputRef.current && !inputRef.current.disabled
+      ? inputRef.current
+      : closeBtnRef.current;
+    focusTarget?.focus();
+
+    const handleMouseDown = (event) => {
+      if (
+        panelRef.current &&
+        !panelRef.current.contains(event.target) &&
+        !anchorRef.current?.contains(event.target)
+      ) {
+        onCloseRef.current?.(false);
+      }
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onCloseRef.current?.(true);
+      }
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [anchorRef]);
+
+  const hasPhoneTarget = Boolean(job.currentPhone && ["working", "phone", "phone_otp"].includes(job.status));
+  const hasActiveSms = Boolean(job.smsStatus && !["idle", "unavailable"].includes(job.smsStatus)) || Boolean(job.smsError);
+
+  return (
+    <AnchoredPopover
+      className="sms-task-popover"
+      role="dialog"
+      aria-label={`手机验证详情 · ${job.email}`}
+      anchorRef={anchorRef}
+      align="left"
+      onClose={() => onClose(false)}
+      onKeyDown={trapModalTab}
+    >
+      <div ref={panelRef} className="sms-popover-inner">
+        <div className="sms-popover-header">
+          <div className="sms-popover-heading">
+            <span className="sms-popover-title">手机验证与接码</span>
+            <span className="sms-popover-subtitle" title={job.email}>{job.email}</span>
+          </div>
+          <button
+            ref={closeBtnRef}
+            type="button"
+            className="icon-button sms-popover-close"
+            onClick={() => onClose(true)}
+            aria-label="关闭手机验证浮层"
+            title="关闭"
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="sms-popover-body">
+          {hasActiveSms && <SmsStatusCard job={job} />}
+
+          {hasPhoneTarget && (
+            <div
+              className="phone-target phone-target-pill"
+              title={`当前手机号：${job.currentPhone}`}
+              aria-label={`当前手机号：${job.currentPhone}`}
+            >
+              <span className="phone-target-lead">
+                <Smartphone size={13} aria-hidden="true" />
+                <span>当前号码</span>
+              </span>
+              <strong className="phone-target-number">{job.currentPhone}</strong>
+            </div>
+          )}
+
+          {job.phoneError && (
+            <div
+              className="phone-error phone-error-card"
+              title={`手机验证反馈：${job.phoneError}`}
+              aria-label={`手机验证反馈：${job.phoneError}`}
+            >
+              <CircleAlert size={13} aria-hidden="true" />
+              <span className="phone-error-text">{job.phoneError}</span>
+            </div>
+          )}
+
+          {inputConfig && (
+            <div className="inline-entry is-phone-entry">
+              <div className="sms-input-shell">
+                <div className="compact-input">
+                  {inputConfig.icon}
+                  <input
+                    ref={inputRef}
+                    value={value}
+                    onChange={(event) => setValue(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && value && !submitting) sendInput(inputConfig.action);
+                    }}
+                    inputMode={inputConfig.inputMode}
+                    type={inputConfig.type || "text"}
+                    placeholder={inputConfig.placeholder}
+                    aria-label={inputConfig.ariaLabel || inputConfig.placeholder}
+                    autoComplete={inputConfig.autoComplete || "one-time-code"}
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="icon-button submit"
+                  onClick={() => sendInput(inputConfig.action)}
+                  disabled={!value || submitting}
+                  title={inputConfig.submitLabel}
+                  aria-label={inputConfig.submitLabel}
+                >
+                  {submitting ? <LoaderCircle className="spin" size={14} /> : <Send size={14} />}
+                </button>
+              </div>
+
+              {job.status === "phone_otp" && (
+                <div className="sms-action-row">
+                  <button type="button" className="text-action" onClick={() => sendInput("resend_phone", "")} disabled={submitting}>
+                    <RefreshCw size={12.5} />重发
+                  </button>
+                  <button type="button" className="text-action" onClick={() => sendInput("change_phone", "")} disabled={submitting}>
+                    <RotateCcw size={12.5} />换号
+                  </button>
+                </div>
+              )}
+
+              {job.status === "phone" && smsProviderAvailable && (
+                <button
+                  type="button"
+                  className="platform-number-button"
+                  onClick={requestSmsNumber}
+                  disabled={!smsProvider.ready || submitting || job.smsStatus === "requesting"}
+                  title={smsProvider.ready ? `使用 ${smsProvider.name} 取号` : "请先完成接码平台配置"}
+                  aria-label={`${smsProvider.name || "平台"}取号`}
+                >
+                  {submitting || job.smsStatus === "requesting" ? <LoaderCircle className="spin" size={13} /> : <PhoneIncoming size={13} />}
+                  <span className="platform-number-button-label">{smsProvider.name || "平台"}取号</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </AnchoredPopover>
+  );
 }
 
 async function saveDownloadResponse(response, fallbackName) {
@@ -6665,7 +7013,18 @@ function sub2ApiStatusJobFields(status) {
     sub2apiAccountId: status?.accountId || null,
     sub2apiAccountIds: Array.isArray(status?.accountIds) ? status.accountIds : [],
     ...(Array.isArray(status?.boundIps) ? { boundIps: status.boundIps, boundProxyStatus: status.boundProxyStatus || (status.proxyIds?.length ? "bound" : "direct") } : {}),
-    ...(status?.accountBlocked ? { autoRepairBlocked: true, autoRepairBlockedReason: status.accountBlockReason, webSessionStatus: "banned", canLoginWeb: false } : {}),
+    // Pool status may arrive before /jobs updates its capability flags. Close
+    // every OAuth entry immediately, but preserve the server's Web readiness:
+    // a ban allows manual Web login; an active task/check may still forbid it.
+    ...(status?.accountBlocked ? {
+      autoRepairBlocked: true,
+      autoRepairBlockedReason: status.accountBlockReason,
+      webSessionStatus: "banned",
+      canRegenerate: false,
+      canForceRelogin: false,
+      canRetry: false,
+      canResume: false,
+    } : {}),
     ...(Array.isArray(status?.boundProxies) ? { boundProxies: status.boundProxies } : {}),
     sub2apiGroupIds: Array.isArray(status?.groupIds) ? status.groupIds : [],
     sub2apiRemoteStatus: status?.remoteStatus || null,

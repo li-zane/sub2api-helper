@@ -48,6 +48,7 @@ import { DEFAULT_MONITORING, normalizeMonitoring } from "../web/src/monitor-sett
 import { normalizeTaskUploadActions, isRedundantTaskUpload } from "../web/src/task-auto-actions.mjs";
 import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "../web/src/login-settings.mjs";
 import { LoginTimeouts } from "./login-timeout.mjs";
+import { authOutputStages } from "./auth-output-stage.mjs";
 import { accountRateLimit } from "./account-rate-limit.mjs";
 import { usageRestricted } from "../web/src/codex-eligibility.mjs";
 import { smsOrderLog } from "./sms-order-cost.mjs";
@@ -3350,7 +3351,7 @@ function consumeOutput(job, rawText) {
     return true;
   };
   if (scan.includes("[ok] Password accepted")) job.securityState = mergeSecurityState(job.securityState, { passwordEnabled: true });
-  if (scan.includes("[ok] 2FA verification accepted")) { job.awaitingMfa = false; job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true }); }
+  if (scan.includes("[ok] 2FA verification accepted")) job.securityState = mergeSecurityState(job.securityState, { totpEnabled: true });
 
   if (scan.includes("[3/5] Password login page reached.")) {
     markAuthorizationRequirement(job, "password");
@@ -3458,49 +3459,58 @@ function consumeOutput(job, rawText) {
     return;
   }
 
-  if (scan.includes("[auth-expired]")) {
-    stopSmsPolling(job);
-    releaseSmsNumber(job, "idle");
-    job.currentPhone = null;
-    job.phoneError = null;
-    setStage(job, "starting", "新登录状态被服务端拒绝，正在自动重新获取邮箱验证码");
-  }
-  if (scan.includes("[codex-auth-login]")) {
-    setStage(job, "working", "Codex 要求独立身份验证，正在继续授权；原 Web 会话已保留");
-  }
-
-  if (scan.includes("Email OTP (r=resend, q=quit):")) {
-    markAuthorizationRequirement(job, "emailOtp");
-    const rejected = scan.includes("[email-otp-rejected]");
-    setStage(
-      job,
-      "email_otp",
-      rejected
-        ? "邮箱验证码错误，请重新输入或重新发送"
-        : job.mailApiUrl
-          ? "正在等待收码接口返回新验证码，也可以手动输入"
-          : "请输入邮箱验证码",
-    );
-    if (job.mailApiUrl) void beginMailPolling(job);
-  }
-  if (scan.includes("Password (q=quit):")) {
-    markAuthorizationRequirement(job, "password");
-    stopMailPolling(job);
-    setStage(job, "password", "请输入账号密码");
-  }
-  if (scan.includes("2FA setup OTP (6 digits, q=quit):")) {
-    setStage(job, "totp_setup_otp", "请将密钥添加到验证器后输入当前 6 位验证码");
-  }
-  const mfaReachedIndex = scan.lastIndexOf("[mfa] TOTP 2FA challenge reached.");
-  const mfaPromptIndex = scan.lastIndexOf("2FA OTP (6 digits, q=quit):");
-  if (mfaReachedIndex > mfaPromptIndex) {
-    job.awaitingMfa = Math.max(mfaReachedIndex, mfaPromptIndex) > scan.lastIndexOf("[ok] 2FA verification accepted");
-    markAuthorizationRequirement(job, "mfa");
-    setStage(job, "working", job.totpSecret ? "正在自动完成 2FA 验证" : "正在准备 2FA 验证");
-  } else if (mfaPromptIndex > mfaReachedIndex) {
-    job.awaitingMfa = Math.max(mfaReachedIndex, mfaPromptIndex) > scan.lastIndexOf("[ok] 2FA verification accepted");
-    markAuthorizationRequirement(job, "mfa");
-    setStage(job, "mfa_otp", "请输入 6 位 2FA 验证码");
+  for (const { type } of authOutputStages(scan, scan.length - text.length)) {
+    if (type === "auth_expired") {
+      job.awaitingMfa = false;
+      stopSmsPolling(job);
+      releaseSmsNumber(job, "idle");
+      job.currentPhone = null;
+      job.phoneError = null;
+      setStage(job, "starting", "新登录状态被服务端拒绝，正在自动重新获取邮箱验证码");
+    }
+    if (type === "codex_auth_login") {
+      setStage(job, "working", "Codex 要求独立身份验证，正在继续授权；原 Web 会话已保留");
+    }
+    if (type === "email_otp") {
+      job.awaitingMfa = false;
+      markAuthorizationRequirement(job, "emailOtp");
+      const rejected = scan.includes("[email-otp-rejected]");
+      setStage(
+        job,
+        "email_otp",
+        rejected
+          ? "邮箱验证码错误，请重新输入或重新发送"
+          : job.mailApiUrl
+            ? "正在等待收码接口返回新验证码，也可以手动输入"
+            : "需要邮箱验证码；未配置自动收码接口，请手动输入",
+      );
+      if (job.mailApiUrl) void beginMailPolling(job);
+    }
+    if (type === "password") {
+      job.awaitingMfa = false;
+      markAuthorizationRequirement(job, "password");
+      stopMailPolling(job);
+      setStage(job, "password", "请输入账号密码");
+    }
+    if (type === "totp_setup_otp") {
+      setStage(job, "totp_setup_otp", "请将密钥添加到验证器后输入当前 6 位验证码");
+    }
+    if (type === "mfa_preparing") {
+      job.awaitingMfa = true;
+      stopMailPolling(job);
+      markAuthorizationRequirement(job, "mfa");
+      setStage(job, "working", job.totpSecret ? "正在自动完成 2FA 验证" : "正在准备 2FA 验证");
+    } else if (type === "mfa_otp") {
+      job.awaitingMfa = true;
+      stopMailPolling(job);
+      markAuthorizationRequirement(job, "mfa");
+      setStage(job, "mfa_otp", "请输入 6 位 2FA 验证码");
+    }
+    if (type === "mfa_accepted") {
+      job.awaitingMfa = false;
+      setStage(job, "working", "2FA 验证通过，正在继续后续验证");
+    }
+    if (type === "password_accepted") setStage(job, "working", "密码验证通过，正在继续后续验证");
   }
   if (scan.includes("[mfa] Generated a 6-digit code from the configured 2FA key.")) {
     markAuthorizationAutomatic(job, "mfa");

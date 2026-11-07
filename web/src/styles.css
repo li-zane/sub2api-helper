@@ -2513,8 +2513,6 @@ select {
   cursor: pointer;
 }
 
-.phone-target,
-.sms-status,
 .totp-setup-secret {
   margin-top: 3px;
   display: inline-flex;
@@ -2522,6 +2520,577 @@ select {
   gap: 4px;
   font-size: 11px;
   color: var(--muted);
+}
+
+/* Dedicated Compact SMS & Phone Verification Entry + Floating Popover (Scoped to avoid affecting 2FA/shared inputs) */
+.sms-compact-entry-row {
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  line-height: 1;
+}
+
+.sms-compact-trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3.5px;
+  height: 20px;
+  max-width: 106px;
+  padding: 0 7px 0 5.5px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 100ms ease;
+}
+
+.sms-compact-trigger:hover {
+  transform: translateY(-0.5px);
+}
+
+.sms-compact-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.sms-compact-trigger-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.sms-compact-trigger-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+}
+
+/* Completed state: even lighter and lower visual interference inside the table */
+.sms-compact-trigger.is-completed,
+.sms-compact-trigger.tone-success {
+  height: 18px;
+  padding: 0 6px 0 5px;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.22);
+  color: #047857;
+  box-shadow: none;
+}
+
+.sms-compact-trigger.is-completed:hover,
+.sms-compact-trigger.tone-success:hover {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.34);
+}
+
+.sms-compact-trigger.tone-waiting {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: var(--amber-strong);
+}
+
+.sms-compact-trigger.tone-waiting:hover {
+  background: #fef3c7;
+  border-color: #fbbf24;
+}
+
+.sms-compact-trigger.tone-running {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: var(--accent-strong);
+}
+
+.sms-compact-trigger.tone-running:hover {
+  background: #dbeafe;
+  border-color: #60a5fa;
+}
+
+.sms-compact-trigger.tone-error {
+  background: #fff1f2;
+  border-color: #fda4af;
+  color: var(--danger-strong);
+}
+
+.sms-compact-trigger.tone-error:hover {
+  background: #ffe4e6;
+  border-color: #fb7185;
+}
+
+.sms-compact-trigger.is-open {
+  box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.18);
+}
+
+/* Floating Portal Popover for Full SMS / Phone Details & Manual Controls */
+.sms-task-popover {
+  margin: 0;
+  padding: 0;
+  width: min(304px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  border-radius: 12px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: 0 12px 32px -6px rgba(15, 23, 42, 0.18), 0 4px 10px -2px rgba(15, 23, 42, 0.08);
+  box-sizing: border-box;
+  overflow: hidden;
+  text-align: left;
+  z-index: 2147483000;
+}
+
+.sms-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 11px;
+  background: #f8fafc;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.07);
+}
+
+.sms-popover-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5.5px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.2;
+}
+
+.sms-popover-heading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+}
+
+.sms-popover-subtitle {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.sms-popover-title svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.sms-popover-close {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.sms-popover-close:hover {
+  background: rgba(15, 23, 42, 0.07);
+  color: var(--ink);
+}
+
+.sms-popover-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.sms-popover-body {
+  padding: 10px 11px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+/* Status Card inside Popover */
+.sms-task-popover .sms-status.sms-status-card {
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: var(--surface-subtle);
+  color: var(--ink-2);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+.sms-task-popover .sms-status-card.tone-running {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: var(--accent-strong);
+}
+
+.sms-task-popover .sms-status-card.tone-waiting {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: var(--amber-strong);
+}
+
+.sms-task-popover .sms-status-card.tone-error {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: var(--danger-strong);
+}
+
+.sms-task-popover .sms-status-card.tone-success {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: var(--emerald-strong);
+}
+
+.sms-status-header {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  line-height: 1.3;
+}
+
+.sms-status-lead {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sms-status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.sms-task-popover .sms-status-primary {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.sms-task-popover .sms-status-provider {
+  min-width: 0;
+  max-width: 150px;
+  flex-shrink: 1;
+  word-break: break-word;
+  padding: 1.5px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(15, 23, 42, 0.09);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.sms-status-secondary {
+  max-width: 100%;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.92;
+}
+
+.sms-status-secondary.is-error-detail {
+  opacity: 0.98;
+  font-weight: 500;
+  color: var(--danger-strong);
+}
+
+/* Target Phone Number Strip inside Popover */
+.phone-target.phone-target-pill {
+  width: 100%;
+  min-height: 30px;
+  margin: 0;
+  padding: 5.5px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: #f8fafc;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  box-sizing: border-box;
+}
+
+.phone-target-lead {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5.5px;
+}
+
+.phone-target-pill svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.phone-target-number {
+  min-width: 0;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  line-height: 1.3;
+}
+
+.phone-target-tag {
+  flex-shrink: 0;
+  padding: 1.5px 6px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Phone Verification Feedback / Error Strip inside Popover */
+.phone-error.phone-error-card {
+  width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid #fecdd3;
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 6px;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+.phone-error-card svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--danger);
+}
+
+.phone-error-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--danger-strong);
+}
+
+/* Interactive Input & Action Footer inside Popover */
+.inline-entry.is-phone-entry {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6.5px;
+  box-sizing: border-box;
+}
+
+.sms-input-shell {
+  width: 100%;
+  height: 34px;
+  padding: 2px 4px 2px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  box-sizing: border-box;
+  transition: border-color 130ms ease, box-shadow 130ms ease;
+}
+
+.sms-input-shell:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2.5px rgba(0, 113, 227, 0.14);
+}
+
+.inline-entry.is-phone-entry .compact-input {
+  flex: 1 1 calc(100% - 30px);
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  gap: 5px;
+}
+
+.inline-entry.is-phone-entry .compact-input svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.inline-entry.is-phone-entry .compact-input input {
+  width: 100%;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+}
+
+.inline-entry.is-phone-entry .compact-input input::placeholder {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--subtle);
+}
+
+.inline-entry.is-phone-entry .icon-button.submit {
+  width: 24px !important;
+  height: 24px !important;
+  border-radius: 5px !important;
+  border: 0 !important;
+  flex: 0 0 24px;
+  background: var(--accent) !important;
+  color: #ffffff !important;
+  box-shadow: 0 1px 2px rgba(0, 113, 227, 0.22);
+}
+
+.inline-entry.is-phone-entry .icon-button.submit:hover:not(:disabled) {
+  background: var(--accent-hover) !important;
+}
+
+.inline-entry.is-phone-entry .icon-button.submit:disabled {
+  opacity: 1 !important;
+  background: #f1f5f9 !important;
+  color: #94a3b8 !important;
+  box-shadow: none !important;
+}
+
+.sms-action-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  width: 100%;
+}
+
+.inline-entry.is-phone-entry .text-action {
+  width: 100%;
+  min-width: 0;
+  height: 25px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  background: #f8fafc;
+  color: var(--ink-2);
+  justify-content: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: all 120ms ease;
+}
+
+.inline-entry.is-phone-entry .text-action:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: rgba(15, 23, 42, 0.18);
+  color: var(--ink);
+}
+
+.inline-entry.is-phone-entry .text-action:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.inline-entry.is-phone-entry .text-action svg {
+  width: 11.5px;
+  height: 11.5px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.inline-entry.is-phone-entry .platform-number-button {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  justify-content: center;
+  gap: 4.5px;
+  border: 1px solid #93c5fd;
+  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 120ms ease;
+  box-sizing: border-box;
+}
+
+.inline-entry.is-phone-entry .platform-number-button:hover:not(:disabled) {
+  background: linear-gradient(180deg, #dbeafe 0%, #bfdbfe 100%);
+  border-color: #60a5fa;
+}
+
+.inline-entry.is-phone-entry .platform-number-button:disabled {
+  opacity: 0.85;
+  cursor: not-allowed;
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.1);
+  color: var(--muted);
+}
+
+.inline-entry.is-phone-entry .platform-number-button svg {
+  width: 12.5px;
+  height: 12.5px;
+  flex-shrink: 0;
+}
+
+.platform-number-button-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Bound IP, Time & Actions Cells */
@@ -3207,7 +3776,7 @@ button.status-toggle.on .status-toggle-thumb {
   background: var(--amber);
 }
 
-.fingerprint-cell-body.is-disabled .fingerprint-round { background: var(--surface-strong); }
+.fingerprint-cell-body.is-disabled:not(.has-retained-history) .fingerprint-round { background: var(--surface-strong); }
 .fingerprint-cell-body.is-disabled .fingerprint-check-button,
 .fingerprint-cell-body.is-disabled .compact-icon-btn { color: var(--muted); }
 
@@ -6941,6 +7510,49 @@ dialog.operation-detail-dialog {
   flex-shrink: 0;
   color: var(--accent, #0071e3);
   stroke-width: 2.2px;
+}
+
+/* Editable PlanType uses the same control/menu skin as the other selects. */
+.custom-select-container.is-editable input.custom-select-trigger {
+  width: 100%;
+  height: 32px;
+  padding: 0 32px 0 12px;
+  text-align: left;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: text;
+  user-select: text;
+  border-radius: 7px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.custom-select-container.is-editable input.custom-select-trigger.active,
+.custom-select-container.is-editable input.custom-select-trigger:focus {
+  border-color: var(--accent, #0071e3);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.14);
+}
+.custom-select-container.is-editable input.custom-select-trigger:disabled {
+  cursor: not-allowed;
+  background: #f1f5f9;
+}
+.custom-select-input-chevron {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.custom-select-input-chevron.rotated { transform: translateY(-50%) rotate(180deg); }
+.custom-select-dropdown.is-editable .custom-select-option-label {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.custom-select-option-description {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 /* Global Beautified Native Select */
