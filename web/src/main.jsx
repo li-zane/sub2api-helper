@@ -16,6 +16,8 @@ import { recentOperation } from "./recent-operation.mjs";
 import { formatUsageTotal } from "./usage-totals.mjs";
 import { hasUsageSnapshot, mergeUsageSnapshot } from "./usage-snapshot.mjs";
 import { TaskToasts } from "./task-toasts.jsx";
+import { notify } from "./toast-events.mjs";
+import { CopyableAccount, AccountText } from "./copyable-account.jsx";
 import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier, normalizeAccountCost, formatAccountCost, accountProfitCents, formatCnyCents, preserveNewerAccountCosts } from "./account-pricing.mjs";
 import { MONITOR_FIELDS, DEFAULT_MONITORING, normalizeMonitoring } from "./monitor-settings.mjs";
 import { normalizeTaskUploadActions, toggleTaskAutoAction } from "./task-auto-actions.mjs";
@@ -3318,6 +3320,7 @@ function App() {
                 planTypeMappingDraft.map((row, index) => (
                   <div className="plan-type-mapping-row" key={index}>
                     <div className="mapping-input-wrapper raw-wrapper">
+                      <span className="mapping-field-label">原始 PlanType</span>
                       <input
                         disabled={planTypeMappingSaving}
                         value={row.raw}
@@ -3331,6 +3334,7 @@ function App() {
                       <ArrowRight size={14} />
                     </span>
                     <div className="mapping-input-wrapper label-wrapper">
+                      <span className="mapping-field-label">显示标签</span>
                       <input
                         disabled={planTypeMappingSaving}
                         value={row.label}
@@ -3340,7 +3344,8 @@ function App() {
                       />
                     </div>
                     <div className="mapping-preview-cell">
-                      <span className="plan-tag" title="列表渲染预览">
+                      <span className="mapping-preview-label">预览:</span>
+                      <span className={`plan-tag ${!row.label.trim() && !row.raw.trim() ? "is-empty" : ""}`} title={`列表渲染预览：${row.label.trim() || row.raw.trim() || "未命名"}`}>
                         {row.label.trim() || row.raw.trim() || "未命名"}
                       </span>
                     </div>
@@ -3494,7 +3499,7 @@ function AccountCostDialog({ token, job, onClose, onSaved }) {
   }
   return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onClose(); }}>
     <ModalForm className="batch-dialog remark-dialog account-cost-dialog" role="dialog" aria-modal="true" aria-labelledby="account-cost-title" onSubmit={save} onClose={onClose} closeDisabled={saving}>
-      <div className="dialog-header"><div><h2 id="account-cost-title">账号成本</h2><span>{job.email}</span></div>
+      <div className="dialog-header"><div><h2 id="account-cost-title">账号成本</h2><span><CopyableAccount email={job.email} /></span></div>
         <button type="button" className="icon-button" onClick={onClose} disabled={saving} aria-label="关闭账号成本"><X size={18} /></button></div>
       <label className="batch-label" htmlFor="account-cost-cny">账号成本（人民币）</label>
       <input id="account-cost-cny" aria-label="账号成本（人民币）" type="number" min="0" max="1000000000" step="0.01" required autoFocus
@@ -3536,7 +3541,7 @@ function RemarkDialog({ token, job, onClose, onSaved }) {
                 与号池备注双向同步：保存会更新同邮箱账号的完整备注，清空也会同步。号池修改会在下一次同步时回显，编辑中的内容会保留。
               </HelpTip>
             </div>
-            <span>{job.email}</span>
+            <span><CopyableAccount email={job.email} /></span>
           </div>
           <button type="button" className="icon-button" onClick={onClose} disabled={saving} aria-label="关闭备注"><X size={18} /></button>
         </div>
@@ -3559,13 +3564,13 @@ function OperationDetailDialog({ detail, onClose }) {
       <div className="dialog-header">
         <div>
           <h2 id="operation-detail-title">最近操作反馈</h2>
-          {detail.email && <span>{detail.email}</span>}
+          {detail.email && <span><CopyableAccount email={detail.email} /></span>}
         </div>
         <button type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭详情" data-dialog-initial-focus>
           <X size={18} />
         </button>
       </div>
-      <pre className="operation-detail-content" tabIndex="0" aria-label="操作反馈代码详情">{displayProtocolLog(detail.operation ? `操作：${detail.operation.label}\n时间：${formatDateTime(detail.operation.at)}\n\n${detail.operation.text}` : detail.text)}</pre>
+      <pre className="operation-detail-content" tabIndex="0" aria-label="操作反馈代码详情"><AccountText text={displayProtocolLog(detail.operation ? `操作：${detail.operation.label}\n时间：${formatDateTime(detail.operation.at)}\n\n${detail.operation.text}` : detail.text)} /></pre>
       <div className="dialog-actions">
         <span className="dialog-actions-spacer" />
         <button type="button" className="cancel-button" onClick={onClose}>关闭</button>
@@ -3852,6 +3857,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
   async function copyTotpSecret() {
     try {
       await navigator.clipboard.writeText(job.totpSetupSecret || "");
+      notify("2FA 密钥已复制");
       onError("");
     } catch {
       onError("无法自动复制，请手动选择 2FA 密钥");
@@ -3862,6 +3868,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
     try {
       await copyText(job.email || "");
       setAccountNameCopied(true);
+      notify("账号已复制");
       window.setTimeout(() => setAccountNameCopied(false), 1_600);
     } catch {
       onError("无法自动复制账号名，请手动选择账号名");
@@ -4251,6 +4258,10 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
   );
 }
 
+const TASK_SETTINGS_MONITOR_FIELDS = Object.freeze(
+  MONITOR_FIELDS.filter(field => field.key !== "fingerprintScanIntervalSeconds")
+);
+
 function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSaved }) {
   const dialogRef = useRef(null);
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
@@ -4258,8 +4269,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [smsTimeout, setSmsTimeout] = useState(() => String(settings.smsTimeoutMinutes ?? DEFAULT_SMS_TIMEOUT_MINUTES));
   const [displayTimeZone, setTimeZone] = useState(settings.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE);
   const [priceMultiplier, setPriceMultiplier] = useState(String(settings.poolPriceMultiplier ?? DEFAULT_POOL_PRICE_MULTIPLIER));
-  const [monitoring, setMonitoring] = useState(() => Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
-  const [fingerprintDefaults, setFingerprintDefaults] = useState(() => ({ intervalMinutes: String(settings.modelFingerprint?.intervalMinutes ?? 360), maxConcurrentAccounts: String(settings.modelFingerprint?.maxConcurrentAccounts ?? 3), first: settings.modelFingerprint?.testSequence?.first || "fingerprint", fingerprint: String(settings.modelFingerprint?.testSequence?.fingerprint ?? 1), candy: String(settings.modelFingerprint?.testSequence?.candy ?? 0) }));
+  const [monitoring, setMonitoring] = useState(() => Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
   const [webMonitor, setWebMonitor] = useState(() => ({ enabled: settings.webSessionMonitor?.enabled === true, autoRelogin: settings.webSessionMonitor?.autoRelogin !== false, intervalMinutes: String(settings.webSessionMonitor?.intervalMinutes || 15), retryMinutes: String(settings.webSessionMonitor?.retryMinutes || 60) }));
@@ -4339,37 +4349,19 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     let monitoringValues;
     try {
       if (Object.values(monitoring).some(value => !String(value).trim())) throw new Error("请填写全部自动监控参数");
-      monitoringValues = normalizeMonitoring(Object.fromEntries(Object.entries(monitoring).map(([key, value]) => [key, Number(value)])));
+      const normalized = normalizeMonitoring(
+        Object.fromEntries(Object.entries(monitoring).map(([key, value]) => [key, Number(value)])),
+        settings.monitoring || DEFAULT_MONITORING
+      );
+      const { fingerprintScanIntervalSeconds: _excluded, ...restMonitoring } = normalized;
+      monitoringValues = restMonitoring;
     } catch (error) { setError(error.message); return; }
-    const intervalMinutes = Number(fingerprintDefaults.intervalMinutes);
-    const maxConcurrentAccounts = Number(fingerprintDefaults.maxConcurrentAccounts);
-    const fpCount = Number(fingerprintDefaults.fingerprint);
-    const cdCount = Number(fingerprintDefaults.candy);
-    if (!Number.isInteger(intervalMinutes) || intervalMinutes < 5 || intervalMinutes > 43200
-      || !Number.isInteger(maxConcurrentAccounts) || maxConcurrentAccounts < 1 || maxConcurrentAccounts > 16) {
-      setError("降智检测间隔需为 5–43200 分钟，并发需为 1–16 个账号"); return;
-    }
-    if (!String(fingerprintDefaults.fingerprint).trim() || !String(fingerprintDefaults.candy).trim() || !["fingerprint", "candy"].includes(fingerprintDefaults.first)
-      || !Number.isInteger(fpCount) || fpCount < 0 || fpCount > 100
-      || !Number.isInteger(cdCount) || cdCount < 0 || cdCount > 100
-      || (fpCount === 0 && cdCount === 0)) {
-      setError("检测轮换须选择首项；指纹、糖果次数须为 0–100 的整数，且不能同时为 0"); return;
-    }
-    const modelFingerprint = {
-      intervalMinutes,
-      maxConcurrentAccounts,
-      testSequence: {
-        first: fingerprintDefaults.first,
-        fingerprint: fpCount,
-        candy: cdCount,
-      },
-    };
     setSaving(true);
     setError("");
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues, modelFingerprint }),
+        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4526,13 +4518,13 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           </div>
           <div className="task-auto-empty">默认关闭；默认每 15 分钟检测，60 分钟内最多自动重登一次。需要验证码时保留在现有任务队列中等待处理。</div>
         </section>
-        {Array.from(new Set(MONITOR_FIELDS.map(field => field.group))).map(group => (
+        {Array.from(new Set(TASK_SETTINGS_MONITOR_FIELDS.map(field => field.group))).map(group => (
           <section className="task-auto-settings" key={group} aria-label={group}>
             <div className="section-title-row">
               <h3>{group}</h3>
             </div>
             <div className="task-two-fields">
-              {MONITOR_FIELDS.filter(field => field.group === group).map(field => (
+              {TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === group).map(field => (
                 <label key={field.key} className="settings-field" htmlFor={`monitor-${field.key}`}>
                   <span>{field.label}（{field.unit}）</span>
                   <input id={`monitor-${field.key}`} type="number" min={field.min} max={field.max} step="1" required
@@ -4541,67 +4533,12 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
                 </label>
               ))}
             </div>
-            <div className="task-auto-empty">{group === "巡检调度" ? "扫描到期任务的频率，不是每个账号的检测间隔。Web 检测共用上方任务并发；降智使用独立账号并发。"
+            <div className="task-auto-empty">{group === "巡检调度" ? "扫描到期任务的频率，不是每个账号的检测间隔。Web 检测共用上方任务并发。"
               : group === "过载监控" ? "刷新频率不改变折线图每格 15 分钟、总计 90 分钟的统计口径。冷却到期仍及时唤醒恢复。"
               : group === "号池异常恢复" ? "默认 300 秒（5 分钟）。重新授权仍进入共享登录队列；重试间隔为 0 时不设失败冷却。"
               : "仅请求号池，默认网络并发 100；由服务端定时同步，关闭页面后继续运行，不会主动刷新上游额度。"}</div>
           </section>
         ))}
-        <section className="task-auto-settings" aria-label="降智检测默认调度">
-          <div className="section-title-row">
-            <h3>降智检测默认调度</h3>
-          </div>
-          <div className="task-two-fields">
-            <label className="settings-field" htmlFor="fingerprint-default-interval"><span>降智检测间隔（分钟）</span><input id="fingerprint-default-interval" type="number" min="5" max="43200" step="1" required value={fingerprintDefaults.intervalMinutes} disabled={saving} onChange={e => setFingerprintDefaults(v => ({ ...v, intervalMinutes: e.target.value }))} /></label>
-            <label className="settings-field" htmlFor="fingerprint-default-concurrency"><span>降智检测并发（账号）</span><input id="fingerprint-default-concurrency" type="number" min="1" max="16" step="1" required value={fingerprintDefaults.maxConcurrentAccounts} disabled={saving} onChange={e => setFingerprintDefaults(v => ({ ...v, maxConcurrentAccounts: e.target.value }))} /></label>
-          </div>
-          <div className="fingerprint-three-fields">
-            <label className="settings-field" htmlFor="fingerprint-default-first">
-              <span>检测首项</span>
-              <CustomSelect
-                disabled={saving}
-                id="fingerprint-default-first"
-                aria-label="检测首项"
-                value={fingerprintDefaults.first}
-                onChange={e => setFingerprintDefaults(v => ({ ...v, first: e.target.value }))}
-              >
-                <option value="fingerprint">指纹检测</option>
-                <option value="candy">糖果检测</option>
-              </CustomSelect>
-            </label>
-            <label className="settings-field" htmlFor="fingerprint-default-fingerprint-count">
-              <span>指纹检测次数</span>
-              <input
-                id="fingerprint-default-fingerprint-count"
-                aria-label="指纹检测次数"
-                type="number"
-                min="0"
-                max="100"
-                step="1"
-                required
-                value={fingerprintDefaults.fingerprint}
-                disabled={saving}
-                onChange={e => setFingerprintDefaults(v => ({ ...v, fingerprint: e.target.value }))}
-              />
-            </label>
-            <label className="settings-field" htmlFor="fingerprint-default-candy-count">
-              <span>糖果检测次数</span>
-              <input
-                id="fingerprint-default-candy-count"
-                aria-label="糖果检测次数"
-                type="number"
-                min="0"
-                max="100"
-                step="1"
-                required
-                value={fingerprintDefaults.candy}
-                disabled={saving}
-                onChange={e => setFingerprintDefaults(v => ({ ...v, candy: e.target.value }))}
-              />
-            </label>
-          </div>
-          <div className="task-auto-empty">复用全局降智检测设置，不更改检测模型、判定阈值、分组或账号独立覆盖规则。</div>
-        </section>
         <section className="task-auto-settings overload-cooldown-settings" aria-labelledby="overload-auto-cooldown-title">
           <div className="section-title-row">
             <h3 id="overload-auto-cooldown-title">过载自动冷却</h3>
@@ -4665,7 +4602,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
-          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES)); setTimeZone(DEFAULT_DISPLAY_TIME_ZONE); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setFingerprintDefaults({ intervalMinutes: "360", maxConcurrentAccounts: "3", first: "fingerprint", fingerprint: "1", candy: "0" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
+          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES)); setTimeZone(DEFAULT_DISPLAY_TIME_ZONE); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>
@@ -4709,7 +4646,6 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
   const [passwordReplacing, setPasswordReplacing] = useState(false);
   const mutationRequestRef = useRef(false);
   const [dialogError, setDialogError] = useState("");
-  const [notice, setNotice] = useState("");
   const credentialBusy = saving || replacing || passwordReplacing;
   const rotationView = totpRotationView(job, replacing);
 
@@ -4717,7 +4653,6 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     let stopped = false;
     setLoading(true);
     setDialogError("");
-    setNotice("");
     apiFetch(token, `/api/jobs/${job.id}/credentials`)
       .then((data) => {
         if (stopped) return;
@@ -4808,13 +4743,12 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
       body.totpSecret = normalized;
     }
     if (!Object.keys(body).length) {
-      setNotice("没有需要保存的修改");
+      notify("没有需要保存的修改");
       return;
     }
     mutationRequestRef.current = true;
     setSaving(true);
     setDialogError("");
-    setNotice("");
     try {
       const data = await apiFetch(token, `/api/jobs/${job.id}/credentials`, {
         method: "PUT",
@@ -4827,7 +4761,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
       setSub2apiJson(next.sub2apiJson || sub2apiJson);
       setPasswordDirty(false);
       setTotpDirty(false);
-      setNotice(next.persisted === false
+      notify(next.persisted === false
         ? "已更新当前进程凭据，但系统未提供持久凭据存储"
         : "凭据已更新并保存");
       onError("");
@@ -4848,7 +4782,6 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     mutationRequestRef.current = true;
     setReplacing(true);
     setDialogError("");
-    setNotice("");
     try {
       const body = {};
 
@@ -4857,7 +4790,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
         body: JSON.stringify(body),
       });
       if (data.job) onJobUpdate?.(data.job);
-      setNotice("2FA 轮换已排队，请等待任务完成后重新读取凭据");
+      notify("2FA 轮换已排队，请等待任务完成后重新读取凭据");
       onError("");
     } catch (error) {
       setDialogError(error.message);
@@ -4873,11 +4806,10 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     mutationRequestRef.current = true;
     setPasswordReplacing(true);
     setDialogError("");
-    setNotice("");
     try {
       const data = await apiFetch(token, `/api/jobs/${job.id}/replace-password`, { method: "POST", body: JSON.stringify({}) });
       if (data.job) onJobUpdate?.(data.job);
-      setNotice("密码轮换请求已提交，请等待任务完成后重新读取凭据");
+      notify("密码轮换请求已提交，请等待任务完成后重新读取凭据");
       onError("");
     } catch (error) {
       setDialogError(error.message);
@@ -4893,7 +4825,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     const name = kind === "password" ? "密码" : "2FA 密钥";
     try {
       await navigator.clipboard.writeText(value);
-      setNotice(`${name}已复制`);
+      notify(`${name}已复制`);
       setDialogError("");
       onError("");
     } catch {
@@ -4905,7 +4837,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     if (!sub2apiJson) return;
     try {
       await navigator.clipboard.writeText(sub2apiJson);
-      setNotice("Sub2API JSON 已复制");
+      notify("Sub2API JSON 已复制");
       onError("");
     } catch {
       setDialogError("无法自动复制 Sub2API JSON，请在滚动区域中手动选择");
@@ -4916,7 +4848,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     if (!totpCode) return;
     try {
       await navigator.clipboard.writeText(totpCode);
-      setNotice("动态验证码已复制");
+      notify("动态验证码已复制");
       onError("");
     } catch {
       setDialogError("无法自动复制动态验证码，请手动选择验证码");
@@ -4931,7 +4863,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
         <div className="dialog-header">
           <div>
             <h2 id="credential-dialog-title">账号凭据</h2>
-            <span>{job.email}</span>
+            <span><CopyableAccount email={job.email} /></span>
           </div>
           <div className="dialog-header-actions">
             <button
@@ -5036,7 +4968,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
               </div>
               {totpCode ? (
                 <div className="totp-code-value" aria-live="polite">
-                  <code>{totpCode}</code>
+                  <button type="button" className="copyable-value" onClick={copyTotpCode} title="点击复制动态验证码"><code>{totpCode}</code></button>
                   <span className="totp-code-countdown">{totpSeconds} 秒后更新</span>
                 </div>
               ) : totpCodeError ? (
@@ -5059,7 +4991,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
                 </button>
               </div>
               {sub2apiJson ? (
-                <pre className="credential-json-viewer" tabIndex="0">{sub2apiJson}</pre>
+                <pre className="credential-json-viewer" tabIndex="0"><AccountText text={sub2apiJson} /></pre>
               ) : (
                 <div className="credential-json-empty">当前任务还没有可用的 Sub2API 导入 JSON</div>
               )}
@@ -5073,8 +5005,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
             {rotationView.state === "incomplete" && (
               <div className="credential-warning credential-warning-block">上次 2FA 轮换未完成；有效 Web 会话仍可用于授权。清空并保存仅删除本地密钥，历史保留，远端 MFA 状态不变。</div>
             )}
-            {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{dialogError}</div>}
-            {notice && <div className="credential-notice" role="status"><Check size={15} />{notice}</div>}
+            {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} /><AccountText text={dialogError} /></div>}
             <div className="dialog-actions credential-dialog-actions" style={{ flexWrap: "wrap" }}>
               {!isBlockedAccount(job) && totpReplaceAvailable && job.canReplaceTotp && (
                 <button type="button" className="danger-button" onClick={replaceTotp} disabled={credentialBusy || Boolean(readOnlyReason) || passwordDirty || totpDirty} title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : undefined)}>
@@ -5125,7 +5056,6 @@ function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
   const [refreshing, setRefreshing] = useState(false);
   const [action, setAction] = useState("");
   const [dialogError, setDialogError] = useState("");
-  const [notice, setNotice] = useState("");
 
   async function loadSessions({ initial = false } = {}) {
     if (blocked) return;
@@ -5148,7 +5078,6 @@ function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
   useEffect(() => {
     let stopped = false;
     setDevices([]);
-    setNotice("");
     if (blocked) { setLoading(false); setDialogError(""); return; }
     setLoading(true);
     setDialogError("");
@@ -5177,7 +5106,6 @@ function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
     if (!window.confirm(`确定登出 ${label} 吗？`)) return;
     setAction(device.id);
     setDialogError("");
-    setNotice("");
     try {
       await apiFetch(token, `/api/jobs/${job.id}/sessions/logout`, {
         method: "POST",
@@ -5186,7 +5114,7 @@ function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
           : { deviceIdHash: device.deviceIdHash }),
       });
       setDevices((current) => current.filter((item) => item.id !== device.id));
-      setNotice("设备已登出");
+      notify("设备已登出");
       onError("");
     } catch (error) {
       setDialogError(error.message);
@@ -5200,11 +5128,10 @@ function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
     if (!window.confirm("确定登出该账号的所有设备和会话吗？当前会话也会失效，需要重新登录。")) return;
     setAction("all");
     setDialogError("");
-    setNotice("");
     try {
       await apiFetch(token, `/api/jobs/${job.id}/sessions/logout-all`, { method: "POST" });
       setDevices([]);
-      setNotice("已提交全部设备登出请求，服务端可能需要几分钟完成传播");
+      notify("已提交全部设备登出请求，服务端可能需要几分钟完成传播");
       onError("");
     } catch (error) {
       setDialogError(error.message);
@@ -5232,7 +5159,7 @@ function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
             )}
           </div>
           <div className="dialog-subtitle-row">
-            <span className="dialog-account-email" title={job.email}>{job.email}</span>
+            <span className="dialog-account-email"><CopyableAccount email={job.email} /></span>
           </div>
         </div>
         <div className="dialog-header-actions">
@@ -5356,7 +5283,7 @@ function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
             <CircleAlert size={18} />
             <div className="dialog-state-text">
               <strong>读取设备与会话失败</strong>
-              <span>{dialogError}</span>
+              <span><AccountText text={dialogError} /></span>
               <small>请求未完成，并不代表账号未登录或会话已失效；可点击重试重新读取。</small>
             </div>
             <button
@@ -5381,13 +5308,7 @@ function SessionDialog({ token, job, readOnlyReason = "", onClose, onError }) {
         {!blocked && !loading && devices.length > 0 && dialogError && (
           <div className="dialog-error" role="alert">
             <CircleAlert size={15} />
-            <span>{dialogError}</span>
-          </div>
-        )}
-        {!blocked && notice && (
-          <div className="credential-notice" role="status">
-            <Check size={15} />
-            <span>{notice}</span>
+            <span><AccountText text={dialogError} /></span>
           </div>
         )}
       </div>
@@ -5448,7 +5369,6 @@ function WorkspaceDialog({ token, job, readOnlyReason = "", planTypeMapping, onC
   const [refreshing, setRefreshing] = useState(false);
   const [action, setAction] = useState("");
   const [dialogError, setDialogError] = useState("");
-  const [notice, setNotice] = useState("");
 
   async function loadWorkspaces({ initial = false } = {}) {
     if (blocked) return;
@@ -5473,7 +5393,6 @@ function WorkspaceDialog({ token, job, readOnlyReason = "", planTypeMapping, onC
     let stopped = false;
     setWorkspaces([]);
     setCurrentWorkspaceId(null);
-    setNotice("");
     setDialogError("");
     if (blocked) { setLoading(false); return; }
     setLoading(true);
@@ -5504,7 +5423,6 @@ function WorkspaceDialog({ token, job, readOnlyReason = "", planTypeMapping, onC
     if (isWorkspaceEntryDisabled(workspace)) return;
     setAction(workspace.id);
     setDialogError("");
-    setNotice("");
     try {
       const data = await apiFetch(token, `/api/jobs/${job.id}/workspaces/switch`, {
         method: "POST",
@@ -5515,15 +5433,15 @@ function WorkspaceDialog({ token, job, readOnlyReason = "", planTypeMapping, onC
       setCurrentWorkspaceId(workspace.id);
       setWorkspaces((current) => current.map((item) => ({ ...item, current: item.id === workspace.id })));
       if (data.sub2api?.error) {
-        setNotice(`已切换到“${workspace.name || workspace.id}”，PlanType 已更新；号池同步失败：${data.sub2api.error}`);
+        notify(`已切换到“${workspace.name || workspace.id}”，PlanType 已更新；号池同步失败：${data.sub2api.error}`);
       } else if (data.sub2api?.statusRefreshError) {
-        setNotice(`已切换到“${workspace.name || workspace.id}”，号池中 ${data.sub2api.updated || 0} 条凭据已更新，但状态刷新失败：${data.sub2api.statusRefreshError}`);
+        notify(`已切换到“${workspace.name || workspace.id}”，号池中 ${data.sub2api.updated || 0} 条凭据已更新，但状态刷新失败：${data.sub2api.statusRefreshError}`);
       } else if (data.sub2api?.updated) {
-        setNotice(`已切换到“${workspace.name || workspace.id}”，PlanType 已更新，号池中 ${data.sub2api.updated} 条凭据已原地同步。`);
+        notify(`已切换到“${workspace.name || workspace.id}”，PlanType 已更新，号池中 ${data.sub2api.updated} 条凭据已原地同步。`);
       } else if (data.sub2api?.configured) {
-        setNotice(`已切换到“${workspace.name || workspace.id}”，PlanType 已更新；号池中没有找到同邮箱账号。`);
+        notify(`已切换到“${workspace.name || workspace.id}”，PlanType 已更新；号池中没有找到同邮箱账号。`);
       } else {
-        setNotice(`已切换到“${workspace.name || workspace.id}”，PlanType 已同步更新。`);
+        notify(`已切换到“${workspace.name || workspace.id}”，PlanType 已同步更新。`);
       }
       onError("");
     } catch (error) {
@@ -5549,7 +5467,7 @@ function WorkspaceDialog({ token, job, readOnlyReason = "", planTypeMapping, onC
             )}
           </div>
           <div className="dialog-subtitle-row">
-            <span className="dialog-account-email" title={job.email}>{job.email}</span>
+            <span className="dialog-account-email"><CopyableAccount email={job.email} /></span>
           </div>
         </div>
         <div className="dialog-header-actions">
@@ -5682,7 +5600,7 @@ function WorkspaceDialog({ token, job, readOnlyReason = "", planTypeMapping, onC
             <CircleAlert size={18} />
             <div className="dialog-state-text">
               <strong>读取工作空间失败</strong>
-              <span>{dialogError}</span>
+              <span><AccountText text={dialogError} /></span>
               <small>未能获取该账号的工作空间列表；可点击重试重新读取。</small>
             </div>
             <button
@@ -5707,13 +5625,7 @@ function WorkspaceDialog({ token, job, readOnlyReason = "", planTypeMapping, onC
         {!blocked && !loading && workspaces.length > 0 && dialogError && (
           <div className="dialog-error" role="alert">
             <CircleAlert size={15} />
-            <span>{dialogError}</span>
-          </div>
-        )}
-        {!blocked && notice && (
-          <div className="credential-notice" role="status">
-            <Check size={15} />
-            <span>{notice}</span>
+            <span><AccountText text={dialogError} /></span>
           </div>
         )}
       </div>
@@ -6310,7 +6222,7 @@ function SmsTaskPopover({
         <div className="sms-popover-header">
           <div className="sms-popover-heading">
             <span className="sms-popover-title">手机验证与接码</span>
-            <span className="sms-popover-subtitle" title={job.email}>{job.email}</span>
+            <span className="sms-popover-subtitle"><CopyableAccount email={job.email} /></span>
           </div>
           <button
             ref={closeBtnRef}

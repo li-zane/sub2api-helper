@@ -6,6 +6,7 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
   const triggerRef = useRef(null);
   const popoverRef = useRef(null);
   const closeTimerRef = useRef(null);
+  const suppressHoverRef = useRef(false);
   const tooltipId = useId();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -24,6 +25,7 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
   }
 
   function handleMouseEnter() {
+    if (suppressHoverRef.current) return;
     clearCloseTimer();
     setDismissed(false);
     setHovered(true);
@@ -37,6 +39,7 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
   }
 
   function handleClick(event) {
+    suppressHoverRef.current = false;
     event.preventDefault();
     event.stopPropagation();
     clearCloseTimer();
@@ -101,6 +104,9 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
     }
     function handleKeyDown(event) {
       if (event.key === "Escape") {
+        // Removing the bubble can expose its trigger beneath a stationary
+        // pointer. That synthetic mouseenter must not undo keyboard dismissal.
+        suppressHoverRef.current = true;
         event.preventDefault();
         event.stopPropagation();
         setPinned(false);
@@ -117,6 +123,11 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
   }, [open]);
 
   useEffect(() => () => clearCloseTimer(), []);
+  useEffect(() => {
+    const allowHover = () => { suppressHoverRef.current = false; };
+    document.addEventListener("pointermove", allowHover, true);
+    return () => document.removeEventListener("pointermove", allowHover, true);
+  }, []);
 
   if (!body) return null;
 
@@ -131,7 +142,7 @@ export function HelpTip({ title, children, content, label = "查看说明", clas
         aria-label={label}
         aria-expanded={open}
         aria-describedby={open ? tooltipId : undefined}
-        onFocus={() => { setFocused(true); setDismissed(false); }}
+        onFocus={() => { suppressHoverRef.current = false; setFocused(true); setDismissed(false); }}
         onBlur={handleBlur}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}

@@ -5,6 +5,12 @@ function TooltipLayer({ target, text, placement = "top", className = "", id }) {
   const ref = useRef(null);
   const [coords, setCoords] = useState(null);
   useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element?.isConnected || typeof element.showPopover !== "function") return;
+    element.showPopover();
+    return () => { if (element.matches(":popover-open")) element.hidePopover(); };
+  }, [target]);
+  useLayoutEffect(() => {
     if (!target?.isConnected || !ref.current) return;
     const rect = target.getBoundingClientRect(), tip = ref.current.getBoundingClientRect(), gap = 6, margin = 8;
     let side = placement === "bottom" ? "bottom" : "top";
@@ -15,11 +21,12 @@ function TooltipLayer({ target, text, placement = "top", className = "", id }) {
     setCoords(previous => previous?.top === top && previous?.left === left && previous?.side === side ? previous : { top, left, side });
   }, [target, text, placement]);
   if (!target?.isConnected || !text) return null;
-  // A body portal is below a modal dialog regardless of z-index.
-  const host = target.closest("dialog[open]") || document.body;
+  // Menus and modal dialogs both occupy the browser's top layer. The tooltip
+  // needs its own top-layer slot within the target's active surface.
+  const host = target.closest('[popover], dialog[open]') || document.body;
   const side = coords?.side || placement;
-  return createPortal(<div ref={ref} id={id} role="tooltip" className={`apple-floating-tooltip ${side} ${className}`.trim()}
-    style={{ position: "fixed", top: `${coords?.top || 0}px`, left: `${coords?.left || 0}px`, visibility: coords ? undefined : "hidden",
+  return createPortal(<div ref={ref} id={id} role="tooltip" popover="manual" className={`apple-floating-tooltip ${side} ${className}`.trim()}
+    style={{ position: "fixed", margin: 0, right: "auto", bottom: "auto", top: `${coords?.top || 0}px`, left: `${coords?.left || 0}px`, visibility: coords ? undefined : "hidden",
       transform: side === "top" ? "translate(-50%, -100%)" : "translate(-50%, 0)" }}>{text}</div>, host);
 }
 

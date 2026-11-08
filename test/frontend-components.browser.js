@@ -48,6 +48,20 @@ async(page)=>{
     release();await modal.waitFor({state:'hidden'});
   }finally{release();await page.unroute('**/api/model-fingerprint/settings');}
  });
+ await test('bulk-menu-tooltip-above-menu-and-filter-with-disabled-items',async()=>{
+  for(const width of [1440,375]){
+   await page.setViewportSize({width,height:width===1440?1000:812});
+   await page.locator('.bulk-more-trigger').click();const menu=page.locator('.bulk-dropdown-menu');await menu.waitFor();
+   const button=menu.getByRole('menuitem',{name:'登出所有设备',exact:true});check(await button.isDisabled(),'expected disabled menu fixture');
+   await button.hover();const tip=page.locator('.apple-floating-tooltip').filter({hasText:'登出所选账号在 OpenAI'});await tip.waitFor();await page.waitForTimeout(150);
+   check(await tip.evaluate(el=>el.matches(':popover-open')),'tooltip below browser top layer');
+   check(await tip.evaluate(el=>!!el.closest('.bulk-dropdown-menu:popover-open')),'tooltip detached from menu surface');
+   const b=await tip.boundingBox();check(b.x>=0&&b.x+b.width<=width+1&&b.y>=0,'menu tooltip outside viewport');
+   check(await tip.evaluate(el=>{el.style.pointerEvents='auto';const r=el.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);el.style.pointerEvents='';return hit&&el.contains(hit);}), 'tooltip painted below another layer');
+   await page.screenshot({path:evidence+'/bulk-menu-tooltip-'+width+'.png'});
+   await page.mouse.move(0,0);await tip.waitFor({state:'hidden'});await page.keyboard.press('Escape');await menu.waitFor({state:'hidden'});
+  }
+ });
  await test('no-component-runtime-errors',async()=>check(!errors.length,errors.join(';')));
  return{passed:results.filter(x=>x.passed).length,total:results.length,results};
 }

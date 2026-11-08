@@ -1,3 +1,5 @@
+import { notify } from "./toast-events.mjs";
+import { CopyableAccount, AccountText } from "./copyable-account.jsx";
 import { splitSmsPhoneHighlights } from "./protocol-sms-log.mjs";
 import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronRight, Copy, RefreshCw, X } from "lucide-react";
@@ -58,8 +60,8 @@ export function AccountLogDialog({ request, job, onClose, statusBadge }) {
   }
   async function refresh() { setRefreshing(true); try { await load(); } finally { if (alive.current) setRefreshing(false); } }
   async function copy() {
-    try { await navigator.clipboard.writeText(view === "protocol" ? displayProtocolLog(data.content) : data.content || ""); setCopied(true); }
-    catch { setError("复制失败，请选择内容后复制"); }
+    try { await navigator.clipboard.writeText(view === "protocol" ? displayProtocolLog(data.content) : data.content || ""); setCopied(true); notify("日志内容已复制"); }
+    catch { notify("复制失败，请选择内容后复制", { tone: "error" }); }
   }
   const current = data.entries.find(entry => entry.id === selected);
   function selectEntry(entry) {
@@ -72,7 +74,7 @@ export function AccountLogDialog({ request, job, onClose, statusBadge }) {
   </button>;
   return <AccessibleDialog className="log-dialog account-log-dialog" labelledBy="account-log-title" onClose={onClose}>
     <div className="dialog-header">
-      <div><div className="section-title-row"><h2 id="account-log-title">账号日志与凭据</h2>{statusBadge}</div><span>{job.email}</span></div>
+      <div><div className="section-title-row"><h2 id="account-log-title">账号日志与凭据</h2>{statusBadge}</div><span><CopyableAccount email={job.email} /></span></div>
       <div className="dialog-header-actions">
         <button type="button" className="secondary-button compact-button" onClick={copy} disabled={!data.content} title="复制当前内容">
           {copied ? <Check size={14} /> : <Copy size={14} />}{copied ? "已复制" : "复制内容"}
@@ -112,7 +114,7 @@ export function AccountLogDialog({ request, job, onClose, statusBadge }) {
         <section className="account-log-content" aria-label="记录详情">
           {error ? <div className="dialog-error" role="alert">{error}</div> : selected ? <>
             <div className="account-log-content-heading">{current ? title(current, view) : "正在读取记录…"}</div>
-            <pre className="log-dialog-viewer" tabIndex="0">{data.content ? view === "protocol" ? protocolParts.map((part, index) => part.phone ? <span key={index} className="protocol-log-phone">{part.text}</span> : part.text) : data.content : (data.selectedId === selected ? "该记录暂无输出" : "正在读取内容…")}</pre>
+            <pre className="log-dialog-viewer" tabIndex="0">{data.content ? view === "protocol" ? protocolParts.map((part, index) => part.phone ? <span key={index} className="protocol-log-phone">{part.text}</span> : <AccountText key={index} text={part.text} />) : <AccountText text={data.content} /> : (data.selectedId === selected ? "该记录暂无输出" : "正在读取内容…")}</pre>
           </> : <div className="account-log-placeholder">选择记录，查看详细内容</div>}
         </section>
       </div>

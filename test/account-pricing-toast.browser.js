@@ -8,7 +8,7 @@ async page => {
     sub2apiUsage:{source:'sub2api',cacheKey:'pricing-'+j.id,allowed:true,primary:{usedPercent:10},totals:{accountCost:100,userCost,tokens:272000000,fetchedAt:'2026-11-07T01:00:00Z'}}}));data.selection=data.jobs;await route.fulfill({json:data})});
   await page.setViewportSize({width:1480,height:1000});await page.reload();
   const row=page.locator('tr.job-row').first();await row.locator('.usage-profit-pill').waitFor();
-  const closeToasts=async()=>{while(await page.locator('.toast-dismiss').count())await page.locator('.toast-dismiss').first().click()};
+  const closeToasts=async()=>{while(await page.locator('.task-toast:not(.is-leaving)').count()){const toast=page.locator('.task-toast:not(.is-leaving)').first();await toast.locator('.toast-dismiss').click();await toast.waitFor({state:'hidden'});}};
   await run('default-cost-beside-remark',async()=>{
     const cost=row.locator('.account-cost-button'),remark=row.locator('.account-remark-button');
     check(await cost.innerText()==='￥0','legacy cost is not zero');const a=await remark.boundingBox(),b=await cost.boundingBox();check(b.x>=a.x+a.width-1&&Math.abs(a.y-b.y)<2,'cost not beside remark');
@@ -45,24 +45,25 @@ async page => {
     userCost=null;await page.reload();await row.locator('.usage-profit-pill').waitFor();check((await row.locator('.usage-profit-pill').innerText()).includes('—'),'missing U became a fake loss');
     userCost=0;await page.reload();await row.locator('.usage-profit-pill').waitFor();check((await row.locator('.usage-profit-pill').innerText()).includes('-￥20.00'),'known zero U did not subtract cost');userCost=2;
   });
-  await run('toast-pauses-on-focus-and-auto-dismisses',async()=>{
+  await run('toast-top-center-expires-after-three-seconds-even-on-focus',async()=>{
     await saveCost('12.34');const toast=page.locator('.task-toast.success');await toast.waitFor();
-    await toast.getByRole('button',{name:'关闭任务通知',exact:true}).focus();await page.waitForTimeout(6300);check(await toast.isVisible(),'toast expired while keyboard focused');
-    await page.getByRole('button',{name:'任务设置',exact:true}).focus();await page.mouse.move(0,0);await toast.waitFor({state:'hidden',timeout:7500});
+    const bounds=await toast.boundingBox();check(Math.abs(bounds.x+bounds.width/2-740)<2&&bounds.y<40,'toast not top-centered');
+    await toast.getByRole('button',{name:'关闭任务通知',exact:true}).focus();await page.waitForTimeout(2400);check(await toast.isVisible(),'toast expired before three seconds');
+    await toast.waitFor({state:'hidden',timeout:1200});
   });
   await run('task-errors-use-dismissible-toast',async()=>{
     await page.route('**/api/jobs/delete-batch',route=>route.fulfill({status:500,json:{error:'fixture-delete-failed'}}));await page.evaluate(()=>{window.confirm=()=>true});
     await row.getByRole('button',{name:'删除账号',exact:true}).click();const toast=page.locator('.task-toast.error');await toast.getByText('fixture-delete-failed',{exact:true}).waitFor();
     check(await toast.getAttribute('role')==='alert','error toast has no alert semantics');await toast.getByRole('button',{name:'关闭错误通知',exact:true}).click();await toast.waitFor({state:'hidden'});
   });
-  await run('task-progress-toast-does-not-expire-mid-task',async()=>{
+  await run('progress-toast-expires-without-cancelling-task',async()=>{
     let release,requested;const gate=new Promise(r=>release=r),started=new Promise(r=>requested=r);
     await page.route('**/api/jobs/cooldown-batch',async route=>{requested();await gate;return route.fulfill({json:{started:1,skipped:0,cooldownMinutes:60}})});
     try {
       await row.getByRole('checkbox').check();await page.locator('.bulk-more-trigger').click();
       await page.getByRole('menuitem',{name:'一键冷却',exact:true}).click();await started;
       const toast=page.locator('.task-toast.success');await toast.waitFor();check(await toast.getAttribute('aria-busy')==='true','progress toast is not busy');
-      await page.mouse.move(0,0);await page.waitForTimeout(6300);check(await toast.isVisible(),'progress toast expired before task completed '+JSON.stringify(await page.evaluate(()=>({exists:!!document.querySelector('.task-toast.success'),busy:document.querySelector('.task-toast.success')?.getAttribute('aria-busy'),open:document.querySelector('.task-toast-region')?.matches(':popover-open'),text:document.querySelector('.task-toast-region')?.textContent,workflow:!!document.querySelector('.workflow-busy')}))));
+      await page.mouse.move(0,0);await toast.waitFor({state:'hidden',timeout:4000});check(await page.locator('.workflow-busy').count()>0,'dismissing toast interrupted task state');
       release();await page.waitForFunction(()=>document.querySelector('.task-toast.success')?.getAttribute('aria-busy')==='false');await closeToasts();
       await row.getByRole('checkbox').uncheck();
     } finally {release();await page.unroute('**/api/jobs/cooldown-batch')}

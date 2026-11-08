@@ -1,3 +1,4 @@
+import { AccountText } from "./copyable-account.jsx";
 import { codexStatusEligible, codexStatusBlockReason, usageRestricted } from "./codex-eligibility.mjs";
 import { CustomSelect } from "./custom-select.jsx";
 import React, { useEffect, useRef, useState } from "react";
@@ -40,7 +41,7 @@ async function api(token, url, body, signal) {
   const data = await response.json(); if (!response.ok) throw new Error(data.error || "指纹检测请求失败"); return data;
 }
 
-function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRef, children }) {
+function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRef, children, className = "" }) {
   const ref = useRef(null);
   useEffect(() => {
     const previous = returnFocusRef?.current || document.activeElement;
@@ -52,7 +53,7 @@ function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRe
   }, []);
   return <dialog
     ref={ref}
-    className="batch-dialog fingerprint-dialog"
+    className={`batch-dialog fingerprint-dialog ${className}`.trim()}
     aria-label={title}
     onKeyDown={trapModalTab}
     onCancel={event => { event.preventDefault(); if (!closeDisabled) onClose(); }}
@@ -65,7 +66,7 @@ function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRe
   >
     <div className="dialog-header">
       <div>
-        <h2>{title}</h2>
+        <h2><AccountText text={title} /></h2>
         {subtitle && <HelpTip title={title} label={`${title}说明`}>{subtitle}</HelpTip>}
       </div>
       <button type="button" className="icon-button" data-dialog-initial-focus aria-label={`关闭${title}`} disabled={closeDisabled} onClick={onClose}><X size={18} /></button>
@@ -78,62 +79,69 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
   const [text, setText] = useState(() => toText(value.models));
   const testSequence = value.testSequence || { first: "fingerprint", fingerprint: 1, candy: 0 };
   return <section className="fingerprint-defaults" aria-label="默认降智检测规则">
-    <label className="settings-field">
-      <span className="field-label-row">
-        <span>默认检测模型（每行一个，最多 8 个）</span>
-        <HelpTip title="默认降智检测规则" label="查看默认降智检测规则说明">
-          每个模型每轮发送 3 条数字指纹提示词，会使用账号额度、网络和本机评分资源。不同账号按并发上限执行，同一账号的请求依次进行；提高并发会增加瞬时资源占用。名称可写为“请求模型 =&gt; 参考库指纹名称”。参考库中的合并类（如 gpt-6-astra/6.1-sol）匹配表示属于该类，不区分其单个模型。归因是参考库内的统计排序，不等同于模型身份或智力证明。
-        </HelpTip>
-      </span>
-      <textarea aria-label="默认检测模型" rows={3} value={text} disabled={disabled} placeholder={"模型 ID\n模型别名 => 预期指纹名称"} onChange={event => { setText(event.target.value); onChange({ ...value, models: fromText(event.target.value) }); }} />
-    </label>
-    <div className="fingerprint-three-fields">
-      <label className="settings-field"><span>默认检测间隔（分钟）</span><input aria-label="默认检测间隔（分钟）" type="number" min="5" max="43200" value={value.intervalMinutes ?? 360} disabled={disabled} onChange={event => onChange({ ...value, intervalMinutes: event.target.value })} /></label>
-      <label className="settings-field"><span>最低归因概率</span><input aria-label="最低归因概率" type="number" min="0.5" max="1" step="0.05" value={value.minProbability ?? 0.8} disabled={disabled} onChange={event => onChange({ ...value, minProbability: event.target.value })} /></label>
-      <label className="settings-field"><span>同时检测账号数（1–16）</span><input aria-label="同时检测账号数量" type="number" min="1" max="16" value={value.maxConcurrentAccounts ?? 3} disabled={disabled} onChange={event => onChange({ ...value, maxConcurrentAccounts: event.target.value })} /></label>
-    </div>
-    <div className="fingerprint-three-fields">
+    <div className="fingerprint-field-group">
       <label className="settings-field">
         <span className="field-label-row">
-          <span>检测首项</span>
-          <HelpTip title="检测轮换" label="查看检测轮换说明">
-            每个到期检测周期执行一种测试，各账号独立保存进度。按首项和次数循环，如指纹 1 次后进行糖果 N 次；次数不能同时为 0。
+          <span>默认检测模型（每行一个，最多 8 个）</span>
+          <HelpTip title="默认降智检测规则" label="查看默认降智检测规则说明">
+            每个模型每轮发送 3 条数字指纹提示词，会使用账号额度、网络和本机评分资源。不同账号按并发上限执行，同一账号的请求依次进行；提高并发会增加瞬时资源占用。名称可写为“请求模型 =&gt; 参考库指纹名称”。参考库中的合并类（如 gpt-6-astra/6.1-sol）匹配表示属于该类，不区分其单个模型。归因是参考库内的统计排序，不等同于模型身份或智力证明。
           </HelpTip>
         </span>
-        <CustomSelect
-          disabled={disabled}
-          aria-label="检测首项"
-          value={testSequence.first || "fingerprint"}
-          onChange={event => onChange({ ...value, testSequence: { ...testSequence, first: event.target.value } })}
-        >
-          <option value="fingerprint">指纹检测</option>
-          <option value="candy">糖果检测</option>
-        </CustomSelect>
+        <textarea aria-label="默认检测模型" rows={2} value={text} disabled={disabled} placeholder={"模型 ID\n模型别名 => 预期指纹名称"} onChange={event => { setText(event.target.value); onChange({ ...value, models: fromText(event.target.value) }); }} />
       </label>
-      <label className="settings-field">
-        <span>指纹检测次数</span>
-        <input
-          aria-label="指纹检测次数"
-          type="number"
-          min="0"
-          max="100"
-          value={testSequence.fingerprint ?? 1}
-          disabled={disabled}
-          onChange={event => onChange({ ...value, testSequence: { ...testSequence, fingerprint: event.target.value === "" ? "" : Number(event.target.value) } })}
-        />
-      </label>
-      <label className="settings-field">
-        <span>糖果检测次数</span>
-        <input
-          aria-label="糖果检测次数"
-          type="number"
-          min="0"
-          max="100"
-          value={testSequence.candy ?? 0}
-          disabled={disabled}
-          onChange={event => onChange({ ...value, testSequence: { ...testSequence, candy: event.target.value === "" ? "" : Number(event.target.value) } })}
-        />
-      </label>
+    </div>
+    <div className="fingerprint-field-group">
+      <div className="fingerprint-three-fields">
+        <label className="settings-field"><span>默认检测间隔（分钟）</span><input aria-label="默认检测间隔（分钟）" type="number" min="5" max="43200" value={value.intervalMinutes ?? 360} disabled={disabled} onChange={event => onChange({ ...value, intervalMinutes: event.target.value })} /></label>
+        <label className="settings-field"><span>最低归因概率</span><input aria-label="最低归因概率" type="number" min="0.5" max="1" step="0.05" value={value.minProbability ?? 0.8} disabled={disabled} onChange={event => onChange({ ...value, minProbability: event.target.value })} /></label>
+        <label className="settings-field"><span>同时检测账号数（1–16）</span><input aria-label="同时检测账号数量" type="number" min="1" max="16" value={value.maxConcurrentAccounts ?? 3} disabled={disabled} onChange={event => onChange({ ...value, maxConcurrentAccounts: event.target.value })} /></label>
+      </div>
+    </div>
+    <div className="fingerprint-field-group">
+      <div className="section-title-row">
+        <h3>检测轮换</h3>
+        <HelpTip title="检测轮换" label="查看检测轮换说明">
+          每个到期检测周期执行一种测试，各账号独立保存进度。按首项和次数循环，如指纹 1 次后进行糖果 N 次；次数不能同时为 0。
+        </HelpTip>
+      </div>
+      <div className="fingerprint-three-fields">
+        <label className="settings-field">
+          <span>检测首项</span>
+          <CustomSelect
+            disabled={disabled}
+            aria-label="检测首项"
+            value={testSequence.first || "fingerprint"}
+            onChange={event => onChange({ ...value, testSequence: { ...testSequence, first: event.target.value } })}
+          >
+            <option value="fingerprint">指纹检测</option>
+            <option value="candy">糖果检测</option>
+          </CustomSelect>
+        </label>
+        <label className="settings-field">
+          <span>指纹检测次数</span>
+          <input
+            aria-label="指纹检测次数"
+            type="number"
+            min="0"
+            max="100"
+            value={testSequence.fingerprint ?? 1}
+            disabled={disabled}
+            onChange={event => onChange({ ...value, testSequence: { ...testSequence, fingerprint: event.target.value === "" ? "" : Number(event.target.value) } })}
+          />
+        </label>
+        <label className="settings-field">
+          <span>糖果检测次数</span>
+          <input
+            aria-label="糖果检测次数"
+            type="number"
+            min="0"
+            max="100"
+            value={testSequence.candy ?? 0}
+            disabled={disabled}
+            onChange={event => onChange({ ...value, testSequence: { ...testSequence, candy: event.target.value === "" ? "" : Number(event.target.value) } })}
+          />
+        </label>
+      </div>
     </div>
   </section>;
 }
@@ -166,7 +174,7 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
   }
   return <><button type="button" className="secondary-button topbar-action-button" disabled={!token || busy} onClick={open}><Activity size={14} />降智检测设置</button>
     {!data && error && <span role="alert" className="proxy-quality-error">{error}</span>}
-    {data && <Dialog title="降智检测设置" subtitle="通过数字指纹提示词评估模型响应分布是否与参考库一致" closeDisabled={busy} returnFocusRef={returnFocusRef} onClose={() => setData(null)}><form onSubmit={save} className="fingerprint-form">
+    {data && <Dialog className="fingerprint-settings-dialog" title="降智检测设置" subtitle="通过数字指纹提示词评估模型响应分布是否与参考库一致" closeDisabled={busy} returnFocusRef={returnFocusRef} onClose={() => setData(null)}><form onSubmit={save} className="fingerprint-form">
       <FingerprintDefaultsFields value={data.settings} onChange={settings => setData(current => ({ ...current, settings }))} disabled={busy} />
       <div className="fingerprint-toolbar-row">
         {data.runtime && (
@@ -202,10 +210,34 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
             读取各 PlanType 所绑定方案的默认分组。默认加入始终保留；不降智加入要求全部指定模型指纹一致。明确不一致时移出条件组；未知结果不改已有分组，新上传账号需通过后才加入条件组。不改其它分组。
           </HelpTip>
         </div>
-        {data.profiles.map(profile => <fieldset key={profile.id} className="fingerprint-profile" disabled={busy}><legend>{profile.name} · {(profile.planTypes || []).join(" / ") || "未绑定 PlanType"}</legend>
-          {!profile.groupIds.length && <p className="empty-inline-note">此方案未指定分组，请先在 Sub2API 配置中选择号池</p>}
-          {profile.groupIds.map(id => <label className="fingerprint-group-rule" key={id}><span>{data.groups.find(g => String(g.id) === String(id))?.name || `分组 ${id}`}</span><CustomSelect disabled={busy} aria-label={`${profile.name} 分组 ${id} 加入规则`} value={data.settings.groupPolicies[profile.id]?.[id] || "default"} onChange={e => patch({ groupPolicies: { ...data.settings.groupPolicies, [profile.id]: { ...data.settings.groupPolicies[profile.id], [id]: e.target.value } } })}><option value="default">默认加入</option><option value="verified">不降智加入（指纹一致）</option></CustomSelect></label>)}
-        </fieldset>)}
+        {data.profiles.map(profile => (
+          <div key={profile.id} className="fingerprint-profile-card">
+            <div className="fingerprint-profile-header">
+              <span className="fingerprint-profile-name">{profile.name}</span>
+              <span className="fingerprint-profile-plans">{(profile.planTypes || []).join(" / ") || "未绑定 PlanType"}</span>
+            </div>
+            {!profile.groupIds.length ? (
+              <p className="empty-inline-note">此方案未指定分组，请先在 Sub2API 配置中选择号池</p>
+            ) : (
+              <div className="fingerprint-group-rules-list">
+                {profile.groupIds.map(id => (
+                  <label className="fingerprint-group-rule" key={id}>
+                    <span className="fingerprint-group-rule-name">{data.groups.find(g => String(g.id) === String(id))?.name || `分组 ${id}`}</span>
+                    <CustomSelect
+                      disabled={busy}
+                      aria-label={`${profile.name} 分组 ${id} 加入规则`}
+                      value={data.settings.groupPolicies[profile.id]?.[id] || "default"}
+                      onChange={e => patch({ groupPolicies: { ...data.settings.groupPolicies, [profile.id]: { ...data.settings.groupPolicies[profile.id], [id]: e.target.value } } })}
+                    >
+                      <option value="default">默认加入</option>
+                      <option value="verified">不降智加入（指纹一致）</option>
+                    </CustomSelect>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
       </section>
       {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" disabled={busy} onClick={() => setData(null)}>取消</button><button className="primary-button" disabled={busy}>{busy ? "保存中…" : "保存降智检测设置"}</button></div>
     </form></Dialog>}

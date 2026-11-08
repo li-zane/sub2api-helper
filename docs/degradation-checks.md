@@ -1,6 +1,6 @@
 # 降智检测：指纹与糖果
 
-全局降智设置及任务设置共用 `modelFingerprint.testSequence`：
+全局“降智检测设置”统一配置检测间隔、并发及 `modelFingerprint.testSequence`，账号可独立覆盖；任务设置不再重复提供这些选项：
 
 ```json
 {

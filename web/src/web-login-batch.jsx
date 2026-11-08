@@ -1,3 +1,4 @@
+import { CopyableAccount } from "./copyable-account.jsx";
 import React, { useEffect, useState } from "react";
 
 const LABELS = { queued: "排队", running: "重登中", checking: "检测中", input: "待输入验证码或密码", success: "成功", failed: "失败" };
@@ -30,6 +31,6 @@ export function WebLoginBatch({ token, batch, onRetry, onClose, busy }) {
       <button type="button" className="secondary-button" onClick={onClose}>关闭进度</button>
     </div>
     {error && <p role="alert">{error}</p>}
-    <details><summary>查看账号明细</summary><ul>{records.map(p => <li key={p.id}>{p.email || p.id}：{p.phase === "success" ? p.renewed ? "已重登并复检" : "会话有效" : LABELS[p.phase]}{p.error ? ` · ${p.error}` : ""}</li>)}{batch.skipped.map(p => <li key={p.id}>{p.email}：已跳过，原选择保留</li>)}</ul></details>
+    <details><summary>查看账号明细</summary><ul>{records.map(p => <li key={p.id}>{p.email ? <CopyableAccount email={p.email} /> : p.id}：{p.phase === "success" ? p.renewed ? "已重登并复检" : "会话有效" : LABELS[p.phase]}{p.error ? ` · ${p.error}` : ""}</li>)}{batch.skipped.map(p => <li key={p.id}><CopyableAccount email={p.email} />：已跳过，原选择保留</li>)}</ul></details>
   </section>;
 }

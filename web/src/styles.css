@@ -4734,152 +4734,369 @@ dialog.batch-dialog::backdrop {
    PlanType Mapping Dialog Spec
    ========================================================================== */
 .plan-type-mapping-dialog {
-  width: min(760px, 100%);
+  width: min(720px, calc(100vw - 32px));
+  max-width: 720px;
+  padding: 22px 24px;
+  border-radius: 18px;
+  box-sizing: border-box;
 }
 
-.mapping-info-banner {
+.plan-type-mapping-dialog .dialog-header {
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.plan-type-mapping-dialog .mapping-info-banner {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 11px 16px;
-  border-radius: 12px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  color: #1d4ed8;
-  font-size: 12.5px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: var(--ink-2, #475569);
+  font-size: 12px;
   line-height: 1.5;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
-.plan-type-mapping-table-header {
+.plan-type-mapping-dialog .plan-type-mapping-table-header {
   display: grid;
-  grid-template-columns: minmax(180px, 1.35fr) 24px minmax(140px, 1.15fr) 110px 34px;
+  grid-template-columns: minmax(180px, 1.4fr) 24px minmax(140px, 1.15fr) 96px 36px;
   align-items: center;
   gap: 10px;
-  padding: 0 14px 8px;
+  padding: 0 8px 8px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--muted);
+  color: var(--muted, #64748b);
   letter-spacing: -0.01em;
+  border-bottom: 1px solid #f1f5f9;
+  margin-bottom: 4px;
 }
 
-.plan-type-mapping-table-header .header-col-preview,
-.plan-type-mapping-table-header .header-col-action {
+.plan-type-mapping-dialog .plan-type-mapping-table-header .header-col-preview,
+.plan-type-mapping-dialog .plan-type-mapping-table-header .header-col-action {
   text-align: center;
 }
 
-.plan-type-mapping-list {
+.plan-type-mapping-dialog .plan-type-mapping-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 440px;
+  gap: 4px;
+  max-height: 400px;
   overflow-y: auto;
-  padding: 2px 4px 4px 0;
-  margin-bottom: 14px;
+  padding: 2px 2px 4px 0;
+  margin-bottom: 10px;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.16) transparent;
 }
 
-.plan-type-mapping-row {
+.plan-type-mapping-dialog .plan-type-mapping-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.35fr) 24px minmax(140px, 1.15fr) 110px 34px;
+  grid-template-columns: minmax(180px, 1.4fr) 24px minmax(140px, 1.15fr) 96px 36px;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
-  transition: all 130ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-.plan-type-mapping-row:hover {
-  border-color: #cbd5e1;
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.05);
-}
-
-.plan-type-mapping-row:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.08);
-}
-
-.mapping-input-wrapper {
-  width: 100%;
-}
-
-.mapping-input-wrapper input {
-  width: 100%;
-  height: 36px;
-  padding: 0 12px;
-  border: 1px solid var(--line-strong);
+  padding: 4px 8px;
+  border: 1px solid transparent;
   border-radius: 8px;
-  background: var(--surface);
-  color: var(--ink);
+  background: transparent;
+  box-shadow: none;
+  transition: background-color 120ms ease;
+}
+
+.plan-type-mapping-dialog .plan-type-mapping-row:hover {
+  background: #f8fafc;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.plan-type-mapping-dialog .plan-type-mapping-row:focus-within {
+  background: #f8fafc;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.plan-type-mapping-dialog .mapping-input-wrapper {
+  width: 100%;
+}
+
+.plan-type-mapping-dialog .mapping-field-label,
+.plan-type-mapping-dialog .mapping-preview-label {
+  display: none;
+}
+
+.plan-type-mapping-dialog .mapping-input-wrapper input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: var(--ink, #0f172a);
   font-size: 13px;
   outline: none;
-  transition: all 120ms ease;
+  box-sizing: border-box;
+  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
 }
 
-.mapping-input-wrapper.raw-wrapper input {
+.plan-type-mapping-dialog .mapping-input-wrapper input:hover:not(:disabled) {
+  border-color: #94a3b8;
+  background: #ffffff;
+}
+
+.plan-type-mapping-dialog .mapping-input-wrapper input:focus {
+  border-color: var(--accent, #0071e3);
+  background: #ffffff;
+  box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.16);
+}
+
+.plan-type-mapping-dialog .mapping-input-wrapper.raw-wrapper input {
   font-family: "SF Mono", "JetBrains Mono", Consolas, monospace;
   font-size: 12.5px;
-  background: #f8fafc;
   color: #0f172a;
 }
 
-.mapping-input-wrapper input:focus {
-  border-color: var(--accent);
-  background: #ffffff;
-  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.12);
+.plan-type-mapping-dialog .plan-type-mapping-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #94a3b8);
+  opacity: 0.65;
+  transition: opacity 120ms ease, color 120ms ease;
 }
 
-.plan-type-mapping-arrow {
-  display: grid;
-  place-items: center;
-  color: var(--muted);
+.plan-type-mapping-dialog .plan-type-mapping-row:hover .plan-type-mapping-arrow,
+.plan-type-mapping-dialog .plan-type-mapping-row:focus-within .plan-type-mapping-arrow {
+  color: var(--ink-2, #475569);
+  opacity: 1;
 }
 
-.mapping-preview-cell {
+.plan-type-mapping-dialog .mapping-preview-cell {
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  padding: 0 2px;
 }
 
-.mapping-preview-cell .plan-tag {
-  max-width: 100px;
+.plan-type-mapping-dialog .mapping-preview-cell .plan-tag {
+  display: block;
+  min-width: 0;
+  max-width: 92px;
+  height: 24px;
+  line-height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  box-sizing: border-box;
 }
 
-.mapping-delete-btn {
+.plan-type-mapping-dialog .mapping-preview-cell .plan-tag.is-empty {
+  background: #f1f5f9;
+  border-color: #e2e8f0;
+  color: var(--muted, #94a3b8);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.plan-type-mapping-dialog .mapping-delete-btn {
   width: 32px !important;
   height: 32px !important;
   border-radius: 8px !important;
-}
-
-.mapping-add-button {
-  width: 100%;
-  height: 38px;
-  border: 1px dashed #cbd5e1;
-  border-radius: 11px;
-  background: #f8fafc;
-  color: var(--ink-2);
-  font-size: 13px;
-  font-weight: 500;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  color: var(--muted, #94a3b8);
+  background: transparent;
+  border: 1px solid transparent;
+  transition: all 120ms ease;
   cursor: pointer;
-  transition: all 140ms ease;
+  padding: 0;
+  margin: 0 auto;
 }
 
-.mapping-add-button:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-soft);
+.plan-type-mapping-dialog .mapping-delete-btn:hover:not(:disabled) {
+  color: #ef4444;
+  background: #fef2f2;
+  border-color: #fee2e2;
+}
+
+.plan-type-mapping-dialog .mapping-delete-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.plan-type-mapping-dialog .mapping-add-button {
+  width: 100%;
+  height: 34px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: var(--ink-2, #334155);
+  font-size: 12.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+
+.plan-type-mapping-dialog .mapping-add-button:hover:not(:disabled) {
+  border-color: var(--accent, #0071e3);
+  color: var(--accent, #0071e3);
+  background: #eff6ff;
+}
+
+.plan-type-mapping-dialog .mapping-add-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.plan-type-mapping-dialog .task-auto-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--muted, #64748b);
+  font-size: 13px;
+  background: #f8fafc;
+  border-radius: 8px;
+  border: 1px dashed #e2e8f0;
+}
+
+.plan-type-mapping-dialog .dialog-error {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.plan-type-mapping-dialog .dialog-footer {
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid #f1f5f9;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.plan-type-mapping-dialog .dialog-actions-spacer {
+  flex: 1;
+}
+
+.plan-type-mapping-dialog .dialog-footer button {
+  height: 34px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+
+/* PlanType Mapping Dialog - Responsive (narrow screens down to 375px) */
+@media (max-width: 640px) {
+  .plan-type-mapping-dialog {
+    width: 100%;
+    padding: 16px 14px;
+    border-radius: 14px;
+    max-height: calc(100vh - 24px);
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-table-header {
+    display: none;
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-list {
+    gap: 10px;
+    max-height: 360px;
+    padding-right: 0;
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "raw raw"
+      "label label"
+      "preview delete";
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #ffffff;
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-row:hover,
+  .plan-type-mapping-dialog .plan-type-mapping-row:focus-within {
+    background: #ffffff;
+    border-color: #cbd5e1;
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-row .raw-wrapper {
+    grid-area: raw;
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-row .label-wrapper {
+    grid-area: label;
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-row .mapping-preview-cell {
+    grid-area: preview;
+    justify-content: flex-start;
+    padding: 0;
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-row .mapping-delete-btn {
+    grid-area: delete;
+    justify-self: end;
+    margin: 0;
+  }
+
+  .plan-type-mapping-dialog .plan-type-mapping-arrow {
+    display: none;
+  }
+
+  .plan-type-mapping-dialog .mapping-field-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted, #64748b);
+    margin-bottom: 3px;
+  }
+
+  .plan-type-mapping-dialog .mapping-preview-label {
+    display: inline-block;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--muted, #64748b);
+    margin-right: 6px;
+  }
+
+  .plan-type-mapping-dialog .dialog-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .plan-type-mapping-dialog .dialog-actions-spacer {
+    display: none;
+  }
+
+  .plan-type-mapping-dialog .dialog-footer .selection-text-button {
+    width: 100%;
+    order: 3;
+    justify-content: center;
+  }
+
+  .plan-type-mapping-dialog .dialog-footer .cancel-button,
+  .plan-type-mapping-dialog .dialog-footer .primary-button {
+    flex: 1;
+  }
 }
 
 .sub2api-binding-add {
@@ -6269,18 +6486,6 @@ section.workspace-dialog {
     grid-template-columns: 1fr;
   }
 
-  .plan-type-mapping-table-header {
-    display: none;
-  }
-
-  .plan-type-mapping-row {
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
-
-  .plan-type-mapping-arrow {
-    display: none;
-  }
 }
 
 @media (max-width: 580px) {
@@ -7784,7 +7989,7 @@ select option {
 /* Task result toasts and local account pricing. Scoped to the new controls. */
 .task-toast-region {
   position: fixed;
-  inset: 72px 20px auto auto;
+  inset: 24px auto auto 50%;
   width: min(420px, calc(100vw - 32px));
   margin: 0;
   padding: 0;
@@ -7796,6 +8001,7 @@ select option {
   gap: 10px;
   z-index: 20000;
   pointer-events: none;
+  transform: translateX(-50%);
 }
 .task-toast-region::backdrop { background: transparent; pointer-events: none; }
 .task-toast {
@@ -7812,7 +8018,11 @@ select option {
   line-height: 1.5;
   pointer-events: auto;
   animation: task-toast-enter 150ms ease-out;
+  transition: opacity 180ms ease, transform 180ms ease;
+  cursor: pointer;
 }
+.task-toast.is-leaving { opacity: 0; transform: translateY(-8px); pointer-events: none; }
+.task-toast:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .task-toast.error { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-strong); }
 .task-toast > svg { flex-shrink: 0; margin-top: 2px; }
 .task-toast-message { flex: 1; min-width: 0; overflow-wrap: anywhere; max-height: 28vh; overflow: auto; }
@@ -7836,10 +8046,30 @@ select option {
 .usage-profit-pill.negative { color: var(--danger-strong); border-color: var(--danger-line); background: var(--danger-soft); }
 .usage-profit-pill.unknown, .usage-profit-pill.zero { color: var(--muted); }
 @media (max-width: 700px) {
-  .task-toast-region { inset: 64px 16px auto 16px; width: auto; }
+  .task-toast-region { top: 16px; }
   .task-display-pricing-row { grid-template-columns: minmax(0,1fr); gap: 8px; }
 }
-@media (prefers-reduced-motion: reduce) { .task-toast { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .task-toast { animation: none; transition: none; } }
+
+.copyable-account,
+.copyable-value {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  overflow-wrap: anywhere;
+  cursor: copy;
+}
+.copyable-account:hover,
+.copyable-value:hover { color: var(--accent); }
+.copyable-account:focus-visible,
+.copyable-value:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Lazy fingerprint transcripts; scoped to the history dialog. */
 .fingerprint-dialog .fingerprint-transcript-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 8px 0; overflow-wrap: anywhere; }
@@ -7863,3 +8093,409 @@ select option {
 /* SMS protocol markers, scoped to the account-log dialog. */
 .account-log-dialog .account-log-sms-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border: 1px solid var(--accent-line); border-radius: var(--radius-sm); color: var(--accent); background: var(--accent-soft); font-size: 10px; font-weight: 500; vertical-align: middle; }
 .account-log-dialog .protocol-log-phone { color: #ff6b7a; font-weight: 600; }
+
+/* ==========================================================================
+   Global Model Fingerprint Settings Dialog Beautification
+   ========================================================================== */
+.fingerprint-settings-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-width: 720px;
+  padding: 22px 26px;
+  border-radius: 18px;
+  box-sizing: border-box;
+}
+
+.fingerprint-settings-dialog .dialog-header {
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.fingerprint-settings-dialog .fingerprint-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Strip heavy card borders from individual settings fields */
+.fingerprint-settings-dialog .settings-field {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.fingerprint-settings-dialog .settings-field:hover,
+.fingerprint-settings-dialog .settings-field:focus-within {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+/* Consistent clear typography for field labels */
+.fingerprint-settings-dialog .settings-field > span,
+.fingerprint-settings-dialog .settings-field .field-label-row {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-2, #334155);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.35;
+}
+
+/* Crisp inputs */
+.fingerprint-settings-dialog .settings-field input:not([type="checkbox"]) {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink, #0f172a);
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.fingerprint-settings-dialog .settings-field input:not([type="checkbox"]):focus {
+  border-color: var(--accent, #0071e3);
+  box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.16);
+}
+
+.fingerprint-settings-dialog .settings-field input:not([type="checkbox"]):hover:not(:disabled) {
+  border-color: #94a3b8;
+}
+
+/* Compact textarea for detection models */
+.fingerprint-settings-dialog textarea {
+  width: 100%;
+  min-height: 58px;
+  height: 64px;
+  max-height: 140px;
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink, #0f172a);
+  font-family: "SF Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: vertical;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.fingerprint-settings-dialog textarea:focus {
+  border-color: var(--accent, #0071e3);
+  box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.16);
+}
+
+.fingerprint-settings-dialog textarea:hover:not(:disabled) {
+  border-color: #94a3b8;
+}
+
+/* Field grouping and grids */
+.fingerprint-settings-dialog .fingerprint-defaults {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fingerprint-settings-dialog .fingerprint-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fingerprint-settings-dialog .fingerprint-field-group .section-title-row {
+  margin-top: 2px;
+}
+
+.fingerprint-settings-dialog .fingerprint-three-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.fingerprint-settings-dialog .section-title-row h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink, #0f172a);
+  margin: 0;
+}
+
+/* CustomSelect inside fingerprint settings */
+.fingerprint-settings-dialog .custom-select-container {
+  width: 100%;
+}
+
+.fingerprint-settings-dialog .custom-select-trigger {
+  height: 34px;
+  border-radius: 8px;
+  font-size: 13px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+}
+
+.fingerprint-settings-dialog .custom-select-trigger:focus,
+.fingerprint-settings-dialog .custom-select-trigger:focus-visible {
+  border-color: var(--accent, #0071e3);
+  box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.16);
+}
+
+/* Status & Reference Models Toolbar */
+.fingerprint-settings-dialog .fingerprint-toolbar-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.fingerprint-settings-dialog .runtime-status-pill {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--ink-2, #334155);
+  font-size: 12px;
+}
+
+.fingerprint-settings-dialog .fingerprint-toolbar-row .compact-btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+/* PlanType Section */
+.fingerprint-settings-dialog .fingerprint-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.fingerprint-settings-dialog .fingerprint-plan-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fingerprint-settings-dialog .plan-check-pill {
+  min-height: 28px;
+  height: auto;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-2, #334155);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  word-break: break-all;
+  white-space: normal;
+  transition: all 120ms ease;
+}
+
+.fingerprint-settings-dialog .plan-check-pill:hover {
+  background: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.fingerprint-settings-dialog .plan-check-pill:has(input:checked) {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1e40af;
+}
+
+.fingerprint-settings-dialog .plan-check-pill input[type="checkbox"] {
+  accent-color: #0071e3;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.fingerprint-settings-dialog .fingerprint-add-plan {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.fingerprint-settings-dialog .fingerprint-add-plan input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 12.5px;
+}
+
+.fingerprint-settings-dialog .fingerprint-add-plan input:focus {
+  border-color: var(--accent, #0071e3);
+  box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.16);
+  outline: none;
+}
+
+.fingerprint-settings-dialog .fingerprint-add-plan button {
+  height: 34px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  flex-shrink: 0;
+}
+
+/* Group Rules Profiles Cards */
+.fingerprint-settings-dialog .fingerprint-profile-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.fingerprint-settings-dialog .fingerprint-profile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f1f5f9;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.fingerprint-settings-dialog .fingerprint-profile-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink, #0f172a);
+}
+
+.fingerprint-settings-dialog .fingerprint-profile-plans {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted, #64748b);
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 1px 6px;
+  word-break: break-all;
+}
+
+.fingerprint-settings-dialog .fingerprint-group-rules-list {
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+}
+
+.fingerprint-settings-dialog .fingerprint-group-rule {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 12.5px;
+}
+
+.fingerprint-settings-dialog .fingerprint-group-rule:last-child {
+  border-bottom: none;
+}
+
+.fingerprint-settings-dialog .fingerprint-group-rule-name {
+  font-weight: 500;
+  color: var(--ink-2, #334155);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fingerprint-settings-dialog .fingerprint-group-rule .custom-select-container {
+  width: 190px;
+  flex-shrink: 0;
+}
+
+.fingerprint-settings-dialog .fingerprint-group-rule .custom-select-trigger {
+  height: 30px;
+  font-size: 12px;
+}
+
+/* Dialog actions footer (sticky for easy reach) */
+.fingerprint-settings-dialog .dialog-actions {
+  position: sticky;
+  bottom: -22px;
+  background: #ffffff;
+  padding: 12px 0 0;
+  margin-top: 8px;
+  border-top: 1px solid #e2e8f0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fingerprint-settings-dialog .dialog-actions .dialog-actions-spacer {
+  flex: 1;
+}
+
+/* Narrow & Mobile Screens (<= 580px down to 375px) */
+@media (max-width: 580px) {
+  .fingerprint-settings-dialog {
+    width: 100%;
+    padding: 16px 14px;
+    border-radius: 14px;
+  }
+
+  .fingerprint-settings-dialog .fingerprint-three-fields {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .fingerprint-settings-dialog .fingerprint-group-rule {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .fingerprint-settings-dialog .fingerprint-group-rule .custom-select-container {
+    width: 100%;
+  }
+
+  .fingerprint-settings-dialog .fingerprint-add-plan {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .fingerprint-settings-dialog .dialog-actions {
+    flex-wrap: wrap;
+  }
+
+  .fingerprint-settings-dialog .dialog-actions button {
+    flex: 1;
+  }
+}
