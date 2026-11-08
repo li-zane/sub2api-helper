@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';
 import { ModelFingerprintService } from '../src/model-fingerprint.mjs';
 import { extractFingerprintReply, fingerprintFailure } from '../src/model-fingerprint-request.mjs';
-const dir=await fs.mkdtemp(path.join(os.tmpdir(),'helper-fingerprint-errors-'));const email='retry@example.test',reply='1, 2, 3';
+const dir=await fs.mkdtemp(path.join(os.tmpdir(),'helper-fingerprint-errors-'));const email='retry@example.test',reply=Array.from({length:100},(_,i)=>i+1).join(', ');
 const sse=events=>events.map(e=>'data: '+JSON.stringify(e)).join('\n\n');
 for(const raw of [sse([{type:'response.output_text.delta',delta:reply}]),sse([{type:'response.output_text.delta',delta:reply},{type:'response.incomplete',response:{error:{message:'private-error-envelope'}}}]),JSON.stringify({status:'incomplete',error:{message:'private-error-envelope'},output:[{content:[{type:'output_text',text:reply}]}]})]){
  assert.throws(()=>extractFingerprintReply(raw),e=>{assert.equal(e.fingerprintReply,reply);assert(!e.fingerprintReply.includes('private-error-envelope'));return fingerprintFailure(e).retryable;});

@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {extractFingerprintReply,extractFingerprintSample,fingerprintFailure} from '../src/model-fingerprint-request.mjs';
+const full=Array.from({length:300},(_,i)=>i+1).join(', ');
+const response={status:'completed',output:[{content:[{type:'output_text',text:full}]}],usage:{input_tokens:100,output_tokens:300,input_tokens_details:{cached_tokens:20},output_tokens_details:{reasoning_tokens:40},total_tokens:400}};
+const sse=events=>events.map(e=>'data: '+JSON.stringify(e)).join('\n\n');
+const partial='247, 19, 318';
+assert.equal(extractFingerprintReply(sse([{type:'response.output_text.delta',delta:partial},{type:'response.completed',response}])),full,'completed output wins over a partial delta');
+assert.equal(extractFingerprintReply(sse([{type:'response.output_text.delta',delta:partial},{type:'response.output_text.done',text:full},{type:'response.completed',response:{}}])),full);
+const sample=extractFingerprintSample(sse([{type:'response.completed',response}]));
+assert.equal(sample.completionSource,'completed');assert.equal(sample.usage.totalTokens,400);assert.equal(sample.usage.cachedInputTokens,20);assert.equal(sample.usage.reasoningTokens,40);
+const multiline='data: {"type":"response.completed",\r\ndata: "response":'+JSON.stringify(response)+'}\r\n\r\n';
+assert.equal(extractFingerprintReply(multiline),full);
+assert.throws(()=>extractFingerprintReply(sse([{type:'response.output_text.done',text:full}])),error=>fingerprintFailure(error).code==='INCOMPLETE','done text alone is not a completed response');
+assert.throws(()=>extractFingerprintReply(sse([{type:'response.output_text.delta',delta:partial},{type:'response.incomplete',response:{...response,status:'incomplete',incomplete_details:{reason:'max_output_tokens'}}}])),error=>error.fingerprintReply===full&&fingerprintFailure(error).incompleteReason==='max_output_tokens');
+assert.equal(extractFingerprintReply(sse([{type:'response.completed',response:{status:'completed',output:[{content:[{type:'output_text',text:partial}]}]}}])),partial,'a genuinely short completion remains short and is not invented');
+assert.throws(()=>extractFingerprintReply(sse([{type:'response.completed',response:{status:'completed',output:[]}}])),error=>fingerprintFailure(error).code==='EMPTY'&&fingerprintFailure(error).retryable);
+console.log('RESPONSE_COMPLETION_PASS final_snapshot=true text_done=true multiline=true incomplete_reason=true usage=true no_fabrication=true');

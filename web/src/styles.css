@@ -6126,13 +6126,13 @@ section.workspace-dialog {
 .fingerprint-profile {
   margin: 0;
   padding: 12px 14px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
+  border: 1px solid rgba(226, 232, 240, 0.7);
+  border-radius: 8px;
   background: #ffffff;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  box-shadow: none;
 }
 
 .fingerprint-group-rule {
@@ -6570,8 +6570,9 @@ dialog.operation-detail-dialog {
   top: 6px;
   bottom: 8px;
   left: 7px;
-  width: 2px;
-  background: var(--line, #e2e8f0);
+  width: 1.5px;
+  background: #e2e8f0;
+  opacity: 0.6;
 }
 
 /* Timeline Node */
@@ -6687,6 +6688,51 @@ dialog.operation-detail-dialog {
   font-size: 11.5px;
 }
 
+.node-method-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.node-method-badge.method-candy {
+  background: #fdf2f8;
+  color: #db2777;
+}
+
+.node-method-badge.method-fingerprint {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.node-sequence-pos {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted, #64748b);
+  background: var(--surface-subtle, #f8fafc);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.node-usage-pill {
+  font-size: 11px;
+  color: var(--muted, #64748b);
+  background: var(--surface-subtle, #f8fafc);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.history-meta-sequence,
+.history-phase-pill {
+  color: var(--muted, #64748b);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* Fingerprint Status Badge (Header & Model) */
 .fingerprint-status {
   display: inline-flex;
@@ -6702,25 +6748,25 @@ dialog.operation-detail-dialog {
 .fingerprint-status.match {
   background: #ecfdf5;
   color: #065f46;
-  border: 1px solid #a7f3d0;
+  border: 1px solid rgba(16, 185, 129, 0.25);
 }
 
 .fingerprint-status.mismatch {
   background: #fff1f2;
   color: #9f1239;
-  border: 1px solid #fecdd3;
+  border: 1px solid rgba(244, 63, 94, 0.25);
 }
 
 .fingerprint-status.unknown {
   background: #fffbeb;
   color: #92400e;
-  border: 1px solid #fde68a;
+  border: 1px solid rgba(245, 158, 11, 0.25);
 }
 
 .fingerprint-status.error {
   background: #fef2f2;
   color: #991b1b;
-  border: 1px solid #fecaca;
+  border: 1px solid rgba(239, 68, 68, 0.25);
 }
 
 /* Timeline Models List */
@@ -6762,7 +6808,7 @@ dialog.operation-detail-dialog {
   font-size: 11px;
   color: var(--muted, #64748b);
   background: var(--surface-subtle, #f8fafc);
-  border: 1px solid var(--line, #e2e8f0);
+  border: 1px solid transparent;
   border-radius: 4px;
   padding: 1px 6px;
 }
@@ -6925,7 +6971,7 @@ dialog.operation-detail-dialog {
 .timeline-details-branch {
   margin: 6px 0 6px 2px;
   padding: 4px 0 4px 14px;
-  border-left: 2.5px solid #94a3b8; /* Clearly visible Slate-400 line */
+  border-left: 2px solid #cbd5e1;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -7801,11 +7847,11 @@ select option {
 .fingerprint-dialog .fingerprint-transcript-content { min-width: 0; padding: 6px 0; }
 .fingerprint-dialog .fingerprint-request-model h4 { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 10px 0; overflow-wrap: anywhere; }
 .fingerprint-dialog .fingerprint-request-model h4 small { color: var(--muted); font-size: 11px; font-weight: 400; }
-.fingerprint-dialog .fingerprint-sample { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0; min-width: 0; }
+.fingerprint-dialog .fingerprint-sample { border: 1px solid rgba(226, 232, 240, 0.8); border-radius: 8px; padding: 8px 10px; margin: 6px 0; min-width: 0; background: #ffffff; }
 .fingerprint-dialog .fingerprint-sample > summary { cursor: pointer; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .fingerprint-dialog .fingerprint-sample > summary span { color: var(--muted); margin-left: 10px; white-space: nowrap; }
 .fingerprint-dialog .fingerprint-sample > strong { font-size: 12px; }
-.fingerprint-dialog .fingerprint-sample pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 var(--font-mono, monospace); background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin: 6px 0 12px; }
+.fingerprint-dialog .fingerprint-sample pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 var(--font-mono, monospace); background: var(--surface-subtle); border: 1px solid rgba(226, 232, 240, 0.6); border-radius: 6px; padding: 10px; margin: 6px 0 12px; }
 
 /* SMSBower balance query and explicit price currency. */
 .sms-balance-panel { margin-bottom: 14px; }

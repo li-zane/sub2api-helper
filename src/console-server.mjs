@@ -5258,7 +5258,7 @@ async function saveTaskSettings(body) {
     catch (error) { throw httpError(400, error.message); }
   }
   if (Object.hasOwn(source, "modelFingerprint") && (!source.modelFingerprint || typeof source.modelFingerprint !== "object" || Array.isArray(source.modelFingerprint))) throw httpError(400, "降智检测默认规则必须为对象");
-  const fingerprintPatch = Object.hasOwn(source, "modelFingerprint") ? Object.fromEntries(["models", "intervalMinutes", "minProbability", "maxConcurrentAccounts"].filter(key => Object.hasOwn(source.modelFingerprint, key)).map(key => [key, source.modelFingerprint[key]])) : null;
+  const fingerprintPatch = Object.hasOwn(source, "modelFingerprint") ? Object.fromEntries(["models", "intervalMinutes", "minProbability", "maxConcurrentAccounts", "testSequence"].filter(key => Object.hasOwn(source.modelFingerprint, key)).map(key => [key, source.modelFingerprint[key]])) : null;
   if (fingerprintPatch) {
     try { normalizeFingerprintSettings({ ...modelFingerprint.settings, ...fingerprintPatch }); }
     catch (error) { throw httpError(400, error.message); }

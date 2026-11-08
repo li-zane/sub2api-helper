@@ -6,6 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CANDY_PROMPT } from '../src/candy-test.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-fingerprint-console-")), output = path.join(temp, "output");
 let child, headers, logs = "", samples = 0;
@@ -27,7 +28,7 @@ const inference = http.createServer(async (req, res) => {
   let raw = ""; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); samples++; transcriptInputs.push(body.input[0].content[0].text);
   assert.equal(req.headers.authorization, "Bearer private-fixture-token"); assert.equal(req.headers["chatgpt-account-id"], "fixture-account");
   assert(body.input[0].content[0].text.length > 70); assert.notEqual(body.input[0].content[0].text, "hi");
-  const reply = Array.from({ length: 332 }, (_, i) => i % 355 + 1).join(", ");
+  const reply = body.input[0].content[0].text === CANDY_PROMPT ? '最终答案：21' : Array.from({ length: 332 }, (_, i) => i % 355 + 1).join(", ");
   transcriptReplies.push(reply);
   res.setHeader("content-type", "text/event-stream");
   res.end([{ type: "response.output_text.delta", delta: reply }, { type: "response.completed", response: {} }].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""));
@@ -91,6 +92,29 @@ try {
   const groupPut = calls.filter(c => c.method === "PUT").slice(puts).find(c => c.body.group_ids);
   assert.deepEqual(groupPut.body.group_ids.map(String), ["10", "20", "30"], "unknown evidence preserves existing conditional membership during profile updates");
   console.log("PASS: fingerprint lazy transcript HTTP auth/404, full prompts/replies, lightweight polling and restart; fingerprint HTTP authentication, defaults-off, plan/group discovery, real per-account prompt transport, multi-model three-sample checks, unknown preservation, restart/overrides, task defaults and profile admission gating");
+  if (process.argv.includes('--candy-cycle')) {
+    const sequence = {first:'fingerprint',fingerprint:1,candy:2};
+    assert.equal((await post('/api/task-settings',{modelFingerprint:{testSequence:sequence}})).status,200);
+    assert.deepEqual((await get('/api/model-fingerprint/settings')).settings.testSequence,sequence);
+    await post(`/api/jobs/${job.id}/model-fingerprint`,{enabled:false,models:['gpt-5.5']});
+    let latest;
+    for (const method of ['fingerprint','candy','candy','fingerprint']) {
+      const before = samples;
+      const previous = (await get('/api/jobs')).jobs.find(j=>j.id===job.id).modelFingerprint.result?.id;
+      assert.equal((await post(`/api/jobs/${job.id}/model-fingerprint/check`,{})).status,202);
+      await waitFor(async()=>{latest=(await get('/api/jobs')).jobs.find(j=>j.id===job.id).modelFingerprint;return latest.phase==='idle'&&latest.result?.id!==previous;});
+      assert.equal(latest.result.method,method);assert.equal(samples-before,method==='fingerprint'?3:1);
+      const history = await get(`/api/jobs/${job.id}/model-fingerprint/history`);
+      assert.equal(history.records[0].method,method);
+      if(method==='candy') {assert.equal(latest.result.status,'match');assert.equal(latest.result.models[0].extractedFinalAnswer,21);const detail=await get(`/api/jobs/${job.id}/model-fingerprint/history?round=${latest.result.id}`);assert.equal(detail.record.models[0].requests[0].prompt,CANDY_PROMPT);}
+    }
+    const progress=latest.sequence;await stop();await start();
+    assert.deepEqual((await get('/api/jobs')).jobs.find(j=>j.id===job.id).modelFingerprint.sequence,progress);
+    assert.equal((await post('/api/task-settings',{modelFingerprint:{testSequence:{first:'candy',fingerprint:0,candy:0}}})).status,400);
+    assert.equal((await post(`/api/jobs/${job.id}/model-fingerprint`,{enabled:false,testSequence:{first:'candy',fingerprint:2,candy:1}})).status,200);
+    assert.equal((await get('/api/jobs')).jobs.find(j=>j.id===job.id).modelFingerprint.sequence.method,'candy');
+    console.log('CONSOLE_CANDY_CYCLE_PASS authenticated_api=true task_settings=true inheritance=true methods=F/C/C/F restart=true validation=true transcripts=true');
+  }
   if (process.argv.includes("--serve")) {
     await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20] }], planTypeBindings: { free: "default" } });
     if (process.env.MODEL_FINGERPRINT_FIXTURE_FILE) await fs.writeFile(process.env.MODEL_FINGERPRINT_FIXTURE_FILE, JSON.stringify({ url: base, output, temp }));

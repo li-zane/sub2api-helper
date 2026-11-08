@@ -4259,7 +4259,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [displayTimeZone, setTimeZone] = useState(settings.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE);
   const [priceMultiplier, setPriceMultiplier] = useState(String(settings.poolPriceMultiplier ?? DEFAULT_POOL_PRICE_MULTIPLIER));
   const [monitoring, setMonitoring] = useState(() => Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
-  const [fingerprintDefaults, setFingerprintDefaults] = useState(() => ({ intervalMinutes: String(settings.modelFingerprint?.intervalMinutes ?? 360), maxConcurrentAccounts: String(settings.modelFingerprint?.maxConcurrentAccounts ?? 3) }));
+  const [fingerprintDefaults, setFingerprintDefaults] = useState(() => ({ intervalMinutes: String(settings.modelFingerprint?.intervalMinutes ?? 360), maxConcurrentAccounts: String(settings.modelFingerprint?.maxConcurrentAccounts ?? 3), first: settings.modelFingerprint?.testSequence?.first || "fingerprint", fingerprint: String(settings.modelFingerprint?.testSequence?.fingerprint ?? 1), candy: String(settings.modelFingerprint?.testSequence?.candy ?? 0) }));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
   const [webMonitor, setWebMonitor] = useState(() => ({ enabled: settings.webSessionMonitor?.enabled === true, autoRelogin: settings.webSessionMonitor?.autoRelogin !== false, intervalMinutes: String(settings.webSessionMonitor?.intervalMinutes || 15), retryMinutes: String(settings.webSessionMonitor?.retryMinutes || 60) }));
@@ -4341,11 +4341,29 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       if (Object.values(monitoring).some(value => !String(value).trim())) throw new Error("请填写全部自动监控参数");
       monitoringValues = normalizeMonitoring(Object.fromEntries(Object.entries(monitoring).map(([key, value]) => [key, Number(value)])));
     } catch (error) { setError(error.message); return; }
-    const modelFingerprint = Object.fromEntries(Object.entries(fingerprintDefaults).map(([key, value]) => [key, Number(value)]));
-    if (!Number.isInteger(modelFingerprint.intervalMinutes) || modelFingerprint.intervalMinutes < 5 || modelFingerprint.intervalMinutes > 43200
-      || !Number.isInteger(modelFingerprint.maxConcurrentAccounts) || modelFingerprint.maxConcurrentAccounts < 1 || modelFingerprint.maxConcurrentAccounts > 16) {
+    const intervalMinutes = Number(fingerprintDefaults.intervalMinutes);
+    const maxConcurrentAccounts = Number(fingerprintDefaults.maxConcurrentAccounts);
+    const fpCount = Number(fingerprintDefaults.fingerprint);
+    const cdCount = Number(fingerprintDefaults.candy);
+    if (!Number.isInteger(intervalMinutes) || intervalMinutes < 5 || intervalMinutes > 43200
+      || !Number.isInteger(maxConcurrentAccounts) || maxConcurrentAccounts < 1 || maxConcurrentAccounts > 16) {
       setError("降智检测间隔需为 5–43200 分钟，并发需为 1–16 个账号"); return;
     }
+    if (!String(fingerprintDefaults.fingerprint).trim() || !String(fingerprintDefaults.candy).trim() || !["fingerprint", "candy"].includes(fingerprintDefaults.first)
+      || !Number.isInteger(fpCount) || fpCount < 0 || fpCount > 100
+      || !Number.isInteger(cdCount) || cdCount < 0 || cdCount > 100
+      || (fpCount === 0 && cdCount === 0)) {
+      setError("检测轮换须选择首项；指纹、糖果次数须为 0–100 的整数，且不能同时为 0"); return;
+    }
+    const modelFingerprint = {
+      intervalMinutes,
+      maxConcurrentAccounts,
+      testSequence: {
+        first: fingerprintDefaults.first,
+        fingerprint: fpCount,
+        candy: cdCount,
+      },
+    };
     setSaving(true);
     setError("");
     try {
@@ -4537,6 +4555,51 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             <label className="settings-field" htmlFor="fingerprint-default-interval"><span>降智检测间隔（分钟）</span><input id="fingerprint-default-interval" type="number" min="5" max="43200" step="1" required value={fingerprintDefaults.intervalMinutes} disabled={saving} onChange={e => setFingerprintDefaults(v => ({ ...v, intervalMinutes: e.target.value }))} /></label>
             <label className="settings-field" htmlFor="fingerprint-default-concurrency"><span>降智检测并发（账号）</span><input id="fingerprint-default-concurrency" type="number" min="1" max="16" step="1" required value={fingerprintDefaults.maxConcurrentAccounts} disabled={saving} onChange={e => setFingerprintDefaults(v => ({ ...v, maxConcurrentAccounts: e.target.value }))} /></label>
           </div>
+          <div className="fingerprint-three-fields">
+            <label className="settings-field" htmlFor="fingerprint-default-first">
+              <span>检测首项</span>
+              <CustomSelect
+                disabled={saving}
+                id="fingerprint-default-first"
+                aria-label="检测首项"
+                value={fingerprintDefaults.first}
+                onChange={e => setFingerprintDefaults(v => ({ ...v, first: e.target.value }))}
+              >
+                <option value="fingerprint">指纹检测</option>
+                <option value="candy">糖果检测</option>
+              </CustomSelect>
+            </label>
+            <label className="settings-field" htmlFor="fingerprint-default-fingerprint-count">
+              <span>指纹检测次数</span>
+              <input
+                id="fingerprint-default-fingerprint-count"
+                aria-label="指纹检测次数"
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+                required
+                value={fingerprintDefaults.fingerprint}
+                disabled={saving}
+                onChange={e => setFingerprintDefaults(v => ({ ...v, fingerprint: e.target.value }))}
+              />
+            </label>
+            <label className="settings-field" htmlFor="fingerprint-default-candy-count">
+              <span>糖果检测次数</span>
+              <input
+                id="fingerprint-default-candy-count"
+                aria-label="糖果检测次数"
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+                required
+                value={fingerprintDefaults.candy}
+                disabled={saving}
+                onChange={e => setFingerprintDefaults(v => ({ ...v, candy: e.target.value }))}
+              />
+            </label>
+          </div>
           <div className="task-auto-empty">复用全局降智检测设置，不更改检测模型、判定阈值、分组或账号独立覆盖规则。</div>
         </section>
         <section className="task-auto-settings overload-cooldown-settings" aria-labelledby="overload-auto-cooldown-title">
@@ -4602,7 +4665,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
-          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES)); setTimeZone(DEFAULT_DISPLAY_TIME_ZONE); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setFingerprintDefaults({ intervalMinutes: "360", maxConcurrentAccounts: "3" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
+          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES)); setTimeZone(DEFAULT_DISPLAY_TIME_ZONE); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setFingerprintDefaults({ intervalMinutes: "360", maxConcurrentAccounts: "3", first: "fingerprint", fingerprint: "1", candy: "0" }); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>

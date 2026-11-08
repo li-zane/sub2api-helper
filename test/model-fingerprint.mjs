@@ -28,9 +28,9 @@ const options = {
   filePath: path.join(directory, "state.json"), now: () => time,
   getContext: () => ({ config: { baseUrl: "https://fixture", adminApiKey: "private" }, backend, profiles: [{ id: "default", groupIds: ["10", "20"] }], jobs: [{ email: "a@example.test", planType: "free" }] }),
   listTargets: async () => [{ id: 1, email: "a@example.test", profileId: "default" }], getAccount: async () => structuredClone(account),
-  sample: async (_config, _account, _model, _prompt, signal) => { calls++; if (phase === "held") await new Promise(resolve => { release = resolve; signal.addEventListener("abort", resolve, { once: true }); }); signal.throwIfAborted(); if (phase === "error") throw new Error("private-token"); return "1, 20, 42"; },
+  sample: async (_config, _account, _model, _prompt, signal) => { calls++; if (phase === "held") await new Promise(resolve => { release = resolve; signal.addEventListener("abort", resolve, { once: true }); }); signal.throwIfAborted(); if (phase === "error") throw new Error("private-token"); return Array.from({length:100},(_,i)=>i+1).join(", "); },
   detectorLoader: async () => ({ builtAt: "fixture-build", analyze: () => makeAnalysis(phase === "mismatch" ? "gpt-5.4" : "gpt-5.5", phase === "unknown" ? .5 : .95) }),
-  challenges: () => Array.from({ length: 3 }, () => ({ prompt: "fixture challenge", expected_count: 3 })),
+  challenges: () => Array.from({ length: 3 }, () => ({ prompt: "fixture challenge", expected_count: 100 })),
   updateGroups: async (_config, _id, ids) => { if (failPut) throw new Error("upstream private-token"); account.group_ids = ids; writes++; },
 };
 const service = new ModelFingerprintService(options);
@@ -95,7 +95,7 @@ try {
   const jobs = [1, 2, 3].map(id => ({ email: `parallel${id}@example.test`, planType: "free" }));
   const parallel = new ModelFingerprintService({ ...options, filePath: path.join(directory, "parallel.json"), getContext: () => ({ ...options.getContext(), jobs }), listTargets: async () => jobs.map((j, i) => ({ id: i + 1, email: j.email, profileId: "default" })), getAccount: async (_config, id) => ({ id, status: "active", group_ids: [] }), sample: async (_config, account, _model, _prompt, signal) => {
     if (!started.includes(account.id)) { started.push(account.id); concurrent++; peak = Math.max(peak, concurrent); await new Promise(resolve => { releases.set(account.id, resolve); signal.addEventListener("abort", resolve, { once: true }); }); concurrent--; }
-    signal.throwIfAborted(); return "1, 20, 42";
+    signal.throwIfAborted(); return Array.from({length:100},(_,i)=>i+1).join(", ");
   }, updateGroups: async () => {}, detectorLoader: async () => ({ builtAt: "fixture", analyze: () => makeAnalysis() }) });
   await parallel.saveSettings({ ...settings, maxConcurrentAccounts: 2 }); parallel.stopped = false;
   const runs = jobs.map(j => parallel.run(j.email, j.planType, { manual: true }));
@@ -107,7 +107,7 @@ try {
   let retryCalls = 0, retryWrites = 0;
   const retryService = new ModelFingerprintService({ ...options, filePath: path.join(directory, "retry.json"),
     getAccount: async () => ({ id: 1, type: "oauth", status: "active", group_ids: ["10","20"] }),
-    sample: async () => { retryCalls++; if (retryCalls === 2) throw Object.assign(new Error("private-token"), { fingerprintFailure: true, code: "UPSTREAM", httpStatus: 503, retryable: true }); return "1, 20, 42"; },
+    sample: async () => { retryCalls++; if (retryCalls === 2) throw Object.assign(new Error("private-token"), { fingerprintFailure: true, code: "UPSTREAM", httpStatus: 503, retryable: true }); return Array.from({length:100},(_,i)=>i+1).join(", "); },
     updateGroups: async () => { retryWrites++; }, detectorLoader: async () => ({ builtAt: "fixture", analyze: () => makeAnalysis() }) });
   await retryService.saveSettings(settings);
   const retried = await retryService.run("a@example.test", "free", { manual: true });
@@ -127,7 +127,7 @@ try {
   await retryService.saveSettings(settings);
   retryService.sample = async () => { retryCalls++; throw Object.assign(new Error("secret upstream"),{fingerprintFailure:true,code:"UPSTREAM",httpStatus:503,retryable:true}); };
   const beforeBound = retryCalls;
-  await retryService.run("a@example.test", "free", { manual: true }); assert.equal(retryCalls,beforeBound+2,"transient retries stop after the second attempt");
+  await retryService.run("a@example.test", "free", { manual: true }); assert.equal(retryCalls,beforeBound+3,"transient retries stop after the third attempt");
   retryService.getAccount = async () => ({id:1,status:"paused"}); time+=1000;
   await assert.rejects(retryService.run("a@example.test", "free", {manual:true}),/暂停/);
   const skipped = retryService.history("a@example.test","free").records[0]; assert.equal(skipped.failure.code,"ACCOUNT_PAUSED"); assert(skipped.error.includes("暂停"),"outer-stage failure details persist in history");

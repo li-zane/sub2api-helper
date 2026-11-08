@@ -4,7 +4,7 @@ const FAILURE_MESSAGES = {
   BANNED: "账号已封禁或永久停用", AUTH: "模型凭据失效或无权限，请刷新授权", QUOTA: "账号额度已用尽或受到请求频率限制",
   OVERLOADED: "模型上游过载", UPSTREAM: "模型上游服务异常", HTTP: "模型接口拒绝请求",
   TIMEOUT: "模型请求超时", NETWORK: "代理或网络连接失败", INCOMPLETE: "模型流式响应中断或未完成",
-  EMPTY: "模型未返回可评分文本", ACCOUNT_PAUSED: "账号已暂停或状态异常，本轮跳过",
+  EMPTY: "模型未返回可评分文本", SHORT_OUTPUT: "模型已结束回答，但有效数字不足，已保留原文", CANDY_UNCLEAR: "糖果测试未能明确提取最终答案", ACCOUNT_PAUSED: "账号已暂停或状态异常，本轮跳过",
   ACCOUNT_MISSING: "账号尚未加入 Sub2API 号池", CREDENTIALS: "账号缺少可用模型凭据",
   PROXY: "账号绑定的代理不可用", REFERENCE: "指纹参考库加载失败或超时", UNKNOWN: "检测未完成，请检查账号配置及网络",
 };
@@ -12,7 +12,7 @@ function failure(code, { httpStatus = null, retryable = false, upstreamCode = nu
   return Object.assign(new Error(FAILURE_MESSAGES[code]), { fingerprintFailure: true, code, httpStatus, retryable, upstreamCode });
 }
 export function fingerprintFailure(error) {
-  if (error?.fingerprintFailure && Object.hasOwn(FAILURE_MESSAGES, error.code)) return { code: error.code, message: FAILURE_MESSAGES[error.code], httpStatus: error.httpStatus ?? null, retryable: error.retryable === true, upstreamCode: error.upstreamCode ?? null };
+  if (error?.fingerprintFailure && Object.hasOwn(FAILURE_MESSAGES, error.code)) return { code: error.code, message: FAILURE_MESSAGES[error.code], httpStatus: error.httpStatus ?? null, retryable: error.retryable === true, upstreamCode: error.upstreamCode ?? null, ...(error.incompleteReason ? { incompleteReason: error.incompleteReason } : {}) };
   const message = String(error?.message || "");
   const code = /timed?\s*out|timeout|超时/i.test(message) ? "TIMEOUT" : /代理/.test(message) ? "PROXY" : /connect|curl|tls|socket|network|fetch failed|econn|enotfound/i.test(message) ? "NETWORK" : /已暂停|状态异常/.test(message) ? "ACCOUNT_PAUSED" : /尚未加入/.test(message) ? "ACCOUNT_MISSING" : /凭据/.test(message) ? "CREDENTIALS" : /参考库/.test(message) ? "REFERENCE" : "UNKNOWN";
   return { code, message: FAILURE_MESSAGES[code], httpStatus: null, retryable: ["TIMEOUT", "NETWORK"].includes(code), upstreamCode: null };
@@ -71,30 +71,53 @@ export function createFingerprintAccountReader(request) {
 const replyText = value => value?.output?.flatMap(item => (item.content || []).filter(p => p.type === "output_text").map(p => p.text || "")).join("") || value?.choices?.[0]?.message?.content || "";
 const withPartialReply = (error, text) => Object.assign(error, { fingerprintReply: typeof text === "string" ? text : "" });
 
-export function extractFingerprintReply(text) {
-  let deltas = "", completed = null, streaming = false;
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.startsWith("data:")) continue;
-    streaming = true;
-    let event; try { event = JSON.parse(line.slice(5).trim()); } catch { continue; }
-    if (event.type === "response.output_text.delta") deltas += event.delta || "";
-    if (event.choices?.[0]?.delta?.content) deltas += event.choices[0].delta.content;
-    if (event.type === "response.completed") completed = event.response;
-    if (["response.failed", "response.incomplete", "error"].includes(event.type)) throw withPartialReply(upstreamFailure(event), deltas || replyText(event.response));
-  }
-  if (streaming && !completed) throw withPartialReply(failure("INCOMPLETE", { retryable: true }), deltas);
-  if (deltas) return deltas;
-  if (!completed) { try { completed = JSON.parse(text); } catch {} }
-  if (completed?.error || completed?.status && completed.status !== "completed") throw withPartialReply(upstreamFailure(completed), replyText(completed));
-  const output = completed?.output?.flatMap(item => (item.content || []).filter(p => p.type === "output_text").map(p => p.text || "")).join("") || completed?.choices?.[0]?.message?.content;
-  if (typeof output !== "string" || !output.trim()) throw failure("EMPTY");
-  return output;
+function sampleUsage(value) {
+  if (!value || typeof value !== 'object') return null;
+  const n = v => Number.isFinite(v) && v >= 0 ? v : null;
+  const inputTokens = n(value.input_tokens ?? value.prompt_tokens), outputTokens = n(value.output_tokens ?? value.completion_tokens);
+  if (inputTokens === null && outputTokens === null && n(value.total_tokens) === null) return null;
+  return {inputTokens, outputTokens, cachedInputTokens:n(value.input_tokens_details?.cached_tokens ?? value.prompt_tokens_details?.cached_tokens), reasoningTokens:n(value.output_tokens_details?.reasoning_tokens ?? value.completion_tokens_details?.reasoning_tokens), totalTokens:n(value.total_tokens) ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null)};
 }
+export function extractFingerprintSample(text) {
+  let deltas = '', completed = null, streaming = false;
+  const done = new Map();
+  const metadata = response => ({usage:sampleUsage(response?.usage), finishStatus:response?.status || 'completed'});
+  const partialError = event => {
+    const error = withPartialReply(upstreamFailure(event), replyText(event.response || event) || deltas || [...done.values()].join(''));
+    const reason = event.response?.incomplete_details?.reason || event.incomplete_details?.reason;
+    if (['max_output_tokens','content_filter'].includes(reason)) error.incompleteReason = reason;
+    error.fingerprintMetadata = metadata(event.response || event);
+    return error;
+  };
+  // SSE data may span multiple lines. Completion snapshots are authoritative:
+  // intermediaries can omit/coalesce delta events without losing the final output.
+  for (const block of text.split(/\r?\n\r?\n/)) {
+    const lines = block.split(/\r?\n/).filter(line=>line.startsWith('data:'));
+    if (!lines.length) continue;
+    streaming = true;
+    const data = lines.map(line=>line.slice(5).trimStart()).join('\n');
+    if (data.trim() === '[DONE]') continue;
+    let event; try { event = JSON.parse(data); } catch { continue; }
+    if (event.type === 'response.output_text.delta') deltas += event.delta || '';
+    if (event.choices?.[0]?.delta?.content) deltas += event.choices[0].delta.content;
+    if (event.type === 'response.output_text.done') done.set(`${event.output_index ?? 0}:${event.content_index ?? 0}`,event.text || '');
+    if (event.type === 'response.completed') completed = event.response || {};
+    if (['response.failed','response.incomplete','error'].includes(event.type)) throw partialError(event);
+  }
+  if (streaming && !completed) throw withPartialReply(failure('INCOMPLETE',{retryable:true}),deltas || [...done.values()].join(''));
+  if (!completed) { try { completed = JSON.parse(text); } catch {} }
+  if (completed?.error || completed?.status && completed.status !== 'completed') throw partialError(completed);
+  const snapshot = replyText(completed);
+  const output = snapshot || [...done.values()].join('') || deltas;
+  if (typeof output !== 'string' || !output.trim()) throw failure('EMPTY',{retryable:true});
+  return {text:output,...metadata(completed),completionSource:snapshot?'completed':done.size?'text_done':'delta'};
+}
+export const extractFingerprintReply = text => extractFingerprintSample(text).text;
 
 // Direct account-specific sampling avoids the admin /test route's hard-coded "hi".
 // Credentials stay on this server; the reference detector only receives local text.
 export function createFingerprintSampler({ getAccount, getProxies, transportFactory = () => new TlsFingerprintTransport({ profile: "chrome146", rotateProxySessions: false, sameProxyRiskRetries: 0, cloudflareSolver: false }), testUrl } = {}) {
-  return async (config, account, model, prompt, signal) => {
+  return async (config, account, model, prompt, signal, { onMetadata } = {}) => {
     let credentialAccount = account;
     if (account.parent_account_id != null) credentialAccount = await getAccount(config, account.parent_account_id);
     const credentials = credentialAccount.credentials || {};
@@ -129,8 +152,9 @@ export function createFingerprintSampler({ getAccount, getProxies, transportFact
         let event; try { event = JSON.parse(text); } catch {}
         throw upstreamFailure(event, response.status);
       }
-      try { return extractFingerprintReply(text); }
+      try { const sample = extractFingerprintSample(text); onMetadata?.({usage:sample.usage,finishStatus:sample.finishStatus,completionSource:sample.completionSource}); return sample.text; }
       catch (error) {
+        if (error.fingerprintMetadata) onMetadata?.(error.fingerprintMetadata);
         if (error.fingerprintFailure && error.httpStatus == null) error.httpStatus = response.status;
         throw error;
       }

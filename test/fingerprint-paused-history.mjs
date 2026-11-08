@@ -21,6 +21,6 @@ try {
   assert.deepEqual(service.snapshot(email, "free").recentResults, before, "idle time/restart expired the last six rounds");
   const next = { status: "mismatch", checkedAt: new Date(now).toISOString(), models: [], signature: service.signature(email, "free") };
   service.recordResult(service.accounts.get(email), next); await service.persist();
-  assert.deepEqual(service.snapshot(email, "free").recentResults, [{ checkedAt: next.checkedAt, status: next.status }, ...before.slice(0, 5)], "a real result did not advance exactly one slot");
+  assert.deepEqual(service.snapshot(email, "free").recentResults, [{ checkedAt: next.checkedAt, status: next.status, method:'fingerprint' }, ...before.slice(0, 5)], "a real result did not advance exactly one slot");
   console.log("FINGERPRINT_PAUSED_HISTORY_PASS cancellation/disable/poll/restart/30-day idle preserve last six timestamps and statuses; only a new record advances history");
 } finally { await service.stop(); assert(root.startsWith(os.tmpdir() + path.sep)); await fs.rm(root, { recursive: true, force: true }); }

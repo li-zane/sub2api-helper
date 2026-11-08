@@ -39,6 +39,7 @@ async function api(token, url, body, signal) {
   const response = await fetch(url, { signal, method: body === undefined ? "GET" : "POST", headers: { "x-console-token": token, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const data = await response.json(); if (!response.ok) throw new Error(data.error || "指纹检测请求失败"); return data;
 }
+
 function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRef, children }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -72,8 +73,10 @@ function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRe
     {children}
   </dialog>;
 }
+
 function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
   const [text, setText] = useState(() => toText(value.models));
+  const testSequence = value.testSequence || { first: "fingerprint", fingerprint: 1, candy: 0 };
   return <section className="fingerprint-defaults" aria-label="默认降智检测规则">
     <label className="settings-field">
       <span className="field-label-row">
@@ -89,19 +92,76 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
       <label className="settings-field"><span>最低归因概率</span><input aria-label="最低归因概率" type="number" min="0.5" max="1" step="0.05" value={value.minProbability ?? 0.8} disabled={disabled} onChange={event => onChange({ ...value, minProbability: event.target.value })} /></label>
       <label className="settings-field"><span>同时检测账号数（1–16）</span><input aria-label="同时检测账号数量" type="number" min="1" max="16" value={value.maxConcurrentAccounts ?? 3} disabled={disabled} onChange={event => onChange({ ...value, maxConcurrentAccounts: event.target.value })} /></label>
     </div>
+    <div className="fingerprint-three-fields">
+      <label className="settings-field">
+        <span className="field-label-row">
+          <span>检测首项</span>
+          <HelpTip title="检测轮换" label="查看检测轮换说明">
+            每个到期检测周期执行一种测试，各账号独立保存进度。按首项和次数循环，如指纹 1 次后进行糖果 N 次；次数不能同时为 0。
+          </HelpTip>
+        </span>
+        <CustomSelect
+          disabled={disabled}
+          aria-label="检测首项"
+          value={testSequence.first || "fingerprint"}
+          onChange={event => onChange({ ...value, testSequence: { ...testSequence, first: event.target.value } })}
+        >
+          <option value="fingerprint">指纹检测</option>
+          <option value="candy">糖果检测</option>
+        </CustomSelect>
+      </label>
+      <label className="settings-field">
+        <span>指纹检测次数</span>
+        <input
+          aria-label="指纹检测次数"
+          type="number"
+          min="0"
+          max="100"
+          value={testSequence.fingerprint ?? 1}
+          disabled={disabled}
+          onChange={event => onChange({ ...value, testSequence: { ...testSequence, fingerprint: event.target.value === "" ? "" : Number(event.target.value) } })}
+        />
+      </label>
+      <label className="settings-field">
+        <span>糖果检测次数</span>
+        <input
+          aria-label="糖果检测次数"
+          type="number"
+          min="0"
+          max="100"
+          value={testSequence.candy ?? 0}
+          disabled={disabled}
+          onChange={event => onChange({ ...value, testSequence: { ...testSequence, candy: event.target.value === "" ? "" : Number(event.target.value) } })}
+        />
+      </label>
+    </div>
   </section>;
 }
+
 export function FingerprintSettingsButton({ token, planTypes = [] }) {
   const returnFocusRef = useRef(null);
   const [data, setData] = useState(null), [error, setError] = useState(""), [busy, setBusy] = useState(false), [newPlan, setNewPlan] = useState(""), [reference, setReference] = useState(null);
   async function open(event) { returnFocusRef.current = event.currentTarget; setBusy(true); setError(""); try { setData(await api(token, "/api/model-fingerprint/settings")); } catch (e) { setError(e.message); } finally { setBusy(false); } }
   const patch = changes => setData(current => ({ ...current, settings: { ...current.settings, ...changes } }));
-  const plans = data ? [...new Set([...planTypes, ...Object.keys(data.settings.planDefaults), ...data.profiles.flatMap(p => p.planTypes || [])])].sort() : [];
+  const plans = data ? [...new Set([...planTypes, ...Object.keys(data.settings.planDefaults || {}), ...data.profiles.flatMap(p => p.planTypes || [])])].sort() : [];
   async function save(event) {
     event.preventDefault(); setBusy(true); setError("");
     try {
+      const seq = data.settings.testSequence || { first: "fingerprint", fingerprint: 1, candy: 0 };
+      const fp = Number(seq.fingerprint);
+      const cd = Number(seq.candy);
+      if (seq.fingerprint == null || seq.candy == null || !String(seq.fingerprint).trim() || !String(seq.candy).trim() || !["fingerprint", "candy"].includes(seq.first) || !Number.isInteger(fp) || fp < 0 || fp > 100 || !Number.isInteger(cd) || cd < 0 || cd > 100 || (fp === 0 && cd === 0)) {
+        throw new Error("检测轮换须选择首项；指纹、糖果次数须为 0–100 的整数，且不能同时为 0");
+      }
       const groupPolicies = Object.fromEntries(data.profiles.map(p => [p.id, Object.fromEntries(p.groupIds.map(id => [id, data.settings.groupPolicies[p.id]?.[id] || "default"]))]));
-      await api(token, "/api/model-fingerprint/settings", { settings: { ...data.settings, groupPolicies } }); setData(null);
+      await api(token, "/api/model-fingerprint/settings", {
+        settings: {
+          ...data.settings,
+          testSequence: { first: seq.first, fingerprint: fp, candy: cd },
+          groupPolicies
+        }
+      });
+      setData(null);
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   return <><button type="button" className="secondary-button topbar-action-button" disabled={!token || busy} onClick={open}><Activity size={14} />降智检测设置</button>
@@ -132,7 +192,7 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
             未配置的 PlanType 默认关闭；账号独立设置优先。新账号识别订阅类型后自动继承对应开关状态。
           </HelpTip>
         </div>
-        <div className="fingerprint-plan-list">{plans.map(plan => <label key={plan} className="plan-check-pill"><input type="checkbox" disabled={busy} checked={data.settings.planDefaults[plan] === true} onChange={e => patch({ planDefaults: { ...data.settings.planDefaults, [plan]: e.target.checked } })} /><span>{plan}</span></label>)}</div>
+        <div className="fingerprint-plan-list">{plans.map(plan => <label key={plan} className="plan-check-pill"><input type="checkbox" disabled={busy} checked={data.settings.planDefaults?.[plan] === true} onChange={e => patch({ planDefaults: { ...data.settings.planDefaults, [plan]: e.target.checked } })} /><span>{plan}</span></label>)}</div>
         <div className="fingerprint-add-plan"><input aria-label="添加检测 PlanType" disabled={busy} value={newPlan} onChange={e => setNewPlan(e.target.value)} placeholder="输入自定义原始 PlanType" /><button type="button" className="secondary-button" disabled={busy || !newPlan.trim()} onClick={() => { patch({ planDefaults: { ...data.settings.planDefaults, [newPlan.trim().toLowerCase()]: false } }); setNewPlan(""); }}>添加类型</button></div>
       </section>
       <section className="fingerprint-section">
@@ -151,12 +211,62 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
     </form></Dialog>}
   </>;
 }
-function AttributionModels({ models, parentStatus }) {
+
+function AttributionModels({ models, parentStatus, method = "fingerprint" }) {
+  const isCandyRound = method === "candy";
   return <div className="fingerprint-timeline-models">{models.map((r, index) => {
+    const isCandy = isCandyRound || r.method === "candy";
     const modelStatus = r.status || "unknown";
     const isMatch = modelStatus === "match";
     const isMismatch = modelStatus === "mismatch";
     const isError = modelStatus === "error";
+
+    if (isCandy) {
+      const extracted = r.extractedFinalAnswer != null ? r.extractedFinalAnswer : (isError ? (r.failure?.code || "检测失败") : "未提取");
+      const statusLabel = modelStatus === "match" ? "通过" : modelStatus === "mismatch" ? "未通过" : modelStatus === "unknown" ? "证据不足" : "检测失败";
+      return <div key={index} className={`fingerprint-timeline-model status-${modelStatus} is-candy`}>
+        <div className="fingerprint-model-stream">
+          <div className="model-stream-left">
+            <strong className="model-name-text">{r.model}</strong>
+            {r.reason && (
+              <HelpTip title={`${r.model} 评分详情`} label={`查看 ${r.model} 评分说明`}>
+                <div>{r.reason}</div>
+              </HelpTip>
+            )}
+            <span className="expected-pill">期望答案：21</span>
+          </div>
+
+          <span className="stream-arrow" aria-hidden="true">→</span>
+
+          <div className="model-stream-right">
+            <span className={`pred-name-text status-${modelStatus}`}>最终答案：{extracted}</span>
+            <span className={`model-status-tag ${modelStatus}`}>{statusLabel}</span>
+          </div>
+        </div>
+
+        {modelStatus === "unknown" && r.reason && <p className="fingerprint-transcript-note">未评分说明：{r.reason}</p>}
+        {r.failure && (
+          <div className="fingerprint-error-note">
+            <span>错误分类：{r.failure.code}</span>
+            {r.failure.httpStatus ? <span> · HTTP {r.failure.httpStatus}</span> : null}
+            {r.failure.upstreamCode ? <span> · {r.failure.upstreamCode}</span> : null}
+          </div>
+        )}
+
+        <div className="fingerprint-timeline-meta">
+          <span>远端账号 ID：{r.accountId || "—"}</span>
+          <span className="meta-sep">·</span>
+          <span>单题检测</span>
+          {r.websiteRulePassed != null && (
+            <>
+              <span className="meta-sep">·</span>
+              <span>包含数字21：{r.websiteRulePassed ? "是" : "否"}</span>
+            </>
+          )}
+        </div>
+      </div>;
+    }
+
     const predName = r.predictionName || r.prediction || (isError ? (r.failure?.code || "检测失败") : "未知");
     const probPercent = r.probability != null ? `${(r.probability * 100).toFixed(2)}%` : null;
 
@@ -262,6 +372,7 @@ function AttributionModels({ models, parentStatus }) {
     </div>;
   })}</div>;
 }
+
 function RoundRequests({ jobId, token, record }) {
   const [open, setOpen] = useState(false), [data, setData] = useState(null), [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -282,20 +393,40 @@ function RoundRequests({ jobId, token, record }) {
     {open && <div className="fingerprint-transcript-content">
       {!data && !error && <p role="status">正在读取采样原文…</p>}
       {error && <div role="alert" className="proxy-quality-error">{error} <button type="button" className="secondary-button compact-btn" onClick={() => setRetry(n => n + 1)}>重试读取</button></div>}
-      {data?.models?.map((model, i) => <section className="fingerprint-request-model" key={i}>
-        <h4>{model.model}<small>号池账号 {model.accountId || "—"}</small></h4>
-        {model.requests?.map((request, j) => <details className="fingerprint-sample" key={j}>
-          <summary>样本 {request.sample} · 请求 {request.attempt} · {request.status === "error" ? "请求失败" : request.accepted ? "有效" : "数字不足"}<span>{request.count ?? 0} / {request.expectedCount ?? "—"} 个数字</span></summary>
-          <p className="fingerprint-transcript-note">{displayDateTime(request.startedAt)} · {((request.durationMs || 0) / 1000).toFixed(1)}s · 最低有效数字数 {request.minimumCount ?? "—"}</p>
-          {request.failure && <p className="proxy-quality-error">{request.failure.code}{request.failure.httpStatus ? ` · HTTP ${request.failure.httpStatus}` : ""}：{request.failure.message}</p>}
-          <strong>Prompt</strong><pre className="fingerprint-request-prompt" tabIndex={0}>{request.prompt}</pre>
-          <strong>{request.status === "error" && request.response ? "回答（未完成，未参与评分）" : "回答"}</strong>
-          {request.response === null ? <p className="fingerprint-transcript-note">本次请求未收到回答正文。</p> : <pre className="fingerprint-request-response" tabIndex={0}>{request.response || "（空回答）"}</pre>}
-        </details>)}
-      </section>)}
+      {data?.models?.map((model, i) => {
+        const isCandyModel = record.method === "candy" || model.method === "candy";
+        return <section className="fingerprint-request-model" key={i}>
+          <h4>{model.model}<small>号池账号 {model.accountId || "—"}</small></h4>
+          {model.requests?.map((request, j) => {
+            const isCandyReq = isCandyModel || request.method === "candy";
+            return <details className="fingerprint-sample" key={j}>
+              <summary>
+                {isCandyReq
+                  ? `糖果题 · 请求 ${request.attempt} · ${request.status === "error" ? "请求失败" : request.accepted ? `有效 (答案 ${request.extractedFinalAnswer ?? "—"})` : "未提取有效答案"}`
+                  : `样本 ${request.sample} · 请求 ${request.attempt} · ${request.status === "error" ? "请求失败" : request.accepted ? "有效" : "数字不足"}`}
+                <span>
+                  {isCandyReq
+                    ? (request.extractedFinalAnswer != null ? `最终答案: ${request.extractedFinalAnswer}` : "期望: 21")
+                    : `${request.count ?? 0} / ${request.expectedCount ?? "—"} 个数字`}
+                </span>
+              </summary>
+              <p className="fingerprint-transcript-note">
+                {displayDateTime(request.startedAt)} · {((request.durationMs || 0) / 1000).toFixed(1)}s
+                {!isCandyReq && ` · 最低有效数字数 ${request.minimumCount ?? "—"}`}
+                {isCandyReq && ` · 题型: 单题问答`}
+              </p>
+              {request.failure && <p className="proxy-quality-error">{request.failure.code}{request.failure.httpStatus ? ` · HTTP ${request.failure.httpStatus}` : ""}：{request.failure.message}</p>}
+              <strong>Prompt</strong><pre className="fingerprint-request-prompt" tabIndex={0}>{request.prompt}</pre>
+              <strong>{request.status === "error" && request.response ? "回答（未完成，未参与评分）" : "回答"}</strong>
+              {request.response === null ? <p className="fingerprint-transcript-note">本次请求未收到回答正文。</p> : <pre className="fingerprint-request-response" tabIndex={0}>{request.response || "（空回答）"}</pre>}
+            </details>;
+          })}
+        </section>;
+      })}
     </div>}
   </details>;
 }
+
 function FingerprintHistoryDialog({ job, token, onClose }) {
   useDisplayTimeZone();
   const [data, setData] = useState(null), [error, setError] = useState("");
@@ -365,6 +496,16 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
     <div className="fingerprint-history-toolbar">
       <div className="fingerprint-history-meta">
         <span className="history-meta-sub">按时间倒序排列</span>
+        {data?.sequence && (
+          <span className="history-meta-sequence">
+            · 轮换：{data.sequence.method === "candy" ? "糖果" : "指纹"} (#{data.sequence.position}/{data.sequence.total})
+          </span>
+        )}
+        {(data?.phase === "running" || data?.phase === "queued") && (
+          <span className="history-phase-pill">
+            · {data.phase === "running" ? `正在检测 (${data.runningMethod === "candy" ? "糖果" : "指纹"})` : `排队中 (#${data.queuePosition ?? 1})`}
+          </span>
+        )}
       </div>
       <button
         className={`secondary-button compact-btn fingerprint-refresh-btn ${refreshing ? "is-refreshing" : refreshed ? "is-refreshed" : ""}`}
@@ -388,7 +529,12 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
       {!data.records.length ? <p className="fingerprint-history-empty">暂无检测记录。</p> : <div className="fingerprint-timeline" role="list">
         {data.records.map((record, index) => {
           const { time, date } = formatTimelineTime(record.checkedAt);
+          const isCandy = record.method === "candy";
           const statusKey = record.status || "unknown";
+          const statusText = isCandy
+            ? (record.status === "match" ? "通过" : record.status === "mismatch" ? "未通过" : record.status === "unknown" ? "证据不足" : "检测失败")
+            : (TITLES[record.status] || "证据不足");
+
           return <div key={record.id || `${record.checkedAt}-${index}`} className={`fingerprint-timeline-node status-${statusKey}`} role="listitem">
             <div className="timeline-node-marker" aria-hidden="true">
               <span className={`marker-dot status-${statusKey}`} />
@@ -399,6 +545,13 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
                   <span className="node-time">{time}</span>
                   <span className="node-date">{date}</span>
                   <span className="node-meta-sep">·</span>
+                  <span className={`node-method-badge ${isCandy ? "method-candy" : "method-fingerprint"}`}>
+                    {isCandy ? "糖果" : "指纹"}
+                  </span>
+                  {record.sequencePosition != null && (
+                    <span className="node-sequence-pos">#{record.sequencePosition}</span>
+                  )}
+                  <span className="node-meta-sep">·</span>
                   <span className="node-source-tag">
                     {record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "历史结果"}
                   </span>
@@ -406,15 +559,21 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
                     <span className="node-meta-sep">·</span>
                     <span className="node-duration">{(record.durationMs / 1000).toFixed(1)}s</span>
                   </>}
+                  {record.usage && (record.usage.totalTokens != null || record.usage.inputTokens != null) && <>
+                    <span className="node-meta-sep">·</span>
+                    <span className="node-usage-pill" title={`输入: ${record.usage.inputTokens ?? "未知"} · 输出: ${record.usage.outputTokens ?? "未知"} · 用量覆盖: ${record.usage.reportedRequests ?? "未知"}/${record.usage.totalRequests ?? "未知"}`}>
+                      {record.usage.complete ? "" : "已报告小计 "}{record.usage.totalTokens ?? "未知"} tok
+                    </span>
+                  </>}
                   {record.legacy && (
                     <HelpTip title="旧版记录说明" label="查看旧版记录说明">
                       旧版记录按当时结论保留，不回填或修改分组；新检测将使用修正后的参考类匹配。
                     </HelpTip>
                   )}
                 </div>
-                <span className={`fingerprint-status ${record.status}`}>{TITLES[record.status] || "证据不足"}</span>
+                <span className={`fingerprint-status ${record.status}`}>{statusText}</span>
               </div>
-              <AttributionModels models={record.models || []} parentStatus={record.status} />
+              <AttributionModels models={record.models || []} parentStatus={record.status} method={record.method || "fingerprint"} />
               <RoundRequests jobId={job.id} token={token} record={record} />
               {record.error && <p className="proxy-quality-error timeline-record-error">{record.error}</p>}
             </div>
@@ -426,6 +585,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
     {error && <p role="alert" className="proxy-quality-error">{error}</p>}
   </div></Dialog>;
 }
+
 export function ModelFingerprintCell({ job, token, onError }) {
   useDisplayTimeZone();
   const [state, setState] = useState(job.modelFingerprint), [editing, setEditing] = useState(false), [showHistory, setShowHistory] = useState(false), [draft, setDraft] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
@@ -441,36 +601,147 @@ export function ModelFingerprintCell({ job, token, onError }) {
     requestPending.current = true;
     setBusy(true); setCheckPending(check); setError(""); try { const result = await api(token, `/api/jobs/${job.id}/model-fingerprint${check ? "/check" : ""}`, body); setState(result.job.modelFingerprint); if (!check) setEditing(false); } catch (e) { setError(e.message); onError?.(e.message); } finally { requestPending.current = false; setBusy(false); setCheckPending(false); }
   }
-  function open() { setDraft({ ...state.override, text: toText(state.override.models ?? state.models), customModels: state.override.models !== null, customInterval: state.override.intervalMinutes !== null, interval: state.override.intervalMinutes ?? state.intervalMinutes }); setError(""); setEditing(true); }
+  function open() {
+    const overrideSeq = state.override?.testSequence;
+    const effectiveSeq = state.testSequence || { first: "fingerprint", fingerprint: 1, candy: 0 };
+    const seqDraft = overrideSeq || effectiveSeq;
+    setDraft({
+      ...state.override,
+      text: toText(state.override?.models ?? state.models),
+      customModels: state.override?.models !== null && state.override?.models !== undefined,
+      customInterval: state.override?.intervalMinutes !== null && state.override?.intervalMinutes !== undefined,
+      interval: state.override?.intervalMinutes ?? state.intervalMinutes,
+      customSequence: overrideSeq !== null && overrideSeq !== undefined,
+      sequenceFirst: seqDraft?.first || "fingerprint",
+      sequenceFingerprint: String(seqDraft?.fingerprint ?? 1),
+      sequenceCandy: String(seqDraft?.candy ?? 0),
+    });
+    setError("");
+    setEditing(true);
+  }
   const result = state.result;
   const recent = (state.recentResults || (result || state.previousResult ? [result || state.previousResult] : [])).slice(0, 6).reverse();
   const rounds = [...Array(6 - recent.length).fill(null), ...recent];
   const checking = state.phase === "running" || state.phase === "queued";
+
+  const checkTitle = () => {
+    if (state.phase === "queued") {
+      return state.sequence?.method === "candy" ? "排队中（糖果）" : "排队中";
+    }
+    if (checking || checkPending) {
+      if (state.runningMethod === "candy") return "正在检测（糖果）";
+      if (state.runningMethod === "fingerprint") return "正在检测（指纹）";
+      return "正在检测";
+    }
+    return "立即检测";
+  };
+
   return <div className={`fingerprint-cell-body${effectiveEnabled ? "" : " is-disabled"}${retainedHistory ? " has-retained-history" : ""}`}>
     <div className="fingerprint-cell-actions">
       <div className="overload-control fingerprint-toggle-control"><span>降智</span>
       <button type="button" role="switch" aria-checked={effectiveEnabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${effectiveEnabled ? "on" : ""}`} disabled={!eligible || !token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
       </div>
       <div className="fingerprint-action-pair">
-      <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={state.phase === "queued" ? "排队中" : checking || checkPending ? "正在检测" : "立即检测"} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models.length || !eligible} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
+      <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={checkTitle()} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models?.length || !eligible} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
       <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title={eligible ? "独立降智检测设置" : codexStatusBlockReason(job)} disabled={!eligible || !token} onClick={open}><Settings2 size={14} /></button>
       </div>
     </div>
     <div className="fingerprint-rounds" role="group" aria-label={`${job.email} 最近 6 轮检测结果`}>
       {rounds.map((round, index) => {
         const status = !round ? "empty" : round.status === "match" ? "match" : round.status === "mismatch" ? "mismatch" : "error";
-        const label = `${retainedHistory ? "检测已暂停 · " : effectiveEnabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${retainedHistory ? "历史结果 · " : ""}${round.status === "match" ? "通过" : round.status === "mismatch" ? "不一致" : round.status === "unknown" ? "证据不足" : "检测失败"} · ${displayDateTime(round.checkedAt)}`}`;
+        const isCandy = round?.method === "candy";
+        let statusText = "暂无检测记录";
+        if (round) {
+          if (isCandy) {
+            statusText = round.status === "match" ? "糖果通过" : round.status === "mismatch" ? "糖果未通过" : round.status === "unknown" ? "证据不足" : "检测失败";
+          } else {
+            statusText = round.status === "match" ? "指纹匹配 (通过)" : round.status === "mismatch" ? "指纹不匹配 (不一致)" : round.status === "unknown" ? "证据不足" : "检测失败";
+          }
+        }
+        const label = `${retainedHistory ? "检测已暂停 · " : effectiveEnabled ? "" : "检测已关闭 · "}${!round ? "暂无检测记录" : `${retainedHistory ? "历史结果 · " : ""}${statusText} · ${displayDateTime(round.checkedAt)}`}`;
         return <button key={round ? `${round.checkedAt}-${index}` : `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
       })}
     </div>
     {showHistory && <FingerprintHistoryDialog job={job} token={token} onClose={() => setShowHistory(false)} />}
-    {editing && <Dialog title={`${job.email} 降智检测`} closeDisabled={busy} onClose={() => setEditing(false)}><form className="fingerprint-form" onSubmit={e => { e.preventDefault(); update({ enabled: draft.enabled, models: draft.customModels ? fromText(draft.text) : null, intervalMinutes: draft.customInterval ? draft.interval : null }); }}>
+    {editing && <Dialog title={`${job.email} 降智检测`} closeDisabled={busy} onClose={() => setEditing(false)}><form className="fingerprint-form" onSubmit={e => {
+      e.preventDefault();
+      let testSequence = null;
+      if (draft.customSequence) {
+        const fp = Number(draft.sequenceFingerprint);
+        const cd = Number(draft.sequenceCandy);
+        if (!String(draft.sequenceFingerprint).trim() || !String(draft.sequenceCandy).trim() || !["fingerprint", "candy"].includes(draft.sequenceFirst) || !Number.isInteger(fp) || fp < 0 || fp > 100 || !Number.isInteger(cd) || cd < 0 || cd > 100 || (fp === 0 && cd === 0)) {
+          setError("检测轮换须选择首项；指纹、糖果次数须为 0–100 的整数，且不能同时为 0");
+          return;
+        }
+        testSequence = {
+          first: draft.sequenceFirst,
+          fingerprint: fp,
+          candy: cd,
+        };
+      }
+      update({
+        enabled: draft.enabled,
+        models: draft.customModels ? fromText(draft.text) : null,
+        intervalMinutes: draft.customInterval ? (draft.interval === "" ? null : Number(draft.interval)) : null,
+        testSequence,
+      });
+    }}>
       <label className="settings-field"><span>账号检测开关</span><CustomSelect disabled={busy} aria-label="账号检测开关" value={draft.enabled == null ? "inherit" : String(draft.enabled)} onChange={e => setDraft({ ...draft, enabled: e.target.value === "inherit" ? null : e.target.value === "true" })}><option value="inherit">继承 PlanType</option><option value="true">独立开启</option><option value="false">独立关闭</option></CustomSelect></label>
       <label className="fingerprint-checkbox"><input type="checkbox" checked={draft.customModels} onChange={e => setDraft({ ...draft, customModels: e.target.checked })} />使用独立检测模型</label>
       <label className="settings-field"><span>账号检测模型</span><textarea aria-label="账号检测模型" rows={4} value={draft.text} disabled={!draft.customModels} onChange={e => setDraft({ ...draft, text: e.target.value })} /></label>
       <label className="fingerprint-checkbox"><input type="checkbox" checked={draft.customInterval} onChange={e => setDraft({ ...draft, customInterval: e.target.checked })} />使用独立检测间隔</label>
       <label className="settings-field"><span>账号检测间隔（分钟）</span><input aria-label="账号检测间隔（分钟）" type="number" min="5" max="43200" disabled={!draft.customInterval} value={draft.interval} onChange={e => setDraft({ ...draft, interval: e.target.value })} /></label>
-      {result && <section className="fingerprint-section"><h3>最近模型归因</h3>{result.models.map((r, i) => <p key={i}>{r.model} → {r.predictionName || r.prediction || r.error || "未知"} · {TITLES[r.status]} {r.probability != null ? `(${(r.probability * 100).toFixed(1)}%)` : ""}<small className="fingerprint-reference">期望：{r.expected}；参考库：{r.referenceBuiltAt || "—"}</small></p>)}</section>}
+      <label className="fingerprint-checkbox"><input type="checkbox" aria-label="使用独立检测轮换" checked={draft.customSequence} onChange={e => setDraft({ ...draft, customSequence: e.target.checked })} />使用独立检测轮换</label>
+      <div className="fingerprint-three-fields">
+        <label className="settings-field">
+          <span>检测首项</span>
+          <CustomSelect
+            disabled={!draft.customSequence || busy}
+            aria-label="账号检测首项"
+            value={draft.sequenceFirst}
+            onChange={e => setDraft({ ...draft, sequenceFirst: e.target.value })}
+          >
+            <option value="fingerprint">指纹检测</option>
+            <option value="candy">糖果检测</option>
+          </CustomSelect>
+        </label>
+        <label className="settings-field">
+          <span>指纹检测次数</span>
+          <input
+            aria-label="账号指纹检测次数"
+            type="number"
+            min="0"
+            max="100"
+            disabled={!draft.customSequence || busy}
+            value={draft.sequenceFingerprint}
+            onChange={e => setDraft({ ...draft, sequenceFingerprint: e.target.value })}
+          />
+        </label>
+        <label className="settings-field">
+          <span>糖果检测次数</span>
+          <input
+            aria-label="账号糖果检测次数"
+            type="number"
+            min="0"
+            max="100"
+            disabled={!draft.customSequence || busy}
+            value={draft.sequenceCandy}
+            onChange={e => setDraft({ ...draft, sequenceCandy: e.target.value })}
+          />
+        </label>
+      </div>
+      {result && <section className="fingerprint-section">
+        <h3>最近模型归因</h3>
+        {result.models?.map((r, i) => {
+          const isCandy = result.method === "candy" || r.method === "candy";
+          return <p key={i}>
+            {r.model} → {isCandy ? (r.extractedFinalAnswer != null ? `答案 ${r.extractedFinalAnswer}` : r.error || "未提取") : (r.predictionName || r.prediction || r.error || "未知")} · {isCandy ? (r.status === "match" ? "通过" : r.status === "mismatch" ? "未通过" : r.status === "unknown" ? "证据不足" : "检测失败") : (TITLES[r.status] || "证据不足")} {r.probability != null ? `(${(r.probability * 100).toFixed(1)}%)` : ""}
+            <small className="fingerprint-reference">
+              {isCandy ? `期望答案：21；单题模式` : `期望：${r.expected}；参考库：${r.referenceBuiltAt || "—"}`}
+            </small>
+          </p>;
+        })}
+      </section>}
       {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" disabled={busy} onClick={() => setEditing(false)}>取消</button><button className="primary-button" disabled={busy}>保存账号检测设置</button></div>
     </form></Dialog>}
   </div>;
