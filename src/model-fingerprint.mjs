@@ -253,8 +253,9 @@ export class ModelFingerprintService {
     const common = () => ({accountId:String(account.id), ...model, method, sampleFailures, requestCount:requests.length, requests});
     try {
       const challenges = method === 'candy' ? [{prompt:CANDY_PROMPT, expected_answer:21}] : this.challenges(3);
+      const maxAttempts = method === 'candy' ? 1 : 3;
       for (const [index, challenge] of challenges.entries()) {
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           const minimumCount = method === 'fingerprint' ? Math.max(80,Math.ceil(challenge.expected_count * .55)) : null;
           const request = {sample:index+1, attempt, method, prompt:challenge.prompt, response:null, startedAt:new Date(this.now()).toISOString(), expectedCount:challenge.expected_count ?? null, minimumCount, ...(method === 'candy' ? {expectedAnswer:21, promptSha256:CANDY_PROMPT_SHA256} : {})};
           const started = this.now(); requests.push(request);
@@ -266,10 +267,10 @@ export class ModelFingerprintService {
             else request.extractedFinalAnswer = gradeCandy(text).extractedFinalAnswer;
             request.accepted = method === 'fingerprint' ? request.count >= minimumCount : request.extractedFinalAnswer !== null;
             if (!request.accepted) {
-              const detail = fingerprintFailure({fingerprintFailure:true,code:method === 'fingerprint' ? 'SHORT_OUTPUT' : 'CANDY_UNCLEAR',retryable:true});
+              const detail = fingerprintFailure({fingerprintFailure:true,code:method === 'fingerprint' ? 'SHORT_OUTPUT' : 'CANDY_UNCLEAR',retryable:method === 'fingerprint'});
               Object.assign(request,{status:'invalid',failure:detail});
               sampleFailures.push({sample:index+1,attempt,...detail});
-              if (attempt < 3) { await delay(1000,undefined,{signal}); continue; }
+              if (attempt < maxAttempts) { await delay(1000,undefined,{signal}); continue; }
             }
             outputs.push({text,expected_count:challenge.expected_count}); break;
           } catch (error) {
@@ -278,7 +279,7 @@ export class ModelFingerprintService {
             Object.assign(request,{status:'error',response:typeof error.fingerprintReply === 'string' ? error.fingerprintReply : null,failure:detail,accepted:false,durationMs:this.now()-started});
             if (method === 'fingerprint') request.count = request.response === null ? 0 : parseNumbers(request.response).length;
             sampleFailures.push({sample:index+1,attempt,...detail});
-            if (!detail.retryable || attempt === 3) throw error;
+            if (!detail.retryable || attempt === maxAttempts) throw error;
             await delay(1000,undefined,{signal});
           }
         }
@@ -290,7 +291,7 @@ export class ModelFingerprintService {
       }
       if (method === 'candy') {
         const grade = gradeCandy(outputs[0].text);
-        return {...common(),...grade, usedOutputs:grade.extractedFinalAnswer === null ? 0 : 1, samplingComplete:grade.extractedFinalAnswer !== null, decision:grade.extractedFinalAnswer === null ? 'unscorable' : 'scored'};
+        return {...common(),...grade, responseComplete:true, usedOutputs:grade.extractedFinalAnswer === null ? 0 : 1, samplingComplete:grade.extractedFinalAnswer !== null, decision:grade.extractedFinalAnswer === null ? 'unscorable' : 'scored'};
       }
       const analysis = detector.analyze(outputs,{strict:true});
       for (const request of requests.filter(r=>r.status === 'success')) {
@@ -350,7 +351,9 @@ export class ModelFingerprintService {
           controller.signal.throwIfAborted();
         }
         this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), identities, routingIdentities, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source: manual ? "manual" : "scheduled", status: aggregateFingerprint(results), models: results });
-        if (results.length && results.every(r=>r.samplingComplete)) entry.sequenceCursor = {signature:step.signature,index:(step.index+1)%step.total};
+        // A completed candy answer consumes its one scheduled turn even when
+        // unscorable. Transport/auth failures keep the slot for the next check.
+        if (results.length && results.every(r=>r.samplingComplete || method === 'candy' && r.responseComplete)) entry.sequenceCursor = {signature:step.signature,index:(step.index+1)%step.total};
         if (method === 'fingerprint') entry.groupSyncPending = true;
         await this.persist();
       });

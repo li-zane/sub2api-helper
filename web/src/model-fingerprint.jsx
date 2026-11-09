@@ -101,7 +101,7 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
       <div className="section-title-row">
         <h3>检测轮换</h3>
         <HelpTip title="检测轮换" label="查看检测轮换说明">
-          每个到期检测周期执行一种测试，各账号独立保存进度。按首项和次数循环，如指纹 1 次后进行糖果 N 次；次数不能同时为 0。
+          每个到期检测周期执行一种测试，各账号独立保存进度。按首项和次数循环，如指纹 1 轮后进行糖果 N 轮。指纹每轮采样 3 次；糖果每模型只请求 1 次，完整回答后进入下一步。次数不能同时为 0。
         </HelpTip>
       </div>
       <div className="fingerprint-three-fields">
