@@ -40,7 +40,7 @@ async function fixture({reply='未给出最终答案',error=null,models=['fixtur
     challenges:()=>[1,2,3].map(i=>({prompt:'fingerprint-'+i,expected_count:100})),
     sample:async(_config,_account,_model,prompt,_signal,{onMetadata})=>{calls++;onMetadata({finishStatus:'completed',usage:{inputTokens:10,outputTokens:20,totalTokens:30}});if(error)throw error;return prompt===CANDY_PROMPT?reply:Array.from({length:100},(_,i)=>i+1).join(',');},
     detectorLoader:async()=>({analyze:()=>({used_outputs:3,decision:'scored',probability_status:'reference_calibrated',probability:.99,prediction:'fixture',results:[{model:'fixture'}]})})};
-  const service=new ModelFingerprintService(options);await service.saveSettings({models,testSequence:sequence});
+  const service=new ModelFingerprintService(options);await service.saveSettings({models,testSequence:sequence,failureRetries:0});
   return{service,options,calls:()=>calls};
 }
 try{
@@ -55,7 +55,7 @@ try{
       await f.service.stop();const restored=new ModelFingerprintService(f.options);try{await restored.load();assert.equal(restored.snapshot('candy@example.test','free').sequence.method,'fingerprint');}finally{await restored.stop();}
     }finally{await f.service.stop();}
   });
-  await test('transport-failure-is-one-candy-request-and-keeps-cycle-for-next-interval',async()=>{
+  await test('disabled-retry-transport-failure-is-one-candy-request-and-keeps-cycle',async()=>{
     const error=Object.assign(Error('fixture network'),{fingerprintFailure:true,code:'NETWORK',retryable:true});const f=await fixture({error});
     try{const state=await f.service.run('candy@example.test','free',{manual:true});assert.equal(f.calls(),1);assert.equal(state.result.status,'error');assert.equal(state.sequence.position,1);}finally{await f.service.stop();}
   });
@@ -70,7 +70,7 @@ try{
   await test('explicit-wrong-candy-consumes-cycle-step',async()=>{
     const f=await fixture({reply:'<final_answer>29</final_answer>'});try{const state=await f.service.run('candy@example.test','free',{manual:true});assert.equal(f.calls(),1);assert.equal(state.result.status,'mismatch');assert.equal(state.result.models[0].extractedFinalAnswer,29);assert.equal(state.sequence.method,'fingerprint');}finally{await f.service.stop();}
   });
-  await test('incomplete-candy-retains-partial-reply-without-scoring-or-retry',async()=>{
+  await test('disabled-retry-incomplete-candy-retains-partial-reply-without-scoring',async()=>{
     const error=Object.assign(Error('interrupted'),{fingerprintFailure:true,code:'INCOMPLETE',retryable:true,fingerprintReply:'<final_answer>21</final_answer>'});
     const f=await fixture({error});try{const state=await f.service.run('candy@example.test','free',{manual:true});assert.equal(f.calls(),1);assert.equal(state.result.status,'error');assert.equal(state.sequence.position,1);const record=f.service.historyDetail('candy@example.test',state.result.id).record;assert.equal(record.models[0].requests[0].response,error.fingerprintReply);assert.equal(record.models[0].requests[0].accepted,false);}finally{await f.service.stop();}
   });

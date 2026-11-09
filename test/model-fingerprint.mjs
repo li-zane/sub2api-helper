@@ -124,7 +124,7 @@ try {
   await retryService.run("a@example.test", "free", { manual: true });
   assert.equal(retryCalls, beforeMultiQuota + 1, "429 must stop remaining models and samples");
   assert.equal(quotaNotifications, 1, "429 must notify the console to stop related monitoring, never OAuth repair");
-  await retryService.saveSettings(settings);
+  await retryService.saveSettings({ ...settings, failureRetries: 2, failureRetryDelaySeconds: 1 });
   retryService.sample = async () => { retryCalls++; throw Object.assign(new Error("secret upstream"),{fingerprintFailure:true,code:"UPSTREAM",httpStatus:503,retryable:true}); };
   const beforeBound = retryCalls;
   await retryService.run("a@example.test", "free", { manual: true }); assert.equal(retryCalls,beforeBound+3,"transient retries stop after the third attempt");

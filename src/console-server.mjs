@@ -63,6 +63,8 @@ import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown 
 import { ModelFingerprintService, normalizeFingerprintSettings } from "./model-fingerprint.mjs";
 import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
 import { WebSessionMonitor, normalizeWebSessionMonitor, DEFAULT_WEB_SESSION_MONITOR } from "./web-session-monitor.mjs";
+import { accountHealth } from "./account-health.mjs";
+import { createProxyImporter } from "./sub2api-proxy-create.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4399;
@@ -86,6 +88,7 @@ const MAX_PROXY_CONNECTION_FAILURES = 20;
 const PROXY_CONNECTION_RETRY_BASE_MS = Math.max(1, Number(process.env.PROXY_CONNECTION_RETRY_BASE_MS || 1_000));
 const PROXY_CONNECTION_RETRY_MAX_MS = 15_000;
 const PAGE_SIZE = 20;
+const importSub2ApiProxies = createProxyImporter({ request: requestSub2Api });
 const JOB_STATUS_FILTER_VALUES = [
   "queued",
   "starting",
@@ -414,12 +417,13 @@ const overloadCooldown = new OverloadCooldown({
 const fingerprintAccountReader = createFingerprintAccountReader(requestSub2Api);
 async function readFingerprintAccount(config, id) {
   const account = await fingerprintAccountReader(config, id);
-  return { ...account, group_ids: sub2ApiAccountGroupIds(account) };
+  return { ...account, group_ids: sub2ApiAccountGroupIds(account), fingerprintCooling: overloadCooldown.ownsPause(sub2ApiAccountEmail(account), account.id) };
 }
 const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprintAccount, getProxies: listSub2ApiProxies,
   testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
 const modelFingerprint = new ModelFingerprintService({
-  isBlocked: email => {
+  isBlocked: (email, { manual = false } = {}) => {
+    if (manual && manualFingerprintAllowed(findJobByEmail(email))) return false;
     if (codexChecksBlocked(email)) return true;
     const job = findJobByEmail(email), state = job && getSub2ApiAccountStatusForJob(job);
     return Boolean(state && state.inPool === true && state.enabled === false);
@@ -429,11 +433,11 @@ const modelFingerprint = new ModelFingerprintService({
     profiles: [...sub2ApiProfiles.values()].map(p => ({ id: p.id, name: p.name, groupIds: p.groupIds || [], planTypes: Object.keys(sub2ApiPlanTypeBindings).filter(t => sub2ApiPlanTypeBindings[t] === p.id) })),
     routing: JSON.stringify({ bindings: sub2ApiPlanTypeBindings, profiles: [...sub2ApiProfiles.values()].map(p => [p.id, p.groupIds]) }),
     jobs: listUniqueJobs().filter(j => !j.deleted && !isActive(j.status) && codexMonitoringAllowed(j)).map(j => ({ email: j.email, planType: getJobPlanType(j) || "unknown" })) }),
-  listTargets: async config => {
+  listTargets: async (config, { manual = false } = {}) => {
     const listing = await listSub2ApiAccounts(config, { withMeta: true });
     if (!listing.complete) throw new Error("Sub2API 账号列表不完整");
     const limited = new Set(listing.accounts.filter(a => accountRateLimit(a).limited || usageRestricted(normalizeSub2ApiUsage(a))).map(sub2ApiAccountEmail));
-    return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && sub2ApiAccountSchedulable(a) === true && !limited.has(sub2ApiAccountEmail(a))).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
+    return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && (sub2ApiAccountSchedulable(a) === true || manual && a.status === "active" && overloadCooldown.ownsPause(sub2ApiAccountEmail(a), a.id)) && !limited.has(sub2ApiAccountEmail(a))).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
   },
   getAccount: readFingerprintAccount, sample: fingerprintSampler,
   onAccountFailure: recoverFingerprintAuthorization,
@@ -737,7 +741,8 @@ async function handleApi(req, res, requestUrl) {
     if (fingerprintMatch[2]) {
       if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认永久停用，降智检测已停止");
       if (isActive(job.status)) throw httpError(409, "账号任务正在执行，请完成后再检测");
-      await assertCodexMonitoringAllowed(job);
+      await loadSub2ApiAccountStatus({ forceRefresh: true });
+      if (!manualFingerprintAllowed(job)) throw httpError(409, "账号需已加入号池并启用，或仅处于 helper 自动冷却中，且未封禁、限流或达到用量限额，才能手动检测");
       void modelFingerprint.run(job.email, planType, { manual: true }).catch(() => {});
       sendJson(res, 202, { job: publicJob(job) }); return;
     }
@@ -814,6 +819,7 @@ async function handleApi(req, res, requestUrl) {
 
   if (req.method === "POST" && requestUrl.pathname === "/api/task-settings") {
     const body = await readJson(req);
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw httpError(400, "任务设置必须为对象");
     const modeChange = Object.hasOwn(body, "accountProxyMode")
       ? await prepareAccountProxyModeChange(validateAccountProxyMode(body.accountProxyMode))
       : null;
@@ -1172,6 +1178,15 @@ async function handleApi(req, res, requestUrl) {
     sendJson(res, 200, {
       groups: await listSub2ApiTargetGroups(config),
     });
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/sub2api/proxies") {
+    const body = await readJson(req);
+    const result = await importSub2ApiProxies(sub2ApiSettingsConfig, body);
+    // Refresh cached choices independently; creation results must survive a read failure.
+    try { await listSub2ApiProxies(); } catch {}
+    sendJson(res, 200, result);
     return;
   }
 
@@ -1801,6 +1816,8 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
   }
   const allJobs = listUniqueJobs();
   await Promise.all(allJobs.map(inspectAccountWebSession));
+  const healthCounts = { normal: 0, abnormal: 0, pending: 0 };
+  for (const job of allJobs) healthCounts[accountHealth(job, getSub2ApiAccountStatusForJob(job), accountAutomationBlocked(job.email))]++;
   const planTypes = [...new Set(allJobs.map((job) => getJobPlanType(job)).filter(Boolean))].sort();
   const planTypeUnknown = allJobs.some((job) => !getJobPlanType(job));
   const sub2apiPools = [...new Set(allJobs.map((job) => getSub2ApiPoolFilterValue(job)))];
@@ -1840,6 +1857,7 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
       sub2apiEnabled,
     },
     stats: {
+      ...healthCounts,
       active: allJobs.filter(occupiesActiveSlot).length + activeWebSessionChecks,
       webSessionChecks: activeWebSessionChecks,
       queued: allJobs.filter((job) => job.status === "queued").length,
@@ -5252,9 +5270,13 @@ async function saveTaskSettings(body) {
     try { normalizeMonitoring(source.monitoring, monitoringSettings); }
     catch (error) { throw httpError(400, error.message); }
   }
-  let nextWebSessionMonitor = webSessionMonitorSettings;
+  let webSessionMonitorPatch = null;
   if (Object.hasOwn(source, "webSessionMonitor")) {
-    try { nextWebSessionMonitor = normalizeWebSessionMonitor(source.webSessionMonitor); }
+    try {
+      if (!source.webSessionMonitor || typeof source.webSessionMonitor !== "object" || Array.isArray(source.webSessionMonitor)) throw new Error("WebSession 巡检设置必须为对象");
+      webSessionMonitorPatch = { ...source.webSessionMonitor };
+      normalizeWebSessionMonitor({ ...webSessionMonitorSettings, ...webSessionMonitorPatch });
+    }
     catch (error) { throw httpError(400, error.message); }
   }
   if (Object.hasOwn(source, "modelFingerprint") && (!source.modelFingerprint || typeof source.modelFingerprint !== "object" || Array.isArray(source.modelFingerprint))) throw httpError(400, "降智检测默认规则必须为对象");
@@ -5287,9 +5309,13 @@ async function saveTaskSettings(body) {
   const nextCooldownMinutes = Object.hasOwn(source, "accountProxyCooldownMinutes")
     ? normalizeCooldownMinutes(source.accountProxyCooldownMinutes)
     : accountProxyCooldownMinutes;
-  let nextOverloadAutoCooldown = overloadAutoCooldownSettings;
+  let overloadAutoCooldownPatch = null;
   if (Object.hasOwn(source, "overloadAutoCooldown")) {
-    try { nextOverloadAutoCooldown = normalizeOverloadCooldown(source.overloadAutoCooldown); }
+    try {
+      if (!source.overloadAutoCooldown || typeof source.overloadAutoCooldown !== "object" || Array.isArray(source.overloadAutoCooldown)) throw new Error("自动冷却规则格式无效");
+      overloadAutoCooldownPatch = { ...source.overloadAutoCooldown };
+      normalizeOverloadCooldown({ ...overloadAutoCooldownSettings, ...overloadAutoCooldownPatch });
+    }
     catch (error) { throw httpError(400, error.message); }
   }
   // Serialize writes so memory and the last persisted setting always agree.
@@ -5307,8 +5333,14 @@ async function saveTaskSettings(body) {
     const effectiveAccountProxyMode = Object.hasOwn(source, "accountProxyMode") ? nextAccountProxyMode : accountProxyMode;
     const effectiveCodexAuthMode = Object.hasOwn(source, "codexAuthMode") ? nextCodexAuthMode : codexAuthMode;
     const effectiveCooldownMinutes = Object.hasOwn(source, "accountProxyCooldownMinutes") ? nextCooldownMinutes : accountProxyCooldownMinutes;
-    const effectiveOverloadAutoCooldown = Object.hasOwn(source, "overloadAutoCooldown") ? nextOverloadAutoCooldown : overloadAutoCooldownSettings;
-    const effectiveWebSessionMonitor = Object.hasOwn(source, "webSessionMonitor") ? nextWebSessionMonitor : webSessionMonitorSettings;
+    // Merge nested patches under the write lock, so parallel saves retain each
+    // other's changes instead of filling omitted fields with defaults.
+    const effectiveOverloadAutoCooldown = overloadAutoCooldownPatch ? normalizeOverloadCooldown({ ...overloadAutoCooldownSettings, ...overloadAutoCooldownPatch }) : overloadAutoCooldownSettings;
+    const effectiveWebSessionMonitor = webSessionMonitorPatch ? normalizeWebSessionMonitor({ ...webSessionMonitorSettings, ...webSessionMonitorPatch }) : webSessionMonitorSettings;
+    const webMonitorChanged = JSON.stringify(effectiveWebSessionMonitor) !== JSON.stringify(webSessionMonitorSettings);
+    const cooldownRuleChanged = JSON.stringify(effectiveOverloadAutoCooldown) !== JSON.stringify(overloadAutoCooldownSettings);
+    const cooldownScheduleChanged = effectiveMonitoring.overloadCooldownIntervalSeconds !== monitoringSettings.overloadCooldownIntervalSeconds
+      || effectiveMonitoring.overloadCooldownConcurrency !== monitoringSettings.overloadCooldownConcurrency;
     const tempPath = `${TASK_SETTINGS_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
       await fs.writeFile(tempPath, `${JSON.stringify({
@@ -5342,7 +5374,7 @@ async function saveTaskSettings(body) {
     poolPriceMultiplier = effectivePoolPriceMultiplier;
     loginTimeoutMinutes = effectiveLoginTimeout;
     smsTimeoutMinutes = effectiveSmsTimeout;
-    loginTimeouts.reschedule();
+    if (Object.hasOwn(source, "loginTimeoutMinutes") || Object.hasOwn(source, "smsTimeoutMinutes")) loginTimeouts.reschedule();
     taskAutoActions = effectiveAutoActions;
     globalProxyUrl = effectiveProxyUrl;
     allowDirectFallback = effectiveFallback;
@@ -5353,9 +5385,9 @@ async function saveTaskSettings(body) {
     webSessionMonitorSettings = effectiveWebSessionMonitor;
     const previousMonitoring = monitoringSettings;
     monitoringSettings = effectiveMonitoring;
-    applyMonitoringSettings(previousMonitoring);
-    webSessionMonitor.trigger(Object.hasOwn(source, "webSessionMonitor"));
-    overloadCooldown.trigger();
+    if (JSON.stringify(previousMonitoring) !== JSON.stringify(monitoringSettings)) applyMonitoringSettings(previousMonitoring);
+    if (webMonitorChanged) webSessionMonitor.trigger(true);
+    if (cooldownRuleChanged || cooldownScheduleChanged) overloadCooldown.trigger();
     // Reducing the limit leaves running jobs alone; they drain before new work
     // starts. Increasing it immediately makes extra slots available.
     scheduleQueuedJobs();
@@ -6660,7 +6692,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
     }
     sub2ApiAccountStatusCache = { backend, fetchedAt, accounts };
     pendingCodexBlocks.clear();
-    for (const job of jobs.values()) if (!codexMonitoringAllowed(job)) modelFingerprint.invalidateAccount(job.email);
+    for (const job of jobs.values()) if (!codexMonitoringAllowed(job) && !(modelFingerprint.isManualCheck(job.email) && manualFingerprintAllowed(job))) modelFingerprint.invalidateAccount(job.email);
     sub2ApiAccountStatusCache.usageIds = remoteAccounts.filter(account => account.platform === "openai" && account.type === "oauth" && sub2ApiAccountEmail(account) && !accountSyncBlocked(account))
       .map(account => normalizeSub2ApiAccountId(account.id)).filter(Boolean);
     await persistUsageSnapshots(sub2ApiAccountStatusCache, { reconcile: true });
@@ -6718,16 +6750,16 @@ function scheduleAccountDataSync() {
   schedule(false); schedule(true);
 }
 function applyMonitoringSettings(previous) {
-  webSessionMonitor.setTickMs(monitoringSettings.webSessionScanIntervalSeconds * 1000);
-  modelFingerprint.setTickMs(monitoringSettings.fingerprintScanIntervalSeconds * 1000);
-  readUsageTotals.refreshSettings();
-  requestProfileSync.drain();
+  if (previous.webSessionScanIntervalSeconds !== monitoringSettings.webSessionScanIntervalSeconds) webSessionMonitor.setTickMs(monitoringSettings.webSessionScanIntervalSeconds * 1000);
+  if (previous.fingerprintScanIntervalSeconds !== monitoringSettings.fingerprintScanIntervalSeconds) modelFingerprint.setTickMs(monitoringSettings.fingerprintScanIntervalSeconds * 1000);
+  if (previous.usageTotalsIntervalSeconds !== monitoringSettings.usageTotalsIntervalSeconds || previous.usageTotalsConcurrency !== monitoringSettings.usageTotalsConcurrency) readUsageTotals.refreshSettings();
+  if (previous.profileSyncConcurrency !== monitoringSettings.profileSyncConcurrency) requestProfileSync.drain();
   if (previous.poolMonitorIntervalSeconds !== monitoringSettings.poolMonitorIntervalSeconds) scheduleSub2ApiMonitor();
   if (previous.overloadIntervalSeconds !== monitoringSettings.overloadIntervalSeconds || previous.overloadConcurrency !== monitoringSettings.overloadConcurrency) {
     overloadMonitor.request.drain(); overloadMonitor.trigger();
   }
-  overloadCooldown.request.drain();
-  scheduleAccountDataSync();
+  if (previous.overloadCooldownConcurrency !== monitoringSettings.overloadCooldownConcurrency) overloadCooldown.request.drain();
+  if (previous.accountStatusIntervalSeconds !== monitoringSettings.accountStatusIntervalSeconds || previous.usageTotalsIntervalSeconds !== monitoringSettings.usageTotalsIntervalSeconds) scheduleAccountDataSync();
 }
 
 function invalidateSub2ApiAccountStatusCache() {
@@ -7267,7 +7299,8 @@ function normalizeSub2ApiProxyList(payload) {
     try {
       if (explicitUrl) url = normalizeProxyUrl(explicitUrl);
       else if (proxy.host && Number(proxy.port) > 0 && ["http", "https", "socks5", "socks5h"].includes(protocol)) {
-        const parsed = new URL(`${protocol}://${proxy.host}:${Number(proxy.port)}`);
+        const host = String(proxy.host).replace(/^\[([^\]]+)\]$/, "$1");
+        const parsed = new URL(`${protocol}://${host.includes(":") ? `[${host}]` : host}:${Number(proxy.port)}`);
         const username = String(proxy.username || proxy.user || proxy.auth?.username || "");
         const password = String(proxy.password || proxy.auth?.password || "");
         if (username) parsed.username = username;
@@ -7682,6 +7715,12 @@ function codexMonitoringAllowed(job) {
   const state = getSub2ApiAccountStatusForJob(job);
   return !pendingCodexBlocks.has(String(job.email).toLowerCase()) && !accountAutomationBlocked(job.email) && !state.rateLimited && !state.quotaRestricted && !usageRestricted(state.usage) && state.inPool === true && state.enabled === true;
 }
+function manualFingerprintAllowed(job) {
+  if (!job || job.deleted || pendingCodexBlocks.has(String(job.email).toLowerCase()) || accountAutomationBlocked(job.email)) return false;
+  const state = getSub2ApiAccountStatusForJob(job);
+  if (state.inPool !== true || state.rateLimited || state.quotaRestricted || usageRestricted(state.usage)) return false;
+  return state.enabled === true || state.remoteStatus === "active" && (state.accountIds || []).some(id => overloadCooldown.ownsPause(job.email, id));
+}
 async function assertCodexMonitoringAllowed(job) {
   await loadSub2ApiAccountStatus({ forceRefresh: true });
   if (!codexMonitoringAllowed(job)) throw httpError(409, "账号需已加入号池并启用，且未达到用量限额、不处于 429 限流中，才能开启 Codex 检测");
@@ -7939,6 +7978,7 @@ function publicJob(job) {
     sub2apiPlanType: sub2ApiStatus.planType,
     sub2apiUsage: publicSub2ApiUsage(sub2ApiStatus.usage, sub2ApiStatus.quotaRestricted),
     codexStatusEligible: codexEligible,
+    canCheckModelFingerprint: manualFingerprintAllowed(job),
     sub2apiRateLimited: sub2ApiStatus.rateLimited === true,
     sub2apiQuotaRestricted: sub2ApiStatus.quotaRestricted === true || usageRestricted(sub2ApiStatus.usage),
     overloadDetection: { ...overloadState, enabled: codexEligible && overloadState.enabled },

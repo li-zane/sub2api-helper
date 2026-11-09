@@ -101,7 +101,7 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
       <div className="section-title-row">
         <h3>检测轮换</h3>
         <HelpTip title="检测轮换" label="查看检测轮换说明">
-          每个到期检测周期执行一种测试，各账号独立保存进度。按首项和次数循环，如指纹 1 轮后进行糖果 N 轮。指纹每轮采样 3 次；糖果每模型只请求 1 次，完整回答后进入下一步。次数不能同时为 0。
+          每个到期检测周期执行一种测试，各账号独立保存进度。按首项和次数循环，如指纹 1 轮后进行糖果 N 轮。指纹每轮采样 3 次；糖果每模型只采集 1 份完整回答，可重试临时请求失败。完整回答后进入下一步，答案未通过或证据不足不重测。次数不能同时为 0。
         </HelpTip>
       </div>
       <div className="fingerprint-three-fields">
@@ -143,6 +143,13 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
         </label>
       </div>
     </div>
+    <div className="fingerprint-section">
+      <div className="section-title-row"><h3>检测失败重试</h3><HelpTip label="检测失败重试说明">指纹和糖果共用重试次数、间隔。过载、网络、超时等临时失败仅重试当前样本，指纹有效数字不足也按此规则补采，已成功的样本不重跑。重试次数不含首次请求，0 表示关闭。明确不通过、指纹归因证据不足、糖果完整回答但答案不明确、401/403、429、封禁或额度错误不重试。重试共用本轮账号并发，不增加一轮检测，全部尝试和用量保存在本轮详情。</HelpTip></div>
+      <div className="fingerprint-three-fields">
+        <label className="settings-field"><span>失败重试次数</span><input aria-label="检测失败重试次数" type="number" min="0" max="5" step="1" value={value.failureRetries ?? 1} disabled={disabled} onChange={event => onChange({ ...value, failureRetries: event.target.value === "" ? "" : Number(event.target.value) })} /></label>
+        <label className="settings-field"><span>重试间隔（秒）</span><input aria-label="检测失败重试间隔（秒）" type="number" min="1" max="300" step="1" value={value.failureRetryDelaySeconds ?? 5} disabled={disabled} onChange={event => onChange({ ...value, failureRetryDelaySeconds: event.target.value === "" ? "" : Number(event.target.value) })} /></label>
+      </div>
+    </div>
   </section>;
 }
 
@@ -161,10 +168,15 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
       if (seq.fingerprint == null || seq.candy == null || !String(seq.fingerprint).trim() || !String(seq.candy).trim() || !["fingerprint", "candy"].includes(seq.first) || !Number.isInteger(fp) || fp < 0 || fp > 100 || !Number.isInteger(cd) || cd < 0 || cd > 100 || (fp === 0 && cd === 0)) {
         throw new Error("检测轮换须选择首项；指纹、糖果次数须为 0–100 的整数，且不能同时为 0");
       }
+      const failureRetries = data.settings.failureRetries ?? 1, failureRetryDelaySeconds = data.settings.failureRetryDelaySeconds ?? 5;
+      if (!Number.isInteger(failureRetries) || failureRetries < 0 || failureRetries > 5) throw new Error("检测失败重试次数必须为 0–5 的整数");
+      if (!Number.isInteger(failureRetryDelaySeconds) || failureRetryDelaySeconds < 1 || failureRetryDelaySeconds > 300) throw new Error("检测失败重试间隔必须为 1–300 秒的整数");
       const groupPolicies = Object.fromEntries(data.profiles.map(p => [p.id, Object.fromEntries(p.groupIds.map(id => [id, data.settings.groupPolicies[p.id]?.[id] || "default"]))]));
       await api(token, "/api/model-fingerprint/settings", {
         settings: {
           ...data.settings,
+          failureRetries,
+          failureRetryDelaySeconds,
           testSequence: { first: seq.first, fingerprint: fp, candy: cd },
           groupPolicies
         }
@@ -207,7 +219,7 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
         <div className="section-title-row">
           <h3>号池分组加入规则</h3>
           <HelpTip title="号池分组加入规则" label="查看号池分组加入规则说明">
-            读取各 PlanType 所绑定方案的默认分组。默认加入始终保留；不降智加入要求全部指定模型指纹一致。明确不一致时移出条件组；未知结果不改已有分组，新上传账号需通过后才加入条件组。不改其它分组。
+            读取各 PlanType 所绑定方案的默认分组。默认加入始终保留；不降智加入依据最近一轮检测，指纹或糖果任一种方法通过即可加入（本轮全部指定模型需通过）。明确未通过时移出条件组；证据不足或请求失败不改已有分组，新上传账号需通过后才加入条件组。不改其它分组。
           </HelpTip>
         </div>
         {data.profiles.map(profile => (
@@ -230,7 +242,7 @@ export function FingerprintSettingsButton({ token, planTypes = [] }) {
                       onChange={e => patch({ groupPolicies: { ...data.settings.groupPolicies, [profile.id]: { ...data.settings.groupPolicies[profile.id], [id]: e.target.value } } })}
                     >
                       <option value="default">默认加入</option>
-                      <option value="verified">不降智加入（指纹一致）</option>
+                      <option value="verified">不降智加入</option>
                     </CustomSelect>
                   </label>
                 ))}
@@ -625,11 +637,13 @@ export function ModelFingerprintCell({ job, token, onError }) {
   const requestPending = useRef(false);
   useEffect(() => setState(job.modelFingerprint), [job.modelFingerprint]);
   const eligible = codexStatusEligible(job);
+  const manualEligible = eligible || job.canCheckModelFingerprint === true;
   const effectiveEnabled = eligible && state?.enabled === true;
-  const retainedHistory = !eligible && (job.sub2apiRateLimited === true || job.sub2apiQuotaRestricted === true || usageRestricted(job.sub2apiUsage));
+  const cooling = ["pausing", "cooling"].includes(job.overloadAutoCooldown?.phase);
+  const retainedHistory = !eligible && (cooling || job.sub2apiRateLimited === true || job.sub2apiQuotaRestricted === true || usageRestricted(job.sub2apiUsage));
   if (!state) return <span className="muted">—</span>;
   async function update(body, check = false) {
-    if (!eligible || requestPending.current || check && ["running", "queued"].includes(state.phase)) return;
+    if (!(check ? manualEligible : eligible) || requestPending.current || check && ["running", "queued"].includes(state.phase)) return;
     requestPending.current = true;
     setBusy(true); setCheckPending(check); setError(""); try { const result = await api(token, `/api/jobs/${job.id}/model-fingerprint${check ? "/check" : ""}`, body); setState(result.job.modelFingerprint); if (!check) setEditing(false); } catch (e) { setError(e.message); onError?.(e.message); } finally { requestPending.current = false; setBusy(false); setCheckPending(false); }
   }
@@ -665,7 +679,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
       if (state.runningMethod === "fingerprint") return "正在检测（指纹）";
       return "正在检测";
     }
-    return "立即检测";
+    return !manualEligible ? codexStatusBlockReason(job) : cooling ? "冷却中，可手动检测；不解除冷却" : "立即检测";
   };
 
   return <div className={`fingerprint-cell-body${effectiveEnabled ? "" : " is-disabled"}${retainedHistory ? " has-retained-history" : ""}`}>
@@ -674,7 +688,7 @@ export function ModelFingerprintCell({ job, token, onError }) {
       <button type="button" role="switch" aria-checked={effectiveEnabled} aria-label={`${job.email} 降智检测`} className={`status-toggle ${effectiveEnabled ? "on" : ""}`} disabled={!eligible || !token || busy} onClick={() => update({ ...state.override, enabled: !state.enabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
       </div>
       <div className="fingerprint-action-pair">
-      <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={checkTitle()} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models?.length || !eligible} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
+      <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={checkTitle()} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models?.length || !manualEligible} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
       <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title={eligible ? "独立降智检测设置" : codexStatusBlockReason(job)} disabled={!eligible || !token} onClick={open}><Settings2 size={14} /></button>
       </div>
     </div>

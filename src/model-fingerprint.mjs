@@ -7,8 +7,9 @@ import { fingerprintFailure, fingerprintRecovery } from "./model-fingerprint-req
 import { CANDY_PROMPT, CANDY_PROMPT_SHA256, gradeCandy, DEFAULT_TEST_SEQUENCE, normalizeTestSequence, sequenceStep, aggregateRequestUsage } from "./candy-test.mjs";
 
 const invalid = message => Object.assign(new Error(message), { status: 400 });
-export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, testSequence: DEFAULT_TEST_SEQUENCE, planDefaults: {}, groupPolicies: {} });
+export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, failureRetries: 1, failureRetryDelaySeconds: 5, testSequence: DEFAULT_TEST_SEQUENCE, planDefaults: {}, groupPolicies: {} });
 const HISTORY_WINDOW_MS = 60 * 60_000;
+const GROUP_POLICY_VERSION = 2;
 const roundSummary = record => record ? { ...record, models: record.models?.map(({ requests, ...model }) => model) } : null;
 export function normalizeFingerprintModels(value) {
   if (!Array.isArray(value) || value.length > 8) throw invalid("检测模型必须是最多 8 项的列表");
@@ -28,6 +29,12 @@ export function normalizeFingerprintSettings(raw = {}) {
   const models = normalizeFingerprintModels(raw.models ?? []);
   const minProbability = Number(raw.minProbability ?? 0.8);
   const maxConcurrentAccounts = Number(raw.maxConcurrentAccounts ?? 3);
+  // Read the previous candy-only names once; persisted/public settings use the
+  // shared names, preserving the user's configured count and delay on upgrade.
+  const failureRetries = raw.failureRetries === undefined ? (raw.candyRetries === undefined ? 1 : raw.candyRetries) : raw.failureRetries;
+  const failureRetryDelaySeconds = raw.failureRetryDelaySeconds === undefined ? (raw.candyRetryDelaySeconds === undefined ? 5 : raw.candyRetryDelaySeconds) : raw.failureRetryDelaySeconds;
+  if (!Number.isInteger(failureRetries) || failureRetries < 0 || failureRetries > 5) throw invalid("检测失败重试次数必须为 0–5 的整数");
+  if (!Number.isInteger(failureRetryDelaySeconds) || failureRetryDelaySeconds < 1 || failureRetryDelaySeconds > 300) throw invalid("检测失败重试间隔必须为 1–300 秒的整数");
   if (typeof raw.maxConcurrentAccounts === "boolean" || !Number.isInteger(maxConcurrentAccounts) || maxConcurrentAccounts < 1 || maxConcurrentAccounts > 16) throw invalid("同时检测账号数量必须为 1–16 的整数");
   if (typeof raw.minProbability === "boolean" || !Number.isFinite(minProbability) || minProbability < 0.5 || minProbability > 1) throw invalid("指纹归因阈值必须为 0.5–1");
   const planDefaults = Object.create(null), groupPolicies = Object.create(null);
@@ -43,7 +50,7 @@ export function normalizeFingerprintSettings(raw = {}) {
       groupPolicies[profile][id] = mode;
     }
   }
-  return { models, intervalMinutes: interval(raw.intervalMinutes ?? 360), maxConcurrentAccounts, minProbability, testSequence: normalizeTestSequence(raw.testSequence), planDefaults, groupPolicies };
+  return { models, intervalMinutes: interval(raw.intervalMinutes ?? 360), maxConcurrentAccounts, minProbability, failureRetries, failureRetryDelaySeconds, testSequence: normalizeTestSequence(raw.testSequence), planDefaults, groupPolicies };
 }
 export function normalizeFingerprintOverride(raw = {}) {
   if (raw.enabled != null && typeof raw.enabled !== "boolean") throw invalid("账号检测开关必须为布尔值或继承");
@@ -79,8 +86,9 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges }) {
-    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked, onChange, onAccountFailure, now, challenges });
+  constructor({ filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
+    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
+    this.manualChecks = new Set();
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
     this.detectorLoader = detectorLoader || (() => loadDetector({ source: "https://lm.ikale.io/data/", cache: path.join(path.dirname(filePath), "model-fingerprint-data.bin") }));
   }
@@ -102,6 +110,7 @@ export class ModelFingerprintService {
   }
   cancelQueued(email) { const task = this.queued.get(email); if (task) { this.queued.delete(email); this.inFlight.delete(email); task.resolve(this.snapshot(email, task.planType)); } }
   invalidateAccount(email) { email = label(email); this.active.get(email)?.abort(); this.cancelQueued(email); }
+  isManualCheck(email) { email = label(email); return this.manualChecks.has(email) || this.queued.get(email)?.options.manual === true; }
   invalidate() { this.revision++; for (const controller of this.active.values()) controller.abort(); for (const email of this.queued.keys()) this.cancelQueued(email); }
   async referenceInfo() {
     const detector = await this.detector();
@@ -115,14 +124,14 @@ export class ModelFingerprintService {
       const data = JSON.parse(await fs.readFile(this.filePath, "utf8"));
       if (data.version !== 1) throw new Error("版本无效");
       this.settings = normalizeFingerprintSettings(data.settings);
-      for (const [email, entry] of Object.entries(data.accounts || {})) this.accounts.set(email, { ...entry, override: normalizeFingerprintOverride(entry.override), recentResults: this.latestRounds(entry), result: roundSummary(entry.result), phase: "idle" });
+      for (const [email, entry] of Object.entries(data.accounts || {})) this.accounts.set(email, { ...entry, override: normalizeFingerprintOverride(entry.override), recentResults: this.latestRounds(entry), result: roundSummary(entry.result), phase: "idle", groupSyncPending: entry.groupSyncPending || data.groupPolicyVersion !== GROUP_POLICY_VERSION && ["match", "mismatch"].includes(entry.result?.status) });
       // Persist pruning immediately, including legacy histories that previously kept 200 rounds.
       await this.persist();
     } catch (error) { if (error.code !== "ENOENT") throw new Error(`模型指纹配置读取失败：${error.message}`); }
   }
   persist() {
-    for (const entry of this.accounts.values()) { entry.recentResults = this.latestRounds(entry); entry.result = roundSummary(entry.result); delete entry.history; }
-    const text = JSON.stringify({ version: 1, settings: this.settings, accounts: Object.fromEntries(this.accounts) }, null, 2);
+    for (const entry of this.accounts.values()) { entry.recentResults = this.latestRounds(entry); entry.result = roundSummary(entry.result); delete entry.history; delete entry.fingerprintResult; }
+    const text = JSON.stringify({ version: 1, groupPolicyVersion: GROUP_POLICY_VERSION, settings: this.settings, accounts: Object.fromEntries(this.accounts) }, null, 2);
     const operation = this.writePromise.catch(() => {}).then(async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const temp = `${this.filePath}.${crypto.randomUUID()}.tmp`;
@@ -140,9 +149,10 @@ export class ModelFingerprintService {
     const saved = this.accounts.get(label(email))?.sequenceCursor;
     return { ...sequenceStep(testSequence, saved?.signature === signature ? saved.index : 0), signature };
   }
-  attribution(email, planType) {
-    const entry = this.accounts.get(label(email));
-    const result = entry?.fingerprintResult || (entry?.result?.method !== 'candy' ? entry?.result : null);
+  groupResult(email, planType) {
+    // Every round uses one method. Its result replaces the prior method's
+    // decision; an old success must not mask a newer explicit failure.
+    const result = this.accounts.get(label(email))?.result;
     return result?.signature === this.signature(email, planType) ? result : null;
   }
   signature(email, planType) { const { models, minProbability } = this.effective(email, planType); return JSON.stringify({ models, minProbability, planType: label(planType), backend: this.getContext().backend, routing: this.getContext().routing }); }
@@ -172,7 +182,6 @@ export class ModelFingerprintService {
     const record = this.historyRecord({ ...result, id: crypto.randomUUID(), transcriptVersion: 1, requestCount: (result.models || []).reduce((n, m) => n + (m.requests?.length || 0), 0) });
     entry.recentResults = this.latestRounds({ recentResults: [record, ...this.latestRounds(entry)] });
     entry.result = roundSummary({ ...result, id: record.id, transcriptVersion: 1, requestCount: record.requestCount });
-    if (result.method !== 'candy') entry.fingerprintResult = entry.result;
     delete entry.history;
   }
   history(email, planType) {
@@ -213,13 +222,13 @@ export class ModelFingerprintService {
   // Apply only the conditional groups in the supplied profile; other groups retain existing behavior.
   filterGroups(email, planType, profileId, groups, currentAccount = null) {
     const rules = this.settings.groupPolicies[profileId] || {};
-    const attribution = this.attribution(email, planType);
-    const result = currentAccount && attribution?.routingIdentities?.[currentAccount.id] === fingerprintRoutingIdentity(currentAccount) ? attribution : null;
+    const evidence = this.groupResult(email, planType);
+    const result = currentAccount && evidence?.routingIdentities?.[currentAccount.id] === fingerprintRoutingIdentity(currentAccount) ? evidence : null;
     const existing = new Set((currentAccount?.group_ids || []).map(String));
     return groups.filter(id => rules[String(id)] !== "verified" || result?.status === "match" || result?.status !== "mismatch" && existing.has(String(id)));
   }
   assertRunnable(email, planType, { manual = false } = {}) {
-    if (this.isBlocked(email)) throw Object.assign(new Error("账号已确认封禁、删除或永久停用，已停止自动化"), { status: 409 });
+    if (this.isBlocked(email, { manual })) throw Object.assign(new Error("账号已停用或不符合检测条件"), { status: 409 });
     const config = this.effective(email, planType), context = this.getContext();
     if (!config.models.length) throw invalid("请先设置至少一个检测模型");
     if (this.closing) throw Object.assign(new Error("检测服务正在关闭"), { status: 503 });
@@ -242,7 +251,7 @@ export class ModelFingerprintService {
     while (this.active.size < this.settings.maxConcurrentAccounts && this.queued.size) {
       const [email, task] = this.queued.entries().next().value;
       this.queued.delete(email);
-      if (this.isBlocked(email) || !task.options.manual && (this.stopped || !this.effective(email, task.planType).enabled)) { this.inFlight.delete(email); task.resolve(this.snapshot(email, task.planType)); continue; }
+      if (this.isBlocked(email, task.options) || !task.options.manual && (this.stopped || !this.effective(email, task.planType).enabled)) { this.inFlight.delete(email); task.resolve(this.snapshot(email, task.planType)); continue; }
       const operation = this.perform(email, task.planType, task.options);
       const settled = () => { this.inFlight.delete(email); this.drain(); this.onChange(); };
       void operation.then(value => { task.resolve(value); settled(); }, error => { task.reject(error); settled(); });
@@ -253,9 +262,16 @@ export class ModelFingerprintService {
     const common = () => ({accountId:String(account.id), ...model, method, sampleFailures, requestCount:requests.length, requests});
     try {
       const challenges = method === 'candy' ? [{prompt:CANDY_PROMPT, expected_answer:21}] : this.challenges(3);
-      const maxAttempts = method === 'candy' ? 1 : 3;
+      const maxAttempts = 1 + this.settings.failureRetries;
       for (const [index, challenge] of challenges.entries()) {
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          if (attempt > 1) {
+            signal.throwIfAborted();
+            if (this.isBlocked(context.email, { manual: context.manual })) throw new Error("账号已暂停或状态异常，本轮跳过");
+            await this.retryDelay(this.settings.failureRetryDelaySeconds * 1000, signal);
+            signal.throwIfAborted();
+            if (this.isBlocked(context.email, { manual: context.manual })) throw new Error("账号已暂停或状态异常，本轮跳过");
+          }
           const minimumCount = method === 'fingerprint' ? Math.max(80,Math.ceil(challenge.expected_count * .55)) : null;
           const request = {sample:index+1, attempt, method, prompt:challenge.prompt, response:null, startedAt:new Date(this.now()).toISOString(), expectedCount:challenge.expected_count ?? null, minimumCount, ...(method === 'candy' ? {expectedAnswer:21, promptSha256:CANDY_PROMPT_SHA256} : {})};
           const started = this.now(); requests.push(request);
@@ -270,7 +286,7 @@ export class ModelFingerprintService {
               const detail = fingerprintFailure({fingerprintFailure:true,code:method === 'fingerprint' ? 'SHORT_OUTPUT' : 'CANDY_UNCLEAR',retryable:method === 'fingerprint'});
               Object.assign(request,{status:'invalid',failure:detail});
               sampleFailures.push({sample:index+1,attempt,...detail});
-              if (attempt < maxAttempts) { await delay(1000,undefined,{signal}); continue; }
+              if (method === 'fingerprint' && attempt < maxAttempts) continue;
             }
             outputs.push({text,expected_count:challenge.expected_count}); break;
           } catch (error) {
@@ -279,8 +295,7 @@ export class ModelFingerprintService {
             Object.assign(request,{status:'error',response:typeof error.fingerprintReply === 'string' ? error.fingerprintReply : null,failure:detail,accepted:false,durationMs:this.now()-started});
             if (method === 'fingerprint') request.count = request.response === null ? 0 : parseNumbers(request.response).length;
             sampleFailures.push({sample:index+1,attempt,...detail});
-            if (!detail.retryable || attempt === maxAttempts) throw error;
-            await delay(1000,undefined,{signal});
+            if (!detail.retryable || attempt === maxAttempts || ["AUTH", "BANNED", "QUOTA"].includes(detail.code) || [401, 403, 429].includes(detail.httpStatus)) throw error;
           }
         }
       }
@@ -307,7 +322,7 @@ export class ModelFingerprintService {
   }
   async perform(email, planType, { manual = false } = {}) {
     email = label(email);
-    if (this.isBlocked(email)) return this.snapshot(email, planType);
+    if (this.isBlocked(email, { manual })) return this.snapshot(email, planType);
     if (this.active.has(email)) return this.snapshot(email, planType);
     const config = this.effective(email, planType);
     if (!config.models.length) throw invalid("请先设置至少一个检测模型");
@@ -315,6 +330,7 @@ export class ModelFingerprintService {
     const context = this.getContext(), backend = context.backend, signature = this.signature(email, planType), revision = this.revision, startedAt = this.now(), step = this.sequence(email,planType), method = step.method;
     if (!context.config?.baseUrl || !context.config?.adminApiKey) throw Object.assign(new Error("请先配置 Sub2API"), { status: 409 });
     const controller = new AbortController(); this.active.set(email, controller);
+    if (manual) this.manualChecks.add(email);
     const previous = this.accounts.get(email) || { override: normalizeFingerprintOverride() };
     const entry = { ...previous, activeMethod:method, lastAttemptAt: new Date(this.now()).toISOString(), nextCheckAt: new Date(this.now() + config.intervalMinutes * 60000).toISOString(), lastError: null };
     this.accounts.set(email, entry);
@@ -322,7 +338,7 @@ export class ModelFingerprintService {
     const results = [];
     try {
       await this.mutate(async () => { controller.signal.throwIfAborted(); await this.persist(); });
-      const targets = (await this.listTargets(context.config)).filter(item => label(item.email) === email);
+      const targets = (await this.listTargets(context.config, { manual })).filter(item => label(item.email) === email);
       if (!targets.length) throw new Error("账号尚未加入 Sub2API 号池");
       const detector = method === 'fingerprint' ? await this.detector(controller.signal) : null;
       const identities = {}, routingIdentities = {};
@@ -330,11 +346,11 @@ export class ModelFingerprintService {
         const account = await this.getAccount(context.config, target.id);
         identities[target.id] = fingerprintAccountIdentity(account);
         routingIdentities[target.id] = fingerprintRoutingIdentity(account);
-        if (account.status && account.status !== "active" || account.schedulable === false) throw new Error("账号已暂停或状态异常，本轮跳过");
+        if (account.status && account.status !== "active" || account.schedulable === false && !(manual && account.fingerprintCooling === true)) throw new Error("账号已暂停或状态异常，本轮跳过");
         for (const model of config.models) {
           controller.signal.throwIfAborted();
-          if (this.isBlocked(email)) return this.snapshot(email, planType);
-          const result = await this.collectModel({...context,minProbability:config.minProbability},account,model,method,detector,controller.signal);
+          if (this.isBlocked(email, { manual })) return this.snapshot(email, planType);
+          const result = await this.collectModel({...context,email,manual,minProbability:config.minProbability},account,model,method,detector,controller.signal);
           results.push(result);
           const detail = result.failure;
           if (detail && (detail.code === 'QUOTA' || detail.httpStatus === 429 || account.type === 'oauth' && fingerprintRecovery(detail))) { recoveryFailure = detail; break sampling; }
@@ -354,7 +370,7 @@ export class ModelFingerprintService {
         // A completed candy answer consumes its one scheduled turn even when
         // unscorable. Transport/auth failures keep the slot for the next check.
         if (results.length && results.every(r=>r.samplingComplete || method === 'candy' && r.responseComplete)) entry.sequenceCursor = {signature:step.signature,index:(step.index+1)%step.total};
-        if (method === 'fingerprint') entry.groupSyncPending = true;
+        entry.groupSyncPending = true;
         await this.persist();
       });
       await this.reconcile(email, planType, targets, revision);
@@ -370,7 +386,7 @@ export class ModelFingerprintService {
       }
       if (manual && !controller.signal.aborted) throw Object.assign(new Error(entry.lastError || "指纹检测未完成"), { status: [400, 409].includes(error.status) ? error.status : 502 });
     } finally {
-      this.active.delete(email); this.onChange();
+      this.active.delete(email); this.manualChecks.delete(email); this.onChange();
       // Dispatch after releasing sampling/mutation state; recovery may cancel checks.
       if (recoveryFailure && !controller.signal.aborted && revision === this.revision && !this.isBlocked(email)) {
         try { await this.onAccountFailure(email, recoveryFailure); }
@@ -384,7 +400,7 @@ export class ModelFingerprintService {
   }
   async reconcileLocked(email, planType, targets, revision) {
     if (this.isBlocked(email)) return;
-    const entry = this.accounts.get(email), result = this.attribution(email, planType), context = this.getContext();
+    const entry = this.accounts.get(email), result = this.groupResult(email, planType), context = this.getContext();
     if (!["match", "mismatch"].includes(result?.status) || !entry.groupSyncPending) return;
     try {
       for (const target of targets) {
@@ -418,7 +434,7 @@ export class ModelFingerprintService {
       if (this.isBlocked(job.email)) continue;
       if (this.inFlight.has(label(job.email))) continue;
       const state = this.snapshot(job.email, job.planType), entry = this.accounts.get(label(job.email));
-      if (entry?.groupSyncPending && ["match", "mismatch"].includes(this.attribution(job.email,job.planType)?.status)) {
+      if (entry?.groupSyncPending && ["match", "mismatch"].includes(this.groupResult(job.email,job.planType)?.status)) {
         const targets = (await this.listTargets(context.config)).filter(t => label(t.email) === label(job.email));
         await this.reconcile(label(job.email), job.planType, targets);
       }

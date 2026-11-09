@@ -62,6 +62,14 @@ export class OverloadCooldown {
     return this.accounts.get(String(email).toLowerCase())?.manualScheduling?.[this.backendIdentity(config)]?.[String(accountId)] === false;
   }
 
+  ownsPause(email, accountId) {
+    const entry = this.accounts.get(String(email).toLowerCase());
+    return Boolean(entry && ["pausing", "cooling"].includes(entry.phase)
+      && entry.backend === this.backendIdentity(this.getConfig())
+      && entry.resumeAccountIds?.includes(String(accountId))
+      && !this.isManuallyDisabled(email, accountId));
+  }
+
   persist() {
     const data = JSON.stringify({ version: 1, accounts: Object.fromEntries(this.accounts) }, null, 2);
     const operation = this.writePromise.catch(() => {}).then(async () => {

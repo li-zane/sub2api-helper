@@ -1,4 +1,5 @@
 import { SmsNumberEstimate } from "./sms-number-estimate.jsx";
+import { ProxyCreateDialog } from "./proxy-create-dialog.jsx";
 import { SmsProviderBalance } from "./sms-provider-balance.jsx";
 import { formatSmsMoney } from "./sms-money.mjs";
 import { AccountLogDialog } from "./account-log-dialog.jsx";
@@ -19,10 +20,12 @@ import { TaskToasts } from "./task-toasts.jsx";
 import { notify } from "./toast-events.mjs";
 import { CopyableAccount, AccountText } from "./copyable-account.jsx";
 import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier, normalizeAccountCost, formatAccountCost, accountProfitCents, formatCnyCents, preserveNewerAccountCosts } from "./account-pricing.mjs";
+import { taskSettingsPatch } from "./task-settings-form.mjs";
 import { MONITOR_FIELDS, DEFAULT_MONITORING, normalizeMonitoring } from "./monitor-settings.mjs";
 import { normalizeTaskUploadActions, toggleTaskAutoAction } from "./task-auto-actions.mjs";
 import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "./login-settings.mjs";
 import {
+  Activity,
   Ban,
   Check,
   ChevronLeft,
@@ -57,6 +60,7 @@ import {
   Search,
   Send,
   Settings2,
+  SlidersHorizontal,
   Shuffle,
   ShieldCheck,
   Smartphone,
@@ -282,7 +286,7 @@ function App() {
   const logoutRunningRef = useRef(false);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 1 });
-  const [stats, setStats] = useState({ active: 0, queued: 0, completed: 0 });
+  const [stats, setStats] = useState({ active: 0, queued: 0, normal: 0, abnormal: 0 });
   const [taskSettings, setTaskSettings] = useState(null);
   useDisplayTimeZone();
   useLayoutEffect(() => { setDisplayTimeZone(taskSettings?.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE); }, [taskSettings?.displayTimeZone]);
@@ -336,6 +340,7 @@ function App() {
   const [proxySettingsSaving, setProxySettingsSaving] = useState(false);
   const [proxySettingsError, setProxySettingsError] = useState("");
   const [proxySettingsOpen, setProxySettingsOpen] = useState(false);
+  const [proxyCreateOpen, setProxyCreateOpen] = useState(false);
   const [planTypeMapping, setPlanTypeMapping] = useState(readPlanTypeMapping);
   const [planTypeMappingOpen, setPlanTypeMappingOpen] = useState(false);
   const [planTypeMappingDraft, setPlanTypeMappingDraft] = useState(() => planTypeMappingRows(readPlanTypeMapping()));
@@ -550,7 +555,7 @@ function App() {
           setWorkspaceJob(current => shareSnapshot(current, data.jobs.find(job => job.id === current?.id) || current));
           setJobSelectionIndex(current => shareJobList(current, preserveNewerAccountCosts(current, data.selection || data.jobs)));
           setPagination(current => shareSnapshot(current, data.pagination || { page, pageSize: 20, total: data.jobs.length, totalPages: 1 }));
-          setStats(current => shareSnapshot(current, data.stats || { active: 0, queued: 0, completed: 0 }));
+          setStats(current => shareSnapshot(current, data.stats || { active: 0, queued: 0, normal: 0, abnormal: 0 }));
           if (data.taskSettings) setTaskSettings(current => shareSnapshot(current, data.taskSettings));
           const nextPlanTypeOptions = Array.isArray(data.filterOptions?.planTypes) ? data.filterOptions.planTypes : [];
           const nextPlanTypeUnknown = data.filterOptions?.planTypeUnknown === true;
@@ -1808,8 +1813,13 @@ function App() {
             <span className="telemetry-divider" aria-hidden="true" />
             <span className="summary-pill">
               <i className="status-dot complete" />
-              <span>已完成</span>
-              <strong>{stats.completed}</strong>
+              <span>正常</span>
+              <strong>{stats.normal ?? 0}</strong>
+            </span>
+            <span className="summary-pill" title="封禁、Web 失效、号池报错、限流、额度受限或需人工处理的账号">
+              <i className="status-dot abnormal" />
+              <span>异常</span>
+              <strong>{stats.abnormal ?? 0}</strong>
             </span>
           </div>
 
@@ -2506,6 +2516,9 @@ function App() {
                 </HelpTip>
               </div>
               <div className="dialog-header-actions">
+                <button type="button" className="secondary-button" disabled={proxySettingsSaving || !hasUsableSub2ApiSettings(sub2apiSettings)} onClick={() => setProxyCreateOpen(true)}>
+                  <Plus size={16} /> 添加代理
+                </button>
                 <button type="button" className="icon-button" autoFocus data-dialog-initial-focus onClick={() => setProxySettingsOpen(false)} disabled={proxySettingsSaving} title="关闭" aria-label="关闭代理 IP 配置">
                   <X size={18} />
                 </button>
@@ -2668,6 +2681,9 @@ function App() {
             </div>
         </AccessibleDialog>
       )}
+      {proxyCreateOpen && <ProxyCreateDialog request={(url, options) => apiFetch(token, url, options)} onClose={() => setProxyCreateOpen(false)} onCreated={() => {
+        void refreshAccountProxyDistribution().catch(error => notify(`代理已保存，刷新列表失败：${error.message}`, { tone: "error" }));
+      }} />}
       {smsSettingsOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !smsSettingsSaving) setSmsSettingsOpen(false);
@@ -4261,6 +4277,8 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
 const TASK_SETTINGS_MONITOR_FIELDS = Object.freeze(
   MONITOR_FIELDS.filter(field => field.key !== "fingerprintScanIntervalSeconds")
 );
+const OVERLOAD_SETTINGS_FIELDS = TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === "过载监控");
+const TASK_SETTINGS_MONITOR_GROUPS = [...new Set(TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group !== "过载监控").map(field => field.group))];
 
 function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSaved }) {
   const dialogRef = useRef(null);
@@ -4297,6 +4315,30 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       returnFocusRef.current?.focus();
     };
   }, [returnFocusRef]);
+
+  function resetDefaults() {
+    setLimit(String(settings.default));
+    setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES));
+    setSmsTimeout(String(DEFAULT_SMS_TIMEOUT_MINUTES));
+    setTimeZone(DEFAULT_DISPLAY_TIME_ZONE);
+    setPriceMultiplier(String(DEFAULT_POOL_PRICE_MULTIPLIER));
+    setCooldownMinutes("60");
+    setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" });
+    setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" });
+    setMonitoring(Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(field.default)])));
+    setAccountProxyMode("global");
+    setCodexAuthMode("local");
+    setError("");
+  }
+
+  function monitoringField(field) {
+    return <label key={field.key} className="settings-field" htmlFor={`monitor-${field.key}`}>
+      <span>{field.label}（{field.unit}）</span>
+      <input id={`monitor-${field.key}`} type="number" min={field.min} max={field.max} step="1" required
+        value={monitoring[field.key]} disabled={saving}
+        onChange={event => setMonitoring(current => ({ ...current, [field.key]: event.target.value }))} />
+    </label>;
+  }
 
   async function save(event) {
     event.preventDefault();
@@ -4361,7 +4403,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }),
+        body: JSON.stringify(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }, settings)),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4391,6 +4433,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       <form onSubmit={save} className="task-settings-form" noValidate>
         <div className="dialog-header">
           <div className="section-title-row">
+            <Settings2 size={18} className="task-header-icon" aria-hidden="true" />
             <h2 id="task-settings-title">任务设置</h2>
             <HelpTip label="任务设置说明">
               任务设置保存到服务端，所有浏览器共用。服务重启后保留此设置。
@@ -4400,6 +4443,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </div>
         <section className="task-auto-settings task-basic-section" aria-labelledby="task-basic-title">
           <div className="section-title-row">
+            <SlidersHorizontal size={15} className="task-section-icon" aria-hidden="true" />
             <h3 id="task-basic-title">基础并发与代理</h3>
           </div>
           <div className="task-two-fields">
@@ -4433,29 +4477,31 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           </div>
           <div className="task-auth-mode-fields">
             <div className="task-display-pricing-row">
-            <label className="settings-field" htmlFor="task-display-time-zone">
-              <span className="field-label-row">显示时区<HelpTip label="显示时区说明">全局页面时间与日志时间使用此时区。原始时间戳保持 UTC，不改变检测间隔或任务调度。支持 IANA 时区，例如 Asia/Shanghai、UTC、America/New_York。</HelpTip></span>
-              <input id="task-display-time-zone" aria-label="显示时区" list="display-time-zones" value={displayTimeZone} onChange={event => setTimeZone(event.target.value)} disabled={saving} required style={{ width: "min(320px, 60%)", minWidth: 0, textAlign: "left" }} />
-              <datalist id="display-time-zones">{["Asia/Shanghai", "UTC", "Asia/Tokyo", "America/Los_Angeles", "America/New_York", "Europe/London"].map(zone => <option key={zone} value={zone} />)}</datalist>
-            </label>
-            <label className="settings-field" htmlFor="task-pool-price-multiplier">
-              <span className="field-label-row">号池价格倍率<HelpTip label="号池价格倍率说明">自定义 1 美元号池用户收费折合多少人民币，仅用于利润展示，不是实时汇率；不会修改号池计费或额度。默认 1，支持最多 6 位小数。</HelpTip></span>
-              <div className="pool-price-multiplier-input"><span>1$ =</span><input id="task-pool-price-multiplier" aria-label="号池价格倍率" type="number" required min="0.000001" max="1000000" step="0.000001"
-                value={priceMultiplier} onChange={event => setPriceMultiplier(event.target.value)} disabled={saving} /><span>元</span></div>
-            </label>
+              <label className="settings-field" htmlFor="task-display-time-zone">
+                <span className="field-label-row">显示时区<HelpTip label="显示时区说明">全局页面时间与日志时间使用此时区。原始时间戳保持 UTC，不改变检测间隔或任务调度。支持 IANA 时区，例如 Asia/Shanghai、UTC、America/New_York。</HelpTip></span>
+                <input id="task-display-time-zone" aria-label="显示时区" list="display-time-zones" value={displayTimeZone} onChange={event => setTimeZone(event.target.value)} disabled={saving} required style={{ width: "min(320px, 60%)", minWidth: 0, textAlign: "left" }} />
+                <datalist id="display-time-zones">{["Asia/Shanghai", "UTC", "Asia/Tokyo", "America/Los_Angeles", "America/New_York", "Europe/London"].map(zone => <option key={zone} value={zone} />)}</datalist>
+              </label>
+              <label className="settings-field" htmlFor="task-pool-price-multiplier">
+                <span className="field-label-row">号池价格倍率<HelpTip label="号池价格倍率说明">自定义 1 美元号池用户收费折合多少人民币，仅用于利润展示，不是实时汇率；不会修改号池计费或额度。默认 1，支持最多 6 位小数。</HelpTip></span>
+                <div className="pool-price-multiplier-input"><span>1$ =</span><input id="task-pool-price-multiplier" aria-label="号池价格倍率" type="number" required min="0.000001" max="1000000" step="0.000001"
+                  value={priceMultiplier} onChange={event => setPriceMultiplier(event.target.value)} disabled={saving} /><span>元</span></div>
+              </label>
             </div>
-            <label className="settings-field" htmlFor="task-login-timeout">
-              <span className="field-label-row">登录超时
-                <HelpTip label="登录超时说明">Web、Codex 登录默认限时 3 分钟，包含邮箱和 2FA 等待、不含排队。进入手机号验证后改用独立接码时限，换号、重发和授权收尾都不重置或切回登录时限。超时保留原凭据；2FA 未通过时暂停自动登录，手动触发可恢复。</HelpTip>
-              </span>
-              <div><input id="task-login-timeout" type="number" min="1" max="1440" step="1" required value={loginTimeout} disabled={saving} onChange={event => setLoginTimeout(event.target.value)} /><span>分钟</span></div>
-            </label>
-            <label className="settings-field" htmlFor="task-sms-timeout">
-              <span className="field-label-row">接码时限
-                <HelpTip label="接码时限说明">默认 10 分钟。从首次进入手机号验证开始，覆盖取号、等待短信、换号、验证码验证和后续授权收尾；仅切换一次，不因重发或换号重置，也不在验证码通过后切回登录时限。超时终止本次尝试并取消号码订单；未完成手机验证的账号暂停自动 OAuth，等待手动触发。</HelpTip>
-              </span>
-              <div><input id="task-sms-timeout" aria-label="接码时限（分钟）" type="number" min="1" max="1440" step="1" required value={smsTimeout} onChange={event => setSmsTimeout(event.target.value)} disabled={saving} /><span>分钟</span></div>
-            </label>
+            <div className="task-two-fields">
+              <label className="settings-field" htmlFor="task-login-timeout">
+                <span className="field-label-row">登录超时
+                  <HelpTip label="登录超时说明">Web、Codex 登录默认限时 3 分钟，包含邮箱和 2FA 等待、不含排队。进入手机号验证后改用独立接码时限，换号、重发和授权收尾都不重置或切回登录时限。超时保留原凭据；2FA 未通过时暂停自动登录，手动触发可恢复。</HelpTip>
+                </span>
+                <div><input id="task-login-timeout" type="number" min="1" max="1440" step="1" required value={loginTimeout} disabled={saving} onChange={event => setLoginTimeout(event.target.value)} /><span>分钟</span></div>
+              </label>
+              <label className="settings-field" htmlFor="task-sms-timeout">
+                <span className="field-label-row">接码时限
+                  <HelpTip label="接码时限说明">默认 10 分钟。从首次进入手机号验证开始，覆盖取号、等待短信、换号、验证码验证和后续授权收尾；仅切换一次，不因重发或换号重置，也不在验证码通过后切回登录时限。超时终止本次尝试并取消号码订单；未完成手机验证的账号暂停自动 OAuth，等待手动触发。</HelpTip>
+                </span>
+                <div><input id="task-sms-timeout" aria-label="接码时限（分钟）" type="number" min="1" max="1440" step="1" required value={smsTimeout} onChange={event => setSmsTimeout(event.target.value)} disabled={saving} /><span>分钟</span></div>
+              </label>
+            </div>
             <label className="settings-field task-auth-mode-field" htmlFor="task-proxy-mode">
               <span className="field-label-row">
                 账号代理分配
@@ -4505,6 +4551,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">
           <div className="section-title-row">
+            <Globe2 size={15} className="task-section-icon" aria-hidden="true" />
             <h3 id="web-session-monitor-title">WebSession 定时巡检</h3>
             <HelpTip label="WebSession 定时巡检说明">由服务端执行，关闭页面后仍运行。使用原设备身份和账号代理检查会话、设备与空间；确认会话失效或空间/PlanType 变化后，通过共享登录队列重新登录授权，并应用新方案、同步号池。网络、403 或上游故障只记录失败，不当作掉线。会话检测成功后按当前套餐核对过载检测、过载冷却及继承套餐规则的降智检测。已有 Web 登录态会定期测活；本地已授权或曾成功登录 Web 的账号缺失会话时可自动补登。主动登出或取消任务会暂停维护，手动检测或登录可恢复。</HelpTip>
           </div>
@@ -4518,43 +4565,60 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           </div>
           <div className="task-auto-empty">默认关闭；默认每 15 分钟检测，60 分钟内最多自动重登一次。需要验证码时保留在现有任务队列中等待处理。</div>
         </section>
-        {Array.from(new Set(TASK_SETTINGS_MONITOR_FIELDS.map(field => field.group))).map(group => (
+        {TASK_SETTINGS_MONITOR_GROUPS.map(group => (
           <section className="task-auto-settings" key={group} aria-label={group}>
             <div className="section-title-row">
+              {group === "号池与用量同步" ? <Database size={15} className="task-section-icon" aria-hidden="true" />
+                : group === "号池异常恢复" ? <RefreshCw size={15} className="task-section-icon" aria-hidden="true" />
+                : <RotateCcw size={15} className="task-section-icon" aria-hidden="true" />}
               <h3>{group}</h3>
             </div>
             <div className="task-two-fields">
-              {TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === group).map(field => (
-                <label key={field.key} className="settings-field" htmlFor={`monitor-${field.key}`}>
-                  <span>{field.label}（{field.unit}）</span>
-                  <input id={`monitor-${field.key}`} type="number" min={field.min} max={field.max} step="1" required
-                    value={monitoring[field.key]} disabled={saving}
-                    onChange={event => setMonitoring(current => ({ ...current, [field.key]: event.target.value }))} />
-                </label>
-              ))}
+              {TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === group).map(monitoringField)}
             </div>
             <div className="task-auto-empty">{group === "巡检调度" ? "扫描到期任务的频率，不是每个账号的检测间隔。Web 检测共用上方任务并发。"
-              : group === "过载监控" ? "刷新频率不改变折线图每格 15 分钟、总计 90 分钟的统计口径。冷却到期仍及时唤醒恢复。"
               : group === "号池异常恢复" ? "默认 300 秒（5 分钟）。重新授权仍进入共享登录队列；重试间隔为 0 时不设失败冷却。"
               : "仅请求号池，默认网络并发 100；由服务端定时同步，关闭页面后继续运行，不会主动刷新上游额度。"}</div>
           </section>
         ))}
-        <section className="task-auto-settings overload-cooldown-settings" aria-labelledby="overload-auto-cooldown-title">
+        <section className="task-auto-settings task-overload-settings" aria-labelledby="task-overload-title">
           <div className="section-title-row">
-            <h3 id="overload-auto-cooldown-title">过载自动冷却</h3>
+            <Activity size={15} className="task-section-icon" aria-hidden="true" />
+            <h3 id="task-overload-title">过载</h3>
+            <HelpTip label="过载设置说明">统计和冷却都读取号池已有请求日志，不主动发起模型测试。这里只设置全局运行参数，账号的“过载”和“冷却”开关在 Codex 状态列或下方 PlanType 自动任务中分别开启。</HelpTip>
+          </div>
+          <div className="task-overload-statistics">
+            <div className="section-title-row">
+              <h4>统计展示</h4>
+            </div>
+            <div className="task-two-fields">{OVERLOAD_SETTINGS_FIELDS.filter(field => field.key === "overloadIntervalSeconds").map(monitoringField)}</div>
+            <div className="task-auto-empty">刷新账号的过载曲线和请求数；每格 15 分钟，共显示最近 6 个已结束时间段。调整刷新间隔不改变统计口径。</div>
+          </div>
+          <div className="task-overload-cooldown">
+          <div className="section-title-row">
+            <h4 id="overload-auto-cooldown-title">自动冷却</h4>
             <HelpTip label="过载自动冷却说明">
-              按上方冷却检查间隔统计最近一段时间的过载次数，达到阈值后暂停号池分配，到期自动恢复（在账号的“过载检测”列单独开启）。当前规则：最近 {overloadRule.windowMinutes || "—"} 分钟内过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟。恢复后重新计数，服务重启后继续计时。
+              按冷却检查间隔统计滚动窗口内的过载次数，达到阈值后暂停号池分配，到期自动恢复。账号需要单独开启“冷却”，不依赖“过载”统计展示开关。恢复后重新计数，服务重启后继续计时。
             </HelpTip>
           </div>
+          <div className="task-two-fields">{OVERLOAD_SETTINGS_FIELDS.filter(field => field.key === "overloadCooldownIntervalSeconds").map(monitoringField)}</div>
           <div className="overload-rule-fields">
             {[{ key: "windowMinutes", label: "过载统计窗口", unit: "分钟", max: 1440 }, { key: "threshold", label: "过载触发阈值", unit: "次", max: 100000 }, { key: "cooldownMinutes", label: "自动冷却时长", unit: "分钟", max: 43200 }].map(field => <label key={field.key} className="settings-field" htmlFor={`overload-rule-${field.key}`}>
               <span>{field.label}</span><div><input id={`overload-rule-${field.key}`} type="number" min={1} max={field.max} step="1" value={overloadRule[field.key]} disabled={saving} onChange={event => setOverloadRule(current => ({ ...current, [field.key]: event.target.value }))} /><span>{field.unit}</span></div>
             </label>)}
           </div>
+          <div className="task-auto-empty">最近 {overloadRule.windowMinutes || "—"} 分钟过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟；到期会及时唤醒恢复。</div>
+          </div>
+          <details className="task-overload-advanced">
+            <summary>过载并发设置</summary>
+            <div className="task-two-fields">{OVERLOAD_SETTINGS_FIELDS.filter(field => field.key.endsWith("Concurrency")).map(monitoringField)}</div>
+            <div className="task-auto-empty">两项均为请求号池的网络并发，默认 100。</div>
+          </details>
         </section>
         <section className="task-auto-settings" aria-labelledby="task-auto-settings-title">
           <div className="task-auto-settings-heading">
             <div className="section-title-row">
+              <ListPlus size={15} className="task-section-icon" aria-hidden="true" />
               <h3 id="task-auto-settings-title">批量导入后的自动任务</h3>
               <HelpTip label="自动任务说明">
                 按首次 Web 登录识别到的原始 PlanType 执行命令。没有规则的 PlanType 不会自动执行其它操作。
@@ -4587,7 +4651,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
                             if (itemIndex !== index) return item;
                             return { ...item, actions: toggleTaskAutoAction(item.actions, option.value, event.target.checked) };
                           }))} />
-                        <span>{option.label}</span>
+                        <span>{option.value === "enable-overload-detection" ? "自动开启过载统计" : option.label}</span>
                       </label>
                     ))}
                   </div>
@@ -4602,7 +4666,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
         </section>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
-          <button type="button" className="selection-text-button" onClick={() => { setLimit(String(settings.default)); setLoginTimeout(String(DEFAULT_LOGIN_TIMEOUT_MINUTES)); setTimeZone(DEFAULT_DISPLAY_TIME_ZONE); setCooldownMinutes("60"); setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" }); setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" }); setMonitoring(Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(field.default)]))); setAccountProxyMode("global"); setCodexAuthMode("local"); }} disabled={saving}>恢复默认</button>
+          <button type="button" className="selection-text-button" onClick={resetDefaults} disabled={saving} title="恢复基础与监控参数，保留已配置的 PlanType 自动任务">恢复默认</button>
           <span className="dialog-actions-spacer" />
           <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
           <button type="submit" className="primary-button" disabled={saving}>

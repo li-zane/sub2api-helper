@@ -13,17 +13,31 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-cooldown-http-"));
 const output = path.join(temp, "output");
 const statePath = path.join(output, "overload-cooldown.json");
 const email = "cooling@example.test";
+const fingerprintScenario = process.argv.includes("--fingerprint");
 const records = [
   { id: 7, platform: "openai", type: "oauth", name: "冷却测试账号", status: "active", schedulable: true, proxy_id: 0, credentials: { email, plan_type: "plus" } },
   { id: 8, platform: "openai", type: "oauth", name: "原本停用账号", status: "active", schedulable: false, proxy_id: 0, credentials: { email: "manual@example.test", plan_type: "free" } },
 ];
 let logRows = makeRows();
+let samples = 0, finishSample;
+const sampleReady = new Promise(resolve => { finishSample = resolve; });
+let releaseSample;
+const sampleRelease = new Promise(resolve => { releaseSample = resolve; });
+if (fingerprintScenario) records[0].credentials.access_token = "fixture-access";
 const changes = [];
 const remote = http.createServer(async (req, res) => {
   const chunks = []; for await (const chunk of req) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
   const url = new URL(req.url, "http://fixture");
   res.setHeader("content-type", "application/json");
+  if (fingerprintScenario && url.pathname === "/responses") {
+    samples++;
+    if (samples === 1) { res.statusCode = 503; return res.end(JSON.stringify({ error: { code: "server_is_overloaded", message: OVERLOAD_MESSAGE } })); }
+    finishSample(); await sampleRelease;
+    res.setHeader("content-type", "text/event-stream");
+    return res.end('data: {"type":"response.completed","response":{"status":"completed","output":[{"content":[{"type":"output_text","text":"<final_answer>21</final_answer>"}]}],"usage":{"input_tokens":10,"output_tokens":20}}}\n\n');
+  }
+  if (fingerprintScenario && url.pathname === "/api/v1/admin/accounts/7") return res.end(JSON.stringify({data:records[0]}));
   if (url.pathname === "/api/v1/admin/accounts") return res.end(JSON.stringify({ data: { items: records, total: records.length, pages: 1 } }));
   if (url.pathname === "/api/v1/admin/proxies/all" || url.pathname === "/api/v1/admin/groups/all") return res.end("[]");
   if (url.pathname.includes("/ops/requests")) return res.end('{"data":{"items":[],"total":0}}');
@@ -62,6 +76,7 @@ try {
   assert.equal((await post(`/api/jobs/${jobId}/overload-auto-cooldown`, { enabled: "yes" })).status, 400);
   assert.equal((await fetch(`${base}/api/jobs/${jobId}/overload-auto-cooldown`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"enabled":true}' })).status, 403);
   const before = await job();
+  if (fingerprintScenario) assert.equal((await post("/api/model-fingerprint/settings", {settings:{models:["fixture"],candyRetries:1,candyRetryDelaySeconds:1,testSequence:{first:"candy",fingerprint:0,candy:1}}})).status,200);
   assert.equal((await post(`/api/jobs/${jobId}/overload-auto-cooldown`, { enabled: true })).status, 200);
   await waitFor(async () => (await job()).overloadAutoCooldown.phase === "cooling");
   assert.equal(records[0].schedulable, false);
@@ -70,6 +85,20 @@ try {
   assert.equal(cooling.overloadAutoCooldown.windowCount, 3);
   assert.equal(cooling.assignedProxyId, before.assignedProxyId);
   assert.equal(cooling.status, before.status, "pool pause does not restart account login");
+  if (fingerprintScenario) {
+    await get("/api/sub2api/account-status?refresh=1");
+    const paused = await job(); assert.equal(paused.codexStatusEligible,false);assert.equal(paused.canCheckModelFingerprint,true,"helper cooldown should permit manual checks");
+    assert.equal((await post(`/api/jobs/${jobId}/model-fingerprint/check`,{})).status,202);
+    await waitFor(async()=>samples===2);await sampleReady;
+    await get("/api/sub2api/account-status?refresh=1");
+    assert.equal((await job()).modelFingerprint.phase,"running","status synchronization cancelled the manual cooling check");
+    releaseSample(); await waitFor(async()=>{const j=await job();return j.modelFingerprint.phase==="idle"&&j.modelFingerprint.result?.status==="match";});
+    const checked=await job();assert.equal(samples,2);assert.equal(records[0].schedulable,false);assert.equal(checked.overloadAutoCooldown.coolingUntil,cooling.overloadAutoCooldown.coolingUntil);assert.deepEqual(changes,[{id:7,enabled:false}]);
+    const history=await get(`/api/jobs/${jobId}/model-fingerprint/history`);assert.equal(history.records.length,1);assert.equal(history.records[0].requestCount,2);
+    const detail=await get(`/api/jobs/${jobId}/model-fingerprint/history?round=${history.records[0].id}`);assert.deepEqual(detail.record.models[0].requests.map(r=>r.status),["error","success"]);
+    const disabled=(await get("/api/jobs")).jobs.find(j=>j.email==="manual@example.test");assert.equal(disabled.canCheckModelFingerprint,false);assert.equal((await post(`/api/jobs/${disabled.id}/model-fingerprint/check`,{})).status,409);
+    console.log("COOLING_FINGERPRINT_HTTP_PASS manual=202 automatic=paused retry=503_to_pass requests=2 polling=preserved deadline=unchanged history=readable manual_disabled=409");
+  }
   await stop(); await start();
   assert.equal((await job()).overloadAutoCooldown.enabled, false, "pool is cooling: effective control stays off while durable resume remains armed");
   assert.deepEqual((await get("/api/task-settings")).settings.overloadAutoCooldown, rule);
@@ -98,7 +127,7 @@ try {
     await new Promise(resolve => { process.once("SIGINT", resolve); process.once("SIGTERM", resolve); });
   }
 } catch (error) { error.message += `\n${logs}`; throw error; }
-finally { await stop(); remote.closeAllConnections(); await new Promise(resolve => remote.close(resolve)); await fs.rm(temp, { recursive: true, force: true }); }
+finally { releaseSample(); await stop(); remote.closeAllConnections(); await new Promise(resolve => remote.close(resolve)); await fs.rm(temp, { recursive: true, force: true }); }
 
 function makeRows() { return [1, 2, 3].map(id => ({ id, account_id: 7, status_code: 503, message: OVERLOAD_MESSAGE, created_at: new Date(Date.now() - 10_000 - id).toISOString() })); }
 async function job() { return (await get("/api/jobs")).jobs.find(job => job.id === jobId); }
@@ -106,7 +135,7 @@ async function get(route) { return (await fetch(`${base}${route}`, { headers }))
 async function post(route, body) { const r = await fetch(`${base}${route}`, { method: "POST", headers, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() }; }
 function listen(server) { return new Promise(resolve => server.listen(0, "127.0.0.1", resolve)); }
 async function start() {
-  child = spawn(process.execPath, [path.join(root, "src/console-server.mjs"), "--host", "127.0.0.1", "--port", String(port)], { cwd: root, windowsHide: true, env: { ...process.env, ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: temp, TOSUB2_MAC_CREDENTIAL_ROOT: path.join(temp, "credentials"), TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(temp, "credentials"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), SUB2API_MONITOR_ENABLED: "false" }, stdio: ["ignore", "pipe", "pipe"] });
+  child = spawn(process.execPath, [path.join(root, "src/console-server.mjs"), "--host", "127.0.0.1", "--port", String(port)], { cwd: root, windowsHide: true, env: { ...process.env, ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: temp, TOSUB2_MAC_CREDENTIAL_ROOT: path.join(temp, "credentials"), TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(temp, "credentials"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), SUB2API_MONITOR_ENABLED: "false", ...(fingerprintScenario ? { NODE_ENV:"test", TOSUB2_FINGERPRINT_TEST_URL:config.baseUrl+"/responses" } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout.on("data", chunk => { logs = `${logs}${chunk}`.slice(-10000); });
   child.stderr.on("data", chunk => { logs = `${logs}${chunk}`.slice(-10000); });
   await waitFor(async () => { const r = await fetch(`${base}/api/bootstrap`).catch(() => null); if (!r?.ok) return false; headers = { "x-console-token": (await r.json()).token, "content-type": "application/json" }; return true; });

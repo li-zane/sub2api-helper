@@ -66,9 +66,9 @@ async (page) => {
     check(!await first.getByRole('checkbox', {name:'Codex 授权',exact:true}).isChecked(), 'rotation schedules a redundant early authorization');
     await upload.check();
     check(await upload.isChecked() && !await rotate.isChecked(), 'plain upload retains rotate');
-    await first.getByRole('checkbox', { name: '自动开启过载检测', exact: true }).check();
+    await first.getByRole('checkbox', { name: '自动开启过载统计', exact: true }).check();
     await rotate.check();
-    check(await first.getByRole('checkbox', { name: '自动开启过载检测', exact: true }).isChecked(), 'upload change clears independent task');
+    check(await first.getByRole('checkbox', { name: '自动开启过载统计', exact: true }).isChecked(), 'upload change clears independent task');
     check(await first.getByText('新账号先登录 Web；一键轮换依次完成 2FA、登出设备、重登 Web、授权与上传，无需额外勾选 Codex 授权。', { exact: true }).isVisible(), 'upload relationship not explained');
   });
   await test('exclusive-upload-values-save-and-reopen', async () => {
