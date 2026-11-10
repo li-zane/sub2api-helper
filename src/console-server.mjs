@@ -45,7 +45,7 @@ import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-trans
 import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
 import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
-import { DEFAULT_MONITORING, normalizeMonitoring } from "../web/src/monitor-settings.mjs";
+import { DEFAULT_MONITORING, normalizeMonitoring, normalizeSavedMonitoring, TASK_SETTINGS_VERSION } from "../web/src/monitor-settings.mjs";
 import { normalizeTaskUploadActions, isRedundantTaskUpload, isRedundantTaskAuthorization } from "../web/src/task-auto-actions.mjs";
 import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "../web/src/login-settings.mjs";
 import { LoginTimeouts } from "./login-timeout.mjs";
@@ -65,6 +65,7 @@ import { createFingerprintSampler, createFingerprintAccountReader } from "./mode
 import { WebSessionMonitor, normalizeWebSessionMonitor, DEFAULT_WEB_SESSION_MONITOR } from "./web-session-monitor.mjs";
 import { accountHealth } from "./account-health.mjs";
 import { createProxyImporter } from "./sub2api-proxy-create.mjs";
+import { poolAccountError } from "../web/src/pool-account-error.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4399;
@@ -256,6 +257,7 @@ const poolRefreshTimers = new Map();
 const poolRefreshOperations = new Set();
 const accountSecurityChecks = new Set();
 const pendingCodexBlocks = new Set();
+const pausedCodexChecks = new Map();
 const manualWebSessionChecks = new Map();
 const manualWebSessionCheckOperations = new Set();
 let drainingWebSessionChecks = false;
@@ -5241,7 +5243,7 @@ async function loadTaskSettings() {
     accountProxyCooldownMinutes = normalizeCooldownMinutes(saved.accountProxyCooldownMinutes);
     overloadAutoCooldownSettings = normalizeOverloadCooldown(saved.overloadAutoCooldown);
     webSessionMonitorSettings = normalizeWebSessionMonitor(saved.webSessionMonitor);
-    monitoringSettings = normalizeMonitoring(saved.monitoring, monitoringDefaults);
+    monitoringSettings = normalizeSavedMonitoring(saved, monitoringDefaults);
   } catch (error) {
     if (error?.code !== "ENOENT") {
       throw new Error(`任务设置读取失败：${error.message}`);
@@ -5344,7 +5346,7 @@ async function saveTaskSettings(body) {
     const tempPath = `${TASK_SETTINGS_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
       await fs.writeFile(tempPath, `${JSON.stringify({
-        version: 2,
+        version: TASK_SETTINGS_VERSION,
         displayTimeZone: effectiveDisplayTimeZone,
         poolPriceMultiplier: effectivePoolPriceMultiplier,
         maxActiveJobs: effectiveLimit,
@@ -6659,6 +6661,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
           priority,
           planType: extractPlanTypeFromAccount(remoteAccount, { preferJwt: false }) || null,
           remoteStatus,
+          remoteErrors: [poolAccountError(remoteAccount)].filter(Boolean),
           rateLimited: rateLimit.limited,
           quotaRestricted: usageRestricted(observedUsage),
           rateLimitUntil: rateLimit.limited ? rateLimit.until : null,
@@ -6678,6 +6681,8 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       current.planType ||= extractPlanTypeFromAccount(remoteAccount, { preferJwt: false }) || null;
       if (remoteStatus === "error") current.remoteStatus = "error";
       else current.remoteStatus ||= remoteStatus;
+      const remoteError = poolAccountError(remoteAccount);
+      if (remoteError) current.remoteErrors.push(remoteError);
       current.usage = mergeSub2ApiUsage(current.usage, usage);
     }
     for (const [email, entry] of accounts) {
@@ -6692,6 +6697,14 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
     }
     sub2ApiAccountStatusCache = { backend, fetchedAt, accounts };
     pendingCodexBlocks.clear();
+    for (const [email, pause] of pausedCodexChecks) {
+      const job = findJobByEmail(email);
+      if (pause.backend !== backend || accountAutomationBlocked(email)) { pausedCodexChecks.delete(email); continue; }
+      if (!job || !codexMonitoringAllowed(job)) continue;
+      pausedCodexChecks.delete(email);
+      appendJobLog(job, "[codex-status] 限额或限流已解除，按原开关恢复检测；手动关闭的项目保持关闭。\n");
+      overloadMonitor.trigger(); overloadCooldown.trigger(); modelFingerprint.trigger();
+    }
     for (const job of jobs.values()) if (!codexMonitoringAllowed(job) && !(modelFingerprint.isManualCheck(job.email) && manualFingerprintAllowed(job))) modelFingerprint.invalidateAccount(job.email);
     sub2ApiAccountStatusCache.usageIds = remoteAccounts.filter(account => account.platform === "openai" && account.type === "oauth" && sub2ApiAccountEmail(account) && !accountSyncBlocked(account))
       .map(account => normalizeSub2ApiAccountId(account.id)).filter(Boolean);
@@ -6844,9 +6857,10 @@ function publicSub2ApiAccountStatusEntry(entry) {
     planType: entry.planType || null,
     groupIds: [...(entry.groupIds || [])],
     remoteStatus: entry.remoteStatus || null,
+    remoteErrors: entry.remoteErrors || [],
     rateLimited: entry.rateLimited === true,
     quotaRestricted: entry.quotaRestricted === true || usageRestricted(entry.usage),
-    codexStatusEligible: !blocked && entry.enabled === true && !entry.rateLimited && !entry.quotaRestricted && !usageRestricted(entry.usage),
+    codexStatusEligible: !blocked && entry.enabled === true && entry.remoteStatus !== "error" && !entry.rateLimited && !entry.quotaRestricted && !usageRestricted(entry.usage),
     rateLimitUntil: entry.rateLimitUntil || null,
     accountBlocked: blocked,
     accountBlockReason: blocked ? job?.autoRepairBlockedReason || null : null,
@@ -7070,6 +7084,7 @@ function getSub2ApiAccountStatusForJob(job, state = sub2ApiAccountStatusCache) {
     proxyIds: [...(entry.proxyIds || [])],
     groupIds: [...(entry.groupIds || [])],
     remoteStatus: entry.remoteStatus || null,
+    remoteErrors: entry.remoteErrors || [],
     planType: entry.planType || null,
     rateLimited: entry.rateLimited === true,
     quotaRestricted: entry.quotaRestricted === true || usageRestricted(entry.usage),
@@ -7696,29 +7711,30 @@ function codexChecksBlocked(email) {
   const state = getSub2ApiAccountStatusForJob({ email });
   // Before a cache exists, the schedulers' fresh account mappings remain the
   // admission check. A known missing/disabled pool member is always blocked.
-  return state.inPool !== null && (state.inPool !== true || state.enabled !== true || state.rateLimited || state.quotaRestricted || usageRestricted(state.usage));
+  return state.inPool !== null && (state.inPool !== true || state.enabled !== true || state.remoteStatus === "error" || state.rateLimited || state.quotaRestricted || usageRestricted(state.usage));
 }
 async function stopUnavailableCodexChecks(email, reason = "达到用量限额") {
   if (!email) return;
-  pendingCodexBlocks.add(String(email).toLowerCase());
-  const changed = overloadMonitor.snapshot(email).enabled || overloadCooldown.snapshot(email).enabled || modelFingerprint.snapshot(email).enabled;
+  email = String(email).toLowerCase();
+  pendingCodexBlocks.add(email);
   modelFingerprint.invalidateAccount(email);
-  if (overloadMonitor.snapshot(email).enabled) await overloadMonitor.setEnabled(email, false);
-  if (overloadCooldown.snapshot(email).enabled) await overloadCooldown.stopDetection(email);
-  const override = modelFingerprint.snapshot(email).override;
-  if (override.enabled !== false) await modelFingerprint.saveOverride(email, { ...override, enabled: false }, { notify: false });
-  const job = changed && findJobByEmail(email);
-  if (job) appendJobLog(job, `[codex-status] ${reason}，已关闭过载、冷却统计与降智检测；保留用量同步及原冷却恢复记录。\n`);
+  // Admission gates pause actual requests. Keep the user's durable switches and
+  // inherited fingerprint policy intact, so recovery and restarts can resume.
+  const backend = monitorBackendIdentity(sub2ApiSettingsConfig || sub2ApiMonitorConfig);
+  const previous = pausedCodexChecks.get(email);
+  pausedCodexChecks.set(email, { backend, reason });
+  const job = (!previous || previous.backend !== backend || previous.reason !== reason) && findJobByEmail(email);
+  if (job) appendJobLog(job, `[codex-status] ${reason}，已暂停过载、冷却统计与降智检测；保留原开关，解除限制后自动恢复。\n`);
 }
 
 function codexMonitoringAllowed(job) {
   const state = getSub2ApiAccountStatusForJob(job);
-  return !pendingCodexBlocks.has(String(job.email).toLowerCase()) && !accountAutomationBlocked(job.email) && !state.rateLimited && !state.quotaRestricted && !usageRestricted(state.usage) && state.inPool === true && state.enabled === true;
+  return !pendingCodexBlocks.has(String(job.email).toLowerCase()) && !accountAutomationBlocked(job.email) && state.remoteStatus !== "error" && !state.rateLimited && !state.quotaRestricted && !usageRestricted(state.usage) && state.inPool === true && state.enabled === true;
 }
 function manualFingerprintAllowed(job) {
   if (!job || job.deleted || pendingCodexBlocks.has(String(job.email).toLowerCase()) || accountAutomationBlocked(job.email)) return false;
   const state = getSub2ApiAccountStatusForJob(job);
-  if (state.inPool !== true || state.rateLimited || state.quotaRestricted || usageRestricted(state.usage)) return false;
+  if (state.inPool !== true || state.remoteStatus === "error" || state.rateLimited || state.quotaRestricted || usageRestricted(state.usage)) return false;
   return state.enabled === true || state.remoteStatus === "active" && (state.accountIds || []).some(id => overloadCooldown.ownsPause(job.email, id));
 }
 async function assertCodexMonitoringAllowed(job) {
@@ -7975,6 +7991,7 @@ function publicJob(job) {
     sub2apiAccountIds: sub2ApiStatus.accountIds,
     sub2apiGroupIds: sub2ApiStatus.groupIds,
     sub2apiRemoteStatus: sub2ApiStatus.remoteStatus,
+    sub2apiRemoteErrors: sub2ApiStatus.remoteErrors || [],
     sub2apiPlanType: sub2ApiStatus.planType,
     sub2apiUsage: publicSub2ApiUsage(sub2ApiStatus.usage, sub2ApiStatus.quotaRestricted),
     codexStatusEligible: codexEligible,
@@ -8098,6 +8115,10 @@ async function getAccountUsage(job, forceRefresh = false) {
       if (usageRestricted(merged)) {
         await stopUnavailableCodexChecks(job.email);
         pendingCodexBlocks.delete(String(job.email).toLowerCase());
+      } else if (codexMonitoringAllowed(job) && pausedCodexChecks.has(String(job.email).toLowerCase())) {
+        pausedCodexChecks.delete(String(job.email).toLowerCase());
+        appendJobLog(job, "[codex-status] 用量同步确认限额已解除，按原开关恢复检测。\n");
+        overloadMonitor.trigger(); overloadCooldown.trigger(); modelFingerprint.trigger();
       }
     }
   }

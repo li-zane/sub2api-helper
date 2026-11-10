@@ -114,13 +114,13 @@ export function OverloadDetection({ job, token, onError }) {
       <div className="overload-dashboard overload-chart">
       <OverloadEnergy value={dashboard.quarter} enabled={enabled} />
       <div className="overload-plot" ref={plotRef}>
-        <svg viewBox="0 0 164 56" role="group" aria-label="最近六个完整的 15 分钟区间的过载与请求数量，两条线独立缩放">
+        <svg viewBox="0 0 164 56" role="group" aria-label="截至最近同步的 90 分钟过载与请求数量，每段 15 分钟，两条线独立缩放">
           <line className="overload-zero" x1="10" x2="156" y1="44" y2="44" />
           {overloadSegments.map((values, index) => <polyline key={index} className="overload-line" points={values} />)}
           {requestSegments.map((values, index) => <polyline key={index} className="overload-request-line" points={values} />)}
           {positioned.map((point, index) => (
             <g key={point.start} className="overload-point" tabIndex="0" role="img"
-              aria-label={`${intervalLabel(point)}；过载 ${point.count ?? "未统计"}；请求 ${point.requestCount ?? "未统计"}`}
+              aria-label={`${intervalLabel(point)}；过载 ${point.count ?? "未统计"}；请求 ${point.requestCount ?? "未统计"}${point.requestEnd && point.requestEnd !== point.end ? `；请求统计区间 ${intervalLabel({ start: point.requestStart, end: point.requestEnd })}` : ""}`}
               onMouseEnter={() => setHovered(index)} onMouseLeave={() => setHovered(null)}
               onFocus={() => setHovered(index)} onBlur={() => setHovered(null)}
               onClick={() => setHovered(index)} onKeyDown={(event) => { if (event.key === "Escape") setHovered(null); }}>
@@ -133,8 +133,9 @@ export function OverloadDetection({ job, token, onError }) {
         {active && <div className={`overload-tooltip point-${hovered}`} role="tooltip">
           <span>{intervalLabel(active)}</span>
           <strong className="overload-tooltip-count"><i aria-hidden="true" />过载 <b>{active.count === null ? "未统计" : `${active.count} 次`}</b></strong>
+          {active.requestEnd && active.requestEnd !== active.end && <span>请求区间：{intervalLabel({ start: active.requestStart, end: active.requestEnd })}</span>}
           <strong className="overload-tooltip-requests"><i aria-hidden="true" />请求 <b>{active.requestCount === null || active.requestCount === undefined ? "未统计" : `${active.requestCount} 次`}</b></strong>
-          <span className="overload-scale-note">独立缩放</span>
+          <span className="overload-scale-note">{errors ? "同步异常，保留上次成功数据；" : ""}独立缩放</span>
         </div>}
         {errors && <span className="overload-error" role="img" aria-label={errors} title={errors}>!</span>}
       </div>
@@ -150,7 +151,7 @@ export function OverloadDetection({ job, token, onError }) {
 
 function OverloadEnergy({ value, enabled }) {
   const energy = overloadEnergy(value.count, value.limit, enabled);
-  const title = `${value.period} 过载；${value.source}；${value.count ?? "未统计"} 次 / 阈值 ${value.limit ?? "未知"} 次${enabled ? "" : "；过载检测已关闭"}`;
+  const title = `${value.period} 过载；${value.source}；${value.count ?? "未统计"} 次 / 阈值 ${value.limit ?? "未知"} 次${value.end ? `；统计至 ${displayDateTime(value.end)}` : ""}${enabled ? "" : "；过载检测已关闭"}`;
   return <div className={`codex-energy ${energy.tone}`} title={title}>
     <div className="codex-energy-track" role="meter" aria-label={`${value.period} 过载次数`} aria-valuemin={0} aria-valuemax={value.limit ?? undefined} aria-valuenow={energy.known ? Math.min(value.count, value.limit) : undefined} aria-valuetext={title}>
       <span className="codex-energy-fill" style={{ height: `${energy.ratio * 100}%`, background: energy.color }} />

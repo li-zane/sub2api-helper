@@ -67,7 +67,7 @@ try{
     assert.equal(calls.slice(count).filter(c=>c.path.includes('/usage')||c.path.endsWith('/quota/refresh')).length,0);
     console.log('BASELINE_ACCOUNT_CONTROLS_REPRODUCED active429_monitor_on=true banned_oauth_enabled=true banned_web_disabled=true manual_banned_usage_skipped=true');process.exitCode=1;
   }else{
-    assert.equal(limited.sub2apiRateLimited,true);assert.equal(limited.codexStatusEligible,false);assert.equal(limited.overloadDetection.enabled,false);assert.equal(limited.modelFingerprint.override.enabled,false);
+    assert.equal(limited.sub2apiRateLimited,true);assert.equal(limited.codexStatusEligible,false);assert.equal(limited.overloadDetection.enabled,false);assert.equal(limited.modelFingerprint.enabled,false);assert.equal(limited.modelFingerprint.override.enabled,null,'429 preserves the inherited fingerprint preference');
     for(const route of ["overload-detection","overload-auto-cooldown","model-fingerprint","model-fingerprint/check"])assert.equal((await api(`/api/jobs/${limited.id}/${route}`,{enabled:true})).status,409);
     assert(!calls.some(c=>c.path.includes('/ops/')&&new URLSearchParams(c.query).get('account_id')==='102'),'429 account was probed for overload');
     assert.equal(records[1].schedulable,true,'429 must not disable pool or remove IP');
@@ -98,8 +98,8 @@ try{
     assert.equal((await find(banned.email)).autoRepairBlocked,true,'Web-only success silently unbanned or enabled the pool');
     assert.equal(records[2].schedulable,false);assert.equal(records[2].proxy_id,0);assert.equal(await fs.readFile(path.join(root,banned.id,'sub2api-import-oauth.json'),'utf8'),originalOAuth);
     const traces=(await fs.readFile(trace,'utf8')).trim().split('\n').map(JSON.parse),recovery=traces.find(t=>t.email===banned.email);assert(recovery.web);assert.equal(recovery.phased,'0');assert.equal(recovery.hasPoolKey,false);
-    records[1].rate_limit_reset_at='2020-01-01T00:00:00Z';await api('/api/sub2api/account-status?refresh=1');const expired=await find(limited.email);assert.equal(expired.sub2apiRateLimited,false);assert.equal(expired.overloadDetection.enabled,false,'rate limit expiry silently re-enabled saved switch');
-    await stop();await start();const restored=await find(limited.email);assert.equal(restored.overloadDetection.enabled,false);assert.equal(restored.modelFingerprint.override.enabled,false);
-    console.log('ACCOUNT_CONTROLS_HTTP_PASS first-import password+2FA before OAuth with monitor off; active429 raw switches stopped/persisted and API gated; banned OAuth blocked but manual Web-only/batch progress survives ban reconciliation; no OAuth/IP/pool-enable side effects; manual banned quota+reset/totals refresh including no-export account; old credentials preserved');
+    records[1].rate_limit_reset_at='2020-01-01T00:00:00Z';await api('/api/sub2api/account-status?refresh=1');const expired=await find(limited.email);assert.equal(expired.sub2apiRateLimited,false);assert.equal(expired.overloadDetection.enabled,true,'rate limit expiry resumes the original enabled switch');assert.equal(expired.modelFingerprint.override.enabled,null,'recovery preserves inherited policy');
+    await stop();await start();const restored=await find(limited.email);assert.equal(restored.overloadDetection.enabled,true);assert.equal(restored.modelFingerprint.override.enabled,null);
+    console.log('ACCOUNT_CONTROLS_HTTP_PASS first-import password+2FA before OAuth with monitor off; active429 requests/API gated without erasing preferences; recovery and restart retain enabled/inherited settings; banned OAuth blocked but manual Web-only/batch progress survives ban reconciliation; no OAuth/IP/pool-enable side effects; manual banned quota+reset/totals refresh including no-export account; old credentials preserved');
   }
 }finally{releaseSecurity?.();await stop();for(const s of[pool,upstream])s.closeAllConnections();await Promise.all([new Promise(r=>pool.close(r)),new Promise(r=>upstream.close(r))]);await fs.rm(root,{recursive:true,force:true})}

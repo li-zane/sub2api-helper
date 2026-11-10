@@ -125,7 +125,8 @@ try {
   assert.equal((await job(ids[1])).overloadDetection.enabled, false);
   assert(logRequests.every((url) => ["7", "8"].includes(url.searchParams.get("account_id"))), "each remote account for this email is included");
   assert(logRequests.every((url) => url.searchParams.get("status_codes") === "503"));
-  assert.equal(new Date(entry.overloadDetection.points.at(-1).end).getMinutes() % 15, 0);
+  assert.equal(entry.overloadDetection.points.at(-1).end, entry.overloadDetection.updatedAt, "current sync is the rolling window end");
+  assert.equal(Date.parse(entry.overloadDetection.points.at(-1).end) - Date.parse(entry.overloadDetection.points[0].start), 90 * 60_000);
   await toggle(false);
   assert.equal((await job()).overloadDetection.enabled, false);
   const saved = JSON.parse(await fs.readFile(path.join(output, "overload-monitor.json"), "utf8"));

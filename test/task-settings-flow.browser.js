@@ -9,14 +9,17 @@ async page => {
   const save=async d=>{const result=page.waitForResponse(r=>r.url().endsWith('/api/task-settings')&&r.request().method()==='POST');await d.getByRole('button',{name:'保存设置',exact:true}).click();const r=await result;check(r.ok(),await r.text());await d.waitFor({state:'hidden'});return r.request().postDataJSON();};
   await api({smsTimeoutMinutes:25,poolPriceMultiplier:7,webSessionMonitor:{enabled:false,intervalMinutes:37,retryMinutes:73,autoRelogin:false},overloadAutoCooldown:{windowMinutes:21,threshold:17,cooldownMinutes:42},autoActions:{free:['enable-overload-detection']}});
   await page.setViewportSize({width:1440,height:1000});let d=await open();
-  await test('one-overload-section-with-statistics-and-cooldown',async()=>{
+  await test('count-sync-under-pool-settings-and-independent-cooldown',async()=>{
     const section=d.locator('.task-overload-settings');check(await section.count()===1,'overload section duplicated');
-    check(await section.getByRole('heading',{name:'统计展示',exact:true}).count()===1,'statistics heading missing');
+    check(await section.getByRole('heading',{name:'统计展示',exact:true}).count()===0,'duplicate statistics section');
+    const pool=d.locator('section').filter({has:page.getByRole('heading',{name:'号池与用量同步',exact:true})});
+    check(await pool.locator('#monitor-overloadIntervalSeconds').inputValue()==='60','count sync default or grouping incorrect');
+    check(await pool.locator('#monitor-overloadConcurrency').inputValue()==='100','count concurrency not under pool sync');
     check(await section.getByRole('heading',{name:'自动冷却',exact:true}).count()===1,'cooldown heading missing');
-    check(await section.locator('input').count()===7,'overload inputs missing');
+    check(await section.locator('input').count()===5,'cooldown inputs missing or count sync duplicated');
     check(await d.getByRole('heading',{name:'过载监控',exact:true}).count()===0,'old overload section remains');
     check(await d.getByRole('checkbox',{name:'自动开启过载统计',exact:true}).isChecked(),'preset switch renamed incorrectly');
-    check(!await section.locator('#monitor-overloadConcurrency').isVisible(),'advanced options not collapsed');
+    check(!await section.locator('#monitor-overloadCooldownConcurrency').isVisible(),'advanced options not collapsed');
     await section.scrollIntoViewIfNeeded();await page.screenshot({path:evidence+'/task-settings-overload-desktop.png'});
   });
   await test('unchanged-form-submits-no-monitor-or-credential-settings',async()=>{
@@ -30,9 +33,9 @@ async page => {
   });
   await test('folded-concurrency-keeps-edits-and-validates-before-request',async()=>{
     const details=d.locator('.task-overload-advanced'),summary=details.locator('summary');await summary.focus();await page.keyboard.press('Enter');
-    await details.locator('#monitor-overloadConcurrency').fill('0');const before=writes.length;await d.getByRole('button',{name:'保存设置',exact:true}).click();check(writes.length===before,'invalid value sent');
-    check(await d.getByRole('alert').isVisible(),'validation feedback missing');await details.locator('#monitor-overloadConcurrency').fill('12');await summary.click();
-    const payload=await save(d);check(payload.monitoring?.overloadConcurrency===12,'collapsed field edit lost');d=await open();
+    await details.locator('#monitor-overloadCooldownConcurrency').fill('0');const before=writes.length;await d.getByRole('button',{name:'保存设置',exact:true}).click();check(writes.length===before,'invalid value sent');
+    check(await d.getByRole('alert').isVisible(),'validation feedback missing');await details.locator('#monitor-overloadCooldownConcurrency').fill('12');await summary.click();
+    const payload=await save(d);check(payload.monitoring?.overloadCooldownConcurrency===12,'collapsed field edit lost');d=await open();
   });
   await test('restore-defaults-includes-sms-and-price-preserves-plan-and-fingerprint',async()=>{
     await d.getByRole('button',{name:'恢复默认',exact:true}).click();

@@ -1,5 +1,6 @@
 import { SmsNumberEstimate } from "./sms-number-estimate.jsx";
 import { ProxyCreateDialog } from "./proxy-create-dialog.jsx";
+import { Sub2ApiPoolBadge } from "./pool-status-badge.jsx";
 import { SmsProviderBalance } from "./sms-provider-balance.jsx";
 import { formatSmsMoney } from "./sms-money.mjs";
 import { AccountLogDialog } from "./account-log-dialog.jsx";
@@ -3990,7 +3991,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
       <td className="pool-status-cell">
         <div className="pool-account-controls">
           <div className="pool-account-status">
-            <Sub2ApiPoolBadge inPool={job.sub2apiInPool} remoteStatus={job.sub2apiRemoteStatus} />
+            <Sub2ApiPoolBadge inPool={job.sub2apiInPool} remoteStatus={job.sub2apiRemoteStatus} errors={job.sub2apiRemoteErrors} />
             <Sub2ApiEnabledToggle
               inPool={job.sub2apiInPool}
               enabled={job.sub2apiEnabled}
@@ -4278,7 +4279,8 @@ const TASK_SETTINGS_MONITOR_FIELDS = Object.freeze(
   MONITOR_FIELDS.filter(field => field.key !== "fingerprintScanIntervalSeconds")
 );
 const OVERLOAD_SETTINGS_FIELDS = TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === "过载监控");
-const TASK_SETTINGS_MONITOR_GROUPS = [...new Set(TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group !== "过载监控").map(field => field.group))];
+const WEB_SESSION_SETTINGS_FIELDS = TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === "WebSession 定时巡检");
+const TASK_SETTINGS_MONITOR_GROUPS = [...new Set(TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group !== "过载监控" && field.group !== "WebSession 定时巡检").map(field => field.group))];
 
 function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSaved }) {
   const dialogRef = useRef(null);
@@ -4562,8 +4564,10 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           <div className="task-two-fields">
             <label className="settings-field" htmlFor="web-session-check-interval"><span>检测间隔（分钟）</span><input id="web-session-check-interval" type="number" min="1" max="1440" value={webMonitor.intervalMinutes} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, intervalMinutes: e.target.value }))} /></label>
             <label className="settings-field" htmlFor="web-session-retry-interval"><span>重登重试间隔（分钟）</span><input id="web-session-retry-interval" type="number" min="15" max="1440" value={webMonitor.retryMinutes} disabled={saving || !webMonitor.enabled} onChange={e => setWebMonitor(v => ({ ...v, retryMinutes: e.target.value }))} /></label>
+            {WEB_SESSION_SETTINGS_FIELDS.map(monitoringField)}
           </div>
           <div className="task-auto-empty">默认关闭；默认每 15 分钟检测，60 分钟内最多自动重登一次。需要验证码时保留在现有任务队列中等待处理。</div>
+          <div className="task-auto-empty">到期任务扫描默认每 30 秒在本地检查哪些账号已到检测时间；实际会话检测按上方检测间隔执行，并共用任务并发。</div>
         </section>
         {TASK_SETTINGS_MONITOR_GROUPS.map(group => (
           <section className="task-auto-settings" key={group} aria-label={group}>
@@ -4576,23 +4580,15 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             <div className="task-two-fields">
               {TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === group).map(monitoringField)}
             </div>
-            <div className="task-auto-empty">{group === "巡检调度" ? "扫描到期任务的频率，不是每个账号的检测间隔。Web 检测共用上方任务并发。"
-              : group === "号池异常恢复" ? "默认 300 秒（5 分钟）。重新授权仍进入共享登录队列；重试间隔为 0 时不设失败冷却。"
-              : "仅请求号池，默认网络并发 100；由服务端定时同步，关闭页面后继续运行，不会主动刷新上游额度。"}</div>
+            <div className="task-auto-empty">{group === "号池异常恢复" ? "默认 300 秒（5 分钟）。重新授权仍进入共享登录队列；重试间隔为 0 时不设失败冷却。"
+              : "仅请求号池，默认网络并发 100。调用与过载次数默认每 60 秒同步，曲线展示截至同步时的最近 90 分钟，包含当前请求；冷却判断使用独立窗口。关闭页面后继续同步。"}</div>
           </section>
         ))}
         <section className="task-auto-settings task-overload-settings" aria-labelledby="task-overload-title">
           <div className="section-title-row">
             <Activity size={15} className="task-section-icon" aria-hidden="true" />
             <h3 id="task-overload-title">过载</h3>
-            <HelpTip label="过载设置说明">统计和冷却都读取号池已有请求日志，不主动发起模型测试。这里只设置全局运行参数，账号的“过载”和“冷却”开关在 Codex 状态列或下方 PlanType 自动任务中分别开启。</HelpTip>
-          </div>
-          <div className="task-overload-statistics">
-            <div className="section-title-row">
-              <h4>统计展示</h4>
-            </div>
-            <div className="task-two-fields">{OVERLOAD_SETTINGS_FIELDS.filter(field => field.key === "overloadIntervalSeconds").map(monitoringField)}</div>
-            <div className="task-auto-empty">刷新账号的过载曲线和请求数；每格 15 分钟，共显示最近 6 个已结束时间段。调整刷新间隔不改变统计口径。</div>
+            <HelpTip label="过载设置说明">冷却读取号池已有请求日志，不主动发起模型测试。调用与过载次数的同步频率在“号池与用量同步”中设置；这里独立设置冷却检查和触发规则。账号的“过载”和“冷却”开关分别开启。</HelpTip>
           </div>
           <div className="task-overload-cooldown">
           <div className="section-title-row">
@@ -4610,9 +4606,9 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           <div className="task-auto-empty">最近 {overloadRule.windowMinutes || "—"} 分钟过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟；到期会及时唤醒恢复。</div>
           </div>
           <details className="task-overload-advanced">
-            <summary>过载并发设置</summary>
+            <summary>冷却检查并发</summary>
             <div className="task-two-fields">{OVERLOAD_SETTINGS_FIELDS.filter(field => field.key.endsWith("Concurrency")).map(monitoringField)}</div>
-            <div className="task-auto-empty">两项均为请求号池的网络并发，默认 100。</div>
+            <div className="task-auto-empty">仅控制冷却检查的网络并发，默认 100。</div>
           </details>
         </section>
         <section className="task-auto-settings" aria-labelledby="task-auto-settings-title">
@@ -5960,13 +5956,6 @@ function formatUsageResetAt(value) {
   return seconds <= 86_400 ? `${formatUsageDuration(seconds)}后` : formatDateTime(value);
 }
 
-function Sub2ApiPoolBadge({ inPool, remoteStatus }) {
-  const hasError = inPool === true && remoteStatus === "error";
-  const state = hasError ? "error" : inPool === true ? "added" : inPool === false ? "not-added" : "unknown";
-  const label = hasError ? "错误" : inPool === true ? "已加入" : inPool === false ? "未加入" : "未同步";
-  return <span className={`pool-badge ${state}`} title={hasError ? "已加入号池，但 Sub2API 中账号状态为错误" : undefined}>{label}</span>;
-}
-
 function Sub2ApiEnabledToggle({ inPool, enabled, available, busy, onChange }) {
   if (inPool !== true) {
     return <span className="pool-toggle-placeholder muted">—</span>;
@@ -7031,6 +7020,7 @@ function sub2ApiStatusJobFields(status) {
     ...(Array.isArray(status?.boundProxies) ? { boundProxies: status.boundProxies } : {}),
     sub2apiGroupIds: Array.isArray(status?.groupIds) ? status.groupIds : [],
     sub2apiRemoteStatus: status?.remoteStatus || null,
+    sub2apiRemoteErrors: Array.isArray(status?.remoteErrors) ? status.remoteErrors : [],
     sub2apiUsage: status?.usage || null,
     sub2apiRateLimited: status?.rateLimited === true,
     sub2apiQuotaRestricted: status?.quotaRestricted === true || usageRestricted(status?.usage),

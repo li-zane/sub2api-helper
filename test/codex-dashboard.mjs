@@ -15,6 +15,10 @@ assert.equal(overloadDashboard({ points: [...points.slice(1), { count: null }] }
 assert.equal(overloadDashboard({ points: [{ count: 999 }, ...points] }, cooldown).total.count, 15, 'only six chart intervals count');
 assert.equal(overloadDashboard(null, null).quarter.count, null);
 assert.equal(overloadDashboard(null, null).total.limit, null);
+const currentPoints = points.map((p,i)=>({...p,start:new Date(Date.UTC(2026,10,10,0,i*15)).toISOString(),end:new Date(Date.UTC(2026,10,10,0,(i+1)*15)).toISOString()}));
+assert.equal(overloadDashboard({points:currentPoints},{...cooldown,lastCheckedAt:'2026-11-10T01:00:00Z'}).quarter.count,5,'stale cooldown must not replace newer count sync');
+assert.equal(overloadDashboard({points:currentPoints},{...cooldown,lastCheckedAt:'2026-11-10T01:31:00Z'}).quarter.count,2,'newer rolling cooldown count remains useful');
+assert.equal(overloadDashboard({points:currentPoints},{...cooldown,enabled:false,lastCheckedAt:'2026-11-10T01:31:00Z'}).quarter.count,5,'disabled cooldown cannot override synced count');
 assert.equal(overloadEnergy(0, 5).tone, 'zero');
 assert.equal(overloadEnergy(0, 5).color, 'var(--emerald)');
 assert.equal(overloadEnergy(1, 5).ratio, 0.2);

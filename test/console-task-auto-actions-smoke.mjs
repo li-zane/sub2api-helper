@@ -56,7 +56,7 @@ try {
     SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown"],
   });
   assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, "utf8")), {
-    version: 2,
+    version: 3,
     displayTimeZone: "Asia/Shanghai",
     poolPriceMultiplier: 1,
     maxActiveJobs: 6,

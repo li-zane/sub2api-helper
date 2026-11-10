@@ -10,7 +10,7 @@ async (page) => {
   let revision = 1, overload = true, cooldown = true, fingerprint = true, phase = 'idle', releaseCheck;
   const points = [0, 1, 2, 3, 4, 5].map((count, i) => ({ start: new Date(Date.UTC(2026, 10, 5, 0, i * 15)).toISOString(), end: new Date(Date.UTC(2026, 10, 5, 0, (i + 1) * 15)).toISOString(), count, requestCount: 1000 + i }));
   const detectionState = () => ({ configured: true, enabled: overload, revision, points });
-  const cooldownState = () => ({ configured: true, enabled: cooldown, revision, settings: { windowMinutes: 15, threshold: 5 }, windowCount: 2, phase: 'idle' });
+  const cooldownState = () => ({ configured: true, enabled: cooldown, revision, settings: { windowMinutes: 15, threshold: 5 }, windowCount: 2, lastCheckedAt: '2026-11-05T01:31:00Z', phase: 'idle' });
   const fingerprintState = () => ({ enabled: fingerprint, models: [{ model: 'fixture-model', expected: 'fixture-model' }], override: { enabled: null, models: null, intervalMinutes: null }, intervalMinutes: 15, phase, recentResults: [{ status: 'match', checkedAt: '2026-11-05T04:00:00Z' }, { status: 'mismatch', checkedAt: '2026-11-05T03:00:00Z' }] });
   for (const route of ['**/api/sub2api/settings', '**/api/sub2api/monitor']) await page.route(route, r => r.fulfill({ json: { hasAdminApiKey: true, config: { baseUrl: 'http://fixture.test' } } }));
   await page.route('**/api/sub2api/account-status*', route => route.fulfill({ json: { configured: false, accounts: {} } }));

@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import { poolAccountError, poolErrorTooltip, redactPoolError } from '../web/src/pool-account-error.mjs';
+const account={id:42,status:'error'};
+const nested=poolAccountError({...account,error_message:'Failed to refresh token: HTTP 402: {"detail":"{\\"error\\":{\\"code\\":\\"deactivated_workspace\\",\\"message\\":\\"Workspace has been deactivated\\"}}"}'});
+assert.equal(nested.code,'deactivated_workspace');assert.equal(nested.message,'Workspace has been deactivated');assert.equal(nested.httpStatus,402);
+assert.equal(poolAccountError({...account,error_message:{error:{code:'invalid_grant',message:'Refresh token revoked'}}}).code,'invalid_grant');
+assert.equal(poolAccountError({...account,error_message:'HTTP 401: workspace_deactivated'}).code,'workspace_deactivated');
+assert.equal(poolAccountError({...account,error_message:'Request failed'}).code,null);
+assert.equal(poolAccountError({...account,status:'active',error_message:'old error'}),null,'stale remote error must be cleared');
+assert.equal(poolAccountError(account).message,'上游未提供错误详情');
+const secrets='Bearer abcdefg access_token=abcdefg refresh_token: "refresh secret" password=pass cookie=abc https://user:secret@proxy.test eyJabcdefghijklmnopqrstuvwxyz.abc';
+const sanitized=redactPoolError(secrets);for(const secret of ['abcdefg','refresh secret','pass cookie','user:secret','eyJabc'])assert(!sanitized.includes(secret),sanitized);
+assert(redactPoolError('x'.repeat(5000)).length<=2000);assert(poolErrorTooltip([nested]).includes('错误代码：deactivated_workspace'));
+assert(poolErrorTooltip([]).includes('未提供错误详情'));assert(poolErrorTooltip([{accountId:'7',message:'No code'}]).includes('上游未提供错误代码'));
+console.log('POOL_ACCOUNT_ERROR_PASS nested_json=true codes=true http_status=true secret_redaction=true unknown_explicit=true stale_error_cleared=true');

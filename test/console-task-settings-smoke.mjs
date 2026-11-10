@@ -100,7 +100,20 @@ try {
   assert.equal((await readSettings()).monitoring.usageTotalsConcurrency,7);
   assert.equal((await readSettings()).modelFingerprint.maxConcurrentAccounts,5);
   assert.equal((await pageData()).taskSettings.maxActiveJobs, 3);
-  console.log("console task settings smoke passed: validation, live queue limits, write recovery, persistence");
+  await stop();
+  const previousSettings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+  await fs.writeFile(settingsPath, JSON.stringify({...previousSettings,version:2,monitoring:{...previousSettings.monitoring,overloadIntervalSeconds:900}}));
+  await start("");
+  assert.equal((await readSettings()).monitoring.overloadIntervalSeconds,60,"legacy chart cadence migrates to minute sync");
+  assert.equal((await saveSettings({monitoring:{overloadIntervalSeconds:900}})).status,200);
+  assert.equal(JSON.parse(await fs.readFile(settingsPath,"utf8")).version,3);
+  await stop(); await start("");
+  assert.equal((await readSettings()).monitoring.overloadIntervalSeconds,900,"new explicit 900s survives restart");
+  await stop();
+  await fs.writeFile(settingsPath,JSON.stringify({...previousSettings,version:2,monitoring:{...previousSettings.monitoring,overloadIntervalSeconds:120}}));
+  await start("");
+  assert.equal((await readSettings()).monitoring.overloadIntervalSeconds,120,"legacy custom cadence survives migration");
+  console.log("console task settings smoke passed: validation, live queue limits, write recovery, persistence, legacy count cadence migration and explicit new cadence restart");
 } catch (error) {
   error.message += `\nConsole output:\n${logs}`;
   throw error;

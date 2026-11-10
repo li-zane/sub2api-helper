@@ -4,11 +4,17 @@ import { DEFAULT_POOL_SYNC_CONCURRENCY, limitPoolRequests } from "./pool-network
 
 export const OVERLOAD_MESSAGE = "Our servers are currently overloaded. Please try again later.";
 export const OVERLOAD_INTERVAL_MS = 15 * 60_000;
+export const COUNT_SYNC_INTERVAL_MS = 60_000;
 const POINT_COUNT = 6;
 
 // Six completed, half-open quarters: at 03:15 the last point is [03:00, 03:15).
 export function completedIntervals(now = Date.now()) {
   const end = Math.floor(now / OVERLOAD_INTERVAL_MS) * OVERLOAD_INTERVAL_MS;
+  return recentIntervals(end);
+}
+
+// Capture the current activity too: six consecutive windows ending at this sync.
+export function recentIntervals(end = Date.now()) {
   return Array.from({ length: POINT_COUNT }, (_, index) => ({
     start: new Date(end - (POINT_COUNT - index) * OVERLOAD_INTERVAL_MS).toISOString(),
     end: new Date(end - (POINT_COUNT - index - 1) * OVERLOAD_INTERVAL_MS).toISOString(),
@@ -29,7 +35,7 @@ function isOverload(row) {
 // The split upstream list includes recovered failures, so successful failovers still count.
 // The legacy endpoint is used only when the split endpoint does not exist.
 export async function collectOverloadIntervals(options) {
-  return collectOverloadCounts({ ...options, points: completedIntervals(options.now) });
+  return collectOverloadCounts({ ...options, points: recentIntervals(options.now) });
 }
 
 export async function collectOverloadWindow({ start, end, ...options }) {
@@ -103,7 +109,7 @@ async function collectOverloadCounts({ config, accountIds, request, points, isEn
 // Count request-level success + failure records, not upstream retry/error attempts.
 // Bin timestamps locally so an inclusive upstream end_time never leaks the next interval.
 export async function collectRequestIntervals({ config, accountIds, request, now = Date.now(), isEnabled = () => true }) {
-  const points = completedIntervals(now);
+  const points = recentIntervals(now);
   const start = Date.parse(points[0].start);
   const end = Date.parse(points.at(-1).end);
   const counts = Array(POINT_COUNT).fill(0);
@@ -150,7 +156,7 @@ export async function collectRequestIntervals({ config, accountIds, request, now
 }
 
 export class OverloadMonitor {
-  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: OVERLOAD_INTERVAL_MS }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: COUNT_SYNC_INTERVAL_MS }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
     Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, concurrency, getMonitoringSettings, now, setTimer, clearTimer });
     this.request = limitPoolRequests((config, url, { isEnabled, ...options } = {}) => {
       if (isEnabled && !isEnabled()) throw new Error("过载统计已停止");
@@ -173,6 +179,7 @@ export class OverloadMonitor {
       for (const [email, entry] of Object.entries(data.accounts)) {
         if (entry && typeof entry.enabled === "boolean") this.accounts.set(email, {
           enabled: entry.enabled, points: Array.isArray(entry.points) ? entry.points.slice(-POINT_COUNT) : [],
+          requestPoints: Array.isArray(entry.requestPoints) ? entry.requestPoints.slice(-POINT_COUNT) : Array.isArray(entry.points) ? entry.points.slice(-POINT_COUNT) : [],
           revision: Number.isSafeInteger(entry.revision) && entry.revision >= 0 ? entry.revision : 0,
           updatedAt: entry.updatedAt || null, lastError: entry.lastError || null, requestError: entry.requestError || null,
         });
@@ -187,7 +194,7 @@ export class OverloadMonitor {
     const backend = config?.baseUrl && config?.adminApiKey ? this.backendIdentity(config) : null;
     if (backend !== this.backend) {
       this.backend = backend;
-      for (const [email, entry] of this.accounts) this.accounts.set(email, { ...entry, points: [], updatedAt: null, lastError: null, requestError: null });
+      for (const [email, entry] of this.accounts) this.accounts.set(email, { ...entry, points: [], requestPoints: [], updatedAt: null, lastError: null, requestError: null });
     }
     return backend;
   }
@@ -195,12 +202,18 @@ export class OverloadMonitor {
   snapshot(email) {
     const configured = Boolean(this.syncBackend());
     const entry = this.accounts.get(email.toLowerCase());
-    const stored = new Map((entry?.points || []).filter(point => Date.parse(point.end) - Date.parse(point.start) === OVERLOAD_INTERVAL_MS).map((point) => [point.start, point]));
+    const validPoints = points => (points || []).filter(point => Date.parse(point.end) - Date.parse(point.start) === OVERLOAD_INTERVAL_MS).slice(-POINT_COUNT);
+    const stored = validPoints(entry?.points);
+    const requests = validPoints(entry?.requestPoints ?? entry?.points);
+    // Never shift a cached sample onto a new time range between network syncs.
+    // Each series keeps its own time range if only the other series refreshed.
+    const points = stored.length ? stored : recentIntervals(this.now());
     return {
       configured, enabled: entry?.enabled === true, revision: entry?.revision || 0, updatedAt: entry?.updatedAt || null,
       lastError: entry?.lastError || null, requestError: entry?.requestError || null,
-      points: completedIntervals(this.now()).map((point) => ({ ...point,
-        count: stored.get(point.start)?.count ?? null, requestCount: stored.get(point.start)?.requestCount ?? null,
+      points: points.map((point, index) => ({ ...point, count: point.count ?? null,
+        requestCount: requests[index]?.requestCount ?? null,
+        requestStart: requests[index]?.start ?? point.start, requestEnd: requests[index]?.end ?? point.end,
       })),
     };
   }
@@ -298,13 +311,10 @@ export class OverloadMonitor {
           const options = { config, accountIds, request: (config, url) => this.request(config, url, { isEnabled }), now, isEnabled };
           const [overloads, requests] = await Promise.allSettled([collectOverloadIntervals(options), collectRequestIntervals(options)]);
           if (!isEnabled()) continue;
-          const previous = new Map((entry.points || []).filter(point => Date.parse(point.end) - Date.parse(point.start) === OVERLOAD_INTERVAL_MS).map((point) => [point.start, point]));
-          const points = completedIntervals(now).map((point, index) => ({ ...point,
-            count: overloads.status === "fulfilled" ? overloads.value?.[index].count ?? null : previous.get(point.start)?.count ?? null,
-            requestCount: requests.status === "fulfilled" ? requests.value?.[index].requestCount ?? null : previous.get(point.start)?.requestCount ?? null,
-          }));
-          this.accounts.set(email, { ...entry, points,
-            updatedAt: overloads.status === "fulfilled" || requests.status === "fulfilled" ? new Date(this.now()).toISOString() : entry.updatedAt || null,
+          this.accounts.set(email, { ...entry,
+            points: overloads.status === "fulfilled" && overloads.value ? overloads.value : entry.points || [],
+            requestPoints: requests.status === "fulfilled" && requests.value ? requests.value : entry.requestPoints ?? entry.points ?? [],
+            updatedAt: overloads.status === "fulfilled" || requests.status === "fulfilled" ? new Date(now).toISOString() : entry.updatedAt || null,
             lastError: overloads.status === "rejected" ? String(overloads.reason?.message || overloads.reason).slice(0, 500) : null,
             requestError: requests.status === "rejected" ? String(requests.reason?.message || requests.reason).slice(0, 500) : null,
           });
