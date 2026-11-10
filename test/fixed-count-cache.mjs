@@ -5,7 +5,7 @@ const minute=60_000, now=Date.parse('2026-11-10T12:19:00Z'), email='cache@exampl
 let failed=0;
 const test=async(name,fn)=>{try{await fn();console.log('PASS '+name);}catch(e){failed++;console.error('FAIL '+name+': '+e.message);}};
 await test('fixed-five-minute-grid-includes-current-partial-bin',async()=>{
-  const points=await api.collectRequestIntervals({config:{},accountIds:[7],now,request:async()=>({data:{items:[],total:0}})});
+  const points=await api.collectRequestIntervals({config:{},accountIds:[7],now,windowMinutes:5,request:async()=>({data:{items:[],total:0}})});
   assert.equal(points.length,18);assert.equal(points.at(-1).start,'2026-11-10T12:15:00.000Z');assert.equal(points.at(-1).end,'2026-11-10T12:20:00.000Z');
   assert.equal(points[0].start,'2026-11-10T10:50:00.000Z');
   for(const p of points){assert.equal(Date.parse(p.start)%(5*minute),0);assert.equal(Date.parse(p.end)-Date.parse(p.start),5*minute);}
@@ -25,7 +25,7 @@ await test('rolling-fifteen-minute-meter-retains-exact-boundaries',async()=>{
 await test('pause-closes-previously-partial-bin-and-fills-gaps',async()=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'fixed-count-pause-'));let clock=now;
  const rows=[now-minute,now+30_000,now+6*minute],calls=[];
- const monitor=new api.OverloadMonitor({filePath:path.join(dir,'counts.json'),getConfig:()=>({baseUrl:'fixture',adminApiKey:'fixture'}),backendIdentity:c=>c.baseUrl,listAccounts:async()=>new Map([[email,[7]]]),now:()=>clock,setTimer:()=>({unref(){}}),clearTimer:()=>{},request:async(_c,endpoint)=>{
+ const monitor=new api.OverloadMonitor({getWindowMinutes:()=>5,filePath:path.join(dir,'counts.json'),getConfig:()=>({baseUrl:'fixture',adminApiKey:'fixture'}),backendIdentity:c=>c.baseUrl,listAccounts:async()=>new Map([[email,[7]]]),now:()=>clock,setTimer:()=>({unref(){}}),clearTimer:()=>{},request:async(_c,endpoint)=>{
   const url=new URL(endpoint,'https://fixture'),start=Date.parse(url.searchParams.get('start_time')),end=Date.parse(url.searchParams.get('end_time'));calls.push({start,end});
   const items=rows.map((at,id)=>({id,request_id:String(id),account_id:7,kind:'error',created_at:new Date(at).toISOString(),status_code:503,message:api.OVERLOAD_MESSAGE})).filter(r=>Date.parse(r.created_at)>=start&&Date.parse(r.created_at)<=end);return{data:{items,total:items.length}};
  }});
@@ -34,13 +34,13 @@ await test('pause-closes-previously-partial-bin-and-fills-gaps',async()=>{
   calls.length=0;clock+=12*minute;await monitor.refresh();const snapshot=monitor.snapshot(email);
   assert(calls.every(c=>c.start===Date.parse('2026-11-10T12:15:00Z')),'resume must close last partial bin, not start at first missing bin');
   const closed=snapshot.points.find(p=>p.start==='2026-11-10T12:15:00.000Z');assert.equal(closed.count,2);assert.equal(closed.requestCount,2);
-  assert.equal(snapshot.recentCount,3);assert(snapshot.points.every(p=>p.count!==null&&p.requestCount!==null));
+  assert.equal(snapshot.recentCount,0);assert(snapshot.points.every(p=>p.count!==null&&p.requestCount!==null));
  }finally{await monitor.stop();await fs.rm(dir,{recursive:true,force:true});}
 });
 await test('cached-history-recheck-delay-restart-scope-and-full-reconciliation',async()=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'fixed-count-cache-'));let clock=now,ids=[7],failRequests=false,failOverloads=false,monitor,restarted;
  const calls=[],rows=[{id:1,at:now-minute},{id:2,at:now-20*minute}];
- const options={filePath:path.join(dir,'counts.json'),getConfig:()=>({baseUrl:'fixture',adminApiKey:'fixture'}),backendIdentity:c=>c.baseUrl,listAccounts:async()=>new Map([[email,ids]]),now:()=>clock,setTimer:()=>({unref(){}}),clearTimer:()=>{},request:async(_c,endpoint)=>{
+ const options={getWindowMinutes:()=>5,filePath:path.join(dir,'counts.json'),getConfig:()=>({baseUrl:'fixture',adminApiKey:'fixture'}),backendIdentity:c=>c.baseUrl,listAccounts:async()=>new Map([[email,ids]]),now:()=>clock,setTimer:()=>({unref(){}}),clearTimer:()=>{},request:async(_c,endpoint)=>{
   const url=new URL(endpoint,'https://fixture'),requests=url.pathname.endsWith('/requests'),start=Date.parse(url.searchParams.get('start_time')),end=Date.parse(url.searchParams.get('end_time'));
   calls.push({requests,start,end,id:url.searchParams.get('account_id')});
   if(requests?failRequests:failOverloads)throw Error(requests?'requests-down':'overloads-down');

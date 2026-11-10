@@ -27,6 +27,10 @@ async page => {
   });
   await test('saving-one-field-preserves-newer-server-values',async()=>{
     await api({monitoring:{overloadConcurrency:77},webSessionMonitor:{retryMinutes:120}});
+    await page.waitForResponse(async response=>{
+      const url=new URL(response.url());if(url.pathname!=='/api/jobs'||response.request().method()!=='GET')return false;
+      const data=await response.json();return data.taskSettings?.monitoring?.overloadConcurrency===77&&data.taskSettings?.webSessionMonitor?.retryMinutes===120;
+    });
     await d.locator('#monitor-overloadIntervalSeconds').fill('600');const payload=await save(d);
     check(JSON.stringify(payload)===JSON.stringify({monitoring:{overloadIntervalSeconds:600}}),'not a sparse patch: '+JSON.stringify(payload));
     const current=await api();check(current.monitoring.overloadConcurrency===77&&current.webSessionMonitor.retryMinutes===120,'concurrent values overwritten');d=await open();

@@ -27,6 +27,12 @@ assert.equal(overloadDashboard(fixed,cooldown).total.count,153,'fixed mode sums 
 assert.equal(overloadDashboard({...fixed,points:fixedPoints.slice(1)},cooldown).total.count,null);
 assert.equal(overloadDashboard({...fixed,points:[{count:999},...fixedPoints]},cooldown).total.count,153);
 assert.equal(overloadDashboard({...fixed,recentCount:null},null).quarter.count,null,'missing rolling events must not be inferred from coarse bins');
+const thirty={bucketMinutes:30,windowMinutes:30,points:fixedPoints.slice(-3),recentCount:7,overloadUpdatedAt:'2026-11-10T01:28:00Z'};
+const thirtyDashboard=overloadDashboard(thirty,{...cooldown,settings:{...cooldown.settings,windowMinutes:30},lastCheckedAt:'2026-11-10T01:27:00Z'});
+assert.equal(thirtyDashboard.quarter.period,'30min');assert.equal(thirtyDashboard.quarter.count,7);assert.equal(thirtyDashboard.total.count,48);
+assert(thirtyDashboard.total.source.includes('3 个过载统计窗口（每格 30 分钟）'));
+const uneven=overloadDashboard({bucketMinutes:20,windowMinutes:20,points:fixedPoints.slice(-5),recentCount:7},null);
+assert.equal(uneven.total.period,'100min','show the real span when whole windows do not divide 90min');
 assert.equal(overloadEnergy(0, 5).tone, 'zero');
 assert.equal(overloadEnergy(0, 5).color, 'var(--emerald)');
 assert.equal(overloadEnergy(1, 5).ratio, 0.2);

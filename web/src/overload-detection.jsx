@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useState, useRef, useMemo } from "react";
 import { buildOverloadChart } from "./overload-chart.mjs";
+import { overloadGrid } from "./overload-grid.mjs";
 import { overloadDashboard, overloadEnergy } from "./codex-dashboard.mjs";
 import { codexStatusEligible, codexStatusBlockReason } from "./codex-eligibility.mjs";
 import { displayDateTime } from "./display-time.mjs";
@@ -58,6 +59,7 @@ export function OverloadDetection({ job, token, onError }) {
   const cooldown = savedCooldown && (savedCooldown.revision ?? 0) > (cooldownSource?.revision ?? -1) ? savedCooldown : cooldownSource || savedCooldown;
   const cooldownEnabled = eligible && cooldown?.enabled === true;
   const points = detection?.points || [];
+  const grid = overloadGrid(detection?.bucketMinutes);
   const dashboard = useMemo(() => overloadDashboard(detection, cooldown), [detection, cooldown]);
   const { positioned, hitWidth, overloadSegments, requestSegments } = useMemo(() => buildOverloadChart(points), [points]);
   const active = hovered === null ? null : positioned[hovered];
@@ -135,7 +137,7 @@ export function OverloadDetection({ job, token, onError }) {
       <div className="overload-dashboard overload-chart">
       <OverloadEnergy value={dashboard.quarter} enabled={enabled} />
       <div className="overload-plot" ref={plotRef}>
-        <svg viewBox="0 0 164 56" role="group" aria-label="90 分钟刻度的过载与请求数量，每格固定 5 分钟，当前格累计至最近同步，两条线独立缩放">
+        <svg viewBox="0 0 164 56" role="group" aria-label={`${grid.historyMinutes} 分钟刻度的过载与请求数量，每格按过载统计窗口 ${grid.bucketMinutes} 分钟，当前格累计至最近同步，两条线独立缩放`}>
           <line className="overload-zero" x1="10" x2="156" y1="44" y2="44" />
           {overloadSegments.map((values, index) => <polyline key={index} className="overload-line" points={values} />)}
           {requestSegments.map((values, index) => <polyline key={index} className="overload-request-line" points={values} />)}

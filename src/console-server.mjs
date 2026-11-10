@@ -371,6 +371,7 @@ const webSessionMonitor = new WebSessionMonitor({
 });
 
 const overloadMonitor = new OverloadMonitor({
+  getWindowMinutes: () => overloadAutoCooldownSettings.windowMinutes,
   getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadIntervalSeconds * 1000, concurrency: monitoringSettings.overloadConcurrency }),
   isBlocked: codexChecksBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-monitor.json"),
@@ -5406,6 +5407,7 @@ async function saveTaskSettings(body) {
     if (JSON.stringify(previousMonitoring) !== JSON.stringify(monitoringSettings)) applyMonitoringSettings(previousMonitoring);
     if (webMonitorChanged) webSessionMonitor.trigger(true);
     if (cooldownRuleChanged || cooldownScheduleChanged) overloadCooldown.trigger();
+    if (cooldownRuleChanged) overloadMonitor.trigger();
     // Reducing the limit leaves running jobs alone; they drain before new work
     // starts. Increasing it immediately makes extra slots available.
     scheduleQueuedJobs();

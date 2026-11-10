@@ -4296,6 +4296,7 @@ const TASK_SETTINGS_MONITOR_GROUPS = [...new Set(TASK_SETTINGS_MONITOR_FIELDS.fi
 
 function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSaved }) {
   const dialogRef = useRef(null);
+  const initialSettings = useRef(settings);
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
   const [loginTimeout, setLoginTimeout] = useState(() => String(settings.loginTimeoutMinutes ?? DEFAULT_LOGIN_TIMEOUT_MINUTES));
   const [smsTimeout, setSmsTimeout] = useState(() => String(settings.smsTimeoutMinutes ?? DEFAULT_SMS_TIMEOUT_MINUTES));
@@ -4417,7 +4418,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }, settings)),
+        body: JSON.stringify(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }, initialSettings.current)),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4593,7 +4594,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
               {TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === group).map(monitoringField)}
             </div>
             <div className="task-auto-empty">{group === "号池异常恢复" ? "默认 300 秒（5 分钟）。重新授权仍进入共享登录队列；重试间隔为 0 时不设失败冷却。"
-              : "仅请求号池，默认网络并发 100。调用与过载次数默认每 60 秒同步，曲线按 5 分钟固定分格，展示 18 格；当前格累计至最近同步，历史格缓存复用。冷却判断使用独立窗口。关闭页面后继续同步。"}</div>
+              : "仅请求号池，默认网络并发 100。调用与过载次数默认每 60 秒同步；曲线每格跟随下方的过载统计窗口，默认 15 分钟一格，展示 6 格。当前格累计至最近同步，历史格缓存复用。冷却独立调度。关闭页面后继续同步。"}</div>
           </section>
         ))}
         <section className="task-auto-settings task-overload-settings" aria-labelledby="task-overload-title">

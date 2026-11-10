@@ -45,11 +45,13 @@ export class OverloadCooldown {
   snapshot(email) {
     const entry = this.accounts.get(email.toLowerCase());
     const config = this.getConfig();
+    const settings = this.getSettings();
     return {
       configured: Boolean(config?.baseUrl && config?.adminApiKey), enabled: entry?.enabled === true, revision: entry?.revision || 0,
       phase: entry?.phase || "idle", coolingUntil: entry?.coolingUntil || null,
-      windowCount: entry?.windowCount ?? null, lastCheckedAt: entry?.lastCheckedAt || null, lastError: entry?.lastError || null,
-      settings: { ...this.getSettings() },
+      windowCount: entry?.windowCountMinutes === settings.windowMinutes ? entry?.windowCount ?? null : null,
+      windowCountMinutes: entry?.windowCountMinutes ?? null, lastCheckedAt: entry?.lastCheckedAt || null, lastError: entry?.lastError || null,
+      settings: { ...settings },
     };
   }
 
@@ -220,10 +222,11 @@ export class OverloadCooldown {
     const end = this.now();
     const start = Math.max(end - settings.windowMinutes * 60_000, Date.parse(entry.lastResumedAt || "") || 0);
     if (start >= end) return;
-    const valid = () => !this.stopped && !this.isBlocked(email) && !this.isCountBlocked(email) && this.accounts.get(email)?.enabled && this.backendIdentity(this.getConfig()) === backend;
+    const valid = () => !this.stopped && !this.isBlocked(email) && !this.isCountBlocked(email) && this.accounts.get(email)?.enabled
+      && this.getSettings().windowMinutes === settings.windowMinutes && this.backendIdentity(this.getConfig()) === backend;
     const count = await collectOverloadWindow({ start, end, accountIds: eligibleRecords.map(record => record.id), config, request: this.request, isEnabled: valid });
     if (count === null || !valid()) return;
-    entry = await this.update(email, { windowCount: count, lastCheckedAt: new Date(end).toISOString(), lastError: null });
+    entry = await this.update(email, { windowCount: count, windowCountMinutes: settings.windowMinutes, lastCheckedAt: new Date(end).toISOString(), lastError: null });
     if (count < settings.threshold) return;
     const targets = eligibleRecords.map(record => String(record.id));
     if (!targets.length) return;

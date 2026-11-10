@@ -1,12 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_POOL_SYNC_CONCURRENCY, limitPoolRequests } from "./pool-network.mjs";
+import { overloadGrid, DEFAULT_COUNT_WINDOW_MINUTES } from "../web/src/overload-grid.mjs";
 
 export const OVERLOAD_MESSAGE = "Our servers are currently overloaded. Please try again later.";
 export const OVERLOAD_INTERVAL_MS = 15 * 60_000;
 export const COUNT_SYNC_INTERVAL_MS = 60_000;
-export const COUNT_BUCKET_MS = 5 * 60_000;
-export const COUNT_POINT_COUNT = 18;
+export const COUNT_BUCKET_MS = DEFAULT_COUNT_WINDOW_MINUTES * 60_000;
+export const COUNT_POINT_COUNT = overloadGrid().pointCount;
 const RECONCILE_MS = 60 * 60_000;
 
 // Six completed, half-open quarters: at 03:15 the last point is [03:00, 03:15).
@@ -18,12 +19,14 @@ export function completedIntervals(now = Date.now()) {
   }));
 }
 
-// Stable wall-clock labels, including the current unfinished five-minute bin.
-export function recentIntervals(now = Date.now()) {
-  const end = (Math.floor(now / COUNT_BUCKET_MS) + 1) * COUNT_BUCKET_MS;
-  return Array.from({ length: COUNT_POINT_COUNT }, (_, index) => ({
-    start: new Date(end - (COUNT_POINT_COUNT - index) * COUNT_BUCKET_MS).toISOString(),
-    end: new Date(end - (COUNT_POINT_COUNT - index - 1) * COUNT_BUCKET_MS).toISOString(),
+// Stable labels follow the configured overload window, including its unfinished bin.
+export function recentIntervals(now = Date.now(), windowMinutes = DEFAULT_COUNT_WINDOW_MINUTES, minimumPoints = 0) {
+  const { bucketMs, pointCount: historyPoints } = overloadGrid(windowMinutes);
+  const pointCount = Math.max(historyPoints, minimumPoints);
+  const end = (Math.floor(now / bucketMs) + 1) * bucketMs;
+  return Array.from({ length: pointCount }, (_, index) => ({
+    start: new Date(end - (pointCount - index) * bucketMs).toISOString(),
+    end: new Date(end - (pointCount - index - 1) * bucketMs).toISOString(),
     count: null,
   }));
 }
@@ -41,7 +44,7 @@ function isOverload(row) {
 // The split upstream list includes recovered failures, so successful failovers still count.
 // The legacy endpoint is used only when the split endpoint does not exist.
 export async function collectOverloadIntervals(options) {
-  return collectOverloadCounts({ ...options, points: options.points ?? recentIntervals(options.now), queryEnd: options.now ?? Date.now() });
+  return collectOverloadCounts({ ...options, points: options.points ?? recentIntervals(options.now, options.windowMinutes), queryEnd: options.now ?? Date.now() });
 }
 
 export async function collectOverloadWindow({ start, end, ...options }) {
@@ -119,7 +122,7 @@ async function collectOverloadCounts({ config, accountIds, request, points, quer
 
 // Count request-level success + failure records, not upstream retry/error attempts.
 // Bin timestamps locally so an inclusive upstream end_time never leaks the next interval.
-export async function collectRequestIntervals({ config, accountIds, request, now = Date.now(), points = recentIntervals(now), isEnabled = () => true }) {
+export async function collectRequestIntervals({ config, accountIds, request, now = Date.now(), windowMinutes = DEFAULT_COUNT_WINDOW_MINUTES, points = recentIntervals(now, windowMinutes), isEnabled = () => true }) {
   const start = Date.parse(points[0].start);
   const end = Math.min(Date.parse(points.at(-1).end), now);
   const bucketMs = Date.parse(points[0].end) - start;
@@ -167,15 +170,22 @@ export async function collectRequestIntervals({ config, accountIds, request, now
 }
 
 const knownCount = value => Number.isSafeInteger(value) && value >= 0;
-const validPoints = points => (Array.isArray(points) ? points : []).filter(point => point
-  && Date.parse(point.end) - Date.parse(point.start) === COUNT_BUCKET_MS
-  && Date.parse(point.start) % COUNT_BUCKET_MS === 0).slice(-COUNT_POINT_COUNT);
+function validPoints(points, windowMinutes, minimumPoints = 0) {
+  const grid = windowMinutes === undefined ? null : overloadGrid(windowMinutes);
+  return (Array.isArray(points) ? points : []).filter(point => {
+    if (!point) return false;
+    const start = Date.parse(point.start), duration = Date.parse(point.end) - start;
+    return Number.isInteger(duration / 60_000) && duration >= 60_000 && duration <= 1440 * 60_000
+      && start % duration === 0 && (!grid || duration === grid.bucketMs);
+  }).slice(-Math.max(grid?.pointCount ?? 90, minimumPoints));
+}
 
-function refreshPlan(entry, metric, scope, now) {
+function refreshPlan(entry, metric, scope, now, windowMinutes) {
+  const { bucketMs } = overloadGrid(windowMinutes);
   const field = metric === "overload" ? "count" : "requestCount";
-  const saved = validPoints(metric === "overload" ? entry.points : entry.requestPoints);
+  const saved = validPoints(metric === "overload" ? entry.points : entry.requestPoints, windowMinutes, 2);
   const previous = new Map(saved.map(point => [point.start, point]));
-  const grid = recentIntervals(now);
+  const grid = recentIntervals(now, windowMinutes, 2);
   const full = entry[`${metric}Scope`] !== scope || !entry[`${metric}ReconciledAt`]
     || now - Date.parse(entry[`${metric}ReconciledAt`]) >= RECONCILE_MS
     || Date.parse(entry[`${metric}UpdatedAt`]) > now;
@@ -184,17 +194,17 @@ function refreshPlan(entry, metric, scope, now) {
   const first = full ? 0 : grid.findIndex(point => !knownCount(previous.get(point.start)?.[field])
     // Close the last partially sampled bucket even after a long pause.
     || !Number.isFinite(sampledAt) || Date.parse(point.end) > sampledAt
-    || Date.parse(point.start) >= currentStart - COUNT_BUCKET_MS
-    || metric === "overload" && Date.parse(point.end) > now - OVERLOAD_INTERVAL_MS && !Array.isArray(previous.get(point.start)?.overloadEvents));
-  return { grid, points: grid.slice(Math.max(0, first)), previous, full };
+    || Date.parse(point.start) >= currentStart - bucketMs
+    || metric === "overload" && Date.parse(point.end) > now - bucketMs && !Array.isArray(previous.get(point.start)?.overloadEvents));
+  return { grid, points: grid.slice(Math.max(0, first)), previous, full, bucketMs };
 }
 
 function mergeCounts(plan, fresh, now, overload) {
   const fetched = new Map(fresh.map(point => [point.start, point]));
   return plan.grid.map(point => {
     const value = fetched.get(point.start) || plan.previous.get(point.start) || point;
-    // Only the latest 15 minutes need individual overload times for the meter.
-    if (overload && Date.parse(point.end) <= now - OVERLOAD_INTERVAL_MS) {
+    // Only the latest configured window needs individual times for the meter.
+    if (overload && Date.parse(point.end) <= now - plan.bucketMs) {
       const { overloadEvents, ...summary } = value;
       return summary;
     }
@@ -202,18 +212,18 @@ function mergeCounts(plan, fresh, now, overload) {
   });
 }
 
-function recentOverloadCount(entry) {
-  const end = Date.parse(entry?.overloadUpdatedAt), start = end - OVERLOAD_INTERVAL_MS;
+function recentOverloadCount(entry, windowMinutes) {
+  const end = Date.parse(entry?.overloadUpdatedAt), start = end - overloadGrid(windowMinutes).bucketMs;
   if (!Number.isFinite(end)) return null;
-  const points = validPoints(entry.points).filter(point => Date.parse(point.end) > start && Date.parse(point.start) < end);
+  const points = validPoints(entry.points, windowMinutes, 2).filter(point => Date.parse(point.end) > start && Date.parse(point.start) < end);
   if (!points.length || Date.parse(points[0].start) > start || Date.parse(points.at(-1).end) < end
     || points.some(point => !Array.isArray(point.overloadEvents))) return null;
   return points.reduce((total, point) => total + point.overloadEvents.filter(at => Number.isFinite(at) && at >= start && at < end).length, 0);
 }
 
 export class OverloadMonitor {
-  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: COUNT_SYNC_INTERVAL_MS }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, concurrency, getMonitoringSettings, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: COUNT_SYNC_INTERVAL_MS }), getWindowMinutes = () => DEFAULT_COUNT_WINDOW_MINUTES, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, concurrency, getMonitoringSettings, getWindowMinutes, now, setTimer, clearTimer });
     this.request = limitPoolRequests((config, url, { isEnabled, ...options } = {}) => {
       if (isEnabled && !isEnabled()) throw new Error("过载统计已停止");
       return request(config, url, options);
@@ -258,15 +268,17 @@ export class OverloadMonitor {
   snapshot(email) {
     const configured = Boolean(this.syncBackend());
     const entry = this.accounts.get(email.toLowerCase());
-    const stored = new Map(validPoints(entry?.points).map(point => [point.start, point]));
-    const requests = new Map(validPoints(entry?.requestPoints).map(point => [point.start, point]));
+    const grid = overloadGrid(this.getWindowMinutes());
+    const stored = new Map(validPoints(entry?.points, grid.bucketMinutes).map(point => [point.start, point]));
+    const requests = new Map(validPoints(entry?.requestPoints, grid.bucketMinutes).map(point => [point.start, point]));
     const at = Date.parse(entry?.updatedAt);
-    const points = recentIntervals(Number.isFinite(at) ? at : this.now());
+    const points = recentIntervals(Number.isFinite(at) ? at : this.now(), grid.bucketMinutes);
     return {
       configured, enabled: entry?.enabled === true, revision: entry?.revision || 0, updatedAt: entry?.updatedAt || null,
       lastError: entry?.lastError || null, requestError: entry?.requestError || null,
-      bucketMinutes: 5, overloadUpdatedAt: entry?.overloadUpdatedAt || null, requestUpdatedAt: entry?.requestUpdatedAt || null,
-      recentCount: recentOverloadCount(entry),
+      bucketMinutes: grid.bucketMinutes, pointCount: grid.pointCount, historyMinutes: grid.historyMinutes, windowMinutes: grid.bucketMinutes,
+      overloadUpdatedAt: entry?.overloadUpdatedAt || null, requestUpdatedAt: entry?.requestUpdatedAt || null,
+      recentCount: recentOverloadCount(entry, grid.bucketMinutes),
       points: points.map(point => ({ ...point, count: stored.get(point.start)?.count ?? null,
         requestCount: requests.get(point.start)?.requestCount ?? null,
         requestStart: point.start, requestEnd: point.end,
@@ -344,6 +356,7 @@ export class OverloadMonitor {
     const backend = this.backend;
     const config = this.getConfig();
     const now = this.now();
+    const windowMinutes = overloadGrid(this.getWindowMinutes()).bucketMinutes;
     const entries = [...this.accounts].filter(([email, entry]) => entry.enabled && !this.isBlocked(email));
     if (!entries.length) return;
     let mapping;
@@ -359,14 +372,15 @@ export class OverloadMonitor {
       while (cursor < entries.length) {
         const [email, entry] = entries[cursor++];
         const isEnabled = () => !this.stopped && !this.isBlocked(email) && this.accounts.get(email) === entry
+          && overloadGrid(this.getWindowMinutes()).bucketMinutes === windowMinutes
           && this.getConfig() && this.backendIdentity(this.getConfig()) === backend;
         if (!isEnabled()) continue;
         try {
           const accountIds = mapping.get(email) || [];
           if (!accountIds.length) throw new Error("该账号尚未加入 Sub2API 号池");
           const options = { config, accountIds, request: (config, url) => this.request(config, url, { isEnabled }), now, isEnabled };
-          const scope = JSON.stringify([...new Set(accountIds.map(String))].sort());
-          const overloadPlan = refreshPlan(entry, "overload", scope, now), requestPlan = refreshPlan(entry, "request", scope, now);
+          const scope = JSON.stringify({ accountIds: [...new Set(accountIds.map(String))].sort(), windowMinutes });
+          const overloadPlan = refreshPlan(entry, "overload", scope, now, windowMinutes), requestPlan = refreshPlan(entry, "request", scope, now, windowMinutes);
           const [overloads, requests] = await Promise.allSettled([
             collectOverloadIntervals({ ...options, points: overloadPlan.points, includeEvents: true }),
             collectRequestIntervals({ ...options, points: requestPlan.points }),
