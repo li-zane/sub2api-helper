@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_POOL_SYNC_CONCURRENCY, limitPoolRequests } from "./pool-network.mjs";
-import { collectOverloadWindow } from "./overload-monitor.mjs";
+import { overloadGrid } from "../web/src/overload-grid.mjs";
 
 export const DEFAULT_OVERLOAD_COOLDOWN = Object.freeze({ windowMinutes: 15, threshold: 10, cooldownMinutes: 60 });
 
@@ -17,8 +17,8 @@ export function normalizeOverloadCooldown(value = DEFAULT_OVERLOAD_COOLDOWN) {
 }
 
 export class OverloadCooldown {
-  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, isCountBlocked, onChange, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, isCountBlocked, onChange, onNeedCounts, now, setTimer, clearTimer });
     this.request = limitPoolRequests(request, () => this.getMonitoringSettings().concurrency);
     this.accounts = new Map();
     this.locks = new Map();
@@ -51,6 +51,7 @@ export class OverloadCooldown {
       phase: entry?.phase || "idle", coolingUntil: entry?.coolingUntil || null,
       windowCount: entry?.windowCountMinutes === settings.windowMinutes ? entry?.windowCount ?? null : null,
       windowCountMinutes: entry?.windowCountMinutes ?? null, lastCheckedAt: entry?.lastCheckedAt || null, lastError: entry?.lastError || null,
+      windowStart: entry?.windowStart || null, windowEnd: entry?.windowEnd || null,
       settings: { ...settings },
     };
   }
@@ -112,6 +113,7 @@ export class OverloadCooldown {
       await this.update(email, { enabled, restrictionPaused: false, ...(!enabled && entry?.resumeAccountIds?.length ? { phase: "resuming" } : {}), lastError: null });
     });
     this.trigger();
+    if (enabled) this.onNeedCounts();
     return this.snapshot(email);
   }
 
@@ -168,8 +170,13 @@ export class OverloadCooldown {
       this.running = null;
       if (this.stopped) return;
       if (this.rerun) { this.trigger(); return; }
-      const due = [...this.accounts.values()].filter(entry => entry.resumeAccountIds?.length && entry.phase !== "resuming").map(entry => Date.parse(entry.coolingUntil)).filter(time => Number.isFinite(time) && time > this.now());
-      const delay = Math.max(100, Math.min(this.getMonitoringSettings().intervalMs, ...due.map(time => time - this.now())));
+      const pending = [...this.accounts].filter(([email, entry]) => !this.isBlocked(email) && entry.resumeAccountIds?.length).map(([, entry]) => entry);
+      if (!pending.length) return;
+      // Each account has a durable deadline; one timer wakes the nearest one.
+      // Only unfinished/failed mutations retry at the shared statistics cadence.
+      const due = pending.map(entry => entry.lastError || entry.phase !== "cooling" || !entry.enabled && !entry.restrictionPaused
+        ? this.getMonitoringSettings().intervalMs : Math.max(100, Date.parse(entry.coolingUntil) - this.now()));
+      const delay = Math.max(100, Math.min(...due));
       this.timer = this.setTimer(() => this.trigger(), delay);
       this.timer.unref?.();
     });
@@ -180,7 +187,7 @@ export class OverloadCooldown {
     this.rerun = false;
     const config = this.getConfig();
     if (this.stopped || !config?.baseUrl || !config?.adminApiKey) return;
-    const active = [...this.accounts].filter(([email, entry]) => !this.isBlocked(email) && (entry.enabled || entry.resumeAccountIds?.length));
+    const active = [...this.accounts].filter(([email, entry]) => !this.isBlocked(email) && entry.resumeAccountIds?.length);
     if (!active.length) return;
     let mapping;
     try { mapping = await this.listAccounts(config); }
@@ -216,24 +223,40 @@ export class OverloadCooldown {
       }
       return;
     }
-    const eligibleRecords = records.filter(record => record.enabled === true && record.canCount !== false);
-    if (this.isCountBlocked(email) || !entry.enabled || !eligibleRecords.length) return;
-    const settings = this.getSettings();
-    const end = this.now();
-    const start = Math.max(end - settings.windowMinutes * 60_000, Date.parse(entry.lastResumedAt || "") || 0);
-    if (start >= end) return;
-    const valid = () => !this.stopped && !this.isBlocked(email) && !this.isCountBlocked(email) && this.accounts.get(email)?.enabled
-      && this.getSettings().windowMinutes === settings.windowMinutes && this.backendIdentity(this.getConfig()) === backend;
-    const count = await collectOverloadWindow({ start, end, accountIds: eligibleRecords.map(record => record.id), config, request: this.request, isEnabled: valid });
-    if (count === null || !valid()) return;
-    entry = await this.update(email, { windowCount: count, windowCountMinutes: settings.windowMinutes, lastCheckedAt: new Date(end).toISOString(), lastError: null });
-    if (count < settings.threshold) return;
-    const targets = eligibleRecords.map(record => String(record.id));
-    if (!targets.length) return;
-    // Save the full pause intent before the first remote write, so interrupted
-    // requests remain recoverable even if their response was never received.
-    await this.update(email, { backend, phase: "pausing", resumeAccountIds: targets, coolingUntil: new Date(end + settings.cooldownMinutes * 60_000).toISOString() });
-    await this.pause(email, config, records);
+  }
+
+  countTargets() {
+    return [...this.accounts].filter(([email, entry]) => entry.enabled && !entry.resumeAccountIds?.length
+      && !this.isBlocked(email) && !this.isCountBlocked(email)).map(([email]) => email);
+  }
+
+  async observeCounts(email, { config, accountIds, point, sampledAt, windowMinutes }) {
+    email = email.toLowerCase();
+    try {
+      await this.lock(email, async () => {
+        const entry = this.accounts.get(email), settings = this.getSettings(), backend = this.backendIdentity(config);
+        const { bucketMs } = overloadGrid(settings.windowMinutes), start = Date.parse(point?.start), end = Date.parse(point?.end);
+        if (this.stopped || !entry?.enabled || entry.resumeAccountIds?.length || this.isBlocked(email) || this.isCountBlocked(email)
+          || backend !== this.backendIdentity(this.getConfig()) || settings.windowMinutes !== windowMinutes
+          || !Number.isFinite(sampledAt) || sampledAt > this.now() || start !== Math.floor(this.now() / bucketMs) * bucketMs
+          || end - start !== bucketMs || sampledAt < start || sampledAt >= end
+          || !Number.isSafeInteger(point?.count) || point.count < 0 || !accountIds.length
+          || sampledAt <= (Date.parse(entry.lastCheckedAt) || 0)) return;
+        // Do not cool again from the same pre-resume bucket's old errors.
+        if ((Date.parse(entry.lastResumedAt) || 0) >= start) return;
+        await this.update(email, { windowCount: point.count, windowCountMinutes: windowMinutes,
+          windowStart: point.start, windowEnd: point.end, lastCheckedAt: new Date(sampledAt).toISOString(), lastError: null });
+        if (point.count < settings.threshold) return;
+        const targets = [...new Set(accountIds.map(String))].filter(id => /^\d+$/.test(id) && !this.isManuallyDisabled(email, id, config));
+        if (!targets.length) return;
+        // Commit ownership before changing remote scheduling, as in restart recovery.
+        await this.update(email, { backend, phase: "pausing", resumeAccountIds: targets,
+          coolingUntil: new Date(this.now() + settings.cooldownMinutes * 60_000).toISOString() });
+        await this.pause(email, config, targets.map(id => ({ id, enabled: true })));
+      });
+    } catch (error) {
+      await this.lock(email, () => this.update(email, { lastError: String(error.message).slice(0, 300) }));
+    } finally { this.trigger(); }
   }
 
   async pause(email, config, records) {

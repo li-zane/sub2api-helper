@@ -9,7 +9,7 @@ async (page) => {
   const initialUrl = page.url();
   let revision = 1, overload = true, cooldown = true, fingerprint = true, phase = 'idle', releaseCheck;
   const points = [0, 1, 2, 3, 4, 5].map((count, i) => ({ start: new Date(Date.UTC(2026, 10, 5, 0, i * 15)).toISOString(), end: new Date(Date.UTC(2026, 10, 5, 0, (i + 1) * 15)).toISOString(), count, requestCount: 1000 + i }));
-  const detectionState = () => ({ configured: true, enabled: overload, revision, points, bucketMinutes: 15, windowMinutes: 15, recentCount: 0, updatedAt: '2026-11-05T01:29:00Z', overloadUpdatedAt: '2026-11-05T01:29:00Z' });
+  const detectionState = () => ({ configured: true, enabled: overload, revision, points, countMode: 'fixed_bucket', bucketMinutes: 15, windowMinutes: 15, recentCount: 0, updatedAt: '2026-11-05T01:29:00Z', overloadUpdatedAt: '2026-11-05T01:29:00Z' });
   const cooldownState = () => ({ configured: true, enabled: cooldown, revision, settings: { windowMinutes: 15, threshold: 5 }, windowCount: 2, lastCheckedAt: '2026-11-05T01:31:00Z', phase: 'idle' });
   const fingerprintState = () => ({ enabled: fingerprint, models: [{ model: 'fixture-model', expected: 'fixture-model' }], override: { enabled: null, models: null, intervalMinutes: null }, intervalMinutes: 15, phase, recentResults: [{ status: 'match', checkedAt: '2026-11-05T04:00:00Z' }, { status: 'mismatch', checkedAt: '2026-11-05T03:00:00Z' }] });
   for (const route of ['**/api/sub2api/settings', '**/api/sub2api/monitor']) await page.route(route, r => r.fulfill({ json: { hasAdminApiKey: true, config: { baseUrl: 'http://fixture.test' } } }));
@@ -18,7 +18,7 @@ async (page) => {
     const response = await route.fetch(), data = await response.json();
     data.jobs = data.jobs.map((job, i) => ({ ...job, status: 'completed', autoRepairBlocked: false, sub2apiInPool: i !== 8, sub2apiEnabled: i !== 7, codexStatusEligible: i !== 7 && i !== 8 && i !== 9, sub2apiRateLimited: i === 9, sub2apiPriority: 3,
       lastOperationType: 'relogin', lastOperationAt: '2026-11-05T04:05:06Z', createdAt: '2026-11-01T01:02:03Z',
-      overloadDetection: { ...detectionState(), enabled: i === 4 ? false : overload, recentCount: i === 3 ? null : 0, points: i === 3 ? points.map(p => ({ ...p, count: null })) : points },
+      overloadDetection: { ...detectionState(), enabled: i === 4 ? false : overload, recentCount: i === 3 ? null : 0, points: i === 3 ? points.map(p => ({ ...p, count: null })) : points.map((p,n)=>n===points.length-1?({...p,count:i===1?0:i===2?5:2}):p) },
       overloadAutoCooldown: { ...cooldownState(), windowCount: i === 1 ? 0 : i === 2 ? 5 : i === 3 ? null : 2 },
       modelFingerprint: { ...fingerprintState(), enabled: i === 4 ? false : fingerprint, phase: i === 5 ? 'queued' : i === 6 ? 'running' : phase },
     }));
@@ -83,18 +83,18 @@ async (page) => {
   });
   await run('energy-period-counts-thresholds-and-colors', async () => {
     const energy = row.locator('.codex-energy');
-    check((await energy.nth(0).getAttribute('title')).includes('15min') && (await energy.nth(0).getAttribute('title')).includes('2 次 / 阈值 5 次'), 'rolling 15min hover information incorrect');
-    check((await energy.nth(1).getAttribute('title')).includes('90min') && (await energy.nth(1).getAttribute('title')).includes('15 次 / 阈值 15 次'), '90min hover information must sum six statistics windows and use triple threshold');
+    check((await energy.nth(0).getAttribute('title')).includes('15min') && (await energy.nth(0).getAttribute('title')).includes('2 次 / 阈值 5 次'), 'current fixed 15min hover information incorrect');
+    check((await energy.nth(1).getAttribute('title')).includes('90min') && (await energy.nth(1).getAttribute('title')).includes('12 次 / 阈值 15 次'), '90min hover information must sum six statistics windows and use triple threshold');
     check(await energy.nth(0).innerText() === '' && await energy.nth(1).innerText() === '', 'energy bars should have no visible annotations');
     await energy.nth(0).hover();
-    check((await energy.nth(0).getByRole('meter').getAttribute('aria-valuetext')).includes('滚动 15 分钟'), 'energy meter lost its accessible description');
+    check((await energy.nth(0).getByRole('meter').getAttribute('aria-valuetext')).includes('当前 15 分钟固定区间'), 'energy meter lost its accessible description');
     const bounds = await row.locator('.overload-chart').boundingBox(), left = await energy.nth(0).boundingBox(), right = await energy.nth(1).boundingBox();
     const plot = await row.locator('.overload-plot').boundingBox();
     for (const bar of [left, right]) check(bar.x > bounds.x && bar.x + bar.width < bounds.x + bounds.width && bar.y > bounds.y && bar.y + bar.height < bounds.y + bounds.height, 'energy bar must stay inside the curve frame');
     check(left.x + left.width <= plot.x && right.x >= plot.x + plot.width, 'energy bars overlap the curve plot');
     check(await row.locator('.overload-chart > .codex-energy').count() === 2, 'energy bars must be children of the curve frame');
     check(await energy.nth(0).locator('.codex-energy-fill').evaluate(el => el.style.height) === '40%', '15min height incorrect');
-    check(await energy.nth(1).locator('.codex-energy-fill').evaluate(el => el.style.height) === '100%', '90min height incorrect');
+    check(await energy.nth(1).locator('.codex-energy-fill').evaluate(el => el.style.height) === '80%', '90min height incorrect');
     check(await rows.nth(1).locator('.codex-energy').first().getAttribute('class') === 'codex-energy zero', 'zero is not green');
     check(await rows.nth(2).locator('.codex-energy').first().getAttribute('class') === 'codex-energy full', 'threshold is not full/red');
     check((await rows.nth(3).locator('.codex-energy').first().getAttribute('title')).includes('未统计'), 'missing result is displayed as zero');

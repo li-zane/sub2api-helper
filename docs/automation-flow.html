@@ -455,7 +455,7 @@
             <span class="node-tag tag-yellow">Trigger A · 异常感知</span>
             <div class="node-title">OAuth 凭据失效 / 401</div>
             <div class="node-text">
-              号池异常巡检或降智检测调用模型时捕获 <code>401 Unauthorized</code>、<code>token_expired</code>、<code>invalid_grant</code>。
+              号池状态刷新发现错误，或降智检测捕获 <code>401 Unauthorized</code>、<code>token_expired</code>、<code>invalid_grant</code>，符合恢复条件即加入授权队列。
             </div>
             <div class="node-highlight-alert">
               ⚡ 重点路径：将触发 Web 会话核验与联动补登！
@@ -474,7 +474,7 @@
             <span class="node-tag tag-purple">Trigger C · 流量指标</span>
             <div class="node-title">过载频次超过阈值</div>
             <div class="node-text">
-              15 分钟滚动窗口内从号池日志统计的 <code>429 / overload</code> 次数达到设定阈值（默认 10 次）。
+              复用统一统计的当前固定格（默认 15 分钟）内 <code>503 / overload</code> 次数，达到设定阈值（默认 10 次）触发冷却。
             </div>
           </div>
 
@@ -664,11 +664,11 @@
             <div class="feature-name">❄️ 过载监测与自动冷却</div>
             <span class="node-tag tag-blue">防封保护</span>
           </div>
-          <p class="node-text">从号池运行日志读取请求与过载计数，滚动窗口内达到阈值自动暂停号池调度，到期自愈唤醒。</p>
+          <p class="node-text">从号池运行日志统一读取请求与过载计数，当前固定格达到阈值自动暂停号池调度；每账号保存独立截止时间，到期唤醒恢复。</p>
           <table class="feature-table">
             <tr>
               <td class="col-label">触发时机</td>
-              <td class="col-val">15 分钟滚动窗口过载计数 ≥ 10 次（默认）。</td>
+              <td class="col-val">当前 15 分钟固定格过载计数 ≥ 10 次（默认）。</td>
             </tr>
             <tr>
               <td class="col-label">保护机制</td>

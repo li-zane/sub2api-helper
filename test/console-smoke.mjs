@@ -1584,10 +1584,12 @@ try {
   const changedPlanCheckText = await changedPlanCheckResponse.text();
   assert.equal(changedPlanCheckResponse.status, 200, changedPlanCheckText);
   const changedPlanCheck = JSON.parse(changedPlanCheckText);
-  assert.equal(changedPlanCheck.result.planTypeChanged, 1);
-  assert.equal(changedPlanCheck.result.planTypeChanges, 1);
-  assert.equal(changedPlanCheck.result.planTypeUpdated, 1);
+  assert.equal(changedPlanCheck.triggerMode,"account_status_refresh");
+  // Automatic status refresh may already apply the change before this explicit check.
+  // Validate the resulting existing record below, rather than per-run counters.
   assert.equal(batchUploadCount, batchCountBeforeChangedPlanCheck, "订阅变化应 PUT 更新已有账号，不应重新上传文件");
+  assert(updatedRemoteAccounts.has(120), JSON.stringify({ baseline: baselinePlanCheck.result, changed: changedPlanCheck.result,
+    persisted: JSON.parse(await fs.readFile(path.join(outputRoot, "sub2api-monitor.json"), "utf8")).state }));
   assert.deepEqual(updatedRemoteAccounts.get(120).group_ids, [71]);
   assert.equal(updatedRemoteAccounts.get(120).proxy_id, 3);
   assert.equal(updatedRemoteAccounts.get(120).concurrency, 4);
@@ -1656,7 +1658,8 @@ try {
   const nonActiveGroupText = await nonActiveGroupResponse.text();
   assert.equal(nonActiveGroupResponse.status, 200, nonActiveGroupText);
   const nonActiveGroupResult = JSON.parse(nonActiveGroupText).result;
-  assert.equal(nonActiveGroupResult.missingTask, 1, "非活动方案号池中的异常账号也应被巡检");
+  assert.equal(nonActiveGroupResult.matched, 1, "非活动方案号池中的异常账号也应被状态刷新识别");
+  assert.equal(nonActiveGroupResult.ineligible, 1, "导入号池账号后，缺少登录资料的账号不自动授权");
 
   // Saving a changed profile pushes only the changed fields to pool accounts
   // whose PlanType was already bound to it.
@@ -2070,6 +2073,11 @@ try {
       credentials: { email: "cross-platform@example.com" },
     },
   ];
+  // Status refresh now imports pool-only accounts immediately, including the
+  // plan/proxy fixtures introduced after the original list was captured.
+  const cleanupPoolOnlyPage = await (await fetch(`${baseUrl}/api/jobs?accountType=pool_only`, { headers })).json();
+  const cleanupPoolOnlyIds = cleanupPoolOnlyPage.selection.map((item) => item.id);
+  const additionalPoolOnlyCount = cleanupPoolOnlyIds.filter((id) => !poolOnlyJobs.some((item) => item.id === id)).length;
   const deleteResponse = await fetch(`${baseUrl}/api/jobs/delete-batch`, {
     method: "POST",
     headers,
@@ -2091,14 +2099,14 @@ try {
       incompleteAuthorizationId,
       incompleteTotpId,
       planFilterCreated.job.id,
-      ...poolOnlyJobs.map((item) => item.id),
+      ...cleanupPoolOnlyIds,
     ] }),
   });
   if (!deleteResponse.ok) {
     throw new Error(`delete request failed with HTTP ${deleteResponse.status}: ${await deleteResponse.text()}`);
   }
   const deleted = await deleteResponse.json();
-  assert.equal(deleted.deleted, 31);
+  assert.equal(deleted.deleted, 31 + additionalPoolOnlyCount);
   assert.equal(deleted.sub2api.configured, true);
   assert.equal(deleted.sub2api.deleted, 2);
   assert.deepEqual(new Set(deleted.sub2api.accountIds), new Set(["101", "102"]));

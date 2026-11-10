@@ -23,8 +23,12 @@ try {
   assert.equal((await readSettings()).loginTimeoutMinutes, 3);
   assert.deepEqual((await readSettings()).monitoring, DEFAULT_MONITORING);
   for (const monitoring of [null, [], {missing:1}, {usageTotalsConcurrency:0}, {overloadIntervalSeconds:1.5}, {poolMonitorIntervalSeconds:"3"}]) assert.equal((await saveSettings({monitoring})).status,400);
-  const patch={usageTotalsConcurrency:7,overloadConcurrency:9,poolMonitorIntervalSeconds:120,usageTotalsIntervalSeconds:90};
+  const patch={usageTotalsConcurrency:7,overloadConcurrency:9,usageTotalsIntervalSeconds:90};
   assert.equal((await saveSettings({monitoring:patch})).status,200);
+  assert.deepEqual((await readSettings()).monitoring,{...DEFAULT_MONITORING,...patch});
+  assert.equal((await saveSettings({monitoring:{poolMonitorIntervalSeconds:120,overloadCooldownIntervalSeconds:90}})).status,200);
+  assert(!Object.hasOwn((await readSettings()).monitoring,'poolMonitorIntervalSeconds'));
+  assert(!Object.hasOwn((await readSettings()).monitoring,'overloadCooldownIntervalSeconds'));
   assert.deepEqual((await readSettings()).monitoring,{...DEFAULT_MONITORING,...patch});
   await Promise.all([saveSettings({monitoring:{profileSyncConcurrency:6}}),saveSettings({monitoring:{overloadCooldownConcurrency:8}})]);
   assert.equal((await readSettings()).monitoring.profileSyncConcurrency,6);
@@ -106,7 +110,7 @@ try {
   await start("");
   assert.equal((await readSettings()).monitoring.overloadIntervalSeconds,60,"legacy chart cadence migrates to minute sync");
   assert.equal((await saveSettings({monitoring:{overloadIntervalSeconds:900}})).status,200);
-  assert.equal(JSON.parse(await fs.readFile(settingsPath,"utf8")).version,3);
+  assert.equal(JSON.parse(await fs.readFile(settingsPath,"utf8")).version,4);
   await stop(); await start("");
   assert.equal((await readSettings()).monitoring.overloadIntervalSeconds,900,"new explicit 900s survives restart");
   await stop();

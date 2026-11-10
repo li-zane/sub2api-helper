@@ -15,6 +15,12 @@ assert.equal(overloadDashboard({ points: [...points.slice(1), { count: null }] }
 assert.equal(overloadDashboard({ points: [{ count: 999 }, ...points] }, cooldown).total.count, 15, 'only six chart intervals count');
 assert.equal(overloadDashboard(null, null).quarter.count, null);
 assert.equal(overloadDashboard(null, null).total.limit, null);
+const unified = overloadDashboard({ countMode: 'fixed_bucket', bucketMinutes: 15, windowMinutes: 15,
+  points: [{ count: 3, start: '2026-11-11T12:15:00Z', end: '2026-11-11T12:30:00Z' }], overloadUpdatedAt: '2026-11-11T12:19:00Z' },
+{ ...cooldown, windowCount: 99, lastCheckedAt: '2026-11-11T12:20:00Z' });
+assert.equal(unified.quarter.count, 3, 'fixed mode always matches the displayed current bin, not an older rolling state');
+assert.equal(unified.quarter.start, '2026-11-11T12:15:00Z');
+assert(unified.quarter.source.includes('当前 15 分钟固定区间'));
 const currentPoints = points.map((p,i)=>({...p,start:new Date(Date.UTC(2026,10,10,0,i*15)).toISOString(),end:new Date(Date.UTC(2026,10,10,0,(i+1)*15)).toISOString()}));
 assert.equal(overloadDashboard({points:currentPoints},{...cooldown,lastCheckedAt:'2026-11-10T01:00:00Z'}).quarter.count,5,'stale cooldown must not replace newer count sync');
 assert.equal(overloadDashboard({points:currentPoints},{...cooldown,lastCheckedAt:'2026-11-10T01:31:00Z'}).quarter.count,2,'newer rolling cooldown count remains useful');

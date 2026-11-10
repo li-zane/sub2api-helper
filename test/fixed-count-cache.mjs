@@ -10,7 +10,7 @@ await test('fixed-five-minute-grid-includes-current-partial-bin',async()=>{
   assert.equal(points[0].start,'2026-11-10T10:50:00.000Z');
   for(const p of points){assert.equal(Date.parse(p.start)%(5*minute),0);assert.equal(Date.parse(p.end)-Date.parse(p.start),5*minute);}
 });
-await test('rolling-fifteen-minute-meter-retains-exact-boundaries',async()=>{
+await test('fixed-current-window-meter-excludes-previous-bucket',async()=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'fixed-count-boundary-'));let clock=now;
  const rows=[now-15*minute-1,now-15*minute,now-15*minute+1,now-1,now];
  const monitor=new api.OverloadMonitor({filePath:path.join(dir,'counts.json'),getConfig:()=>({baseUrl:'fixture',adminApiKey:'fixture'}),backendIdentity:c=>c.baseUrl,listAccounts:async()=>new Map([[email,[7]]]),now:()=>clock,setTimer:()=>({unref(){}}),clearTimer:()=>{},request:async(_c,endpoint)=>{
@@ -18,8 +18,8 @@ await test('rolling-fifteen-minute-meter-retains-exact-boundaries',async()=>{
   const items=rows.map((at,id)=>({id,request_id:String(id),account_id:7,kind:'error',created_at:new Date(at).toISOString(),status_code:503,message:api.OVERLOAD_MESSAGE})).filter(r=>Date.parse(r.created_at)>=start&&Date.parse(r.created_at)<=end);return{data:{items,total:items.length}};
  }});
  try{
-  await monitor.setEnabled(email,true);await monitor.refresh();assert.equal(monitor.snapshot(email).recentCount,3,'cutoff inclusive; sample time exclusive');
-  clock+=2;await monitor.refresh();assert.equal(monitor.snapshot(email).recentCount,2,'rolling cutoff must advance within a fixed bin');
+  await monitor.setEnabled(email,true);await monitor.refresh();assert.equal(monitor.snapshot(email).recentCount,1,'previous bucket excluded; sample time exclusive');
+  clock+=2;await monitor.refresh();assert.equal(monitor.snapshot(email).recentCount,2,'accepted events accumulate in the current fixed bin');
  }finally{await monitor.stop();await fs.rm(dir,{recursive:true,force:true});}
 });
 await test('pause-closes-previously-partial-bin-and-fills-gaps',async()=>{
@@ -59,7 +59,7 @@ await test('cached-history-recheck-delay-restart-scope-and-full-reconciliation',
   // Delay in the immediately preceding bucket is corrected without double counting.
   rows.push({id:4,at:now-2*minute});await monitor.refresh();current=monitor.snapshot(email);assert.equal(current.points.find(p=>p.start==='2026-11-10T12:15:00.000Z').count,2);
   await monitor.refresh();assert.equal(monitor.snapshot(email).points.find(p=>p.start==='2026-11-10T12:15:00.000Z').count,2,'re-query replaces counts rather than accumulating duplicates');
-  assert.equal(monitor.snapshot(email).recentCount,2,'exact rolling 15m excludes the delayed event outside recheck range until reconciliation');
+  assert.equal(monitor.snapshot(email).recentCount,0,'current bin excludes the previous fixed bin even if it was corrected');
   await monitor.stop();restarted=new api.OverloadMonitor(options);await restarted.load();calls.length=0;await restarted.refresh();assert(calls.every(c=>c.end-c.start<=10*minute),'restart must reuse persisted fixed bins');
   // A partial failure keeps old counts at their actual bin, never under a new time label.
   const retained=restarted.snapshot(email);failRequests=true;clock+=5*minute;await restarted.refresh();const partial=restarted.snapshot(email);

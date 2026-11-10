@@ -2989,9 +2989,9 @@ function App() {
                     onChange={(event) => setSub2apiSettingsDraft((current) => ({ ...current, monitorEnabled: event.target.checked }))}
                   />
                   <span className="field-label-row">
-                    <strong>每 5 分钟监控异常账号</strong>
+                    <strong>状态刷新时自动恢复异常账号</strong>
                     <HelpTip title="异常账号监控" label="查看异常账号监控说明">
-                      只自动处理上次完整登录未人工输入密码、邮箱码或登录 2FA 的任务。
+                      每次号池状态刷新发现错误后，立即将符合自动登录条件的账号加入共享授权队列；保留失败重试间隔与防重复限制。
                     </HelpTip>
                   </span>
                 </label>
@@ -4593,35 +4593,34 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             <div className="task-two-fields">
               {TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === group).map(monitoringField)}
             </div>
-            <div className="task-auto-empty">{group === "号池异常恢复" ? "默认 300 秒（5 分钟）。重新授权仍进入共享登录队列；重试间隔为 0 时不设失败冷却。"
-              : "仅请求号池，默认网络并发 100。调用与过载次数默认每 60 秒同步；曲线每格跟随下方的过载统计窗口，默认 15 分钟一格，展示 6 格。当前格累计至最近同步，历史格缓存复用。冷却独立调度。关闭页面后继续同步。"}</div>
+            <div className="task-auto-empty">{group === "号池异常恢复" ? "跟随号池状态刷新，发现可恢复错误立即加入共享授权队列，不另设巡检；重试间隔仅用于失败后的再次尝试，设为 0 时不设失败冷却。"
+              : "仅请求号池，默认网络并发 100。调用与过载默认每 60 秒统一统计；曲线每格跟随下方的过载统计窗口，默认 15 分钟一格，展示 6 格。当前格累计至最近同步，并直接用于冷却阈值判断；历史格缓存复用，冷却到期独立恢复。关闭页面后继续同步。"}</div>
           </section>
         ))}
         <section className="task-auto-settings task-overload-settings" aria-labelledby="task-overload-title">
           <div className="section-title-row">
             <Activity size={15} className="task-section-icon" aria-hidden="true" />
             <h3 id="task-overload-title">过载</h3>
-            <HelpTip label="过载设置说明">冷却读取号池已有请求日志，不主动发起模型测试。调用与过载次数的同步频率在“号池与用量同步”中设置；这里独立设置冷却检查和触发规则。账号的“过载”和“冷却”开关分别开启。</HelpTip>
+            <HelpTip label="过载设置说明">冷却读取号池已有请求日志，不主动发起模型测试。统计频率在“号池与用量同步”中统一设置，每次统计后直接判断当前固定格是否达到冷却阈值；这里设置触发规则。账号的“过载”和“冷却”开关分别开启。</HelpTip>
           </div>
           <div className="task-overload-cooldown">
           <div className="section-title-row">
             <h4 id="overload-auto-cooldown-title">自动冷却</h4>
             <HelpTip label="过载自动冷却说明">
-              按冷却检查间隔统计滚动窗口内的过载次数，达到阈值后暂停号池分配，到期自动恢复。账号需要单独开启“冷却”，不依赖“过载”统计展示开关。恢复后重新计数，服务重启后继续计时。
+              复用调用与过载统计的当前固定格次数，达到阈值后暂停号池分配。每个账号独立保存冷却截止时间，到期自动恢复，重启后继续计时。“冷却”可单独开启，不依赖“过载”展示开关；恢复后从下一固定格重新判断，避免旧次数再次触发。
             </HelpTip>
           </div>
-          <div className="task-two-fields">{OVERLOAD_SETTINGS_FIELDS.filter(field => field.key === "overloadCooldownIntervalSeconds").map(monitoringField)}</div>
           <div className="overload-rule-fields">
             {[{ key: "windowMinutes", label: "过载统计窗口", unit: "分钟", max: 1440 }, { key: "threshold", label: "过载触发阈值", unit: "次", max: 100000 }, { key: "cooldownMinutes", label: "自动冷却时长", unit: "分钟", max: 43200 }].map(field => <label key={field.key} className="settings-field" htmlFor={`overload-rule-${field.key}`}>
               <span>{field.label}</span><div><input id={`overload-rule-${field.key}`} type="number" min={1} max={field.max} step="1" value={overloadRule[field.key]} disabled={saving} onChange={event => setOverloadRule(current => ({ ...current, [field.key]: event.target.value }))} /><span>{field.unit}</span></div>
             </label>)}
           </div>
-          <div className="task-auto-empty">最近 {overloadRule.windowMinutes || "—"} 分钟过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟；到期会及时唤醒恢复。</div>
+          <div className="task-auto-empty">当前 {overloadRule.windowMinutes || "—"} 分钟固定格内过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟；到期会及时唤醒恢复。</div>
           </div>
           <details className="task-overload-advanced">
-            <summary>冷却检查并发</summary>
+            <summary>冷却操作并发</summary>
             <div className="task-two-fields">{OVERLOAD_SETTINGS_FIELDS.filter(field => field.key.endsWith("Concurrency")).map(monitoringField)}</div>
-            <div className="task-auto-empty">仅控制冷却检查的网络并发，默认 100。</div>
+            <div className="task-auto-empty">仅控制暂停、到期恢复及失败重试的网络并发，默认 100；不再单独查询过载日志。</div>
           </details>
         </section>
         <section className="task-auto-settings" aria-labelledby="task-auto-settings-title">

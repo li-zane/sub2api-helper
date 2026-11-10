@@ -16,6 +16,7 @@ for(const minutes of [5,15,20,30,90,120,1440]){
   assert(p.every(v=>Date.parse(v.end)-Date.parse(v.start)===minutes*60_000));
 }
 const dir=await fs.mkdtemp(path.join(os.tmpdir(),'count-window-')),email='window@example.test';
+const minutesCurrent=()=>2;
 let clock=now,windowMinutes=15,failRequests=false,hold,monitor,restarted;
 const calls=[],rows=[now-60_000,now-17*60_000,now-40*60_000];
 const options={filePath:path.join(dir,'counts.json'),getWindowMinutes:()=>windowMinutes,getConfig:()=>({baseUrl:'fixture',adminApiKey:'fixture'}),backendIdentity:c=>c.baseUrl,listAccounts:async()=>new Map([[email,[7]]]),now:()=>clock,setTimer:()=>({unref(){}}),clearTimer:()=>{},request:async(_c,endpoint)=>{
@@ -37,13 +38,13 @@ try{
   assert.equal(s.points.reduce((n,p)=>n+p.count,0),3);
   let release;hold=new Promise(r=>release=r);const running=monitor.refresh();await new Promise(r=>setImmediate(r));windowMinutes=10;release();await running;hold=null;
   assert(monitor.snapshot(email).points.every(p=>p.count===null),'in-flight old-window counts discarded');
-  await monitor.refresh();assert.equal(monitor.snapshot(email).points.length,9);assert.equal(monitor.snapshot(email).recentCount,1);
+  await monitor.refresh();assert.equal(monitor.snapshot(email).points.length,9);assert.equal(monitor.snapshot(email).recentCount,0);
   failRequests=true;windowMinutes=20;const requestAt=monitor.snapshot(email).requestUpdatedAt;await monitor.refresh();s=monitor.snapshot(email);
-  assert.equal(s.points.length,5);assert.equal(s.historyMinutes,100);assert.equal(s.recentCount,2);
+  assert.equal(s.points.length,5);assert.equal(s.historyMinutes,100);assert.equal(s.recentCount,0);
   assert(s.points.every(p=>p.requestCount===null),'failed old-size request cache stays unknown on a new grid');assert.equal(s.requestUpdatedAt,requestAt);
   failRequests=false;await monitor.refresh();const before=monitor.snapshot(email);await monitor.stop();restarted=new OverloadMonitor(options);await restarted.load();assert.deepEqual(restarted.snapshot(email),before);
   calls.length=0;await restarted.refresh();assert(calls.every(c=>c.end-c.start<=40*60_000),'restarts reuse matching window cache');
-  for(windowMinutes of [90,120]){await restarted.refresh();s=restarted.snapshot(email);assert.equal(s.points.length,1);assert.equal(s.recentCount,3,'single visible bin still retains prior-bin times for rolling meter');}
+  for(windowMinutes of [90,120]){await restarted.refresh();s=restarted.snapshot(email);assert.equal(s.points.length,1);assert.equal(s.recentCount,minutesCurrent(windowMinutes),'current fixed bin excludes earlier bins');}
   await restarted.stop();
   const old=recentIntervals(clock,5).map(p=>({...p,count:999,requestCount:999}));
   await fs.writeFile(options.filePath,JSON.stringify({version:2,backend:'fixture',accounts:{[email]:{enabled:true,revision:7,points:old,requestPoints:old,updatedAt:new Date(clock).toISOString(),overloadScope:'["7"]',requestScope:'["7"]'}}}));

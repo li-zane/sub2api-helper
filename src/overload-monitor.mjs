@@ -194,36 +194,22 @@ function refreshPlan(entry, metric, scope, now, windowMinutes) {
   const first = full ? 0 : grid.findIndex(point => !knownCount(previous.get(point.start)?.[field])
     // Close the last partially sampled bucket even after a long pause.
     || !Number.isFinite(sampledAt) || Date.parse(point.end) > sampledAt
-    || Date.parse(point.start) >= currentStart - bucketMs
-    || metric === "overload" && Date.parse(point.end) > now - bucketMs && !Array.isArray(previous.get(point.start)?.overloadEvents));
+    || Date.parse(point.start) >= currentStart - bucketMs);
   return { grid, points: grid.slice(Math.max(0, first)), previous, full, bucketMs };
 }
 
-function mergeCounts(plan, fresh, now, overload) {
+function mergeCounts(plan, fresh) {
   const fetched = new Map(fresh.map(point => [point.start, point]));
   return plan.grid.map(point => {
     const value = fetched.get(point.start) || plan.previous.get(point.start) || point;
-    // Only the latest configured window needs individual times for the meter.
-    if (overload && Date.parse(point.end) <= now - plan.bucketMs) {
-      const { overloadEvents, ...summary } = value;
-      return summary;
-    }
-    return value;
+    const { overloadEvents, ...summary } = value;
+    return summary;
   });
 }
 
-function recentOverloadCount(entry, windowMinutes) {
-  const end = Date.parse(entry?.overloadUpdatedAt), start = end - overloadGrid(windowMinutes).bucketMs;
-  if (!Number.isFinite(end)) return null;
-  const points = validPoints(entry.points, windowMinutes, 2).filter(point => Date.parse(point.end) > start && Date.parse(point.start) < end);
-  if (!points.length || Date.parse(points[0].start) > start || Date.parse(points.at(-1).end) < end
-    || points.some(point => !Array.isArray(point.overloadEvents))) return null;
-  return points.reduce((total, point) => total + point.overloadEvents.filter(at => Number.isFinite(at) && at >= start && at < end).length, 0);
-}
-
 export class OverloadMonitor {
-  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: COUNT_SYNC_INTERVAL_MS }), getWindowMinutes = () => DEFAULT_COUNT_WINDOW_MINUTES, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, concurrency, getMonitoringSettings, getWindowMinutes, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: COUNT_SYNC_INTERVAL_MS }), getWindowMinutes = () => DEFAULT_COUNT_WINDOW_MINUTES, getAdditionalTargets = () => [], onOverloadCounts = async () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, concurrency, getMonitoringSettings, getWindowMinutes, getAdditionalTargets, onOverloadCounts, now, setTimer, clearTimer });
     this.request = limitPoolRequests((config, url, { isEnabled, ...options } = {}) => {
       if (isEnabled && !isEnabled()) throw new Error("过载统计已停止");
       return request(config, url, options);
@@ -278,7 +264,7 @@ export class OverloadMonitor {
       lastError: entry?.lastError || null, requestError: entry?.requestError || null,
       bucketMinutes: grid.bucketMinutes, pointCount: grid.pointCount, historyMinutes: grid.historyMinutes, windowMinutes: grid.bucketMinutes,
       overloadUpdatedAt: entry?.overloadUpdatedAt || null, requestUpdatedAt: entry?.requestUpdatedAt || null,
-      recentCount: recentOverloadCount(entry, grid.bucketMinutes),
+      countMode: "fixed_bucket", recentCount: stored.get(points.at(-1)?.start)?.count ?? null,
       points: points.map(point => ({ ...point, count: stored.get(point.start)?.count ?? null,
         requestCount: requests.get(point.start)?.requestCount ?? null,
         requestStart: point.start, requestEnd: point.end,
@@ -357,7 +343,9 @@ export class OverloadMonitor {
     const config = this.getConfig();
     const now = this.now();
     const windowMinutes = overloadGrid(this.getWindowMinutes()).bucketMinutes;
-    const entries = [...this.accounts].filter(([email, entry]) => entry.enabled && !this.isBlocked(email));
+    const additional = new Set(this.getAdditionalTargets());
+    for (const email of additional) if (!this.accounts.has(email)) this.accounts.set(email, { enabled: false, revision: 0, points: [], requestPoints: [] });
+    const entries = [...this.accounts].filter(([email, entry]) => (entry.enabled || additional.has(email)) && !this.isBlocked(email));
     if (!entries.length) return;
     let mapping;
     try { mapping = await this.listAccounts(config); }
@@ -372,6 +360,7 @@ export class OverloadMonitor {
       while (cursor < entries.length) {
         const [email, entry] = entries[cursor++];
         const isEnabled = () => !this.stopped && !this.isBlocked(email) && this.accounts.get(email) === entry
+          && (entry.enabled || this.getAdditionalTargets().includes(email))
           && overloadGrid(this.getWindowMinutes()).bucketMinutes === windowMinutes
           && this.getConfig() && this.backendIdentity(this.getConfig()) === backend;
         if (!isEnabled()) continue;
@@ -382,19 +371,22 @@ export class OverloadMonitor {
           const scope = JSON.stringify({ accountIds: [...new Set(accountIds.map(String))].sort(), windowMinutes });
           const overloadPlan = refreshPlan(entry, "overload", scope, now, windowMinutes), requestPlan = refreshPlan(entry, "request", scope, now, windowMinutes);
           const [overloads, requests] = await Promise.allSettled([
-            collectOverloadIntervals({ ...options, points: overloadPlan.points, includeEvents: true }),
-            collectRequestIntervals({ ...options, points: requestPlan.points }),
+            collectOverloadIntervals({ ...options, points: overloadPlan.points }),
+            entry.enabled ? collectRequestIntervals({ ...options, points: requestPlan.points }) : Promise.resolve(null),
           ]);
           if (!isEnabled()) continue;
           this.accounts.set(email, { ...entry,
-            points: overloads.status === "fulfilled" && overloads.value ? mergeCounts(overloadPlan, overloads.value, now, true) : entry.points || [],
-            requestPoints: requests.status === "fulfilled" && requests.value ? mergeCounts(requestPlan, requests.value, now, false) : entry.requestPoints || [],
+            points: overloads.status === "fulfilled" && overloads.value ? mergeCounts(overloadPlan, overloads.value) : entry.points || [],
+            requestPoints: requests.status === "fulfilled" && requests.value ? mergeCounts(requestPlan, requests.value) : entry.requestPoints || [],
             ...(overloads.status === "fulfilled" && overloads.value ? { overloadScope: scope, overloadUpdatedAt: new Date(now).toISOString(), overloadReconciledAt: overloadPlan.full ? new Date(now).toISOString() : entry.overloadReconciledAt } : {}),
             ...(requests.status === "fulfilled" && requests.value ? { requestScope: scope, requestUpdatedAt: new Date(now).toISOString(), requestReconciledAt: requestPlan.full ? new Date(now).toISOString() : entry.requestReconciledAt } : {}),
             updatedAt: overloads.status === "fulfilled" || requests.status === "fulfilled" ? new Date(now).toISOString() : entry.updatedAt || null,
             lastError: overloads.status === "rejected" ? String(overloads.reason?.message || overloads.reason).slice(0, 500) : null,
             requestError: requests.status === "rejected" ? String(requests.reason?.message || requests.reason).slice(0, 500) : null,
           });
+          if (overloads.status === "fulfilled" && overloads.value) {
+            await this.onOverloadCounts(email, { config, accountIds, point: overloads.value.at(-1), sampledAt: now, windowMinutes });
+          }
         } catch (error) {
           if (isEnabled()) this.accounts.set(email, { ...entry, lastError: String(error.message).slice(0, 500), requestError: String(error.message).slice(0, 500) });
         }

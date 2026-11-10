@@ -63,7 +63,7 @@ try{
   assert.deepEqual((await trace()).slice(before),[{name:'web',args:[true]}]);
   before=(await trace()).length;assert.equal((await api({overloadAutoCooldown:{threshold:9}})).status,200);
   assert.deepEqual((await trace()).slice(before),[{name:'cooldown',args:[]}]);
-  before=(await trace()).length;assert.equal((await api({monitoring:{overloadCooldownIntervalSeconds:90}})).status,200);
+  before=(await trace()).length;assert.equal((await api({monitoring:{overloadIntervalSeconds:90}})).status,200);
   assert.deepEqual((await trace()).slice(before),[{name:'cooldown',args:[]}]);
  });
  await check('persisted-settings-survive-restart',async()=>{

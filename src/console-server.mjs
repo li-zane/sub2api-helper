@@ -152,12 +152,10 @@ const SUB2API_ACCOUNT_NAME_TEMPLATE_KEYS = new Set([
   "id",
   "name",
 ]);
-const SUB2API_MONITOR_INTERVAL_MS = readDurationEnv("SUB2API_MONITOR_INTERVAL_MS", 5 * 60_000, 1_000);
 const SUB2API_AUTO_REPAIR_COOLDOWN_MS = readDurationEnv("SUB2API_AUTO_REPAIR_COOLDOWN_MS", 5 * 60_000, 0);
 const monitoringDefaults = {
   ...DEFAULT_MONITORING,
   accountStatusIntervalSeconds: SUB2API_ACCOUNT_STATUS_CACHE_TTL_MS / 1000,
-  poolMonitorIntervalSeconds: SUB2API_MONITOR_INTERVAL_MS / 1000,
   poolRepairRetrySeconds: SUB2API_AUTO_REPAIR_COOLDOWN_MS / 1000,
 };
 let monitoringSettings = { ...monitoringDefaults };
@@ -273,7 +271,8 @@ let sub2ApiPlanTypeBindings = {};
 let sub2ApiActiveProfileId = "default";
 let planTypeLabelMapping = {};
 let planTypeLabelMappingConfigured = false;
-let sub2ApiMonitorTimer = null;
+let sub2ApiRecoveryPending = null;
+let sub2ApiRecoverySnapshot = null;
 let sub2ApiMonitorPromise = null;
 let sub2ApiAccountStatusPromise = null;
 const usageSnapshots = new UsageSnapshots(path.join(OUTPUT_ROOT, "usage-snapshots.json"));
@@ -373,6 +372,8 @@ const webSessionMonitor = new WebSessionMonitor({
 
 const overloadMonitor = new OverloadMonitor({
   getWindowMinutes: () => overloadAutoCooldownSettings.windowMinutes,
+  getAdditionalTargets: () => overloadCooldown.countTargets(),
+  onOverloadCounts: (email, sample) => overloadCooldown.observeCounts(email, sample),
   getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadIntervalSeconds * 1000, concurrency: monitoringSettings.overloadConcurrency }),
   isBlocked: codexChecksBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-monitor.json"),
@@ -395,7 +396,7 @@ const overloadMonitor = new OverloadMonitor({
 });
 
 const overloadCooldown = new OverloadCooldown({
-  getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadCooldownIntervalSeconds * 1000, concurrency: monitoringSettings.overloadCooldownConcurrency }),
+  getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadIntervalSeconds * 1000, concurrency: monitoringSettings.overloadCooldownConcurrency }),
   isBlocked: accountAutomationBlocked,
   isCountBlocked: codexChecksBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
@@ -404,6 +405,7 @@ const overloadCooldown = new OverloadCooldown({
   getSettings: () => overloadAutoCooldownSettings,
   request: requestSub2Api,
   onChange: invalidateSub2ApiAccountStatusCache,
+  onNeedCounts: () => overloadMonitor.trigger(),
   listAccounts: async config => {
     const listing = await listSub2ApiAccounts(config, { withMeta: true });
     if (!listing.complete) throw new Error("Sub2API 账号列表不完整，自动冷却检查未完成");
@@ -574,7 +576,7 @@ for (const job of jobs.values()) {
 smsCancellations.start();
 resumePendingTaskAutoActions();
 scheduleQueuedJobs();
-scheduleSub2ApiMonitor();
+requestSub2ApiStatusRefresh();
 overloadMonitor.start();
 overloadCooldown.start();
 modelFingerprint.setTickMs(monitoringSettings.fingerprintScanIntervalSeconds * 1000);
@@ -1471,7 +1473,7 @@ async function handleApi(req, res, requestUrl) {
     sub2ApiMonitorConfig = { ...config, enabled: body.enabled === true };
     sub2ApiMonitorState.lastError = null;
     await persistSub2ApiMonitorConfiguration();
-    scheduleSub2ApiMonitor();
+    requestSub2ApiStatusRefresh();
     const profileSync = await syncSub2ApiProfileChanges(config, profileSyncTargets, snapshotSub2ApiProfileState());
     const datePrioritySync = await refreshImportDatePriorities(config);
     overloadMonitor.trigger();
@@ -5375,7 +5377,7 @@ async function saveTaskSettings(body) {
     const effectiveWebSessionMonitor = webSessionMonitorPatch ? normalizeWebSessionMonitor({ ...webSessionMonitorSettings, ...webSessionMonitorPatch }) : webSessionMonitorSettings;
     const webMonitorChanged = JSON.stringify(effectiveWebSessionMonitor) !== JSON.stringify(webSessionMonitorSettings);
     const cooldownRuleChanged = JSON.stringify(effectiveOverloadAutoCooldown) !== JSON.stringify(overloadAutoCooldownSettings);
-    const cooldownScheduleChanged = effectiveMonitoring.overloadCooldownIntervalSeconds !== monitoringSettings.overloadCooldownIntervalSeconds
+    const cooldownScheduleChanged = effectiveMonitoring.overloadIntervalSeconds !== monitoringSettings.overloadIntervalSeconds
       || effectiveMonitoring.overloadCooldownConcurrency !== monitoringSettings.overloadCooldownConcurrency;
     const tempPath = `${TASK_SETTINGS_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
@@ -5694,12 +5696,13 @@ function publicSub2ApiMonitorState() {
     profiles: [...sub2ApiProfiles.values()].map((profile) => ({ ...profile })),
     planTypeBindings: { ...sub2ApiPlanTypeBindings },
     activeProfileId: sub2ApiActiveProfileId,
-    intervalMinutes: monitoringSettings.poolMonitorIntervalSeconds / 60,
-    intervalSeconds: monitoringSettings.poolMonitorIntervalSeconds,
+    intervalMinutes: monitoringSettings.accountStatusIntervalSeconds / 60,
+    intervalSeconds: monitoringSettings.accountStatusIntervalSeconds,
+    triggerMode: "account_status_refresh",
     cooldownMinutes: monitoringSettings.poolRepairRetrySeconds / 60,
     running: sub2ApiMonitorState.running,
     lastCheckAt: sub2ApiMonitorState.lastCheckAt,
-    nextCheckAt: sub2ApiMonitorState.nextCheckAt,
+    nextCheckAt: null,
     lastError: sub2ApiMonitorState.lastError,
     lastResult: sub2ApiMonitorState.lastResult,
   };
@@ -5748,32 +5751,51 @@ async function persistPlanTypeLabelMapping(mapping) {
   await fs.rename(tempPath, PLAN_TYPE_MAPPING_PATH);
 }
 
-function scheduleSub2ApiMonitor() {
-  if (sub2ApiMonitorTimer) {
-    clearInterval(sub2ApiMonitorTimer);
-    sub2ApiMonitorTimer = null;
-  }
-  sub2ApiMonitorState.nextCheckAt = null;
-  if (!sub2ApiMonitorConfig?.enabled || shuttingDown) return;
-  const interval = monitoringSettings.poolMonitorIntervalSeconds * 1000;
-  sub2ApiMonitorState.nextCheckAt = new Date(Date.now() + interval).toISOString();
-  sub2ApiMonitorTimer = setInterval(() => {
-    sub2ApiMonitorState.nextCheckAt = new Date(Date.now() + interval).toISOString();
-    void runSub2ApiMonitor("scheduled").catch((error) => {
-      console.warn(`[warn] Sub2API 号池巡检失败：${String(error?.message || error).slice(0, 180)}`);
-    });
-  }, interval);
-  sub2ApiMonitorTimer.unref?.();
+function requestSub2ApiStatusRefresh() {
+  if (shuttingDown || !sub2ApiMonitorConfig?.enabled) return;
+  void loadSub2ApiAccountStatus({ forceRefresh: true }).catch(error => console.warn('[warn] 号池状态刷新失败：' + error.message));
 }
 
-async function runSub2ApiMonitor(trigger = "scheduled") {
+async function runSub2ApiMonitor() {
   if (!sub2ApiMonitorConfig?.enabled) throw httpError(409, "Sub2API 号池监控未启用");
+  // An explicit check must start after a prior refresh, rather than joining a
+  // snapshot that was already being read before the click.
+  if (sub2ApiAccountStatusPromise) await sub2ApiAccountStatusPromise;
+  await loadSub2ApiAccountStatus({ forceRefresh: true });
+  while (sub2ApiMonitorPromise) await sub2ApiMonitorPromise;
+  return sub2ApiMonitorState.lastResult;
+}
+
+function queueSub2ApiRecovery(listing, config) {
+  if (shuttingDown || !sub2ApiMonitorConfig?.enabled || monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiMonitorConfig)) return;
+  // Keep the freshest complete list if status refreshes arrive during a repair.
+  sub2ApiRecoverySnapshot = sub2ApiRecoveryPending = { listing, config: { ...config, groupIds: [...config.groupIds] } };
   if (sub2ApiMonitorPromise) return sub2ApiMonitorPromise;
-  const config = { ...sub2ApiMonitorConfig, groupIds: [...sub2ApiMonitorConfig.groupIds] };
+  sub2ApiMonitorPromise = Promise.resolve().then(async () => {
+    while (sub2ApiRecoveryPending && !shuttingDown && sub2ApiMonitorConfig?.enabled) {
+      const snapshot = sub2ApiRecoveryPending; sub2ApiRecoveryPending = null;
+      if (monitorBackendIdentity(snapshot.config) !== monitorBackendIdentity(sub2ApiMonitorConfig)) continue;
+      await processSub2ApiRecovery(snapshot);
+    }
+  }).finally(() => {
+    sub2ApiMonitorPromise = null;
+    // A refresh can arrive after the drain's last condition but before this
+    // finalizer. Never strand that newer complete snapshot.
+    if (sub2ApiRecoveryPending && !shuttingDown && sub2ApiMonitorConfig?.enabled) {
+      const next = sub2ApiRecoveryPending;
+      queueSub2ApiRecovery(next.listing, next.config);
+    }
+  });
+  void sub2ApiMonitorPromise.catch(error => console.warn('[warn] 号池异常恢复失败：' + String(error.message).slice(0, 180)));
+  return sub2ApiMonitorPromise;
+}
+
+async function processSub2ApiRecovery({ listing: accountListing, config }) {
+  const trigger = "status_refresh";
   const profileState = snapshotSub2ApiProfileState();
   const monitorGroupIds = sub2ApiMonitorGroupIds(config, profileState);
   const backend = monitorBackendIdentity(config);
-  sub2ApiMonitorPromise = (async () => {
+  {
     sub2ApiMonitorState.running = true;
     sub2ApiMonitorState.lastError = null;
     const summary = {
@@ -5808,11 +5830,8 @@ async function runSub2ApiMonitor(trigger = "scheduled") {
       if (refreshFailure) summary.poolCredentialSyncFailed = refreshRetries.filter((result) => result.status === "rejected").length;
       await retryPendingSub2ApiUploads(config, summary, profileState);
       if (shuttingDown) throw httpError(503, "服务正在关闭，已停止号池巡检");
-      const accountListing = await listSub2ApiAccounts(config, { withMeta: true });
       const allRemoteAccounts = accountListing.accounts;
       if (accountListing.complete) {
-        await reconcileSub2ApiAccountBans(config, allRemoteAccounts);
-        summary.datePrioritySync = await syncImportDatePriorities(config, accountListing, profileState);
         await fallBackExpiredSub2ApiProxies(config, profileState, allRemoteAccounts, summary);
         const previousPlanTypes = sub2ApiMonitorState.planTypesBackend === backend
           ? normalizeSub2ApiPlanTypeState(sub2ApiMonitorState.planTypes)
@@ -5861,7 +5880,7 @@ async function runSub2ApiMonitor(trigger = "scheduled") {
         // page could mistake a temporarily truncated response for a PlanType
         // transition and update the wrong account.
       }
-      const remoteAccounts = await listSub2ApiErrorAccounts(config);
+      const remoteAccounts = allRemoteAccounts.filter(account => String(account.platform || "openai") === "openai" && String(account.status || "").toLowerCase() === "error");
       summary.checked = remoteAccounts.length;
       const grouped = new Map();
       for (const account of remoteAccounts) {
@@ -5880,6 +5899,10 @@ async function runSub2ApiMonitor(trigger = "scheduled") {
 
       for (const [email, accounts] of grouped) {
         await withEmailJobLock(email, async () => {
+          if (shuttingDown || !sub2ApiMonitorConfig?.enabled || backend !== monitorBackendIdentity(sub2ApiMonitorConfig)) return;
+          const latest = sub2ApiRecoverySnapshot;
+          if (latest && latest.config && monitorBackendIdentity(latest.config) === backend
+            && !latest.listing.accounts.some(a => sub2ApiAccountEmail(a) === email && a.status === "error" && isSub2ApiAccountInMonitoredGroups(a, monitorGroupIds))) return;
           const job = findJobByEmail(email);
           if (!job) {
             summary.missingTask += accounts.length;
@@ -5925,10 +5948,7 @@ async function runSub2ApiMonitor(trigger = "scheduled") {
     } finally {
       sub2ApiMonitorState.running = false;
     }
-  })().finally(() => {
-    sub2ApiMonitorPromise = null;
-  });
-  return sub2ApiMonitorPromise;
+  }
 }
 
 const SUB2API_PROFILE_FIELD_LABELS = {
@@ -6531,7 +6551,7 @@ function createSub2ApiAutoRepairOperation(config, accounts, profileState = snaps
 async function retryPendingSub2ApiUploads(config, summary, profileState = snapshotSub2ApiProfileState()) {
   const backend = monitorBackendIdentity(config);
   const legacyBackend = legacyMonitorBackendIdentity(config);
-  for (const candidate of listUniqueJobs()) {
+  for (const candidate of listUniqueJobs().filter(job => job.autoRepairPendingAccountIds?.length)) {
     await withEmailJobLock(candidate.email, async () => {
       const job = findJobByEmail(candidate.email);
       const pendingIds = [...new Set(job?.autoRepairPendingAccountIds || [])]
@@ -6603,30 +6623,6 @@ async function getSub2ApiAccount(config, accountId) {
     if (error?.remoteStatus === 404) return null;
     throw error;
   }
-}
-
-async function listSub2ApiErrorAccounts(config) {
-  const accounts = [];
-  let page = 1;
-  let pages = 1;
-  do {
-    const query = new URLSearchParams({
-      page: String(page),
-      page_size: "100",
-      platform: "openai",
-      status: "error",
-    });
-    const payload = await requestSub2Api(config, `/api/v1/admin/accounts?${query}`);
-    const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
-    const items = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
-    accounts.push(...items.filter((account) => account && String(account.platform || "openai") === "openai" && String(account.status || "error") === "error"));
-    const reportedPages = Number(data?.pages);
-    pages = Number.isSafeInteger(reportedPages) && reportedPages > 0
-      ? reportedPages
-      : items.length >= 100 ? page + 1 : page;
-    page += 1;
-  } while (page <= pages && page <= 1_000);
-  return accounts;
 }
 
 function sub2ApiAccountEmail(account) {
@@ -6745,6 +6741,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       .map(account => normalizeSub2ApiAccountId(account.id)).filter(Boolean);
     await persistUsageSnapshots(sub2ApiAccountStatusCache, { reconcile: true });
     void synchronizeCachedUsageTotals(config, sub2ApiAccountStatusCache).catch(() => {});
+    queueSub2ApiRecovery(listing, config);
     return sub2ApiAccountStatusCache;
   })().finally(() => {
     sub2ApiAccountStatusPromise = null;
@@ -6802,7 +6799,6 @@ function applyMonitoringSettings(previous) {
   if (previous.fingerprintScanIntervalSeconds !== monitoringSettings.fingerprintScanIntervalSeconds) modelFingerprint.setTickMs(monitoringSettings.fingerprintScanIntervalSeconds * 1000);
   if (previous.usageTotalsIntervalSeconds !== monitoringSettings.usageTotalsIntervalSeconds || previous.usageTotalsConcurrency !== monitoringSettings.usageTotalsConcurrency) readUsageTotals.refreshSettings();
   if (previous.profileSyncConcurrency !== monitoringSettings.profileSyncConcurrency) requestProfileSync.drain();
-  if (previous.poolMonitorIntervalSeconds !== monitoringSettings.poolMonitorIntervalSeconds) scheduleSub2ApiMonitor();
   if (previous.overloadIntervalSeconds !== monitoringSettings.overloadIntervalSeconds || previous.overloadConcurrency !== monitoringSettings.overloadConcurrency) {
     overloadMonitor.request.drain(); overloadMonitor.trigger();
   }
@@ -10794,10 +10790,7 @@ async function shutdown() {
     for (const timer of poolRefreshTimers.values()) clearTimeout(timer);
     poolRefreshTimers.clear();
     queueSchedulingPaused = true;
-    if (sub2ApiMonitorTimer) {
-      clearInterval(sub2ApiMonitorTimer);
-      sub2ApiMonitorTimer = null;
-    }
+    sub2ApiRecoveryPending = null;
     for (const controller of sub2ApiRequestControllers) controller.abort();
     await Promise.allSettled([
       overloadMonitor.stop(),
