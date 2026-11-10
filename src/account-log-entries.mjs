@@ -4,6 +4,7 @@ import sync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { hydrateAccountLog, readCredentialHistory } from "./account-history.mjs";
+import { compactTotpHistory } from "./totp-history-versions.mjs";
 
 const labels = {
   initial_authorization: "首次授权", initial_web_login: "首次 Web 登录", web_login: "Web 登录",
@@ -88,13 +89,14 @@ export async function readAccountLogEntries(job, { view = "protocol", entryId = 
       after: { password: job.password, localRecord: true, remoteEnabled: job.securityState?.passwordEnabled ?? null } });
     if (job.totpSecret) history.push({ id: "current-2fa", type: "2fa", stage: "current", at: job.createdAt,
       after: { totpSecret: job.totpSecret, localRecord: true, remoteEnabled: job.securityState?.totpEnabled ?? null } });
-    const names = { password: "密码", "2fa": "2FA", web_session: "当前 Web 会话 / Cookie", codex_oauth: "当前 Codex OAuth" };
-    const entries = history.map(event => ({ id: event.id, type: event.type, at: event.at, stage: event.stage,
-      label: `${names[event.type] || event.type} · ${event.stage === "current" ? "当前版本" : event.stage || "历史"}` }));
-    const selected = entryId ? history.find(event => event.id === entryId) : null;
+    const compact = compactTotpHistory(history);
+    const names = { password: "密码", "2fa": "2FA", web_session: "当前 Web 会话 / Cookie", codex_oauth: "当前 Codex OAuth", workspaces: "工作空间", phone: "接码手机号" };
+    const entries = compact.map(event => ({ id: event.id, type: event.type, at: event.at, stage: event.stage, compact: event.compact || false,
+      label: event.compact ? event.label : `${names[event.type] || event.type} · ${event.stage === "current" ? "当前版本" : event.stage || "历史"}` }));
+    const selected = entryId ? compact.find(event => event.id === entryId) || history.find(event => event.id === entryId) : null;
     if (entryId && !selected) throw Object.assign(new Error("该记录已更新，请刷新列表"), { status: 404 });
     return { view, entries: entries.reverse(), selectedId: selected?.id || null,
-      content: selected ? JSON.stringify(selected, null, 2) : "", retention: "密码与 2FA 历史永久保留，候选不代表生效；Web / Cookie / OAuth 仅当前版本" };
+      content: selected ? JSON.stringify(selected, null, 2) : "", retention: "密码、2FA、空间变化与成功接码保留；同一 2FA 密钥合并展示；Web / Cookie / OAuth 仅当前版本" };
   }
   hydrateAccountLog(job);
   let entries = [];

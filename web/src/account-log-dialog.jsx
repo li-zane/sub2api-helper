@@ -11,11 +11,13 @@ import { groupCredentialHistory } from "./credential-history-groups.mjs";
 const stages = { imported: "导入", started: "开始", prepared: "已备份", submission_pending: "待提交",
   confirmed: "已确认", confirmed_before_save: "已确认待保存", activation_pending: "待激活", activated: "已激活",
   activated_before_save: "已激活待保存", local_password_delete_prepared: "清空本地密码", local_key_delete_prepared: "清空本地密钥",
-  manual_update_prepared: "手动更新", current: "当前版本", activation_failed: "激活未完成", enroll_failed: "注册未完成" };
-const credentialNames = { password: "密码", "2fa": "2FA", web_session: "Web 会话 / Cookie", codex_oauth: "Codex OAuth" };
+  manual_update_prepared: "手动更新", current: "当前版本", activation_failed: "激活未完成", enroll_failed: "注册未完成",
+  discovered: "首次发现", changed: "空间变化", verified: "已验证", cleared: "已清空本地记录" };
+const credentialNames = { password: "密码", "2fa": "2FA", web_session: "Web 会话 / Cookie", codex_oauth: "Codex OAuth", workspaces: "工作空间", phone: "接码手机号" };
 const credentialName = type => Object.hasOwn(credentialNames, type) ? credentialNames[type] : String(type || "其他凭据");
 function title(entry, view) {
   if (view !== "credentials") return entry.label;
+  if (entry.compact && entry.label) return entry.label;
   const name = credentialName(entry.type);
   return `${name} · ${stages[entry.stage] || entry.stage || "历史"}`;
 }

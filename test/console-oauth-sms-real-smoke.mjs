@@ -79,6 +79,13 @@ try {
   const protocolLog = (await fetch(base + `/api/jobs/${id}/logs`, { headers }).then(r => r.json())).logs;
   const grouped = await fetch(base + `/api/jobs/${id}/logs?view=protocol`, { headers }).then(r => r.json());
   assert(grouped.entries.some(e => e.tags?.includes("sms")), "SMS OAuth entry has no durable sms tag");
+  const credentialList = await fetch(base + `/api/jobs/${id}/logs?view=credentials`, { headers }).then(r => r.json());
+  const phoneEntries = credentialList.entries.filter(e => e.type === "phone");
+  assert.equal(phoneEntries.length, 1, "only the accepted second phone should be retained, without protocol/parser duplicates");
+  const phoneDetail = JSON.parse((await fetch(base + `/api/jobs/${id}/logs?view=credentials&entry=${phoneEntries[0].id}`, { headers }).then(r => r.json())).content);
+  assert.equal(phoneDetail.after.phone, "+12025550002");
+  assert.equal(phoneDetail.after.countryName, "Japan");
+  assert(credentialList.entries.some(e => e.type === "workspaces"), "real authorization should record owned spaces");
   assert.match(protocolLog, /国家 Japan（ID 1001）/);
   assert(protocolLog.includes("[codex-auth-login]") && protocolLog.includes("自动取号"));
   for (const secret of ["Fixture-Password-123!", "JBSWY3DPEHPK3PXP", "fixture-sms-key"]) assert(!protocolLog.includes(secret) && !logs.includes(secret));

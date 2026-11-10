@@ -14,6 +14,7 @@ import {
 import { normalizeCodexAuthMode, generateSub2ApiOAuth, exchangeSub2ApiOAuth, refreshSub2ApiOAuth, sub2ApiOAuthIdentity } from "./sub2api-oauth.mjs";
 import { getAccountBrowserIdentity } from "./account-browser-identity.mjs";
 import { recordCredentialHistory, writePrivateJsonAtomic } from "./account-history.mjs";
+import { recordWorkspaceHistory, recordAcceptedPhone } from "./credential-events.mjs";
 import { readAccountWebSession, saveProtocolWebSession, normalizeHelperLoginProxy } from "./account-web-session.mjs";
 import { uniqueWorkspaceAccounts, isUsableWorkspaceAccount, isTeamWorkspaceAccount, webTokenWorkspaceId, workspaceProviderCode, isDeactivatedWorkspaceError } from "./workspace-accounts.mjs";
 
@@ -512,6 +513,8 @@ async function run() {
       codexAuthMode,
       sub2ApiOAuth,
       expectedEmail: email,
+      credentialHistoryRoot: path.dirname(sub2apiOutPath),
+      credentialHistoryRunId: process.env.TOSUB2_LOGIN_RUN_ID || crypto.randomUUID(),
       password: process.env.CHATGPT_LOGIN_PASSWORD || "",
       totpSecret: process.env.CHATGPT_TOTP_SECRET || "",
       rl,
@@ -531,7 +534,7 @@ async function run() {
 
     async function selectCodexProxy() {
       const identity = await identifyWebPlan(client, { chatgptBase, web,
-        allowPersonalFallback: true, preferTeam: true, verifyTokenWorkspace: true });
+        allowPersonalFallback: true, preferTeam: true, verifyTokenWorkspace: true, historyRoot: path.dirname(sub2apiOutPath), email });
       web = { ...web, workspaceId: identity.workspaceId, planType: identity.planType };
       codexOptions.currentWorkspaceId = identity.workspaceId || undefined;
       codexOptions.allowedWorkspaceIds = identity.workspaceId ? [identity.workspaceId] : undefined;
@@ -1934,7 +1937,7 @@ function decodeBase32Secret(value) {
   return Buffer.from(bytes);
 }
 
-export async function identifyWebPlan(client, { chatgptBase, web = null, allowPersonalFallback = false, preferTeam = false, verifyTokenWorkspace = false }) {
+export async function identifyWebPlan(client, { chatgptBase, web = null, allowPersonalFallback = false, preferTeam = false, verifyTokenWorkspace = false, historyRoot, email }) {
   const { data: session } = await client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
   const accessToken = session?.accessToken || session?.access_token;
   if (!accessToken) throw new Error("WEB_PLAN_UNAVAILABLE: 网页登录会话未返回访问令牌，请重新登录");
@@ -1953,6 +1956,7 @@ export async function identifyWebPlan(client, { chatgptBase, web = null, allowPe
     if (isDeactivatedWorkspaceError(error)) throw new Error("WEB_LOGIN_WORKSPACE_UNAVAILABLE: Web 凭据绑定的空间已停用，需要重新登录", { cause: error });
     throw error;
   }
+  if (historyRoot) await recordWorkspaceHistory(historyRoot, payload, email);
   const accounts = uniqueWorkspaceAccounts(payload).filter(a => !client.unavailableLoginWorkspaceIds?.has(a.id));
   const explicitId = web?.workspaceId || payload?.current_account_id;
   const currentId = explicitId || payload?.default_account_id || payload?.default_account || session?.account?.id
@@ -2343,6 +2347,9 @@ async function bindPhoneIfNeeded(client, options, current, addPhoneUrl) {
 
       const validated = await tryValidatePhoneOtp(client, options.authBase, phoneCode, phoneReferer);
       if (validated.ok) {
+        if (options.credentialHistoryRoot || process.env.TOSUB2_CREDENTIAL_HISTORY_ROOT) await recordAcceptedPhone(options.credentialHistoryRoot || process.env.TOSUB2_CREDENTIAL_HISTORY_ROOT, {
+          phone, email: options.expectedEmail, runId: options.credentialHistoryRunId || process.env.TOSUB2_LOGIN_RUN_ID,
+        });
         console.log("[ok] Phone OTP validated");
         return validated.data;
       }

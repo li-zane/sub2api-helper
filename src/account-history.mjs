@@ -10,11 +10,17 @@ const directory = job => path.dirname(job.outputPath);
 // Web/cookie/OAuth views are derived from their current canonical files.
 const transientTypes = new Set(["web_session", "web_login", "codex_oauth", "cookie", "cookies", "credentials"]);
 
-export async function recordCredentialHistory(root, event) {
+export async function recordCredentialHistory(root, event, { key } = {}) {
   if (transientTypes.has(event.type)) return null;
   const dir = path.join(root, "credential-history");
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  const id = `${Date.now()}-${crypto.randomUUID()}`;
+  // Stable event keys make acceptance notifications/restarts idempotent.
+  const digest = key && crypto.createHash("sha256").update(key).digest("hex");
+  const id = digest ? `0-${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}` : `${Date.now()}-${crypto.randomUUID()}`;
+  if (key) {
+    try { return JSON.parse(await fs.readFile(path.join(dir, `${id}.json`), "utf8")); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
   const record = { version: 1, id, at: new Date().toISOString(), ...event };
   await writePrivateJsonAtomic(path.join(dir, `${id}.json`), record);
   return record;

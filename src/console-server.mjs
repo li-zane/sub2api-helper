@@ -14,7 +14,8 @@ import { createDirectPublicIpReader } from "./direct-public-ip.mjs";
 import { createStaticFrontend } from "./static-frontend.mjs";
 import { createCredentialStore } from "./credential-store.mjs";
 import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, inspectAccountWebSession, publicWebCredentialSync } from "./account-web-session.mjs";
-import { appendTimestampedAccountLog, hydrateAccountLog, readAccountLog, recordCredentialHistory, readCredentialHistory } from "./account-history.mjs";
+import { appendTimestampedAccountLog, hydrateAccountLog, readAccountLog, recordCredentialHistory, readCredentialHistory, writePrivateJsonAtomic } from "./account-history.mjs";
+import { recordAcceptedPhone, phoneOrderDetails } from "./credential-events.mjs";
 import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone } from "../web/src/display-time.mjs";
 import { normalizeSecurityState, mergeSecurityState, publicSecurityState } from "./account-security.mjs";
 import { PoolUploadLocks, uniquePoolUploadAccounts } from "./pool-upload-lock.mjs";
@@ -2326,6 +2327,8 @@ function launchJob(job, options = {}) {
       TOSUB2_EMAIL_OTP_API_AVAILABLE: job.mailApiUrl && mailApiUrlForJob(job) ? "1" : "0",
       TOSUB2_BROWSER_IDENTITY_ROOT: path.join(OUTPUT_ROOT, "browser-identities"),
       TOSUB2_WEB_SESSION_PATH: mode === "web_login" ? webLoginCandidatePath(job) : webSessionPathForJob(job),
+      TOSUB2_CREDENTIAL_HISTORY_ROOT: path.dirname(job.outputPath),
+      TOSUB2_LOGIN_RUN_ID: runId,
       CHATGPT_TOTP_SECRET: job.totpSecret || "",
       CHATGPT_NEW_PASSWORD: mode === "password_add" ? job.pendingNewPassword || "" : "",
       CHATGPT_PROXY_URL: job.proxyFallbackActive ? "" : ((options.phasedProxy ? options.loginProxyUrl : job.proxyUrl) || ""),
@@ -2407,7 +2410,7 @@ function launchJob(job, options = {}) {
 async function handleChildClose(job, outcome) {
   if (job.runId !== outcome.runId) return;
   const operation = job.logOperation;
-  try { return await handleChildCloseRun(job, outcome); }
+  try { await job.phoneCredentialWrite; return await handleChildCloseRun(job, outcome); }
   finally {
     if (operation) finishAccountLogOperation(job, operation, outcome.code === 0 ? "completed" : "failed");
   }
@@ -3718,6 +3721,13 @@ function consumeOutput(job, rawText) {
     }
   }
   if (scan.includes("[ok] Phone OTP validated")) {
+    const acceptedPosition = `${job.runId}:${smsScanBase + scan.lastIndexOf("[ok] Phone OTP validated")}`;
+    if (job.phoneCredentialSuccessPosition !== acceptedPosition) {
+      job.phoneCredentialSuccessPosition = acceptedPosition;
+      const accepted = { phone: job.currentPhone, email: job.email, runId: job.runId, order: job.smsOrderDetails };
+      job.phoneCredentialWrite = (job.phoneCredentialWrite || Promise.resolve()).catch(() => {}).then(() => recordAcceptedPhone(path.dirname(job.outputPath), accepted));
+      void job.phoneCredentialWrite.catch(error => appendJobLog(job, `[credential-history] 成功接码记录保存失败：${error.message}\n`));
+    }
     job.phoneVerificationPending = false;
     job.phoneVerifiedAt ||= new Date().toISOString();
     if (accountLoginPause(job)?.reason === "phone_unverified") clearAutomaticLoginPause(job);
@@ -4097,6 +4107,9 @@ async function acquireSmsNumber(job, providerId, config) {
       throw httpError(409, "任务已经不在手机号输入步骤，已提交号码取消请求");
     }
     job.smsOrderId = order.requestId;
+    job.smsOrderDetails = { ...phoneOrderDetails(order, smsClient.id, smsClient.name), runId };
+    // The protocol process commits the accepted phone before advancing OAuth.
+    await writePrivateJsonAtomic(path.join(path.dirname(job.outputPath), "sms-order.json"), job.smsOrderDetails);
     job.smsOrderRoute = smsClient.id === "smsbower" ? normalizeSmsPoolRoute({ ...order, service: String(config.service || "dr").trim().toLowerCase() }) : null;
     job.smsNumber = order.number;
     job.smsStatus = "number_acquired";
@@ -4254,6 +4267,7 @@ function releaseSmsNumber(job, nextStatus = "idle", errorMessage = null) {
   stopSmsPolling(job);
   job.smsOrderId = null;
   job.smsOrderRoute = null;
+  job.smsOrderDetails = null;
   job.smsNumber = null;
   job.smsClient = null;
   job.smsLastSubmittedCode = null;
@@ -4286,6 +4300,7 @@ function completeSmsNumber(job) {
   stopSmsPolling(job);
   job.smsOrderId = null;
   job.smsOrderRoute = null;
+  job.smsOrderDetails = null;
   job.smsClient = null;
   job.smsLastSubmittedCode = null;
   job.smsStatus = "completed";
@@ -4308,6 +4323,7 @@ function newSmsState() {
     smsServiceLabel: null,
     smsOrderId: null,
     smsOrderRoute: null,
+    smsOrderDetails: null,
     smsPoolPolicy: null,
     smsNumber: null,
     smsClient: null,
@@ -4326,6 +4342,7 @@ function restoredSmsState(metadata = {}) {
   return {
     ...base,
     smsOrderRoute: normalizeSmsPoolRoute(metadata.sms_order_route),
+    smsOrderDetails: metadata.sms_order_details || null,
     smsProviderId: metadata.sms_provider_id || "luban",
     smsProviderName: metadata.sms_provider_name || (metadata.sms_provider_id === "smsbower" ? "SMSBower" : "LubanSMS"),
     smsServiceLabel: metadata.sms_service_label || metadata.luban_service_id || null,
@@ -10447,6 +10464,7 @@ async function saveJobMetadata(job) {
         sms_service_label: job.smsServiceLabel || null,
         sms_order_id: job.smsOrderId || null,
         sms_order_route: job.smsOrderRoute || null,
+        sms_order_details: job.smsOrderDetails || null,
         sms_pool_policy: restoreSmsPoolPolicy(job.smsPoolPolicy),
         sms_number: job.smsNumber || null,
         sms_status: job.smsStatus || null,

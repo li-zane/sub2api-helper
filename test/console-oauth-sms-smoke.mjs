@@ -25,6 +25,7 @@ await listen(sms); const socket = http.createServer(), port = await listen(socke
 const wait = async fn => { const end = Date.now() + 15000; while (Date.now() < end) { const v = await fn().catch(() => null); if (v) return v; await new Promise(r => setTimeout(r, 30)); } throw Error("fixture timeout\n" + logs); };
 const api = async (route, body, method = "POST") => { const r = await fetch(base + route, { headers, ...(body === undefined ? {} : { method, body: JSON.stringify(body) }) }); return { status: r.status, data: await r.json() }; };
 const job = async id => (await api("/api/jobs")).data.jobs.find(j => j.id === id);
+const phoneHistory = async id => (await api(`/api/jobs/${id}/logs?view=credentials`)).data.entries.filter(entry => entry.type === "phone");
 const waitJob = (id, test) => wait(async () => { const j = await job(id); return j && test(j) ? j : null; });
 const create = async prefix => { const r = await api("/api/jobs", { email: prefix + "@example.test" }); assert.equal(r.status, 201); return r.data.job.id; };
 const settings = (autoAcquire, maxAutoNumbers = 3) => api("/api/sms-provider-settings", { settings: { selectedProviderId: "smsbower", autoAcquire, maxAutoNumbers, maxFailuresPerPool: 10, configs: { smsbower: { apiKey: "fixture-sms-key", service: "dr", country: "1001", maxPrice: "0.42" } } } });
@@ -42,6 +43,10 @@ try {
   const off = await create("auto-off"); await waitJob(off, j => j.status === "phone"); await new Promise(r => setTimeout(r, 100)); assert.equal(gets, 0);
   assert.equal((await settings(true)).status, 200);
   const done = await waitJob(off, j => j.status === "completed"); assert.equal(done.smsStatus, "completed"); assert.equal(gets, 1);
+  const accepted = await phoneHistory(off); assert.equal(accepted.length, 1, "accepted output must create exactly one phone credential");
+  const acceptedDetail = (await api(`/api/jobs/${off}/logs?view=credentials&entry=${accepted[0].id}`)).data.content;
+  assert.equal(JSON.parse(acceptedDetail).after.phone, "+12025550001");
+  assert.equal(JSON.parse(acceptedDetail).after.country, "1001");
   assert(statuses.some(s => s.status === "1") && statuses.some(s => s.status === "6"));
   noStock = true;
   const no = await create("no-stock"); // Force a provider-level failure before acquiring any paid order.
@@ -52,6 +57,7 @@ try {
     const result = await waitJob(id, j => j.status === "completed");
     assert.equal(result.smsStatus, "completed");
     assert.equal(gets - before, 2, prefix + " must automatically replace exactly one rejected number");
+    assert.equal((await phoneHistory(id)).length, 1, "rejected numbers/code receipts must not create credentials");
   }
   const beforeReject = gets, reject = await create("reject-phone");
   await waitJob(reject, j => j.status === "phone" && /上限/.test(j.prompt || ""));
@@ -62,6 +68,7 @@ try {
     await waitJob(id, j => j.smsStatus === "error");
     await new Promise(r => setTimeout(r, 200)); assert.equal(gets - before, 1, prefix + " must not buy another number");
     await api(`/api/jobs/${id}/cancel`, {});
+    assert.equal((await phoneHistory(id)).length, 0, "failed validation must not create a phone credential");
   }
   assert.equal((await settings(true, 2)).status, 200);
   const beforeTwo = gets, two = await create("reject-phone-limit-two");
@@ -72,7 +79,9 @@ try {
   const cancel = api(`/api/jobs/${stale}/cancel`, {}); // Cancellation does not need to wait for the supplier.
   await cancel; releaseHold(); await wait(async () => statuses.some(s => s.id === "fixture-" + gets && s.status === "8"));
   assert.equal((await job(stale)).status, "canceled");
+  assert.equal((await phoneHistory(stale)).length, 0, "late/canceled order must not become a credential");
   await stop(); await start();
+  assert.equal((await phoneHistory(off)).length, 1, "accepted phones must survive restart without duplicates");
   assert.equal((await api("/api/sms-provider-settings")).data.settings.autoAcquire, true, "saved server config did not survive restart");
   assert.equal((await api("/api/sms-provider-settings")).data.settings.maxAutoNumbers, 2);
   const restored = await create("after-restart"); await waitJob(restored, j => j.status === "completed");
