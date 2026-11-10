@@ -6,6 +6,7 @@ import http from 'node:http';
 import {spawn} from 'node:child_process';
 const temp=await fs.mkdtemp(path.join(os.tmpdir(),'helper-proxy-create-'));
 const proxies=[],writes=[];
+const poolAccount={id:23,name:'proxy-23@example.test',platform:'openai',type:'oauth',status:'error',schedulable:true,error_message:'fixture pool error',credentials:{email:'proxy-23@example.test'},extra:{}};
 const remote=http.createServer(async(req,res)=>{
  const route=new URL(req.url,'http://fixture').pathname;res.setHeader('content-type','application/json');
  if(req.method==='POST'&&route==='/api/v1/admin/proxies'){
@@ -15,7 +16,7 @@ const remote=http.createServer(async(req,res)=>{
   if(p.host==='uncertain.test'){res.statusCode=500;res.end('{}');return;}
   proxies.push({...p,id:proxies.length+1,status:'active'});res.end(JSON.stringify({data:proxies.at(-1)}));return;
  }
- const data=route==='/api/v1/admin/proxies/all'?proxies:route==='/api/v1/admin/proxies'?{items:proxies,total:proxies.length}:route==='/api/v1/admin/groups/all'?[]:route==='/api/v1/admin/accounts'?{items:[],total:0,pages:1}:null;
+ const data=route==='/api/v1/admin/proxies/all'?proxies:route==='/api/v1/admin/proxies'?{items:proxies,total:proxies.length}:route==='/api/v1/admin/groups/all'?[]:route==='/api/v1/admin/accounts'?{items:[poolAccount],total:1,pages:1}:null;
  res.end(JSON.stringify({data}));
 });
 const freePort=async()=>{const s=http.createServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const p=s.address().port;await new Promise(r=>s.close(r));return p;};
@@ -46,9 +47,10 @@ try{
  assert(!JSON.stringify(a.data).includes('password-fixture'));assert(!JSON.stringify(a.data).includes('echo-password'));
  assert.equal((await post('/api/sub2api/proxies',{...body,proxies:[{...proxy,name:'other'}]})).status,409);
  for(const query of ['?page=1','?page=2','?search=proxy-1']){
-  const r=await fetch(base+'/api/jobs'+query,{headers}),data=await r.json();assert.equal(r.status,200);assert.equal(data.stats.normal,23);assert.equal(data.stats.abnormal,2);assert.equal(data.stats.pending,0);
+  const r=await fetch(base+'/api/jobs'+query,{headers}),data=await r.json();assert.equal(r.status,200);assert.equal(data.stats.normal,22);assert.equal(data.stats.abnormal,2);assert.equal(data.stats.pending,1);
  }
- console.log('PROXY_CREATE_API_PASS auth=true validation=true partial=1/1/1/1 idempotency=true secrets_omitted=true stats=23/2 all_pages=true');
+ const filtered=await(await fetch(base+'/api/jobs?summary=abnormal',{headers})).json();assert.deepEqual(filtered.jobs.map(j=>j.email).sort(),['proxy-23@example.test','proxy-25@example.test']);assert.equal(filtered.pagination.total,2);assert.equal(filtered.selection.length,2,'selection must match filtered pool errors and banned accounts');
+ console.log('PROXY_CREATE_API_PASS auth=true validation=true partial=1/1/1/1 idempotency=true secrets_omitted=true stats=22/2/1 pool_error_filter=true all_pages=true');
 }finally{
  if(child&&child.exitCode===null){const done=new Promise(r=>child.once('exit',r));child.kill('SIGTERM');await done;}
  await new Promise(r=>remote.close(r));await fs.rm(temp,{recursive:true,force:true});

@@ -16,6 +16,7 @@ const ids = names.map((_, i) => `11111111-1111-4111-8111-${String(i + 1).padStar
 const emailFor = name => `${name}@example.test`;
 const requests = [], updates = [];
 let plan = "free", child, exited, base, headers, logs = "";
+let holdValidProbe = false, releaseProbe;
 const tokenFor = (name, cookie) => `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now()/1000)+3600, "https://api.openai.com/auth": { chatgpt_account_id: name === "unavailable" && cookie.includes("session=unavailable") ? "dead" : "personal", chatgpt_plan_type: plan } })).toString("base64url")}.signature`;
 const upstream = http.createServer((req, res) => {
   const route = new URL(req.url, "http://fixture").pathname;
@@ -24,6 +25,11 @@ const upstream = http.createServer((req, res) => {
   requests.push({ name, route });
   res.setHeader("content-type", "application/json");
   if (route === "/api/auth/session") {
+    if (name === "valid" && holdValidProbe) {
+      holdValidProbe = false;
+      releaseProbe = () => res.end(JSON.stringify({ user: { email: emailFor(name) }, accessToken: tokenFor(name, cookie) }));
+      return;
+    }
     if (name === "trouble") { res.statusCode = 503; return res.end(JSON.stringify({ error: "temporary" })); }
     if (name === "expired" && cookie.includes("session=expired")) { res.statusCode = 401; return res.end("{}"); }
     return res.end(JSON.stringify({ user: { email: emailFor(name) }, accessToken: tokenFor(name, cookie) }));
@@ -109,6 +115,7 @@ await fs.writeFile(f,JSON.stringify(s));console.log('[ok] Saved web session: '+f
     assert.equal((await fetch(base + `/api/jobs/${ids[0]}/web-session-check`, { method: "POST" })).status, 403);
     const blocker = await api("/api/jobs", { email: "foreground@example.test" });
     await wait(async () => (await job(blocker.data.job.id))?.status === "email_otp");
+    assert.deepEqual((await api('/api/jobs?summary=active')).data.jobs.map(j=>j.id),[blocker.data.job.id],'active summary includes waiting foreground login');
     const batch = await api("/api/jobs/web-session-check-batch", { ids });
     assert.equal(batch.status, 200, "manual Web-session batch endpoint must exist");
     assert.equal(batch.data.started, 5); assert.equal(batch.data.skipped, 0);
@@ -116,7 +123,14 @@ await fs.writeFile(f,JSON.stringify(s));console.log('[ok] Saved web session: '+f
     assert.equal((await api(`/api/jobs/${ids[0]}/web-session-check`, {})).status, 409);
     const attempts = batch.data.jobs.map(j => ({ id: j.id, attemptId: j.webSessionCheckAttemptId }));
     assert((await api("/api/jobs/web-session-check-progress", { attempts })).data.progress.every(p => p.phase === "queued"));
+    holdValidProbe = true;
     await api(`/api/jobs/${blocker.data.job.id}/cancel`, {});
+    await wait(async () => releaseProbe);
+    try {
+      const active = (await api('/api/jobs?summary=active')).data;
+      assert.equal(active.stats.active, 1);
+      assert.deepEqual(active.jobs.map(j=>j.id),[ids[0]],'active summary includes Web probe even when job status is completed');
+    } finally { releaseProbe();releaseProbe=null; }
     const finished = await wait(async () => {
       const result = await api("/api/jobs/web-session-check-progress", { attempts });
       return result.data.progress.every(p => ["success", "failed"].includes(p.phase)) && result.data;
@@ -129,6 +143,8 @@ await fs.writeFile(f,JSON.stringify(s));console.log('[ok] Saved web session: '+f
     assert.match((await job(ids[2])).webSessionCheckError, /503/, "single row must expose asynchronous check failures");
     assert.equal(finished.progress.find(p => p.id === ids[4]).phase, "success");
     assert.equal(finished.progress.find(p => p.id === ids[4]).renewed, true, "confirmed workspace loss must renew even if discovery returns 200");
+    assert.equal((await api('/api/jobs?summary=active')).data.pagination.total,0,'finished probes leave active summary');
+    console.log('SUMMARY_ACTIVE_CHECK_PASS foreground=true web_probe=true released=true');
     assert.equal(requests.filter(r => r.name === "trouble" && r.route === "/api/auth/session").length, 3, "non-401 must retry exactly twice even when scheduled monitor disabled");
     assert.equal(requests.filter(r => r.name === "expired" && r.route === "/api/auth/session").length, 2, "401 must proceed straight to renewal then one successful recheck");
     assert.equal(await fs.readFile(trace,"utf8"), "banned@example.test\nexpired@example.test\nunavailable@example.test\n", "only confirmed expiry or an explicit banned-Web request may log in");

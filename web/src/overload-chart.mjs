@@ -3,7 +3,8 @@ export function buildOverloadChart(points = []) {
   const maximum = (field) => Math.max(1, ...points.map((point) => valid(point[field]) ? point[field] : 0));
   const overloadMax = maximum("count");
   const requestMax = maximum("requestCount");
-  const positioned = points.map((point, index) => ({ ...point, x: 18 + index * 26,
+  const spacing = points.length > 1 ? 130 / (points.length - 1) : 26;
+  const positioned = points.map((point, index) => ({ ...point, x: 18 + index * spacing,
     y: valid(point.count) ? 44 - (point.count / overloadMax) * 34 : null,
     requestY: valid(point.requestCount) ? 44 - (point.requestCount / requestMax) * 34 : null,
   }));
@@ -19,5 +20,5 @@ export function buildOverloadChart(points = []) {
     if (segment.length) output.push(segment.join(" "));
     return output;
   }
-  return { positioned, overloadSegments: segments("y"), requestSegments: segments("requestY") };
+  return { positioned, hitWidth: Math.min(26, spacing), overloadSegments: segments("y"), requestSegments: segments("requestY") };
 }

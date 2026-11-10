@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useMemo } from "react";
+import React, { useEffect, useLayoutEffect, useState, useRef, useMemo } from "react";
 import { buildOverloadChart } from "./overload-chart.mjs";
 import { overloadDashboard, overloadEnergy } from "./codex-dashboard.mjs";
 import { codexStatusEligible, codexStatusBlockReason } from "./codex-eligibility.mjs";
@@ -20,6 +20,8 @@ export function OverloadDetection({ job, token, onError }) {
   const [cooldownBusy, setCooldownBusy] = useState(false);
   const [savedCooldown, setSavedCooldown] = useState(null);
   const plotRef = useRef(null);
+  const tooltipRef = useRef(null);
+  const [tooltipOffset, setTooltipOffset] = useState(0);
 
   useEffect(() => {
     if (hovered === null) return;
@@ -57,10 +59,29 @@ export function OverloadDetection({ job, token, onError }) {
   const cooldownEnabled = eligible && cooldown?.enabled === true;
   const points = detection?.points || [];
   const dashboard = useMemo(() => overloadDashboard(detection, cooldown), [detection, cooldown]);
-  const { positioned, overloadSegments, requestSegments } = useMemo(() => buildOverloadChart(points), [points]);
+  const { positioned, hitWidth, overloadSegments, requestSegments } = useMemo(() => buildOverloadChart(points), [points]);
   const active = hovered === null ? null : positioned[hovered];
   const errors = [detection?.lastError ? `过载统计：${detection.lastError}` : null,
     detection?.requestError ? `请求统计：${detection.requestError}` : null].filter(Boolean).join("；");
+
+  useLayoutEffect(() => {
+    if (!active || !tooltipRef.current || !plotRef.current) return;
+    const position = () => {
+      const plot = plotRef.current.getBoundingClientRect();
+      const frame = plotRef.current.closest(".table-frame")?.getBoundingClientRect();
+      const width = tooltipRef.current.getBoundingClientRect().width;
+      const left = Math.max(8, (frame?.left ?? 0) + 8);
+      const right = Math.min(window.innerWidth - 8, (frame?.right ?? window.innerWidth) - 8);
+      setTooltipOffset(Math.max(left - plot.left, Math.min(0, right - plot.left - width)));
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [active?.start, detection?.overloadUpdatedAt, detection?.requestUpdatedAt, errors]);
 
   async function toggle() {
     if (busy || !eligible) return;
@@ -114,7 +135,7 @@ export function OverloadDetection({ job, token, onError }) {
       <div className="overload-dashboard overload-chart">
       <OverloadEnergy value={dashboard.quarter} enabled={enabled} />
       <div className="overload-plot" ref={plotRef}>
-        <svg viewBox="0 0 164 56" role="group" aria-label="截至最近同步的 90 分钟过载与请求数量，每段 15 分钟，两条线独立缩放">
+        <svg viewBox="0 0 164 56" role="group" aria-label="90 分钟刻度的过载与请求数量，每格固定 5 分钟，当前格累计至最近同步，两条线独立缩放">
           <line className="overload-zero" x1="10" x2="156" y1="44" y2="44" />
           {overloadSegments.map((values, index) => <polyline key={index} className="overload-line" points={values} />)}
           {requestSegments.map((values, index) => <polyline key={index} className="overload-request-line" points={values} />)}
@@ -124,17 +145,19 @@ export function OverloadDetection({ job, token, onError }) {
               onMouseEnter={() => setHovered(index)} onMouseLeave={() => setHovered(null)}
               onFocus={() => setHovered(index)} onBlur={() => setHovered(null)}
               onClick={() => setHovered(index)} onKeyDown={(event) => { if (event.key === "Escape") setHovered(null); }}>
-              <rect className="overload-hit-area" x={point.x - 13} y="0" width="26" height="56" />
+              <rect className="overload-hit-area" x={point.x - hitWidth / 2} y="0" width={hitWidth} height="56" />
               {point.y !== null && <circle className={`overload-dot ${hovered === index ? "active" : ""}`} cx={point.x} cy={point.y} r={hovered === index ? 3.5 : 2.5} />}
               {point.requestY !== null && <circle className="overload-request-dot" cx={point.x} cy={point.requestY} r={hovered === index ? 4.5 : 3.5} />}
             </g>
           ))}
         </svg>
-        {active && <div className={`overload-tooltip point-${hovered}`} role="tooltip">
+        {active && <div className={`overload-tooltip point-${hovered}`} role="tooltip" ref={tooltipRef} style={{ left: tooltipOffset }}>
           <span>{intervalLabel(active)}</span>
+          {detection?.overloadUpdatedAt && <span>过载统计至：{displayDateTime(detection.overloadUpdatedAt, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>}
           <strong className="overload-tooltip-count"><i aria-hidden="true" />过载 <b>{active.count === null ? "未统计" : `${active.count} 次`}</b></strong>
           {active.requestEnd && active.requestEnd !== active.end && <span>请求区间：{intervalLabel({ start: active.requestStart, end: active.requestEnd })}</span>}
           <strong className="overload-tooltip-requests"><i aria-hidden="true" />请求 <b>{active.requestCount === null || active.requestCount === undefined ? "未统计" : `${active.requestCount} 次`}</b></strong>
+          {detection?.requestUpdatedAt && <span>请求统计至：{displayDateTime(detection.requestUpdatedAt, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>}
           <span className="overload-scale-note">{errors ? "同步异常，保留上次成功数据；" : ""}独立缩放</span>
         </div>}
         {errors && <span className="overload-error" role="img" aria-label={errors} title={errors}>!</span>}

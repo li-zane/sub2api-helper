@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { OVERLOAD_INTERVAL_MS, OVERLOAD_MESSAGE } from "../src/overload-monitor.mjs";
+import { COUNT_BUCKET_MS, OVERLOAD_MESSAGE } from "../src/overload-monitor.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-overload-http-"));
@@ -14,9 +14,11 @@ const output = path.join(temp, "output");
 const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
 const emails = ["overload@example.test", "paused@example.test"];
 const records = [7, 8, 9].map((id, index) => ({ id, platform: "openai", type: "oauth", name: emails[index === 2 ? 1 : 0], status: "active", schedulable: true, credentials: { email: emails[index === 2 ? 1 : 0] }, extra: {}, group_ids: [] }));
-const counts = [0, 2, 5, 1, 3, 0];
-const requestCounts = [198, 204, 210, 202, 196, 200];
+const counts = [0, 2, 5, 1, 3, ...Array(13).fill(0)];
+const requestCounts = [198, 204, 210, 202, 196, 200, ...Array(12).fill(0)];
 const logRequests = [];
+// Keep source rows fixed across cold, incremental and restarted queries.
+const sourceStart = Math.floor(Date.now() / COUNT_BUCKET_MS) * COUNT_BUCKET_MS - 17 * COUNT_BUCKET_MS;
 let child;
 let headers;
 let logs = "";
@@ -28,21 +30,23 @@ const remote = http.createServer(async (req, res) => {
   if (url.pathname === "/api/v1/admin/ops/requests") {
     const accountId = Number(url.searchParams.get("account_id"));
     const start = Date.parse(url.searchParams.get("start_time"));
+    const end = Date.parse(url.searchParams.get("end_time"));
     const page = Number(url.searchParams.get("page"));
     const items = accountId === 7 ? requestCounts.flatMap((count, index) => Array.from({ length: count }, (_, number) => ({
       request_id: `request-${index}-${number}`, account_id: accountId, kind: number % 2 ? "success" : "error",
-      created_at: new Date(start + index * OVERLOAD_INTERVAL_MS + 10_000 + number).toISOString(),
-    }))) : [];
+      created_at: new Date(sourceStart + index * COUNT_BUCKET_MS + 10_000 + number).toISOString(),
+    }))).filter(row => Date.parse(row.created_at) >= start && Date.parse(row.created_at) <= end) : [];
     return res.end(JSON.stringify({ data: { items: items.slice((page - 1) * 100, page * 100), total: items.length } }));
   }
   if (url.pathname === "/api/v1/admin/ops/upstream-errors") {
     logRequests.push(url);
     const accountId = Number(url.searchParams.get("account_id"));
     const start = Date.parse(url.searchParams.get("start_time"));
+    const end = Date.parse(url.searchParams.get("end_time"));
     const items = accountId === 7 ? counts.flatMap((count, index) => Array.from({ length: count }, (_, number) => ({
       id: index * 100 + number + 1, account_id: accountId, status_code: 503,
-      message: OVERLOAD_MESSAGE, created_at: new Date(start + index * OVERLOAD_INTERVAL_MS + 10_000 + number).toISOString(),
-    }))) : [];
+      message: OVERLOAD_MESSAGE, created_at: new Date(sourceStart + index * COUNT_BUCKET_MS + 10_000 + number).toISOString(),
+    }))).filter(row => Date.parse(row.created_at) >= start && Date.parse(row.created_at) <= end) : [];
     return res.end(JSON.stringify({ data: { items, total: items.length, page: 1, page_size: 500, pages: 1 } }));
   }
   res.statusCode = 404; res.end("{}");
@@ -125,7 +129,8 @@ try {
   assert.equal((await job(ids[1])).overloadDetection.enabled, false);
   assert(logRequests.every((url) => ["7", "8"].includes(url.searchParams.get("account_id"))), "each remote account for this email is included");
   assert(logRequests.every((url) => url.searchParams.get("status_codes") === "503"));
-  assert.equal(entry.overloadDetection.points.at(-1).end, entry.overloadDetection.updatedAt, "current sync is the rolling window end");
+  assert.equal(Date.parse(entry.overloadDetection.points.at(-1).end)%COUNT_BUCKET_MS,0,"fixed labels align to five minutes");
+  assert(Date.parse(entry.overloadDetection.points.at(-1).end)>Date.parse(entry.overloadDetection.updatedAt));
   assert.equal(Date.parse(entry.overloadDetection.points.at(-1).end) - Date.parse(entry.overloadDetection.points[0].start), 90 * 60_000);
   await toggle(false);
   assert.equal((await job()).overloadDetection.enabled, false);

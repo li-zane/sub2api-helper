@@ -8,8 +8,8 @@ async (page) => {
   await page.setViewportSize({ width: 1480, height: 1000 });
   const initialUrl = page.url();
   let revision = 1, overload = true, cooldown = true, fingerprint = true, phase = 'idle', releaseCheck;
-  const points = [0, 1, 2, 3, 4, 5].map((count, i) => ({ start: new Date(Date.UTC(2026, 10, 5, 0, i * 15)).toISOString(), end: new Date(Date.UTC(2026, 10, 5, 0, (i + 1) * 15)).toISOString(), count, requestCount: 1000 + i }));
-  const detectionState = () => ({ configured: true, enabled: overload, revision, points });
+  const points = [0, 1, 2, 3, 4, 5, ...Array(12).fill(0)].map((count, i) => ({ start: new Date(Date.UTC(2026, 10, 5, 0, i * 5)).toISOString(), end: new Date(Date.UTC(2026, 10, 5, 0, (i + 1) * 5)).toISOString(), count, requestCount: 1000 + i }));
+  const detectionState = () => ({ configured: true, enabled: overload, revision, points, bucketMinutes: 5, recentCount: 0, updatedAt: '2026-11-05T01:29:00Z', overloadUpdatedAt: '2026-11-05T01:29:00Z' });
   const cooldownState = () => ({ configured: true, enabled: cooldown, revision, settings: { windowMinutes: 15, threshold: 5 }, windowCount: 2, lastCheckedAt: '2026-11-05T01:31:00Z', phase: 'idle' });
   const fingerprintState = () => ({ enabled: fingerprint, models: [{ model: 'fixture-model', expected: 'fixture-model' }], override: { enabled: null, models: null, intervalMinutes: null }, intervalMinutes: 15, phase, recentResults: [{ status: 'match', checkedAt: '2026-11-05T04:00:00Z' }, { status: 'mismatch', checkedAt: '2026-11-05T03:00:00Z' }] });
   for (const route of ['**/api/sub2api/settings', '**/api/sub2api/monitor']) await page.route(route, r => r.fulfill({ json: { hasAdminApiKey: true, config: { baseUrl: 'http://fixture.test' } } }));
@@ -18,7 +18,7 @@ async (page) => {
     const response = await route.fetch(), data = await response.json();
     data.jobs = data.jobs.map((job, i) => ({ ...job, status: 'completed', autoRepairBlocked: false, sub2apiInPool: i !== 8, sub2apiEnabled: i !== 7, codexStatusEligible: i !== 7 && i !== 8 && i !== 9, sub2apiRateLimited: i === 9, sub2apiPriority: 3,
       lastOperationType: 'relogin', lastOperationAt: '2026-11-05T04:05:06Z', createdAt: '2026-11-01T01:02:03Z',
-      overloadDetection: { ...detectionState(), enabled: i === 4 ? false : overload, points: i === 3 ? points.map(p => ({ ...p, count: null })) : points },
+      overloadDetection: { ...detectionState(), enabled: i === 4 ? false : overload, recentCount: i === 3 ? null : 0, points: i === 3 ? points.map(p => ({ ...p, count: null })) : points },
       overloadAutoCooldown: { ...cooldownState(), windowCount: i === 1 ? 0 : i === 2 ? 5 : i === 3 ? null : 2 },
       modelFingerprint: { ...fingerprintState(), enabled: i === 4 ? false : fingerprint, phase: i === 5 ? 'queued' : i === 6 ? 'running' : phase },
     }));
@@ -84,7 +84,7 @@ async (page) => {
   await run('energy-period-counts-thresholds-and-colors', async () => {
     const energy = row.locator('.codex-energy');
     check((await energy.nth(0).getAttribute('title')).includes('15min') && (await energy.nth(0).getAttribute('title')).includes('2 次 / 阈值 5 次'), 'rolling 15min hover information incorrect');
-    check((await energy.nth(1).getAttribute('title')).includes('90min') && (await energy.nth(1).getAttribute('title')).includes('15 次 / 阈值 15 次'), '90min hover information must sum six intervals and use triple threshold');
+    check((await energy.nth(1).getAttribute('title')).includes('90min') && (await energy.nth(1).getAttribute('title')).includes('15 次 / 阈值 15 次'), '90min hover information must sum eighteen fixed intervals and use triple threshold');
     check(await energy.nth(0).innerText() === '' && await energy.nth(1).innerText() === '', 'energy bars should have no visible annotations');
     await energy.nth(0).hover();
     check((await energy.nth(0).getByRole('meter').getAttribute('aria-valuetext')).includes('滚动 15 分钟'), 'energy meter lost its accessible description');
@@ -102,7 +102,7 @@ async (page) => {
     const colors = await rows.nth(4).locator('.fingerprint-round').evaluateAll(nodes => nodes.map(el => getComputedStyle(el).backgroundColor));
     check(new Set(colors).size === 1, 'disabled fingerprint history is not gray');
     await row.locator('.overload-point').last().focus();
-    check((await row.getByRole('tooltip').innerText()).includes('1005 次'), 'chart tooltip lost request-count detail');
+    check((await row.getByRole('tooltip').innerText()).includes('1017 次'), 'chart tooltip lost request-count detail');
     await page.keyboard.press('Escape');
   });
   await run('monitor-switches-save-through-original-endpoints', async () => {

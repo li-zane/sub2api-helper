@@ -1,6 +1,6 @@
 async page => {
  const evidence="__UI_TEST_EVIDENCE_DIR__",results=[],errors=[],writes=[];let refreshes=0,partial=false,failRefresh=false;
- page.setDefaultTimeout(7000);page.on('pageerror',e=>errors.push(e.message));
+ page.setDefaultTimeout(7000);page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&!m.text().includes('502'))errors.push(m.text());});
  const check=(v,m)=>{if(!v)throw Error(m);},test=async(name,run)=>{try{await run();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.message});await page.screenshot({path:evidence+'/failure-'+results.length+'.png'}).catch(()=>{});}};
  await page.route(/\/api\/sub2api\/(?:settings|monitor)$/,r=>r.fulfill({json:{configured:true,enabled:false,hasAdminApiKey:true,config:{baseUrl:'https://pool.example.test'},profiles:[{id:'default',name:'Default'}],activeProfileId:'default'}}));
  await page.route('**/api/sub2api/options',r=>{refreshes++;return failRefresh?r.fulfill({status:502,json:{error:'fixture refresh failure'}}):r.fulfill({json:{proxies:[],groups:[],directAccountCount:0}});});
@@ -13,10 +13,17 @@ async page => {
  await page.reload();await page.locator('tbody .job-row').first().waitFor();
  await page.setViewportSize({width:1440,height:1000});
  await test('global-normal-and-abnormal-counts',async()=>{
-  const text=await page.locator('.telemetry-capsule').innerText();check(text.includes('正常')&&text.includes('22')&&text.includes('异常')&&text.includes('2')&&!text.includes('已完成'),text);
+  const capsule=page.locator('.telemetry-capsule');check(await capsule.getByRole('button',{name:'筛选正常账号',exact:true}).locator('strong').innerText()==='22','normal count');check(await capsule.getByRole('button',{name:'筛选异常账号',exact:true}).locator('strong').innerText()==='1','only banned fixture is abnormal');
  });
  const open=async()=>{await page.getByRole('region',{name:'代理 IP 配置',exact:true}).getByRole('button',{name:'配置',exact:true}).click();const parent=page.getByRole('dialog',{name:'代理 IP 配置与检测',exact:true});await parent.getByRole('button',{name:'添加代理',exact:true}).click();const d=page.getByRole('dialog',{name:'添加代理',exact:true});await d.waitFor();return d;};
  let d;try{d=await open();}catch(e){await page.screenshot({path:evidence+'/open-failed.png'});throw Error(e.message+'; pageErrors='+errors.join('; ')+'; dialogs='+JSON.stringify(await page.locator('dialog').evaluateAll(nodes=>nodes.map(n=>({open:n.open,modal:n.matches(':modal'),label:n.getAttribute('aria-labelledby'),inert:n.inert,text:n.innerText.slice(0,100)}))))+'; tree='+await page.locator('body').ariaSnapshot());}
+ await test('proxy-form-inherits-light-app-theme-under-dark-system-preference',async()=>{
+  const colors=()=>d.evaluate(el=>({theme:getComputedStyle(document.documentElement).colorScheme,fields:[...el.querySelectorAll('.proxy-text-input,.proxy-field-title,.proxy-tabs-bar,.proxy-expire-group,.proxy-date-input')].map(n=>{const c=getComputedStyle(n);return{color:c.color,background:c.backgroundColor};})}));
+  await page.emulateMedia({colorScheme:'light'});const light=await colors();
+  await page.emulateMedia({colorScheme:'dark'});const dark=await colors();check(JSON.stringify(light)===JSON.stringify(dark),'system dark mode overrode light app theme');check(dark.theme==='light','unexpected app theme');
+  check(dark.fields.every(c=>c.color.match(/\d+/g).slice(0,3).every(v=>Number(v)<150)),'unreadable light labels remain');
+  await page.screenshot({path:evidence+'/proxy-manual-dark-system.png'});
+ });
  await test('manual-validation-protocol-expiry-and-busy-lock',async()=>{
   await d.getByRole('button',{name:'添加代理',exact:true}).click();check(await d.getByRole('alert').isVisible(),'empty form not validated');check(writes.length===0,'invalid request sent');
   await d.getByLabel('代理名称 *',{exact:true}).fill('Tokyo');await d.getByLabel('主机地址 / IP *',{exact:true}).fill('proxy.test');await d.getByLabel('端口 *',{exact:true}).fill('1080');
@@ -34,6 +41,7 @@ async page => {
   await d.locator('textarea').fill('one.test:8080:u:p\n\nbad');check((await d.innerText()).includes('第 3 行'),'line error missing');check(await d.getByRole('button',{name:/导入代理/}).isDisabled(),'invalid import enabled');
   await d.locator('textarea').fill('one.test:8080:u:p\nsocks5://u:p@two.test:1080\nu:p@three.test:8080\nfour.test:8080@u:p');
   await d.getByLabel('第 1 行代理名称',{exact:true}).fill('Custom name');check(await d.getByLabel(/第 \d 行代理名称/).count()===4,'four previews missing');await page.screenshot({path:evidence+'/proxy-import-desktop.png'});
+  const c=await d.locator('textarea').evaluate(el=>({bg:getComputedStyle(el).backgroundColor,color:getComputedStyle(el).color}));check(c.bg==='rgb(255, 255, 255)'&&c.color==='rgb(29, 29, 31)','import editor mixes dark and light themes');
   check(await d.locator('.proxy-batch-options-row').evaluate(el=>{const a=el.querySelector('.custom-select-container').getBoundingClientRect(),b=el.querySelector('.name-prefix-group').getBoundingClientRect();return a.right<=b.left;}),'protocol selector overlaps name prefix');
  });
  await test('partial-results-and-retry-preserve-request-id',async()=>{

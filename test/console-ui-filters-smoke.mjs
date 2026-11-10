@@ -49,6 +49,20 @@ try {
     return response.json();
   };
   const all = await get("");
+  assert.deepEqual([all.stats.normal, all.stats.abnormal], [2, 1]);
+  for (const summary of ['normal', 'abnormal', 'active', 'queued']) {
+    const result = await get('?summary=' + summary);
+    assert.equal(result.filter.active, true);
+    assert.equal(result.filter.summary, summary);
+    assert.deepEqual(result.stats, all.stats, 'summary counts must remain global while filtering');
+    assert.equal(result.pagination.total, summary === 'normal' ? 2 : summary === 'abnormal' ? 1 : 0);
+    assert.deepEqual(result.selection.map(job => job.id), result.jobs.map(job => job.id));
+  }
+  assert.deepEqual((await get('?summary=abnormal')).jobs.map(job => job.email), [fixture[2].email]);
+  assert.equal((await get('?summary=normal&search=business')).pagination.total, 1);
+  assert.equal((await get('?summary=abnormal&search=business')).pagination.total, 0);
+  const intersection = await fetch(base + '/api/jobs/query', { method: 'POST', headers, body: JSON.stringify({ emails: [fixture[1].email, fixture[2].email], summary: 'abnormal' }) });
+  assert.equal(intersection.status, 200);assert.deepEqual((await intersection.json()).jobs.map(job => job.email), [fixture[2].email]);
   assert.equal(all.jobs.find(job => job.email === fixture[0].email).planType, "business");
   const search = await get("?search=BUSINESS");
   assert.deepEqual(search.jobs.map(job => job.email), [fixture[0].email], "search must use the displayed workspace plan");
@@ -73,6 +87,14 @@ try {
   const pending=(await get("?search=free@example.test")).jobs[0];
   assert.equal(pending.planType,"free");assert.equal(pending.webCredentialSync.status,"pending_update");assert.equal(pending.webCredentialSync.webPlanType,"team",JSON.stringify({web:pending.webSessionStatus,sync:pending.webCredentialSync,read:pending.webSessionReadError}));
   assert(!JSON.stringify(pending).includes(token),"sync API never returns raw Web token");
+  const expiredPath = path.join(root, '11111111-1111-4111-8111-000000000001');
+  const expired = await seedWebSession(path.join(expiredPath, 'sub2api-import-oauth.json'));
+  expired.validation = { status: 'expired', verifiedAt: new Date().toISOString() };
+  await fs.writeFile(path.join(expiredPath, 'web-session.json'), JSON.stringify({ ...expired, version: 1 }));
+  const abnormal = await get('?summary=abnormal');
+  assert.equal(abnormal.stats.abnormal, 2, 'expired Web session joins banned account');
+  assert.deepEqual(abnormal.jobs.map(job => job.email).sort(), [fixture[0].email, fixture[2].email].sort());
+  console.log('SUMMARY_FILTER_API_PASS global_counts=true web_expired=true banned=true search_and_email_intersections=true active_queued=true');
   console.log("PASS: UI filters use effective workspace plan, case-insensitive search, remarks, Web state including read failures, locked state, active metadata, exact-email intersections and Free/old-Team credential sync");
 } finally {
   if (child.exitCode === null) child.kill("SIGTERM");

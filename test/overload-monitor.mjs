@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { completedIntervals, collectOverloadIntervals, collectRequestIntervals, OverloadMonitor, OVERLOAD_MESSAGE, OVERLOAD_INTERVAL_MS, COUNT_SYNC_INTERVAL_MS } from "../src/overload-monitor.mjs";
+import { completedIntervals, collectOverloadIntervals, collectRequestIntervals, OverloadMonitor, OVERLOAD_MESSAGE, OVERLOAD_INTERVAL_MS, COUNT_SYNC_INTERVAL_MS, COUNT_BUCKET_MS, COUNT_POINT_COUNT } from "../src/overload-monitor.mjs";
 import { buildOverloadChart } from "../web/src/overload-chart.mjs";
 
 const now = Date.parse("2026-10-31T03:00:00+08:00");
@@ -43,7 +43,7 @@ const request = async (_config, endpoint) => {
   // Small pages exercise pagination even when the server caps the requested page size.
   return { data: { items: rows.slice((page - 1) * 5, page * 5), total: rows.length } };
 };
-const points = await collectOverloadIntervals({ config: {}, accountIds: [7, 7], request, now });
+const points = await collectOverloadIntervals({ config: {}, accountIds: [7, 7], request, now, points: completedIntervals(now) });
 assert.deepEqual(points.map((point) => point.count), [3, 1, 1, 1, 1, 1]);
 assert.equal(calls.filter((call) => call.includes("page=")).length, 3);
 assert(calls.some((call) => call.endsWith("/13")), "generic list message needs upstream detail");
@@ -63,7 +63,7 @@ for (const payload of [{ data: {} }, { data: { items: [], total: 2 } }, { data: 
   await assert.rejects(collectOverloadIntervals({ config: {}, accountIds: [7], now, request: async () => payload }));
 }
 let dedupeCalls = 0;
-const duplicate = await collectOverloadIntervals({ config: {}, accountIds: [7, 8], now, request: async (_c, endpoint) => {
+const duplicate = await collectOverloadIntervals({ config: {}, accountIds: [7, 8], now, points: completedIntervals(now), request: async (_c, endpoint) => {
   const url = new URL(endpoint, "https://fixture.test");
   const id = Number(url.searchParams.get("account_id"));
   dedupeCalls += 1;
@@ -81,7 +81,7 @@ const requestRows = [
   { account_id: 9, kind: "success", request_id: "other-account", created_at: new Date(start).toISOString() },
 ];
 requestRows.push(requestRows[0]);
-const requestPoints = await collectRequestIntervals({ config: {}, accountIds: [7, 7, 8], now, request: async (_config, endpoint) => {
+const requestPoints = await collectRequestIntervals({ config: {}, accountIds: [7, 7, 8], now, points: completedIntervals(now), request: async (_config, endpoint) => {
   const url = new URL(endpoint, "https://fixture.test");
   assert.equal(url.pathname, "/api/v1/admin/ops/requests");
   assert.equal(url.searchParams.get("kind"), "all");
@@ -132,13 +132,13 @@ try {
   assert.equal(monitor.snapshot("first@example.test").revision, 1);
   assert(monitor.snapshot("first@example.test").points.every((point) => point.count === null));
   await monitor.refresh();
-  assert.deepEqual(monitor.snapshot("first@example.test").points.map((point) => point.count), [0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(monitor.snapshot("first@example.test").points.map((point) => point.count), Array(COUNT_POINT_COUNT).fill(0));
   assert.equal(monitor.snapshot("second@example.test").enabled, false);
   clock += OVERLOAD_INTERVAL_MS;
   fail = true;
   await monitor.refresh();
   assert.equal(monitor.snapshot("first@example.test").points.at(-1).count, 0, "failed fetch preserves the previous known sample");
-  assert.equal(monitor.snapshot("first@example.test").points.at(-1).end, new Date(now).toISOString(), "failed fetch must not move the cached time range");
+  assert.equal(monitor.snapshot("first@example.test").points.at(-1).end, new Date(now + COUNT_BUCKET_MS).toISOString(), "failed fetch must not move the cached time range");
   assert.equal(monitor.snapshot("first@example.test").lastError, "fixture outage");
   assert.equal(monitor.snapshot("first@example.test").points[0].count, 0);
   assert.equal(monitor.snapshot("first@example.test").points.at(-1).requestCount, 0);
@@ -146,8 +146,9 @@ try {
   failRequests = true;
   await monitor.refresh();
   assert.equal(monitor.snapshot("first@example.test").points.at(-1).count, 0, "request failure does not discard overload data");
-  assert.equal(monitor.snapshot("first@example.test").points.at(-1).requestCount, 0, "request failure keeps the previous known count");
-  assert.equal(monitor.snapshot("first@example.test").points.at(-1).requestEnd, new Date(now).toISOString(), "old request counts retain their own timestamp");
+  assert.equal(monitor.snapshot("first@example.test").points.at(-1).requestCount, null, "new bins are unknown when request sync fails");
+  assert.equal(monitor.snapshot("first@example.test").points.find(p => Date.parse(p.start) === now).requestCount, 0, "known old bin stays cached at its original time");
+  assert.equal(monitor.snapshot("first@example.test").requestUpdatedAt, new Date(now).toISOString());
   assert.equal(monitor.snapshot("first@example.test").requestError, "request fixture outage");
   failRequests = false;
   fail = true;
@@ -199,7 +200,7 @@ try {
   timer();
   await scheduled.running;
   assert.equal(scheduledDelay, COUNT_SYNC_INTERVAL_MS, "subsequent wakeup remains aligned to the minute");
-  assert.equal(Date.parse(scheduled.snapshot("first@example.test").points.at(-1).end) - Date.parse(previousEnd), 10_000);
+  assert.equal(Date.parse(scheduled.snapshot("first@example.test").points.at(-1).end) - Date.parse(previousEnd), COUNT_BUCKET_MS, "only boundary crossings shift fixed labels");
   assert(scheduled.snapshot("first@example.test").points.every((point) => point.count === 0));
   fail = true;
   clock += OVERLOAD_INTERVAL_MS;
@@ -207,7 +208,7 @@ try {
   await scheduled.running;
   assert.equal(scheduledDelay, 60_000, "transient failures retry in a minute");
   assert.equal(scheduled.snapshot("first@example.test").points.at(-1).count, 0, "outage retains the last sample");
-  assert.equal(scheduled.snapshot("first@example.test").points.at(-1).end, new Date(now).toISOString());
+  assert.equal(scheduled.snapshot("first@example.test").points.at(-1).end, new Date(now + COUNT_BUCKET_MS).toISOString());
   fail = false;
   clock += 60_000;
   timer();
@@ -217,4 +218,4 @@ try {
   await scheduled.stop();
   assert.equal(timer, null, "shutdown clears the sync timer");
 } finally { await fs.rm(root, { recursive: true, force: true }); }
-console.log("PASS: overload and request boundaries, success+failure requests, pagination/deduplication, independent chart scales/raw values/gaps, cached partial failures with original timestamps, six rolling intervals, exact 503 message, per-account toggle, persistence/restart, disable race, backend isolation, minute scheduler and retry");
+console.log("PASS: request/overload half-open bounds and pagination/deduplication; fixed cached bins; unknown new bins on partial failure; independent chart scales; exact 503 message; per-account toggle, restart, disable race, backend isolation and minute scheduler");

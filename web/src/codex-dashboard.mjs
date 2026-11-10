@@ -1,19 +1,20 @@
 const countValue = value => Number.isFinite(value) && value >= 0 ? value : null;
 
 export function overloadDashboard(detection, cooldown) {
-  const points = (detection?.points || []).slice(-6);
+  const fixed = detection?.bucketMinutes === 5;
+  const points = (detection?.points || []).slice(fixed ? -18 : -6);
   const threshold = Number.isFinite(cooldown?.settings?.threshold) && cooldown.settings.threshold > 0 ? cooldown.settings.threshold : null;
   const latest = points.at(-1);
-  const statsAt = typeof latest?.end === "string" ? Date.parse(latest.end) : NaN;
+  const statsAt = Date.parse(detection?.overloadUpdatedAt || detection?.updatedAt || (typeof latest?.end === "string" ? latest.end : ""));
   const cooldownAt = Date.parse(cooldown?.lastCheckedAt);
   const rolling = cooldown?.enabled !== false && cooldown?.settings?.windowMinutes === 15 && !cooldown.lastError
     && countValue(cooldown.windowCount) !== null
-    && (countValue(latest?.count) === null || !Number.isFinite(statsAt) || cooldownAt >= statsAt);
-  const quarter = rolling ? cooldown.windowCount : countValue(latest?.count);
-  const complete = points.length === 6 && points.every(point => countValue(point.count) !== null);
+    && (countValue(fixed ? detection?.recentCount : latest?.count) === null || !Number.isFinite(statsAt) || cooldownAt >= statsAt);
+  const quarter = rolling ? cooldown.windowCount : countValue(fixed ? detection?.recentCount : latest?.count);
+  const complete = points.length === (fixed ? 18 : 6) && points.every(point => countValue(point.count) !== null);
   return {
-    quarter: { count: quarter, limit: threshold, period: "15min", source: rolling ? "滚动 15 分钟" : "截至过载同步的最近 15 分钟", start: rolling ? null : latest?.start, end: rolling ? cooldown.lastCheckedAt : latest?.end },
-    total: { count: complete ? points.reduce((sum, point) => sum + point.count, 0) : null, limit: threshold === null ? null : threshold * 3, period: "90min", source: "截至过载同步的最近 90 分钟累计", start: points[0]?.start, end: latest?.end },
+    quarter: { count: quarter, limit: threshold, period: "15min", source: rolling ? "滚动 15 分钟" : "截至过载同步的最近 15 分钟", start: rolling ? null : latest?.start, end: rolling ? cooldown.lastCheckedAt : detection?.overloadUpdatedAt || latest?.end },
+    total: { count: complete ? points.reduce((sum, point) => sum + point.count, 0) : null, limit: threshold === null ? null : threshold * 3, period: "90min", source: fixed ? "图表 18 个固定 5 分钟区间累计，含当前未结束区间" : "截至过载同步的最近 90 分钟累计", start: points[0]?.start, end: detection?.overloadUpdatedAt || latest?.end },
   };
 }
 

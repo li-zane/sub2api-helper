@@ -241,6 +241,7 @@ let shuttingDown = false;
 let queueSchedulingPaused = false;
 let maxActiveJobs = initialMaxActiveJobs();
 let activeWebSessionChecks = 0;
+const activeWebSessionCheckAccounts = new Map();
 let taskAutoActions = Object.create(null);
 let displayTimeZone = DEFAULT_DISPLAY_TIME_ZONE;
 let poolPriceMultiplier = DEFAULT_POOL_PRICE_MULTIPLIER;
@@ -842,6 +843,7 @@ async function handleApi(req, res, requestUrl) {
       sub2apiPool: requestUrl.searchParams.get("sub2apiPool"),
       sub2apiEnabled: requestUrl.searchParams.get("sub2apiEnabled"),
       webSession: requestUrl.searchParams.get("webSession"),
+      summary: requestUrl.searchParams.get("summary"),
     }));
     return;
   }
@@ -1839,7 +1841,8 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
     selection: visibleJobs.map(publicSelectionJob),
     pagination: { page, pageSize: PAGE_SIZE, total, totalPages, totalAll: allJobs.length },
     filter: {
-      active: Boolean(emailSet || filters.search || filters.lockedOnly || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession),
+      active: Boolean(emailSet || filters.search || filters.lockedOnly || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession || filters.summary),
+      summary: filters.summary || "",
       search: filters.search || "",
       lockedOnly: Boolean(filters.lockedOnly),
       webSession: filters.webSession || "",
@@ -1884,6 +1887,7 @@ function normalizeJobFilters(value) {
     search: search || null,
     lockedOnly,
     webSession: ["absent", "saved", "valid", "expired", "unavailable", "banned"].includes(source.webSession) ? source.webSession : null,
+    summary: ["active", "queued", "normal", "abnormal"].includes(source.summary) ? source.summary : null,
     accountType: ["password_totp", "pool_only"].includes(accountTypeValue) ? accountTypeValue : null,
     status: JOB_STATUS_FILTER_VALUES.includes(statusValue) ? statusValue : null,
     planType: planTypeValue || null,
@@ -1894,6 +1898,10 @@ function normalizeJobFilters(value) {
 
 function matchesJobFilters(job, filters) {
   const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
+  if (filters.summary === "active" && !occupiesActiveSlot(job) && !activeWebSessionCheckAccounts.has(job.email.toLowerCase())) return false;
+  if (filters.summary === "queued" && job.status !== "queued") return false;
+  if (["normal", "abnormal"].includes(filters.summary)
+    && accountHealth(job, sub2ApiStatus, accountAutomationBlocked(job.email)) !== filters.summary) return false;
   if (filters.lockedOnly) {
     const isLocked = job.status === "banned" || Boolean(job.autoRepairBlocked);
     if (!isLocked) return false;
@@ -2118,14 +2126,22 @@ function scheduleQueuedJobs() {
   drainWebSessionChecks();
 }
 
-async function withWebSessionCheckSlot(_job, operation) {
+async function withWebSessionCheckSlot(job, operation) {
   // Foreground login jobs get first use of available shared slots. Checks that
   // find the pool full remain due and are retried by the monitor's next tick.
   scheduleQueuedJobs();
   if (shuttingDown || queueSchedulingPaused || [...jobs.values()].filter(occupiesActiveSlot).length + activeWebSessionChecks >= maxActiveJobs) return;
   activeWebSessionChecks++;
+  const email = job.email.toLowerCase();
+  activeWebSessionCheckAccounts.set(email, (activeWebSessionCheckAccounts.get(email) || 0) + 1);
   try { return await operation(); }
-  finally { activeWebSessionChecks--; scheduleQueuedJobs(); }
+  finally {
+    activeWebSessionChecks--;
+    const remaining = activeWebSessionCheckAccounts.get(email) - 1;
+    if (remaining > 0) activeWebSessionCheckAccounts.set(email, remaining);
+    else activeWebSessionCheckAccounts.delete(email);
+    scheduleQueuedJobs();
+  }
 }
 
 async function prepareAndLaunchJob(job, mode, queueRunId) {

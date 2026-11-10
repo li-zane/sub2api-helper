@@ -17,17 +17,19 @@ await test('current-quarter-activity-counted-before-quarter-ends', async () => {
   const request = async () => ({data:{items:[row],total:1}});
   const options = {now, config:{}, accountIds:[7],request};
   const overload = await collectOverloadIntervals(options), requests = await collectRequestIntervals(options);
-  assert.equal(overload.at(-1).end, new Date(now).toISOString());
+  assert.equal(overload.at(-1).start,'2026-11-10T03:05:00.000Z');
+  assert.equal(overload.at(-1).end,'2026-11-10T03:10:00.000Z');
   assert.equal(overload.at(-1).count,1);
   assert.equal(requests.at(-1).requestCount,1);
-  assert.equal(Date.parse(overload[0].start), now - 90*60_000);
-  for (let i=0;i<6;i++) { assert.equal(Date.parse(overload[i].end)-Date.parse(overload[i].start),15*60_000); if(i)assert.equal(overload[i].start,overload[i-1].end); }
+  assert.equal(Date.parse(overload.at(-1).end)-Date.parse(overload[0].start),90*60_000);
+  assert.equal(overload.length,18);
+  for (let i=0;i<18;i++) { assert.equal(Date.parse(overload[i].end)-Date.parse(overload[i].start),5*60_000); if(i)assert.equal(overload[i].start,overload[i-1].end); }
 });
 await test('rolling-boundaries-exclude-older-and-future-records', async () => {
-  const start=now-90*60_000, rows=[start-1,start,start+15*60_000-1,start+15*60_000,now-1,now].map((at,i)=>({...row,id:i,request_id:String(i),created_at:new Date(at).toISOString()}));
+  const start=Date.parse('2026-11-10T01:40:00Z'), rows=[start-1,start,start+5*60_000-1,start+5*60_000,now-1,now].map((at,i)=>({...row,id:i,request_id:String(i),created_at:new Date(at).toISOString()}));
   const options={now,config:{},accountIds:[7],request:async()=>({data:{items:rows,total:rows.length}})};
-  assert.deepEqual((await collectOverloadIntervals(options)).map(p=>p.count),[2,1,0,0,0,1]);
-  assert.deepEqual((await collectRequestIntervals(options)).map(p=>p.requestCount),[2,1,0,0,0,1]);
+  assert.deepEqual((await collectOverloadIntervals(options)).map(p=>p.count),[2,1,...Array(15).fill(0),1]);
+  assert.deepEqual((await collectRequestIntervals(options)).map(p=>p.requestCount),[2,1,...Array(15).fill(0),1]);
 });
 await test('count-sync-settings-live-under-pool-sync-default-60s-and-100', () => {
   assert.equal(settings.DEFAULT_MONITORING.overloadIntervalSeconds,60);
@@ -59,14 +61,15 @@ await test('sync-each-minute-keeps-cache-and-separate-failed-series-across-resta
     failOverloads=false;await monitor.refresh();
     const partial=monitor.snapshot('fixture@example.test');
     assert.equal(partial.points.at(-1).count,1);assert.equal(partial.points.at(-1).requestCount,1,'failed request series retains known values');
-    assert.equal(partial.points.at(-1).end,new Date(clock).toISOString());
+    assert.equal(partial.points.at(-1).end,initial.points.at(-1).end,'labels stay fixed within the same bin');
+    assert.equal(partial.overloadUpdatedAt,new Date(clock).toISOString());assert.equal(partial.requestUpdatedAt,initial.requestUpdatedAt);
     assert.equal(partial.points.at(-1).requestEnd,initial.points.at(-1).end,'cached request time is not relabeled as fresh');
     const chart=buildOverloadChart(partial.points);assert.equal(chart.positioned.at(-1).requestEnd,initial.points.at(-1).end);
     await monitor.stop();recovered=new OverloadMonitor(options);await recovered.load();assert.deepEqual(recovered.snapshot('fixture@example.test'),partial,'independent series survive restart');
     failOverloads=true;failRequests=false;clock+=60_000;await recovered.refresh();const other=recovered.snapshot('fixture@example.test');
-    assert.equal(other.points.at(-1).end,partial.points.at(-1).end);assert.equal(other.points.at(-1).requestEnd,new Date(clock).toISOString());
+    assert.equal(other.points.at(-1).end,partial.points.at(-1).end);assert.equal(other.requestUpdatedAt,new Date(clock).toISOString());assert.equal(other.overloadUpdatedAt,partial.overloadUpdatedAt);
     assert.equal(other.points.at(-1).count,1);assert.equal(other.points.at(-1).requestCount,1);
   } finally {await monitor?.stop();await recovered?.stop();await fs.rm(temp,{recursive:true,force:true});}
 });
 if(failures)process.exitCode=1;
-else console.log('LIVE_COUNT_SYNC_PASS current_activity=true rolling_90m=true independent_cache=true minute_sync=true migration=true');
+else console.log('LIVE_COUNT_SYNC_PASS current_activity=true fixed_5min=true independent_cache=true minute_sync=true migration=true');

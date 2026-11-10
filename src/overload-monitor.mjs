@@ -5,19 +5,25 @@ import { DEFAULT_POOL_SYNC_CONCURRENCY, limitPoolRequests } from "./pool-network
 export const OVERLOAD_MESSAGE = "Our servers are currently overloaded. Please try again later.";
 export const OVERLOAD_INTERVAL_MS = 15 * 60_000;
 export const COUNT_SYNC_INTERVAL_MS = 60_000;
-const POINT_COUNT = 6;
+export const COUNT_BUCKET_MS = 5 * 60_000;
+export const COUNT_POINT_COUNT = 18;
+const RECONCILE_MS = 60 * 60_000;
 
 // Six completed, half-open quarters: at 03:15 the last point is [03:00, 03:15).
 export function completedIntervals(now = Date.now()) {
   const end = Math.floor(now / OVERLOAD_INTERVAL_MS) * OVERLOAD_INTERVAL_MS;
-  return recentIntervals(end);
+  return Array.from({ length: 6 }, (_, index) => ({
+    start: new Date(end - (6 - index) * OVERLOAD_INTERVAL_MS).toISOString(),
+    end: new Date(end - (5 - index) * OVERLOAD_INTERVAL_MS).toISOString(), count: null,
+  }));
 }
 
-// Capture the current activity too: six consecutive windows ending at this sync.
-export function recentIntervals(end = Date.now()) {
-  return Array.from({ length: POINT_COUNT }, (_, index) => ({
-    start: new Date(end - (POINT_COUNT - index) * OVERLOAD_INTERVAL_MS).toISOString(),
-    end: new Date(end - (POINT_COUNT - index - 1) * OVERLOAD_INTERVAL_MS).toISOString(),
+// Stable wall-clock labels, including the current unfinished five-minute bin.
+export function recentIntervals(now = Date.now()) {
+  const end = (Math.floor(now / COUNT_BUCKET_MS) + 1) * COUNT_BUCKET_MS;
+  return Array.from({ length: COUNT_POINT_COUNT }, (_, index) => ({
+    start: new Date(end - (COUNT_POINT_COUNT - index) * COUNT_BUCKET_MS).toISOString(),
+    end: new Date(end - (COUNT_POINT_COUNT - index - 1) * COUNT_BUCKET_MS).toISOString(),
     count: null,
   }));
 }
@@ -35,7 +41,7 @@ function isOverload(row) {
 // The split upstream list includes recovered failures, so successful failovers still count.
 // The legacy endpoint is used only when the split endpoint does not exist.
 export async function collectOverloadIntervals(options) {
-  return collectOverloadCounts({ ...options, points: recentIntervals(options.now) });
+  return collectOverloadCounts({ ...options, points: options.points ?? recentIntervals(options.now), queryEnd: options.now ?? Date.now() });
 }
 
 export async function collectOverloadWindow({ start, end, ...options }) {
@@ -43,11 +49,12 @@ export async function collectOverloadWindow({ start, end, ...options }) {
   return points?.[0].count ?? null;
 }
 
-async function collectOverloadCounts({ config, accountIds, request, points, isEnabled = () => true }) {
+async function collectOverloadCounts({ config, accountIds, request, points, queryEnd, includeEvents = false, isEnabled = () => true }) {
   const start = Date.parse(points[0].start);
-  const end = Date.parse(points.at(-1).end);
+  const end = Math.min(Date.parse(points.at(-1).end), queryEnd ?? Infinity);
   const bucketMs = Date.parse(points[0].end) - start;
   const counts = Array(points.length).fill(0);
+  const events = includeEvents ? points.map(() => []) : null;
   const seen = new Set();
   for (const accountId of new Set(accountIds.map(String))) {
     let endpoint = "/api/v1/admin/ops/upstream-errors";
@@ -58,7 +65,7 @@ async function collectOverloadCounts({ config, accountIds, request, points, isEn
       if (page > 1000) throw new Error("运维日志分页超过上限，统计未完成");
       const query = new URLSearchParams({
         page: String(page), page_size: "500", platform: "openai", account_id: accountId,
-        start_time: points[0].start, end_time: points.at(-1).end,
+        start_time: points[0].start, end_time: new Date(end).toISOString(),
         status_codes: "503", view: "all", sort_by: "created_at", sort_order: "asc",
       });
       let payload;
@@ -97,22 +104,26 @@ async function collectOverloadCounts({ config, accountIds, request, points, isEn
             throw new Error("运维日志详情与账号不匹配");
           }
         }
-        if (isOverload(row)) counts[Math.floor((timestamp - start) / bucketMs)] += 1;
+        if (isOverload(row)) {
+          const index = Math.floor((timestamp - start) / bucketMs);
+          counts[index] += 1;
+          events?.[index].push(timestamp);
+        }
       }
       if (received >= total) break;
       if (!data.items.length) throw new Error("运维日志分页不完整");
     }
   }
-  return points.map((point, index) => ({ ...point, count: counts[index] }));
+  return points.map((point, index) => ({ ...point, count: counts[index], ...(events ? { overloadEvents: events[index] } : {}) }));
 }
 
 // Count request-level success + failure records, not upstream retry/error attempts.
 // Bin timestamps locally so an inclusive upstream end_time never leaks the next interval.
-export async function collectRequestIntervals({ config, accountIds, request, now = Date.now(), isEnabled = () => true }) {
-  const points = recentIntervals(now);
+export async function collectRequestIntervals({ config, accountIds, request, now = Date.now(), points = recentIntervals(now), isEnabled = () => true }) {
   const start = Date.parse(points[0].start);
-  const end = Date.parse(points.at(-1).end);
-  const counts = Array(POINT_COUNT).fill(0);
+  const end = Math.min(Date.parse(points.at(-1).end), now);
+  const bucketMs = Date.parse(points[0].end) - start;
+  const counts = Array(points.length).fill(0);
   const seen = new Set();
   for (const accountId of new Set(accountIds.map(String))) {
     let expectedTotal = null;
@@ -122,7 +133,7 @@ export async function collectRequestIntervals({ config, accountIds, request, now
       if (page > 1000) throw new Error("请求日志分页超过上限，统计未完成");
       const query = new URLSearchParams({
         page: String(page), page_size: "100", platform: "openai", account_id: accountId,
-        start_time: points[0].start, end_time: points.at(-1).end,
+        start_time: points[0].start, end_time: new Date(end).toISOString(),
         kind: "all", sort: "created_at_desc",
       });
       const payload = await request(config, `/api/v1/admin/ops/requests?${query}`);
@@ -146,13 +157,58 @@ export async function collectRequestIntervals({ config, accountIds, request, now
           if (seen.has(key)) continue;
           seen.add(key);
         }
-        counts[Math.floor((timestamp - start) / OVERLOAD_INTERVAL_MS)] += 1;
+        counts[Math.floor((timestamp - start) / bucketMs)] += 1;
       }
       if (received >= total) break;
       if (!data.items.length) throw new Error("请求日志分页不完整");
     }
   }
   return points.map((point, index) => ({ ...point, requestCount: counts[index] }));
+}
+
+const knownCount = value => Number.isSafeInteger(value) && value >= 0;
+const validPoints = points => (Array.isArray(points) ? points : []).filter(point => point
+  && Date.parse(point.end) - Date.parse(point.start) === COUNT_BUCKET_MS
+  && Date.parse(point.start) % COUNT_BUCKET_MS === 0).slice(-COUNT_POINT_COUNT);
+
+function refreshPlan(entry, metric, scope, now) {
+  const field = metric === "overload" ? "count" : "requestCount";
+  const saved = validPoints(metric === "overload" ? entry.points : entry.requestPoints);
+  const previous = new Map(saved.map(point => [point.start, point]));
+  const grid = recentIntervals(now);
+  const full = entry[`${metric}Scope`] !== scope || !entry[`${metric}ReconciledAt`]
+    || now - Date.parse(entry[`${metric}ReconciledAt`]) >= RECONCILE_MS
+    || Date.parse(entry[`${metric}UpdatedAt`]) > now;
+  const currentStart = Date.parse(grid.at(-1).start);
+  const sampledAt = Date.parse(entry[`${metric}UpdatedAt`]);
+  const first = full ? 0 : grid.findIndex(point => !knownCount(previous.get(point.start)?.[field])
+    // Close the last partially sampled bucket even after a long pause.
+    || !Number.isFinite(sampledAt) || Date.parse(point.end) > sampledAt
+    || Date.parse(point.start) >= currentStart - COUNT_BUCKET_MS
+    || metric === "overload" && Date.parse(point.end) > now - OVERLOAD_INTERVAL_MS && !Array.isArray(previous.get(point.start)?.overloadEvents));
+  return { grid, points: grid.slice(Math.max(0, first)), previous, full };
+}
+
+function mergeCounts(plan, fresh, now, overload) {
+  const fetched = new Map(fresh.map(point => [point.start, point]));
+  return plan.grid.map(point => {
+    const value = fetched.get(point.start) || plan.previous.get(point.start) || point;
+    // Only the latest 15 minutes need individual overload times for the meter.
+    if (overload && Date.parse(point.end) <= now - OVERLOAD_INTERVAL_MS) {
+      const { overloadEvents, ...summary } = value;
+      return summary;
+    }
+    return value;
+  });
+}
+
+function recentOverloadCount(entry) {
+  const end = Date.parse(entry?.overloadUpdatedAt), start = end - OVERLOAD_INTERVAL_MS;
+  if (!Number.isFinite(end)) return null;
+  const points = validPoints(entry.points).filter(point => Date.parse(point.end) > start && Date.parse(point.start) < end);
+  if (!points.length || Date.parse(points[0].start) > start || Date.parse(points.at(-1).end) < end
+    || points.some(point => !Array.isArray(point.overloadEvents))) return null;
+  return points.reduce((total, point) => total + point.overloadEvents.filter(at => Number.isFinite(at) && at >= start && at < end).length, 0);
 }
 
 export class OverloadMonitor {
@@ -174,14 +230,14 @@ export class OverloadMonitor {
   async load() {
     try {
       const data = JSON.parse(await fs.readFile(this.filePath, "utf8"));
-      if (data.version !== 1 || !data.accounts || typeof data.accounts !== "object") throw new Error("过载检测配置格式无效");
+      if (![1, 2].includes(data.version) || !data.accounts || typeof data.accounts !== "object") throw new Error("过载检测配置格式无效");
       this.backend = data.backend || null;
       for (const [email, entry] of Object.entries(data.accounts)) {
         if (entry && typeof entry.enabled === "boolean") this.accounts.set(email, {
-          enabled: entry.enabled, points: Array.isArray(entry.points) ? entry.points.slice(-POINT_COUNT) : [],
-          requestPoints: Array.isArray(entry.requestPoints) ? entry.requestPoints.slice(-POINT_COUNT) : Array.isArray(entry.points) ? entry.points.slice(-POINT_COUNT) : [],
+          enabled: entry.enabled, points: validPoints(entry.points), requestPoints: validPoints(entry.requestPoints ?? entry.points),
           revision: Number.isSafeInteger(entry.revision) && entry.revision >= 0 ? entry.revision : 0,
           updatedAt: entry.updatedAt || null, lastError: entry.lastError || null, requestError: entry.requestError || null,
+          ...Object.fromEntries(["overload", "request"].flatMap(metric => ["UpdatedAt", "ReconciledAt", "Scope"].map(suffix => [`${metric}${suffix}`, entry[`${metric}${suffix}`] || null]))),
         });
       }
     } catch (error) {
@@ -194,7 +250,7 @@ export class OverloadMonitor {
     const backend = config?.baseUrl && config?.adminApiKey ? this.backendIdentity(config) : null;
     if (backend !== this.backend) {
       this.backend = backend;
-      for (const [email, entry] of this.accounts) this.accounts.set(email, { ...entry, points: [], requestPoints: [], updatedAt: null, lastError: null, requestError: null });
+      for (const [email, entry] of this.accounts) this.accounts.set(email, { enabled: entry.enabled, revision: entry.revision, points: [], requestPoints: [], updatedAt: null, lastError: null, requestError: null });
     }
     return backend;
   }
@@ -202,24 +258,24 @@ export class OverloadMonitor {
   snapshot(email) {
     const configured = Boolean(this.syncBackend());
     const entry = this.accounts.get(email.toLowerCase());
-    const validPoints = points => (points || []).filter(point => Date.parse(point.end) - Date.parse(point.start) === OVERLOAD_INTERVAL_MS).slice(-POINT_COUNT);
-    const stored = validPoints(entry?.points);
-    const requests = validPoints(entry?.requestPoints ?? entry?.points);
-    // Never shift a cached sample onto a new time range between network syncs.
-    // Each series keeps its own time range if only the other series refreshed.
-    const points = stored.length ? stored : recentIntervals(this.now());
+    const stored = new Map(validPoints(entry?.points).map(point => [point.start, point]));
+    const requests = new Map(validPoints(entry?.requestPoints).map(point => [point.start, point]));
+    const at = Date.parse(entry?.updatedAt);
+    const points = recentIntervals(Number.isFinite(at) ? at : this.now());
     return {
       configured, enabled: entry?.enabled === true, revision: entry?.revision || 0, updatedAt: entry?.updatedAt || null,
       lastError: entry?.lastError || null, requestError: entry?.requestError || null,
-      points: points.map((point, index) => ({ ...point, count: point.count ?? null,
-        requestCount: requests[index]?.requestCount ?? null,
-        requestStart: requests[index]?.start ?? point.start, requestEnd: requests[index]?.end ?? point.end,
+      bucketMinutes: 5, overloadUpdatedAt: entry?.overloadUpdatedAt || null, requestUpdatedAt: entry?.requestUpdatedAt || null,
+      recentCount: recentOverloadCount(entry),
+      points: points.map(point => ({ ...point, count: stored.get(point.start)?.count ?? null,
+        requestCount: requests.get(point.start)?.requestCount ?? null,
+        requestStart: point.start, requestEnd: point.end,
       })),
     };
   }
 
   persist() {
-    const data = JSON.stringify({ version: 1, backend: this.backend, accounts: Object.fromEntries(this.accounts) }, null, 2);
+    const data = JSON.stringify({ version: 2, backend: this.backend, accounts: Object.fromEntries(this.accounts) }, null, 2);
     const operation = this.writePromise.catch(() => {}).then(async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const temporary = `${this.filePath}.tmp`;
@@ -309,11 +365,18 @@ export class OverloadMonitor {
           const accountIds = mapping.get(email) || [];
           if (!accountIds.length) throw new Error("该账号尚未加入 Sub2API 号池");
           const options = { config, accountIds, request: (config, url) => this.request(config, url, { isEnabled }), now, isEnabled };
-          const [overloads, requests] = await Promise.allSettled([collectOverloadIntervals(options), collectRequestIntervals(options)]);
+          const scope = JSON.stringify([...new Set(accountIds.map(String))].sort());
+          const overloadPlan = refreshPlan(entry, "overload", scope, now), requestPlan = refreshPlan(entry, "request", scope, now);
+          const [overloads, requests] = await Promise.allSettled([
+            collectOverloadIntervals({ ...options, points: overloadPlan.points, includeEvents: true }),
+            collectRequestIntervals({ ...options, points: requestPlan.points }),
+          ]);
           if (!isEnabled()) continue;
           this.accounts.set(email, { ...entry,
-            points: overloads.status === "fulfilled" && overloads.value ? overloads.value : entry.points || [],
-            requestPoints: requests.status === "fulfilled" && requests.value ? requests.value : entry.requestPoints ?? entry.points ?? [],
+            points: overloads.status === "fulfilled" && overloads.value ? mergeCounts(overloadPlan, overloads.value, now, true) : entry.points || [],
+            requestPoints: requests.status === "fulfilled" && requests.value ? mergeCounts(requestPlan, requests.value, now, false) : entry.requestPoints || [],
+            ...(overloads.status === "fulfilled" && overloads.value ? { overloadScope: scope, overloadUpdatedAt: new Date(now).toISOString(), overloadReconciledAt: overloadPlan.full ? new Date(now).toISOString() : entry.overloadReconciledAt } : {}),
+            ...(requests.status === "fulfilled" && requests.value ? { requestScope: scope, requestUpdatedAt: new Date(now).toISOString(), requestReconciledAt: requestPlan.full ? new Date(now).toISOString() : entry.requestReconciledAt } : {}),
             updatedAt: overloads.status === "fulfilled" || requests.status === "fulfilled" ? new Date(now).toISOString() : entry.updatedAt || null,
             lastError: overloads.status === "rejected" ? String(overloads.reason?.message || overloads.reason).slice(0, 500) : null,
             requestError: requests.status === "rejected" ? String(requests.reason?.message || requests.reason).slice(0, 500) : null,

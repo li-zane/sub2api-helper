@@ -19,6 +19,14 @@ const currentPoints = points.map((p,i)=>({...p,start:new Date(Date.UTC(2026,10,1
 assert.equal(overloadDashboard({points:currentPoints},{...cooldown,lastCheckedAt:'2026-11-10T01:00:00Z'}).quarter.count,5,'stale cooldown must not replace newer count sync');
 assert.equal(overloadDashboard({points:currentPoints},{...cooldown,lastCheckedAt:'2026-11-10T01:31:00Z'}).quarter.count,2,'newer rolling cooldown count remains useful');
 assert.equal(overloadDashboard({points:currentPoints},{...cooldown,enabled:false,lastCheckedAt:'2026-11-10T01:31:00Z'}).quarter.count,5,'disabled cooldown cannot override synced count');
+const fixedPoints = Array.from({length:18}, (_,i)=>({count:i,requestCount:9000,start:new Date(Date.UTC(2026,10,10,0,i*5)).toISOString(),end:new Date(Date.UTC(2026,10,10,0,(i+1)*5)).toISOString()}));
+const fixed = {bucketMinutes:5,points:fixedPoints,recentCount:9,updatedAt:'2026-11-10T01:29:00Z',overloadUpdatedAt:'2026-11-10T01:28:00Z'};
+assert.equal(overloadDashboard(fixed,{...cooldown,lastCheckedAt:'2026-11-10T01:27:00Z'}).quarter.count,9,'fixed-bin fallback uses exact rolling events, not the last 5min count');
+assert.equal(overloadDashboard(fixed,{...cooldown,lastCheckedAt:'2026-11-10T01:28:30Z'}).quarter.count,2,'fresh cooldown compares metric sample time rather than future bin boundary or request time');
+assert.equal(overloadDashboard(fixed,cooldown).total.count,153,'fixed mode sums all eighteen bins');
+assert.equal(overloadDashboard({...fixed,points:fixedPoints.slice(1)},cooldown).total.count,null);
+assert.equal(overloadDashboard({...fixed,points:[{count:999},...fixedPoints]},cooldown).total.count,153);
+assert.equal(overloadDashboard({...fixed,recentCount:null},null).quarter.count,null,'missing rolling events must not be inferred from coarse bins');
 assert.equal(overloadEnergy(0, 5).tone, 'zero');
 assert.equal(overloadEnergy(0, 5).color, 'var(--emerald)');
 assert.equal(overloadEnergy(1, 5).ratio, 0.2);
@@ -33,4 +41,4 @@ for (const [count, limit, enabled] of [[null, 5, true], [NaN, 5, true], [-1, 5, 
   assert.equal(state.tone, 'unknown');
   assert.equal(state.ratio, 0);
 }
-console.log('CODEX_DASHBOARD_PASS rolling/fallback; six-interval totals; dynamic thresholds; green/yellow/red; saturation; missing/disabled states');
+console.log('CODEX_DASHBOARD_PASS rolling/fallback; eighteen-fixed-bin and legacy totals; independent sample times; dynamic thresholds; green/yellow/red; saturation; missing/disabled states');

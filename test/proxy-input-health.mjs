@@ -21,13 +21,13 @@ assert.throws(()=>normalizeProxyInput({name:'x',host:'proxy.test',port:80,passwo
 const done={status:'completed',resultSaved:true};
 assert.equal(accountHealth(done),'normal');
 assert.equal(accountHealth({...done,webSessionStatus:'expired'}),'abnormal');
-assert.equal(accountHealth({...done,webSessionStatus:'valid'}, {rateLimited:true}),'abnormal');
-assert.equal(accountHealth({...done,webSessionStatus:'valid'}, {usage:{primary:{usedPercent:100}}}),'abnormal');
+assert.equal(accountHealth({...done,webSessionStatus:'valid'}, {rateLimited:true}),'normal');
+assert.equal(accountHealth({...done,webSessionStatus:'valid'}, {usage:{primary:{usedPercent:100}}}),'normal');
 assert.equal(accountHealth({status:'canceled',webSessionStatus:'valid'}),'normal');
 assert.equal(accountHealth({status:'failed',webSessionStatus:'valid'}),'normal');
 assert.equal(accountHealth({...done,webSessionStatus:'valid'}, {},true),'abnormal');
 assert.equal(accountHealth({status:'working'}),'pending');
-assert.equal(accountHealth({status:'failed'}),'abnormal');
+assert.equal(accountHealth({status:'failed'}),'pending');
 assert.equal(accountHealth({status:'canceled'}),'pending');
 assert.equal(accountHealth(done,{inPool:true,enabled:false,remoteStatus:'active'}),'normal','manual pause is not an account failure');
 let writes=0,reads=0;const catalog=[];

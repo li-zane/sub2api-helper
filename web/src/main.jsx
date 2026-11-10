@@ -83,6 +83,7 @@ import { CustomSelect } from "./custom-select.jsx";
 import { GlobalTooltipProvider } from "./tooltip.jsx";
 
 const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效", unavailable: "Web 凭据读取失败", banned: "账号已封禁" };
+const SUMMARY_FILTER_LABELS = { active: "进行中", queued: "排队中", normal: "正常", abnormal: "异常" };
 const BATCH_KEY = "tosub2.web-session-check-batch";
 const POLL_INTERVAL_MS = 900;
 const SUB2API_PIPELINE_TIMEOUT_MS = 15 * 60_000;
@@ -262,6 +263,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [lockedOnly, setLockedOnly] = useState(false);
   const [webSessionFilter, setWebSessionFilter] = useState("");
+  const [summaryFilter, setSummaryFilter] = useState("");
   const [webBatch, setWebBatch] = useState(() => { try { const b = JSON.parse(sessionStorage.getItem(BATCH_KEY)); return b && Array.isArray(b.attempts) && Array.isArray(b.failed) && Array.isArray(b.skipped) ? b : null; } catch { return null; } });
   useEffect(() => { if (webBatch) sessionStorage.setItem(BATCH_KEY, JSON.stringify(webBatch)); else sessionStorage.removeItem(BATCH_KEY); }, [webBatch]);
   const [filterOpen, setFilterOpen] = useState(false);
@@ -526,6 +528,7 @@ function App() {
           search: searchQuery.trim() || undefined,
           lockedOnly: lockedOnly || undefined,
           webSession: webSessionFilter || undefined,
+          summary: summaryFilter || undefined,
           accountType: accountTypeFilter || undefined,
           status: statusFilter || undefined,
           planType: planTypeFilter || undefined,
@@ -543,6 +546,7 @@ function App() {
               ...(filters.search ? { search: filters.search } : {}),
               ...(filters.lockedOnly ? { lockedOnly: "true" } : {}),
               ...(filters.webSession ? { webSession: filters.webSession } : {}),
+              ...(filters.summary ? { summary: filters.summary } : {}),
               ...(filters.accountType ? { accountType: filters.accountType } : {}),
               ...(filters.status ? { status: filters.status } : {}),
               ...(filters.planType ? { planType: filters.planType } : {}),
@@ -595,7 +599,7 @@ function App() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, page, searchQuery, lockedOnly, webSessionFilter, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter]);
+  }, [token, page, searchQuery, lockedOnly, webSessionFilter, summaryFilter, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter]);
 
   useEffect(() => {
     if (!token || !features.sub2apiMonitor) return undefined;
@@ -723,7 +727,7 @@ function App() {
   const passwordAddSelectedCount = selectedJobs.filter((job) => job.canAddPassword).length;
   const canAddPasswordSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && passwordAddSelectedCount > 0;
-  const hasJobFilters = Boolean(searchQuery.trim() || lockedOnly || webSessionFilter || emailFilter.length || accountTypeFilter || statusFilter || planTypeFilter || sub2apiPoolFilter || sub2apiEnabledFilter);
+  const hasJobFilters = Boolean(summaryFilter || searchQuery.trim() || lockedOnly || webSessionFilter || emailFilter.length || accountTypeFilter || statusFilter || planTypeFilter || sub2apiPoolFilter || sub2apiEnabledFilter);
   const availablePlanTypes = [...new Set([
     ...planTypeOptions,
     ...jobs.map((job) => job.planType).filter(Boolean),
@@ -1482,6 +1486,7 @@ function App() {
     setSearchQuery("");
     setLockedOnly(false);
     setWebSessionFilter("");
+    setSummaryFilter("");
     setAccountTypeFilter("");
     setStatusFilter("");
     setFilterText("");
@@ -1800,28 +1805,32 @@ function App() {
           </div>
 
           <div className="telemetry-capsule" aria-label="任务统计">
-            <span className="summary-pill" title="进行中任务数 / 同时运行任务数上限">
+            <button type="button" className="summary-pill" title="筛选进行中账号；进行中任务数 / 同时运行任务数上限；再次点击清除筛选"
+              aria-label="筛选进行中账号" aria-pressed={summaryFilter === "active"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "active" ? "" : "active")}>
               <i className="status-dot active" />
               <span>进行中</span>
               <strong>{stats.active}{taskSettings ? ` / ${taskSettings.maxActiveJobs}` : ""}</strong>
-            </span>
+            </button>
             <span className="telemetry-divider" aria-hidden="true" />
-            <span className="summary-pill">
+            <button type="button" className="summary-pill" title="筛选排队中账号；再次点击清除筛选"
+              aria-label="筛选排队中账号" aria-pressed={summaryFilter === "queued"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "queued" ? "" : "queued")}>
               <i className="status-dot queued" />
               <span>排队中</span>
               <strong>{stats.queued || 0}</strong>
-            </span>
+            </button>
             <span className="telemetry-divider" aria-hidden="true" />
-            <span className="summary-pill">
+            <button type="button" className="summary-pill" title="筛选正常账号；再次点击清除筛选"
+              aria-label="筛选正常账号" aria-pressed={summaryFilter === "normal"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "normal" ? "" : "normal")}>
               <i className="status-dot complete" />
               <span>正常</span>
               <strong>{stats.normal ?? 0}</strong>
-            </span>
-            <span className="summary-pill" title="封禁、Web 失效、号池报错、限流、额度受限或需人工处理的账号">
+            </button>
+            <button type="button" className="summary-pill" title="仅包括封禁、Web 会话失效、号池错误；再次点击清除筛选"
+              aria-label="筛选异常账号" aria-pressed={summaryFilter === "abnormal"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "abnormal" ? "" : "abnormal")}>
               <i className="status-dot abnormal" />
               <span>异常</span>
               <strong>{stats.abnormal ?? 0}</strong>
-            </span>
+            </button>
           </div>
 
           <div className="topbar-actions">
@@ -2084,6 +2093,9 @@ function App() {
             </div>
 
             <div className="account-filter-controls" aria-label="账号筛选">
+              {summaryFilter && <button type="button" className="secondary-button filter-chip-button filter-active" onClick={() => applyColumnFilter(setSummaryFilter, "")} aria-label="清除状态统计筛选">
+                仅显示{SUMMARY_FILTER_LABELS[summaryFilter]}账号<X size={12} aria-hidden="true" />
+              </button>}
               <div className="filter-select-wrapper">
                 <select className="web-state-filter" data-active={Boolean(webSessionFilter)} aria-label="筛选 Web 登录态" value={webSessionFilter}
                   onChange={(event) => applyColumnFilter(setWebSessionFilter, event.target.value)}>
@@ -4581,7 +4593,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
               {TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === group).map(monitoringField)}
             </div>
             <div className="task-auto-empty">{group === "号池异常恢复" ? "默认 300 秒（5 分钟）。重新授权仍进入共享登录队列；重试间隔为 0 时不设失败冷却。"
-              : "仅请求号池，默认网络并发 100。调用与过载次数默认每 60 秒同步，曲线展示截至同步时的最近 90 分钟，包含当前请求；冷却判断使用独立窗口。关闭页面后继续同步。"}</div>
+              : "仅请求号池，默认网络并发 100。调用与过载次数默认每 60 秒同步，曲线按 5 分钟固定分格，展示 18 格；当前格累计至最近同步，历史格缓存复用。冷却判断使用独立窗口。关闭页面后继续同步。"}</div>
           </section>
         ))}
         <section className="task-auto-settings task-overload-settings" aria-labelledby="task-overload-title">
