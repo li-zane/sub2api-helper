@@ -1363,6 +1363,10 @@ async function handleApi(req, res, requestUrl) {
     state.accounts.set(job.email.toLowerCase(), nextEntry);
     if (!body.enabled) modelFingerprint.invalidateAccount(job.email);
     state.fetchedAt = new Date().toISOString();
+    // Resume the charts immediately, after publishing the successful pool
+    // switch. Otherwise the admission gate sees the pre-enable cache and the
+    // last pre-cooldown chart remains frozen until the next statistics tick.
+    if (body.enabled) overloadMonitor.trigger();
     sendJson(res, 200, { status: publicSub2ApiAccountStatusEntry(nextEntry) });
     return;
   }

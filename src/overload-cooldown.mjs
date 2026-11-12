@@ -280,6 +280,9 @@ export class OverloadCooldown {
       entry = await this.update(email, { resumeAccountIds: remaining, ...(remaining.length ? {} : { phase: "idle", coolingUntil: null, lastResumedAt: new Date(this.now()).toISOString(), windowCount: 0, lastError: null }) });
     }
     await this.update(email, { phase: "idle", coolingUntil: null, lastResumedAt: new Date(this.now()).toISOString(), windowCount: 0, lastError: null });
+    // The pause intent is cleared first, so shared statistics can fill the
+    // missed fixed buckets without immediately re-cooling from old errors.
+    this.onNeedCounts();
   }
 
   async setSchedulable(config, id, enabled) {
