@@ -76,6 +76,8 @@ import { ProxyQualityPanel } from "./proxy-quality.jsx";
 import { WebLoginBatch } from "./web-login-batch.jsx";
 import { FingerprintSettingsButton } from "./model-fingerprint.jsx";
 import { CodexStatus } from "./codex-status.jsx";
+import { CodexIcon } from "./codex-icon.jsx";
+import { SessionResetDialog } from "./session-reset-dialog.jsx";
 import { HelpTip } from "./help-tip.jsx";
 import { AccessibleDialog, ModalForm, trapModalTab, useModalFocus } from "./accessible-dialog.jsx";
 import { AnchoredPopover } from "./anchored-popover.jsx";
@@ -294,6 +296,7 @@ function App() {
   useDisplayTimeZone();
   useLayoutEffect(() => { setDisplayTimeZone(taskSettings?.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE); }, [taskSettings?.displayTimeZone]);
   const [taskSettingsOpen, setTaskSettingsOpen] = useState(false);
+  const [sessionResetSelection, setSessionResetSelection] = useState(null);
   const [taskSettingsOpening, setTaskSettingsOpening] = useState(false);
   const taskSettingsButtonRef = useRef(null);
   const [smsSettings, setSmsSettings] = useState(readSmsProviderSettings);
@@ -707,7 +710,7 @@ function App() {
   const canLoginWebSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size && webLoginSelectedCount > 0;
   const canLogoutSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && selectedJobs.some((job) => job.canLogoutAllSessions);
-  const sessionEligibleSelectedCount = selectedJobs.filter((job) => job.canLogoutAllSessions && job.canForceRelogin).length;
+  const sessionEligibleSelectedCount = selectedJobs.filter((job) => job.canResetSessions).length;
   const canCooldownSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && sessionEligibleSelectedCount > 0;
   const proxySwitchSelection = proxySwitchSelectionState(selectedJobs, {
@@ -1604,8 +1607,12 @@ function App() {
     }
   }
 
-  async function runSelectedPoolAction(action) {
+  async function runSelectedPoolAction(action, options = {}) {
     if (!selectedJobIds.size || batchAction) return;
+    const resetting = action === "session-reset";
+    if (resetting && !Object.hasOwn(options, "cooldownMinutes")) {
+      setSessionResetSelection([...selectedJobIds]); return;
+    }
     if (action === "switch-proxy" && (!["sub2api", "plan"].includes(accountProxyMode) || proxySettingsDirty)) {
       setProxySettingsError(proxySwitchSelection.reason);
       return;
@@ -1615,31 +1622,31 @@ function App() {
       setError(proxySwitchSelection.reason);
       return;
     }
-    const actionIds = switching ? proxySwitchSelection.eligible.map((job) => job.id) : [...selectedJobIds];
+    const actionIds = switching ? proxySwitchSelection.eligible.map((job) => job.id) : options.ids || [...selectedJobIds];
     const actionCount = switching ? actionIds.length : sessionEligibleSelectedCount;
     const skippedCount = switching ? proxySwitchSelection.skippedCount : 0;
-    const endpoint = action === "cooldown" ? "/api/jobs/cooldown-batch" : "/api/jobs/switch-proxy-batch";
-    const label = action === "cooldown" ? "一键冷却" : "一键切换 IP";
-    if (!window.confirm(action === "cooldown"
-      ? `确定登出选中账号的所有设备，并在任务设置的冷却时长后重新登录、授权和同步号池凭据吗？共 ${sessionEligibleSelectedCount} 个账号。`
-      : `确定为 ${actionCount} 个账号手动应用当前方案吗？直连方案会清除原代理绑定，固定代理使用指定节点，均衡分配更换出口；然后登出所有设备、重新登录授权并同步号池。方案配置本身不会修改。${skippedCount ? `其余 ${skippedCount} 个账号将跳过。` : ""}`)) return;
+    const endpoint = resetting ? "/api/jobs/session-reset-batch" : "/api/jobs/switch-proxy-batch";
+    const label = resetting ? "一键重登" : "一键切换 IP";
+    if (switching && !window.confirm(`确定为 ${actionCount} 个账号手动应用当前方案吗？直连方案会清除原代理绑定，固定代理使用指定节点，均衡分配更换出口；然后登出所有设备、重新登录授权并同步号池。方案配置本身不会修改。${skippedCount ? `其余 ${skippedCount} 个账号将跳过。` : ""}`)) return;
     setBatchAction(action);
     setError("");
     setUploadNotice(`${label}正在处理 ${actionCount} 个账号`);
     try {
       const data = await apiFetch(token, endpoint, {
         method: "POST",
-        body: JSON.stringify({ ids: actionIds }),
+        body: JSON.stringify({ ids: actionIds, ...(resetting ? { cooldownMinutes: options.cooldownMinutes } : {}) }),
       });
       const failed = Array.isArray(data.failed) ? data.failed : [];
-      setUploadNotice(action === "cooldown"
-        ? `冷却已开始 ${data.started} 个账号，时长 ${data.cooldownMinutes} 分钟${failed.length ? `，失败 ${failed.length} 个` : ""}`
+      setUploadNotice(resetting
+        ? `已加入重登队列 ${data.started} 个账号${data.cooldownMinutes ? `，登出后冷却 ${data.cooldownMinutes} 分钟` : "，不冷却"}${failed.length ? `，失败 ${failed.length} 个` : ""}`
         : `已启动切换 IP 并重新授权 ${data.started} 个账号${skippedCount + Number(data.skipped || 0) ? `，跳过 ${skippedCount + Number(data.skipped || 0)} 个` : ""}${failed.length ? `，失败 ${failed.length} 个` : ""}`);
       if (failed.length) setError(failed.slice(0, 5).map((item) => `${item.email}：${item.error}`).join("；"));
       setSelectedJobIds(new Set());
       void refreshSub2ApiAccountStatus(true).catch(() => {});
+      return true;
     } catch (requestError) {
       setError(`${label}失败：${requestError.message}`);
+      return false;
     } finally {
       setBatchAction("");
     }
@@ -2207,7 +2214,7 @@ function App() {
                   disabled={!canReauthorizeSelected || Boolean(batchAction)}
                   title="为选中的账号重新获取 Codex 授权令牌"
                 >
-                  {batchAction === "reauthorize" ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}
+                  {batchAction === "reauthorize" ? <LoaderCircle className="spin" size={14} /> : <CodexIcon size={14} />}
                   <span>重新授权</span>
                 </button>
 
@@ -2232,7 +2239,6 @@ function App() {
                   proxySwitchSelection={proxySwitchSelection}
                   runSelectedPoolAction={runSelectedPoolAction}
                   canCooldownSelected={canCooldownSelected}
-                  taskSettings={taskSettings}
                   canLogoutSelected={canLogoutSelected}
                   logoutAllDevices={logoutAllDevices}
                   selectedJobs={selectedJobs}
@@ -3291,6 +3297,9 @@ function App() {
           </ModalForm>
         </div>
       )}
+      {sessionResetSelection && <SessionResetDialog count={sessionResetSelection.length}
+        onClose={() => setSessionResetSelection(null)}
+        onConfirm={cooldownMinutes => runSelectedPoolAction("session-reset", { ids: sessionResetSelection, cooldownMinutes })} />}
       {taskSettingsOpen && taskSettings && (
         <TaskSettingsDialog
           token={token}
@@ -3627,7 +3636,6 @@ function BulkMoreMenu({
   proxySwitchSelection,
   runSelectedPoolAction,
   canCooldownSelected,
-  taskSettings,
   canLogoutSelected,
   logoutAllDevices,
   selectedJobs,
@@ -3659,7 +3667,7 @@ function BulkMoreMenu({
   }, [open]);
 
   const moreActionBusy = [
-    "relogin", "cooldown", "switch-proxy", "logout-all",
+    "relogin", "session-reset", "switch-proxy", "logout-all",
     "setup-2fa", "add-password", "source",
   ].includes(batchAction);
 
@@ -3711,11 +3719,11 @@ function BulkMoreMenu({
                   className="bulk-dropdown-item"
                   role="menuitem"
                   disabled={!canCooldownSelected || Boolean(batchAction)}
-                  onClick={() => { setOpen(false); runSelectedPoolAction("cooldown"); }}
-                  title={taskSettings?.accountProxyCooldownMinutes ? `冷却 ${taskSettings.accountProxyCooldownMinutes} 分钟后重新授权并同步号池` : "冷却后重新授权并同步号池"}
+                  onClick={() => { setOpen(false); runSelectedPoolAction("session-reset"); }}
+                  title="登出所有设备、重登 Web、Codex 授权并更新号池凭据；冷却时间可选，默认 0 分钟，保持原 IP 绑定"
                 >
-                  {batchAction === "cooldown" ? <LoaderCircle className="spin" size={14} /> : <LogOut size={14} />}
-                  <span>一键冷却</span>
+                  {batchAction === "session-reset" ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}
+                  <span>一键重登</span>
                 </button>
               )}
               {features.accountSessions && (
@@ -4261,7 +4269,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
             disabled={rowBusy || !job.canResetSessions}
             title={job.canResetSessions ? "登出所有设备 → 重新登录 Web → Codex 授权 → 更新号池凭据；绑定 IP 保持不变" : mutationReason || job.sessionReset?.error || "需要有效 Web 会话且已加入号池，封禁账号不执行"}
             aria-label="登出设备并重登授权">
-            {['queued', 'logging_out', 'authorizing', 'syncing'].includes(job.sessionReset?.status) ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
+            {['queued', 'logging_out', 'cooling', 'authorizing', 'syncing'].includes(job.sessionReset?.status) ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
           </button>
           <button
             type="button"
@@ -4271,7 +4279,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
             title={isBlockedAccount(job) || rowBusy || !job.canForceRelogin ? mutationReason || "请先结束当前任务，再进行授权" : "Codex 授权：优先刷新已有凭据；缺失或明确失效时，复用有效 Web 会话或先登录 Web，再通过授权链接授权"}
             aria-label="Codex 授权"
           >
-            {submitting ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}
+            {submitting ? <LoaderCircle className="spin" size={13} /> : <CodexIcon size={13} />}
           </button>
           {!terminal && (
             <button type="button" className="icon-button danger" onClick={cancel}
@@ -4321,7 +4329,6 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [displayTimeZone, setTimeZone] = useState(settings.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE);
   const [priceMultiplier, setPriceMultiplier] = useState(String(settings.poolPriceMultiplier ?? DEFAULT_POOL_PRICE_MULTIPLIER));
   const [monitoring, setMonitoring] = useState(() => Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
-  const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
   const [resetAfterCooldown, setResetAfterCooldown] = useState(settings.overloadAutoCooldown?.reauthorizeAfterCooldown === true);
   const [webMonitor, setWebMonitor] = useState(() => ({ enabled: settings.webSessionMonitor?.enabled === true, autoRelogin: settings.webSessionMonitor?.autoRelogin !== false, intervalMinutes: String(settings.webSessionMonitor?.intervalMinutes || 15), retryMinutes: String(settings.webSessionMonitor?.retryMinutes || 60) }));
@@ -4356,7 +4363,6 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     setSmsTimeout(String(DEFAULT_SMS_TIMEOUT_MINUTES));
     setTimeZone(DEFAULT_DISPLAY_TIME_ZONE);
     setPriceMultiplier(String(DEFAULT_POOL_PRICE_MULTIPLIER));
-    setCooldownMinutes("60");
     setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" });
     setResetAfterCooldown(false);
     setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" });
@@ -4385,14 +4391,9 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       setError(`同时运行任务数必须是 ${settings.min} 到 ${settings.max} 的整数`);
       return;
     }
-    const cooldownValue = Number(cooldownMinutes);
     let loginTimeoutMinutes, smsTimeoutMinutes;
     try { loginTimeoutMinutes = normalizeLoginTimeoutMinutes(Number(loginTimeout)); smsTimeoutMinutes = normalizeSmsTimeoutMinutes(Number(smsTimeout)); }
     catch (error) { setError(error.message); return; }
-    if (!Number.isInteger(cooldownValue) || cooldownValue < 1 || cooldownValue > 43_200) {
-      setError("冷却时长必须是 1 到 43200 分钟的整数");
-      return;
-    }
     const overloadAutoCooldown = Object.fromEntries(Object.entries(overloadRule).map(([key, value]) => [key, Number(value)]));
     if (resetAfterCooldown || Object.hasOwn(settings.overloadAutoCooldown || {}, "reauthorizeAfterCooldown"))
       overloadAutoCooldown.reauthorizeAfterCooldown = resetAfterCooldown;
@@ -4440,7 +4441,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     try {
       const data = await apiFetch(token, "/api/task-settings", {
         method: "POST",
-        body: JSON.stringify(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyCooldownMinutes: Number(cooldownMinutes), accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }, initialSettings.current)),
+        body: JSON.stringify(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }, initialSettings.current)),
       });
       onSaved(data.settings);
     } catch (requestError) {
@@ -4497,19 +4498,6 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
                   value={limit} onChange={(event) => setLimit(event.target.value)} disabled={saving}
                   aria-invalid={Boolean(error)} />
                 <span>条</span>
-              </div>
-            </label>
-            <label className="settings-field task-cooldown-field" htmlFor="task-cooldown-minutes">
-              <span className="field-label-row">
-                一键冷却时长
-                <HelpTip label="一键冷却时长说明">
-                  批量工具栏中点击“一键冷却”时，暂停号池分配的默认时长（1–43200 分钟）。
-                </HelpTip>
-              </span>
-              <div>
-                <input id="task-cooldown-minutes" type="number" min="1" max="43200" step="1" required
-                  value={cooldownMinutes} onChange={(event) => setCooldownMinutes(event.target.value)} disabled={saving} />
-                <span>分钟</span>
               </div>
             </label>
           </div>

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createSmsPoolPolicy, restoreSmsPoolPolicy, normalizeSmsPoolRoute, excludedSmsPools, recordSmsPoolFailure, DEFAULT_SMS_POOL_FAILURE_LIMIT } from "./sms-pool-policy.mjs";
 import { generateAccountPassword } from "./account-password.mjs";
-import { beginAccountLogOperation, finishAccountLogOperation, readAccountLogEntries, markAccountLogSms } from "./account-log-entries.mjs";
+import { beginAccountLogOperation, finishAccountLogOperation, restoreAccountLogOperation, readAccountLogEntries, markAccountLogSms } from "./account-log-entries.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -65,7 +65,7 @@ import { ModelFingerprintService, normalizeFingerprintSettings } from "./model-f
 import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
 import { WebSessionMonitor, normalizeWebSessionMonitor, DEFAULT_WEB_SESSION_MONITOR } from "./web-session-monitor.mjs";
 import { accountHealth } from "./account-health.mjs";
-import { AccountSessionResets, sessionResetPending, resetCredentialUpdate } from "./account-session-reset.mjs";
+import { AccountSessionResets, sessionResetPending, resetCredentialUpdate, normalizeSessionResetDelay } from "./account-session-reset.mjs";
 import { createProxyImporter } from "./sub2api-proxy-create.mjs";
 import { poolAccountError } from "../web/src/pool-account-error.mjs";
 
@@ -238,7 +238,7 @@ const emailJobLocks = new Map();
 let outputSyncPromise = null;
 let lastOutputSyncAt = 0;
 let shuttingDown = false;
-let queueSchedulingPaused = false;
+let queueSchedulingPaused = true;
 let maxActiveJobs = initialMaxActiveJobs();
 let activeWebSessionChecks = 0;
 const activeWebSessionCheckAccounts = new Map();
@@ -572,6 +572,7 @@ for (const job of jobs.values()) {
     await automationBlockWrites.get(job.email.toLowerCase());
   }
 }
+await restoreAccountSessionResets();
 for (const job of jobs.values()) {
   if (job.poolRefreshAction) {
     schedulePoolRefresh(job, job.poolRefreshAction === "cooldown" && job.poolRefreshDueAt
@@ -579,9 +580,9 @@ for (const job of jobs.values()) {
       : 0);
   }
 }
-await restoreAccountSessionResets();
 smsCancellations.start();
 resumePendingTaskAutoActions();
+queueSchedulingPaused = false;
 scheduleQueuedJobs();
 requestSub2ApiStatusRefresh();
 overloadMonitor.start();
@@ -1079,6 +1080,25 @@ async function handleApi(req, res, requestUrl) {
       started: eligible.length,
       skipped: selected.length - eligible.length,
     });
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/jobs/session-reset-batch") {
+    const body = await readJson(req);
+    let cooldownMinutes;
+    try { cooldownMinutes = normalizeSessionResetDelay(body.cooldownMinutes); }
+    catch (error) { throw httpError(400, error.message); }
+    const selected = resolveSelectedJobs(body.ids);
+    await loadSub2ApiAccountStatus({ forceRefresh: true });
+    const results = await Promise.allSettled(selected.map(job => withEmailJobLock(job.email, async () => {
+      await startAccountSessionReset(job, { cooldownMinutes });
+      return job;
+    })));
+    const started = results.filter(result => result.status === "fulfilled").map(result => result.value);
+    sendJson(res, 202, { jobs: started.map(publicJob), started: started.length,
+      skipped: selected.length - started.length, cooldownMinutes,
+      failed: results.flatMap((result, index) => result.status === "rejected"
+        ? [{ email: selected[index].email, error: String(result.reason?.message || result.reason).slice(0, 300) }] : []) });
     return;
   }
 
@@ -2118,7 +2138,7 @@ function scheduleQueuedJobs() {
   let availableSlots = maxActiveJobs - [...jobs.values()].filter(occupiesActiveSlot).length - activeWebSessionChecks;
   if (availableSlots <= 0) return;
   const queuedJobs = [...jobs.values()]
-    .filter((job) => job.status === "queued")
+    .filter((job) => job.status === "queued" && activeSessionReset(job)?.status !== "cooling")
     .sort((a, b) => String(a.queuedAt || a.createdAt).localeCompare(String(b.queuedAt || b.createdAt)));
   for (const job of queuedJobs.slice(0, availableSlots)) {
     const mode = job.queuedMode || "full";
@@ -3019,7 +3039,8 @@ async function validateSessionResetRoute(job, state) {
     sub2ApiOAuth: state.codexAuthMode === "sub2api" ? { baseUrl: config.baseUrl, adminApiKey: config.adminApiKey, proxyId: state.proxyId || null } : null };
 }
 
-async function startAccountSessionReset(job, { automatic = false, requestId = null } = {}) {
+async function startAccountSessionReset(job, { automatic = false, requestId = null, cooldownMinutes = 0 } = {}) {
+  cooldownMinutes = normalizeSessionResetDelay(cooldownMinutes);
   // The authoritative pool listing below also works before the first status
   // snapshot after restart, including an already-expired cooldown deadline.
   if (!canResetAccountSessions(job, { requirePoolSnapshot: false })) throw httpError(409, "账号正在执行任务、缺少 Web 会话或尚未加入号池，暂不能重建会话");
@@ -3042,7 +3063,7 @@ async function startAccountSessionReset(job, { automatic = false, requestId = nu
   const state = await accountSessionResets.begin(job.email, { id: requestId || crypto.randomUUID(), backend,
     jobId: job.id, source: automatic ? "cooldown" : "manual", proxyId, proxyUrl: proxy?.url || null,
     boundIp: proxy?.ipAddress || null, proxyName: proxy?.name || null, codexAuthMode,
-    accountIds: records.map(a => String(a.id)),
+    accountIds: records.map(a => String(a.id)), cooldownMinutes, resumeAt: null,
     // An explicit retry after confirmed logout continues with login, never logs
     // out a newly recovered Web session for the same failed operation.
     logoutCompletedAt: !job.webSessionAvailable && previous?.status === "failed" ? previous.logoutCompletedAt || null : null });
@@ -3051,7 +3072,7 @@ async function startAccountSessionReset(job, { automatic = false, requestId = nu
     await saveStoredLoginCredentials(job.email, job);
     await forceReloginJob(job, {}, { automatic, sessionReset: true, poolRefreshAction: "session-reset" });
     await accountSessionResets.save(job.email, { logOperationId: job.logOperation?.id || null });
-    appendJobLog(job, `[session-reset] 已加入共享任务队列：登出所有设备 → 重新登录 Web → Codex OAuth → 更新现有号池凭据；全程保持原 IP 绑定${state.proxyId ? `（代理 ${state.proxyId}）` : "（直连）"}。\n`);
+    appendJobLog(job, `[session-reset] 已加入共享任务队列：登出所有设备 → ${cooldownMinutes ? `冷却 ${cooldownMinutes} 分钟 → ` : ""}重新登录 Web → Codex OAuth → 更新现有号池凭据；全程保持原 IP 绑定${state.proxyId ? `（代理 ${state.proxyId}）` : "（直连）"}。\n`);
     await saveJobMetadata(job);
   } catch (error) { await accountSessionResets.fail(job.email, error); throw error; }
 }
@@ -3094,10 +3115,29 @@ async function prepareSessionResetLogin(job, current = () => true) {
     await accountSessionResets.save(job.email, { status: "logging_out" });
     appendJobLog(job, "[session-reset] 1/4：使用原绑定 IP 登出所有设备与会话。\n");
     await revokeAllAccountSessions(job);
-    await accountSessionResets.save(job.email, { logoutCompletedAt: new Date().toISOString(), status: "authorizing" });
+    state = await accountSessionResets.save(job.email, { logoutCompletedAt: new Date().toISOString(),
+      resumeAt: state.cooldownMinutes ? new Date(Date.now() + state.cooldownMinutes * 60_000).toISOString() : null,
+      status: "authorizing" });
     await removePrivateFile(job.checkpointPath);
   } else await accountSessionResets.save(job.email, { status: "authorizing" });
   if (!current()) { await accountSessionResets.fail(job.email, "会话重建已停止，已保存登出结果"); return null; }
+  const remaining = Date.parse(state.resumeAt) - Date.now();
+  if (remaining > 0) {
+    await accountSessionResets.save(job.email, { status: "cooling" });
+    loginTimeouts.pause(job);
+    job.queueRunId = null;
+    job.status = "queued";
+    job.queuedMode = "full";
+    job.queuedAt = new Date().toISOString();
+    job.poolRefreshDueAt = state.resumeAt;
+    job.prompt = `设备已登出，冷却 ${state.cooldownMinutes} 分钟后重新登录`;
+    appendJobLog(job, `[session-reset] 设备已登出；冷却至 ${state.resumeAt}，等待期间释放登录并发，原 IP 绑定保持不变。\n`);
+    touch(job);
+    await saveJobMetadata(job);
+    schedulePoolRefresh(job, remaining);
+    scheduleQueuedJobs();
+    return null;
+  }
   appendJobLog(job, "[session-reset] 2/4：重新登录 Web；3/4：使用新 Web 会话完成 Codex OAuth，不走旧 OAuth 刷新。\n");
   return route;
 }
@@ -3112,9 +3152,19 @@ async function restoreAccountSessionResets() {
     if (state.status === "logging_out") {
       await accountSessionResets.fail(email, "服务重启中断了登出请求，远端结果待确认，请手动检查后重试"); continue;
     }
+    if (!job.logOperation && state.logOperationId) {
+      const entry = await privateJsonIfPresent(path.join(path.dirname(job.outputPath), "operation-logs", `${state.logOperationId}.json`));
+      if (entry?.type === "session_reset") restoreAccountLogOperation(job, entry);
+    }
     if (state.status === "syncing") {
       job.status = "completed"; job.poolRefreshAction = "session-reset"; job.poolRefreshReady = true;
       schedulePoolRefresh(job, 0); continue;
+    }
+    if (state.status === "cooling") {
+      job.status = "queued"; job.queuedMode = "full"; job.poolRefreshAction = "session-reset";
+      job.poolRefreshDueAt = state.resumeAt;
+      schedulePoolRefresh(job, Math.max(0, Date.parse(state.resumeAt) - Date.now()));
+      continue;
     }
     if (job.status === "queued") {
       job.queuedMode = "full"; job.poolRefreshAction = "session-reset";
@@ -4671,6 +4721,10 @@ async function submitJobInput(job, body, options = {}) {
 }
 
 async function cancelJob(job) {
+  if (shuttingDown && activeSessionReset(job)?.status === "cooling") {
+    await saveJobMetadata(job);
+    return;
+  }
   const operation = job.logOperation;
   try { return await cancelJobRun(job); }
   finally {
@@ -8219,7 +8273,8 @@ function publicJob(job) {
     accountCostCny: restoredAccountCost(job.accountCostCny),
     accountCostUpdatedAt: job.accountCostUpdatedAt || null,
     status: job.status,
-    prompt: job.status === "queued"
+    prompt: activeSessionReset(job)?.status === "cooling" ? "设备已登出，等待冷却结束后重新登录"
+      : job.status === "queued"
       ? `排队中，前方还有 ${Math.max(0, getQueuePosition(job) - 1)} 条任务`
       : job.status === "failed" && /^CODEX_AUTH_/.test(job.lastError || "") ? "Codex 授权未完成，原 Web 会话状态独立保留" : job.prompt,
     createdAt: job.createdAt,
@@ -8969,7 +9024,18 @@ async function runPoolRefresh(job) {
     await synchronizePoolRefresh(job);
     return;
   }
-  if (job.poolRefreshAction === "session-reset") return;
+  if (job.poolRefreshAction === "session-reset") {
+    const reset = activeSessionReset(job);
+    if (reset?.status !== "cooling") return;
+    const remaining = Date.parse(reset.resumeAt) - Date.now();
+    if (remaining > 0) { schedulePoolRefresh(job, remaining); return; }
+    await validateSessionResetRoute(job, reset);
+    await accountSessionResets.save(job.email, { status: "queued" });
+    job.poolRefreshDueAt = null;
+    enqueueJob(job, "full", "冷却结束，正在重新登录 Web 并完成 Codex 授权");
+    await saveJobMetadata(job);
+    return;
+  }
   if (automaticLoginBlocked(job, "oauth")) return;
   if (job.poolRefreshAction === "cooldown" && job.poolRefreshDueAt) {
     const remaining = Date.parse(job.poolRefreshDueAt) - Date.now();
@@ -9068,7 +9134,7 @@ function occupiesActiveSlot(job) {
 function getQueuePosition(job) {
   if (job.status !== "queued") return 0;
   return [...jobs.values()]
-    .filter((item) => item.status === "queued")
+    .filter((item) => item.status === "queued" && activeSessionReset(item)?.status !== "cooling")
     .sort((a, b) => String(a.queuedAt || a.createdAt).localeCompare(String(b.queuedAt || b.createdAt)))
     .findIndex((item) => item.id === job.id) + 1;
 }

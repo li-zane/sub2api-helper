@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { AccountSessionResets, sessionResetPending, resetCredentialUpdate } from "../src/account-session-reset.mjs";
+import { AccountSessionResets, sessionResetPending, resetCredentialUpdate, normalizeSessionResetDelay } from "../src/account-session-reset.mjs";
 import { OverloadCooldown, normalizeOverloadCooldown } from "../src/overload-cooldown.mjs";
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "helper-session-reset-")), email = "reset@example.test";
@@ -11,6 +11,13 @@ try {
   await store.begin(email, { id: "fixture", proxyId: 3, proxyUrl: "http://fixture:8080", accountIds: ["7"] });
   assert(sessionResetPending(store.get(email))); assert(!JSON.stringify(store.publicState(email)).includes("proxyUrl"));
   assert.throws(() => store.begin(email, { id: "duplicate" }));
+  assert.equal(normalizeSessionResetDelay(), 0);
+  for (const value of [0, 1, 43200]) assert.equal(normalizeSessionResetDelay(value), value);
+  for (const value of [-1, 43201, 0.1, "1", null, true]) assert.throws(() => normalizeSessionResetDelay(value));
+  await store.save(email, { status: "cooling", cooldownMinutes: 1, resumeAt: "2026-11-13T12:00:00Z" });
+  assert(sessionResetPending(store.get(email)));
+  const cooling = new AccountSessionResets(path.join(dir, "reset.json")); await cooling.load();
+  assert.equal(cooling.publicState(email).resumeAt, "2026-11-13T12:00:00Z");
   await store.save(email, { status: "authorizing", logoutCompletedAt: new Date().toISOString() });
   store = new AccountSessionResets(path.join(dir, "reset.json")); await store.load();
   assert.equal(store.get(email).id, "fixture"); assert(store.get(email).logoutCompletedAt);

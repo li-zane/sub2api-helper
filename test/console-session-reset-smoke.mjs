@@ -8,10 +8,11 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { seedWebSession } from "./account-web-fixture.mjs";
 
-for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSION_RESET_SCENARIO] : ["manual-proxy", "manual-direct", "automatic", "automatic-overdue", "logout-failure", "oauth-failure", "proxy-changed", "sync-retry", "queued", "automation-paused", "local-oauth", "oauth-retry", "banned"])) {
+for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSION_RESET_SCENARIO] : ["manual-proxy", "manual-direct", "automatic", "automatic-overdue", "logout-failure", "oauth-failure", "proxy-changed", "sync-retry", "queued", "automation-paused", "local-oauth", "oauth-retry", "banned", "batch-default", "batch-delay", "batch-direct", "batch-cancel", "batch-mixed"])) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "helper-reset-http-")), email = "reset@example.test";
   const id = "11111111-1111-4111-8111-111111111111", dir = path.join(temp, id), trace = path.join(temp, "trace.jsonl");
-  const automatic = ["automatic", "automatic-overdue", "logout-failure", "automation-paused"].includes(scenario), direct = scenario === "manual-direct";
+  const automatic = ["automatic", "automatic-overdue", "logout-failure", "automation-paused"].includes(scenario), direct = ["manual-direct", "batch-direct"].includes(scenario);
+  const batch = scenario.startsWith("batch-"), delayed = ["batch-delay", "batch-cancel"].includes(scenario);
   let child, headers, logs = "", logouts = 0, updates = 0, creates = 0, failSync = scenario === "sync-retry";
   const mutations = [], row = { id: 7, platform: "openai", type: "oauth", name: email, status: "active", schedulable: !automatic,
     proxy_id: direct ? 0 : 3, group_ids: [91], priority: 17, credentials: { email, access_token: "old", refresh_token: "old-refresh", plan_type: "plus", custom: "retain" } };
@@ -85,7 +86,7 @@ TlsFingerprintTransport.prototype.close=async function(){};`;
       bound_ip: direct ? null : "198.51.100.3", last_auth_automated: true, last_auth_requirements: { emailOtp: true }, mail_api_url: officialBase + "/mail",
       ...(scenario === "automation-paused" ? { login_automation_pause: { reason: "mfa_failed", at: new Date().toISOString() } } : {}) }));
     const blockerId = "22222222-2222-4222-8222-222222222222";
-    if (scenario === "queued") {
+    if (["queued", "batch-mixed"].includes(scenario)) {
       const blocker = path.join(temp, blockerId); await fs.mkdir(blocker);
       await fs.writeFile(path.join(blocker, "sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ credentials: { email: "blocker@example.test", plan_type: "plus", access_token: "fixture", refresh_token: "fixture" } }] }));
       await fs.writeFile(path.join(blocker, "job-meta.json"), JSON.stringify({ version: 1, email: "blocker@example.test", status: "completed" }));
@@ -102,15 +103,50 @@ TlsFingerprintTransport.prototype.close=async function(){};`;
       await fs.writeFile(trace, "");
     }
     const unauthorized = await fetch(base + `/api/jobs/${id}/session-reset`, { method: "POST", body: "{}" }); assert.equal(unauthorized.status, 403);
+    if (batch) {
+      assert.equal((await fetch(base + '/api/jobs/session-reset-batch', { method: 'POST', body: '{}' })).status, 403);
+      for (const cooldownMinutes of [-1, 43201, 0.1, "1", null, true])
+        assert.equal((await api('/api/jobs/session-reset-batch', { ids: [id], cooldownMinutes })).status, 400);
+      assert.equal(logouts, 0, "invalid delay logged out devices");
+    }
     if (scenario === "proxy-changed") proxy.ip_address = "198.51.100.99";
     if (!automatic) {
-      const started = await api(`/api/jobs/${id}/session-reset`, {});
+      const started = batch ? await api('/api/jobs/session-reset-batch', { ids: scenario === 'batch-mixed' ? [id, blockerId] : [id],
+        ...(delayed ? { cooldownMinutes: 1 } : {}) }) : await api(`/api/jobs/${id}/session-reset`, {});
       assert.equal(started.status, ["proxy-changed", "banned"].includes(scenario) ? 409 : 202, JSON.stringify(started.data));
+      if (batch) {
+        assert.equal(started.data.started, 1);
+        assert.equal(started.data.cooldownMinutes, delayed ? 1 : 0);
+        assert.equal(started.data.failed.length, scenario === 'batch-mixed' ? 1 : 0);
+      }
       if (scenario === "queued") {
         assert.equal((await job()).status, "queued"); await new Promise(r => setTimeout(r, 120));
         assert.equal(logouts, 0, "logout happened outside shared queue slot");
         assert.equal((await api(`/api/jobs/${blockerId}/cancel`, {})).status, 200);
       }
+    }
+    if (delayed) {
+      await wait(async () => (await job()).sessionReset?.status === 'cooling', 'delay did not enter cooling');
+      assert.equal(logouts, 1); assert.equal(updates, 0);
+      assert(!(await fs.readFile(trace, 'utf8')).includes('"phase":"web"'), 'login happened before delay');
+      assert.equal((await api('/api/jobs')).data.stats.active, 0, 'delay occupies shared login slot');
+      const due = (await job()).sessionReset.resumeAt;
+      if (scenario === 'batch-cancel') {
+        assert.equal((await api(`/api/jobs/${id}/cancel`, {})).status, 200);
+        await stop(); await start();
+        assert.equal((await job()).sessionReset.status, 'failed');
+        assert.equal((await job()).status, 'canceled');
+        assert.equal(logouts, 1); assert.equal(updates, 0); assert.equal(creates, 0);
+        console.log('SESSION_RESET_HTTP_PASS batch-cancel cooling canceled durably without login/binding/update');
+        continue;
+      }
+      await stop(); await start();
+      assert.equal((await job()).sessionReset.status, 'cooling');
+      assert.equal((await job()).sessionReset.resumeAt, due); assert.equal(logouts, 1);
+      await stop();
+      const statePath = path.join(temp, 'account-session-resets.json'), saved = JSON.parse(await fs.readFile(statePath, 'utf8'));
+      saved.accounts[email].resumeAt = new Date(Date.now() - 1000).toISOString();
+      await fs.writeFile(statePath, JSON.stringify(saved)); await start();
     }
     if (["proxy-changed", "banned"].includes(scenario)) {
       assert.equal(logouts, 0); assert.equal(updates, 0); assert.equal(row.proxy_id, scenario === "banned" ? 0 : 3);
@@ -154,6 +190,13 @@ TlsFingerprintTransport.prototype.close=async function(){};`;
         assert.equal(row.proxy_id, direct ? 0 : 3); assert.deepEqual(row.group_ids, [91]); assert.equal(row.priority, 17); assert.equal(logouts, 1);
         await wait(async () => (await api(`/api/jobs/${id}/logs?view=protocol`)).data.entries
           .some(e => e.type === "session_reset" && e.status === "completed"), "completed reset is missing from protocol menu");
+        if (scenario === 'batch-delay') {
+          const entries = (await api(`/api/jobs/${id}/logs?view=protocol`)).data.entries;
+          const entry = entries.find(item => item.type === 'session_reset');
+          assert.equal(entries.filter(item => item.type === 'session_reset').length, 1);
+          const detail = (await api(`/api/jobs/${id}/logs?view=protocol&entry=${entry.id}`)).data.content;
+          assert(detail.includes('1/4') && detail.includes('2/4') && detail.includes('4/4'), 'restart split or truncated the session reset protocol log');
+        }
         if (automatic) assert.deepEqual(mutations, [true]);
         await stop();
         if (scenario === "manual-proxy") {

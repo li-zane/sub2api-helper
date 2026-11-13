@@ -57,7 +57,7 @@ export function recentOperation(job, statusLabels = {}) {
     error = job.lastError;
     if (AUTHORIZATION.has(type) && job.poolRefreshError) {
       error = job.poolRefreshError; result = "同步待完成"; tone = "error";
-    } else if (type === "cooldown" && job.poolRefreshDueAt) {
+    } else if ((type === "cooldown" && job.poolRefreshDueAt) || job.sessionReset?.status === "cooling") {
       result = "冷却中"; tone = "pending";
     }
   }

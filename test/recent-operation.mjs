@@ -25,5 +25,6 @@ for (const type of ["credential_update", "proxy_update", "account_update", "work
 assert.equal(recentOperation({ ...base, lastOperationType: "replace_2fa", status: "completed", totpSetupError: "fixture 2FA failure" }, labels).result, "失败");
 assert.equal(recentOperation({ ...base, lastOperationType: "add_password", status: "completed", passwordAddError: raw }, labels).result, "失败");
 const diagnostics = recentOperation({ ...base, webSessionMaintenancePause: { reason: "logout" }, webSessionRepairRetryAt: "2026-11-05T02:00:00Z", webSessionCheckError: "HTTP 503" }, labels);
+assert.equal(recentOperation({ ...base, lastOperationType: "session_reset", status: "queued", sessionReset: { status: "cooling" } }, labels).result, "冷却中");
 assert(diagnostics.text.includes("已主动登出")); assert(diagnostics.text.includes("Web 自动重登冷却中")); assert(diagnostics.text.includes("HTTP 503"));
 console.log("RECENT_OPERATION_PASS scoped Web/auth/security/update results; original response codes and JSON; stale-feedback isolation; diagnostics preserved");

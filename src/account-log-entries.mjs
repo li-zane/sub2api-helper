@@ -41,6 +41,14 @@ export function finishAccountLogOperation(job, entry = job.logOperation, status 
   if (job.logOperation?.id === entry.id) job.logOperation = null;
 }
 
+export function restoreAccountLogOperation(job, entry) {
+  if (!entry || !/^[a-f0-9-]{36}$/.test(entry.id)) return;
+  const restored = { ...entry, end: null, status: "running" };
+  delete restored.finishedAt;
+  save(job, restored);
+  job.logOperation = restored;
+}
+
 export function markAccountLogSms(job, text) {
   const entry = job.logOperation;
   if (!entry || entry.tags?.includes("sms")) return;

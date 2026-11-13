@@ -2,8 +2,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const pending = new Set(["queued", "logging_out", "authorizing", "syncing"]);
+const pending = new Set(["queued", "logging_out", "cooling", "authorizing", "syncing"]);
 export function sessionResetPending(state) { return pending.has(state?.status); }
+
+export function normalizeSessionResetDelay(value = 0) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 43200)
+    throw Error("冷却时间必须为 0–43200 分钟的整数");
+  return value;
+}
 
 // Private durable state: a reset keeps the route captured before logout, even
 // when the plan, defaults or other accounts' proxy allocations later change.
@@ -14,7 +20,7 @@ export class AccountSessionResets {
       const data = JSON.parse(await fs.readFile(this.filePath, "utf8"));
       if (data.version !== 1 || !data.accounts || typeof data.accounts !== "object") throw Error("会话重建记录格式无效");
       for (const [email, state] of Object.entries(data.accounts)) {
-        if (state?.id && ["queued", "logging_out", "authorizing", "syncing", "completed", "failed"].includes(state.status)) this.accounts.set(email, state);
+        if (state?.id && [...pending, "completed", "failed"].includes(state.status)) this.accounts.set(email, state);
       }
     } catch (error) { if (error.code !== "ENOENT") throw error; }
   }
@@ -22,8 +28,9 @@ export class AccountSessionResets {
   publicState(email) {
     const state = this.get(email);
     if (!state) return null;
-    const { id, status, source, startedAt, completedAt, error, proxyId } = state;
-    return { id, status, source, startedAt, completedAt: completedAt || null, error: error || null, proxyId };
+    const { id, status, source, startedAt, completedAt, error, proxyId, resumeAt, cooldownMinutes } = state;
+    return { id, status, source, startedAt, completedAt: completedAt || null, error: error || null, proxyId,
+      resumeAt: resumeAt || null, cooldownMinutes: cooldownMinutes || 0 };
   }
   async save(email, changes) {
     email = email.toLowerCase();

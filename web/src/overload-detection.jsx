@@ -58,6 +58,11 @@ export function OverloadDetection({ job, token, onError }) {
   }, [cooldownSource?.revision, cooldownSource?.settings]);
   const cooldown = savedCooldown && (savedCooldown.revision ?? 0) > (cooldownSource?.revision ?? -1) ? savedCooldown : cooldownSource || savedCooldown;
   const cooldownEnabled = eligible && cooldown?.enabled === true;
+  const coolingUntil = job.sessionReset?.status === "cooling" ? job.sessionReset.resumeAt : cooldown?.coolingUntil;
+  const cooling = Boolean(coolingUntil || ["pausing", "cooling", "refreshing", "resuming"].includes(cooldown?.phase));
+  const cooldownHint = cooldown?.lastError ? `自动冷却异常：${cooldown.lastError}`
+    : cooldown?.phase === "resuming" ? "正在恢复号池…" : cooldown?.phase === "refreshing" ? "重登授权后恢复…"
+    : coolingUntil ? `冷却至 ${displayDateTime(coolingUntil, { hour: "2-digit", minute: "2-digit" })}` : "";
   const points = detection?.points || [];
   const grid = overloadGrid(detection?.bucketMinutes);
   const dashboard = useMemo(() => overloadDashboard(detection, cooldown), [detection, cooldown]);
@@ -134,7 +139,8 @@ export function OverloadDetection({ job, token, onError }) {
         disabled={!eligible || cooldownBusy || !token || (!cooldown?.configured && !cooldownEnabled)} onClick={toggleCooldown}><span aria-hidden="true" /></button></div>
       </div>
       <div className="overload-chart-status">
-      <div className="overload-dashboard overload-chart">
+      <div className={`overload-dashboard overload-chart${cooling ? " is-cooling" : ""}`}
+        title={cooldownHint || undefined} aria-label={cooldownHint || undefined}>
       <OverloadEnergy value={dashboard.quarter} enabled={enabled} />
       <div className="overload-plot" ref={plotRef}>
         <svg viewBox="0 0 164 56" role="group" aria-label={`${grid.historyMinutes} 分钟刻度的过载与请求数量，每格按过载统计窗口 ${grid.bucketMinutes} 分钟，当前格累计至最近同步，两条线独立缩放`}>
@@ -166,9 +172,6 @@ export function OverloadDetection({ job, token, onError }) {
       </div>
       <OverloadEnergy value={dashboard.total} enabled={enabled} />
       </div>
-      {cooldown && (cooldown.lastError || cooldown.phase === "resuming" || cooldown.coolingUntil) && <span className={`overload-cooldown-status ${cooldown.lastError ? "error" : ""}`} title={cooldown.lastError || "自动冷却状态"}>
-        {cooldown.lastError ? "自动冷却异常" : cooldown.phase === "resuming" ? "正在恢复号池…" : cooldown.phase === "refreshing" ? "重登授权后恢复…" : `冷却至 ${displayDateTime(cooldown.coolingUntil, { hour: "2-digit", minute: "2-digit" })}`}
-      </span>}
       </div>
     </div>
   );

@@ -3748,11 +3748,6 @@ button.status-toggle.on .status-toggle-thumb {
   color: rgba(255, 255, 255, 0.4);
 }
 
-.overload-cooldown-status {
-  font-size: 10.5px;
-  color: var(--muted);
-}
-
 .fingerprint-check-button {
   height: 22px;
   padding: 0 5px;
@@ -3897,6 +3892,16 @@ button.status-toggle.on .status-toggle-thumb {
   padding: 2px;
 }
 
+.codex-status .overload-chart.is-cooling {
+  background: var(--surface-strong);
+  border-color: var(--line-strong);
+}
+.overload-chart.is-cooling .overload-line,
+.overload-chart.is-cooling .overload-request-line { stroke: var(--muted); }
+.overload-chart.is-cooling .overload-dot,
+.overload-chart.is-cooling .overload-request-dot { fill: var(--muted); }
+.overload-chart.is-cooling .codex-energy-fill { background: var(--muted) !important; }
+
 .overload-plot {
   position: relative;
   min-width: 0;
@@ -3929,7 +3934,9 @@ button.status-toggle.on .status-toggle-thumb {
 
 .codex-energy.zero .codex-energy-fill { min-height: 2px; }
 .codex-status .fingerprint-round { flex: 1; height: 5px; border-radius: 999px; }
-.codex-status .overload-cooldown-status { display: block; margin-top: 3px; }
+
+dialog.session-reset-dialog { width: min(440px, calc(100vw - 32px)); }
+.session-reset-dialog .settings-note { color: var(--muted); font-size: 12px; line-height: 1.6; }
 
 /* ==========================================================================
    9. Apple Sheet Modals & Dialogs (Refined macOS / iOS Sheet Design)

@@ -4,7 +4,7 @@ async page => {
   const run=async(name,fn)=>{try{await fn();results.push({name,passed:true})}catch(error){results.push({name,passed:false,error:error.message});await page.screenshot({path:evidence+'/'+name+'-failure.png'}).catch(()=>{});await page.keyboard.press('Escape').catch(()=>{})}};
   page.setDefaultTimeout(10000);page.on('pageerror',e=>errors.push(e.message));
   let userCost=2;
-  await page.route(/\/api\/jobs(?:\?|$)/,async route=>{const res=await route.fetch(),data=await res.json();data.jobs=data.jobs.map(j=>({...j,status:'completed',autoRepairBlocked:false,sub2apiInPool:true,canDownload:true,canLogoutAllSessions:true,canForceRelogin:true,
+  await page.route(/\/api\/jobs(?:\?|$)/,async route=>{const res=await route.fetch(),data=await res.json();data.jobs=data.jobs.map(j=>({...j,status:'completed',autoRepairBlocked:false,sub2apiInPool:true,canDownload:true,canLogoutAllSessions:true,canForceRelogin:true,canResetSessions:true,
     sub2apiUsage:{source:'sub2api',cacheKey:'pricing-'+j.id,allowed:true,primary:{usedPercent:10},totals:{accountCost:100,userCost,tokens:272000000,fetchedAt:'2026-11-07T01:00:00Z'}}}));data.selection=data.jobs;await route.fulfill({json:data})});
   await page.setViewportSize({width:1480,height:1000});await page.reload();
   const row=page.locator('tr.job-row').first();await row.locator('.usage-profit-pill').waitFor();
@@ -58,15 +58,15 @@ async page => {
   });
   await run('progress-toast-expires-without-cancelling-task',async()=>{
     let release,requested;const gate=new Promise(r=>release=r),started=new Promise(r=>requested=r);
-    await page.route('**/api/jobs/cooldown-batch',async route=>{requested();await gate;return route.fulfill({json:{started:1,skipped:0,cooldownMinutes:60}})});
+    await page.route('**/api/jobs/session-reset-batch',async route=>{requested();await gate;return route.fulfill({json:{started:1,skipped:0,cooldownMinutes:0}})});
     try {
       await row.getByRole('checkbox').check();await page.locator('.bulk-more-trigger').click();
-      await page.getByRole('menuitem',{name:'一键冷却',exact:true}).click();await started;
+      await page.getByRole('menuitem',{name:'一键重登',exact:true}).click();await page.getByRole('dialog',{name:'一键重登',exact:true}).getByRole('button',{name:'开始重登',exact:true}).click();await started;
       const toast=page.locator('.task-toast.success');await toast.waitFor();check(await toast.getAttribute('aria-busy')==='true','progress toast is not busy');
       await page.mouse.move(0,0);await toast.waitFor({state:'hidden',timeout:4000});check(await page.locator('.workflow-busy').count()>0,'dismissing toast interrupted task state');
       release();await page.waitForFunction(()=>document.querySelector('.task-toast.success')?.getAttribute('aria-busy')==='false');await closeToasts();
       await row.getByRole('checkbox').uncheck();
-    } finally {release();await page.unroute('**/api/jobs/cooldown-batch')}
+    } finally {release();await page.unroute('**/api/jobs/session-reset-batch')}
   });
   await run('mobile-price-and-toast-fit-viewport',async()=>{
     await page.setViewportSize({width:375,height:812});await saveCost('10');const toast=page.locator('.task-toast.success');await toast.waitFor();const b=await toast.boundingBox();check(b.x>=0&&b.x+b.width<=376,'mobile toast overflow');
