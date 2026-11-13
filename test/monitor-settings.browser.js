@@ -13,6 +13,11 @@ async (page) => {
     check(await modal.locator('input[id^="monitor-"]').count()===9,'obsolete monitor settings remain or settings are missing');
     check(await modal.locator('#monitor-poolMonitorIntervalSeconds, #monitor-overloadCooldownIntervalSeconds').count()===0,'duplicate polling intervals remain');
     check((await modal.getByRole('region',{name:'号池异常恢复',exact:true}).innerText()).includes('发现可恢复错误立即加入共享授权队列'),'immediate recovery explanation missing');
+    const overloadSection=modal.locator('.task-overload-settings');
+    check((await overloadSection.innerText()).includes('或图表累计达到 30 次'),'history threshold explanation missing');
+    await modal.locator('#overload-rule-threshold').fill('4');
+    check((await overloadSection.innerText()).includes('或图表累计达到 12 次'),'history threshold does not track current threshold');
+    await modal.locator('#overload-rule-threshold').fill('10');
     for(const key of ['usageTotalsConcurrency','overloadConcurrency','overloadCooldownConcurrency','profileSyncConcurrency']) check(await modal.locator('#monitor-'+key).inputValue()==='100',key+' default');
     check(await modal.locator('#fingerprint-default-concurrency, #fingerprint-default-interval').count()===0,'degradation settings duplicated');
     check(await modal.getByLabel('检测间隔（分钟）',{exact:true}).count()===1,'duplicated Web account interval');

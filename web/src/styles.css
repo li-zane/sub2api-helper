@@ -7316,9 +7316,11 @@ dialog.operation-detail-dialog {
 /* ==========================================================================
    Task Settings Dialog Modern Redesign (Clean Cards & Compact Form Controls)
    ========================================================================== */
-.task-settings-dialog {
+dialog.task-settings-dialog {
   width: min(840px, calc(100vw - 32px));
   max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow: hidden;
   padding: 22px 26px 20px;
   background: #ffffff;
   border-radius: 18px;
@@ -7330,10 +7332,41 @@ dialog.operation-detail-dialog {
   scrollbar-color: rgba(0, 0, 0, 0.16) transparent;
 }
 
-.task-settings-dialog .task-settings-form {
+dialog.task-settings-dialog[open] {
   display: flex;
   flex-direction: column;
+}
+
+.task-settings-dialog .task-settings-form {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
   gap: 14px;
+}
+
+.task-settings-dialog .task-settings-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.24) transparent;
+}
+
+.task-settings-dialog .task-settings-body > * {
+  flex-shrink: 0;
+}
+
+.task-settings-dialog .dialog-header,
+.task-settings-dialog .dialog-footer,
+.task-settings-dialog .dialog-error {
+  flex-shrink: 0;
 }
 
 .task-settings-dialog .dialog-header {
@@ -7865,9 +7898,11 @@ dialog.operation-detail-dialog {
 
 /* Responsive adjustments */
 @media (max-width: 768px) {
-  .task-settings-dialog {
+  dialog.task-settings-dialog {
     width: 100%;
     max-width: 100vw;
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
     padding: 16px 14px 18px;
     border-radius: 14px;
   }

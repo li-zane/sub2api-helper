@@ -167,7 +167,7 @@ export function OverloadDetection({ job, token, onError }) {
       <OverloadEnergy value={dashboard.total} enabled={enabled} />
       </div>
       {cooldown && (cooldown.lastError || cooldown.phase === "resuming" || cooldown.coolingUntil) && <span className={`overload-cooldown-status ${cooldown.lastError ? "error" : ""}`} title={cooldown.lastError || "自动冷却状态"}>
-        {cooldown.lastError ? "自动冷却异常" : cooldown.phase === "resuming" ? "正在恢复号池…" : `冷却至 ${displayDateTime(cooldown.coolingUntil, { hour: "2-digit", minute: "2-digit" })}`}
+        {cooldown.lastError ? "自动冷却异常" : cooldown.phase === "resuming" ? "正在恢复号池…" : cooldown.phase === "refreshing" ? "重登授权后恢复…" : `冷却至 ${displayDateTime(cooldown.coolingUntil, { hour: "2-digit", minute: "2-digit" })}`}
       </span>}
       </div>
     </div>

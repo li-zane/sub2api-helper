@@ -474,7 +474,7 @@
             <span class="node-tag tag-purple">Trigger C · 流量指标</span>
             <div class="node-title">过载频次超过阈值</div>
             <div class="node-text">
-              复用统一统计的当前固定格（默认 15 分钟）内 <code>503 / overload</code> 次数，达到设定阈值（默认 10 次）触发冷却。
+              复用统一统计的 <code>503 / overload</code> 次数；当前固定格达到阈值，或图表累计达到 3 倍阈值，任一满足就冷却（默认 15 分钟 ≥ 10 次，或 90 分钟 ≥ 30 次）。
             </div>
           </div>
 
@@ -664,11 +664,11 @@
             <div class="feature-name">❄️ 过载监测与自动冷却</div>
             <span class="node-tag tag-blue">防封保护</span>
           </div>
-          <p class="node-text">从号池运行日志统一读取请求与过载计数，当前固定格达到阈值自动暂停号池调度；每账号保存独立截止时间，到期唤醒恢复。</p>
+          <p class="node-text">从号池运行日志统一读取请求与过载计数，当前固定格达到阈值，或图表累计达到 3 倍阈值，自动暂停号池调度；每账号保存独立截止时间，到期唤醒恢复。</p>
           <table class="feature-table">
             <tr>
               <td class="col-label">触发时机</td>
-              <td class="col-val">当前 15 分钟固定格过载计数 ≥ 10 次（默认）。</td>
+              <td class="col-val">当前 15 分钟固定格 ≥ 10 次，或图表 90 分钟累计 ≥ 30 次（默认），任一满足。</td>
             </tr>
             <tr>
               <td class="col-label">保护机制</td>

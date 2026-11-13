@@ -3873,6 +3873,18 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
     }
   }
 
+  async function resetSessions() {
+    if (rowBusy || !job.canResetSessions) return;
+    setSubmitting(true);
+    try {
+      const data = await apiFetch(token, `/api/jobs/${job.id}/session-reset`, { method: "POST", body: JSON.stringify({}) });
+      onJobUpdate(data.job);
+      notify("已加入队列：登出设备、重登 Web 并更新号池凭据");
+      onError("");
+    } catch (error) { onError(error.message); }
+    finally { setSubmitting(false); }
+  }
+
   async function loginWeb() {
     if (workflowBusy || submitting) return;
     setSubmitting(true);
@@ -4245,6 +4257,12 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
           </button>
 
           {/* Row 2: 授权、重试与会话 */}
+          <button type="button" className="regenerate-button icon-only-action" onClick={resetSessions}
+            disabled={rowBusy || !job.canResetSessions}
+            title={job.canResetSessions ? "登出所有设备 → 重新登录 Web → Codex 授权 → 更新号池凭据；绑定 IP 保持不变" : mutationReason || job.sessionReset?.error || "需要有效 Web 会话且已加入号池，封禁账号不执行"}
+            aria-label="登出设备并重登授权">
+            {['queued', 'logging_out', 'authorizing', 'syncing'].includes(job.sessionReset?.status) ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
+          </button>
           <button
             type="button"
             className="regenerate-button icon-only-action"
@@ -4305,6 +4323,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
   const [monitoring, setMonitoring] = useState(() => Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
   const [cooldownMinutes, setCooldownMinutes] = useState(() => String(settings.accountProxyCooldownMinutes || 60));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
+  const [resetAfterCooldown, setResetAfterCooldown] = useState(settings.overloadAutoCooldown?.reauthorizeAfterCooldown === true);
   const [webMonitor, setWebMonitor] = useState(() => ({ enabled: settings.webSessionMonitor?.enabled === true, autoRelogin: settings.webSessionMonitor?.autoRelogin !== false, intervalMinutes: String(settings.webSessionMonitor?.intervalMinutes || 15), retryMinutes: String(settings.webSessionMonitor?.retryMinutes || 60) }));
   const [accountProxyMode, setAccountProxyMode] = useState(() => ["sub2api", "plan"].includes(settings.accountProxyMode) ? settings.accountProxyMode : "global");
   const [codexAuthMode, setCodexAuthMode] = useState(() => settings.codexAuthMode || "local");
@@ -4339,6 +4358,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
     setPriceMultiplier(String(DEFAULT_POOL_PRICE_MULTIPLIER));
     setCooldownMinutes("60");
     setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" });
+    setResetAfterCooldown(false);
     setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" });
     setMonitoring(Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(field.default)])));
     setAccountProxyMode("global");
@@ -4374,6 +4394,8 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
       return;
     }
     const overloadAutoCooldown = Object.fromEntries(Object.entries(overloadRule).map(([key, value]) => [key, Number(value)]));
+    if (resetAfterCooldown || Object.hasOwn(settings.overloadAutoCooldown || {}, "reauthorizeAfterCooldown"))
+      overloadAutoCooldown.reauthorizeAfterCooldown = resetAfterCooldown;
     if (!Number.isInteger(overloadAutoCooldown.windowMinutes) || overloadAutoCooldown.windowMinutes < 1 || overloadAutoCooldown.windowMinutes > 1440
       || !Number.isInteger(overloadAutoCooldown.threshold) || overloadAutoCooldown.threshold < 1 || overloadAutoCooldown.threshold > 100000
       || !Number.isInteger(overloadAutoCooldown.cooldownMinutes) || overloadAutoCooldown.cooldownMinutes < 1 || overloadAutoCooldown.cooldownMinutes > 43200) {
@@ -4456,6 +4478,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           </div>
           <button type="button" className="icon-button" data-dialog-initial-focus onClick={onClose} disabled={saving} aria-label="关闭任务设置"><X size={18} /></button>
         </div>
+        <div className="task-settings-body">
         <section className="task-auto-settings task-basic-section" aria-labelledby="task-basic-title">
           <div className="section-title-row">
             <SlidersHorizontal size={15} className="task-section-icon" aria-hidden="true" />
@@ -4594,20 +4617,20 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
               {TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === group).map(monitoringField)}
             </div>
             <div className="task-auto-empty">{group === "号池异常恢复" ? "跟随号池状态刷新，发现可恢复错误立即加入共享授权队列，不另设巡检；重试间隔仅用于失败后的再次尝试，设为 0 时不设失败冷却。"
-              : "仅请求号池，默认网络并发 100。调用与过载默认每 60 秒统一统计；曲线每格跟随下方的过载统计窗口，默认 15 分钟一格，展示 6 格。当前格累计至最近同步，并直接用于冷却阈值判断；历史格缓存复用，冷却到期独立恢复。关闭页面后继续同步。"}</div>
+              : "仅请求号池，默认网络并发 100。调用与过载默认每 60 秒统一统计；曲线每格跟随下方的过载统计窗口，默认 15 分钟一格，展示 6 格。当前格和图表累计共用采集，任一达到各自阈值就冷却；历史格缓存复用，冷却到期独立恢复。关闭页面后继续同步。"}</div>
           </section>
         ))}
         <section className="task-auto-settings task-overload-settings" aria-labelledby="task-overload-title">
           <div className="section-title-row">
             <Activity size={15} className="task-section-icon" aria-hidden="true" />
             <h3 id="task-overload-title">过载</h3>
-            <HelpTip label="过载设置说明">冷却读取号池已有请求日志，不主动发起模型测试。统计频率在“号池与用量同步”中统一设置，每次统计后直接判断当前固定格是否达到冷却阈值；这里设置触发规则。账号的“过载”和“冷却”开关分别开启。</HelpTip>
+            <HelpTip label="过载设置说明">冷却读取号池已有请求日志，不主动发起模型测试。统计频率在“号池与用量同步”中统一设置，每次统计后判断当前固定格或图表累计是否达到各自阈值，任一达到就冷却。账号的“过载”和“冷却”开关分别开启。</HelpTip>
           </div>
           <div className="task-overload-cooldown">
           <div className="section-title-row">
             <h4 id="overload-auto-cooldown-title">自动冷却</h4>
             <HelpTip label="过载自动冷却说明">
-              复用调用与过载统计的当前固定格次数，达到阈值后暂停号池分配。每个账号独立保存冷却截止时间，到期自动恢复，重启后继续计时。“冷却”可单独开启，不依赖“过载”展示开关；恢复后从下一固定格重新判断，避免旧次数再次触发。
+              当前固定格达到阈值，或图表累计（默认 90 分钟）达到阈值的 3 倍，任一满足就暂停号池分配，与两侧能量条一致。复用同一次采集；累计数据不完整时只判断当前格。每个账号独立保存冷却截止时间，到期自动恢复，重启后继续计时。“冷却”可单独开启；恢复当格跳过旧次数，下一固定格重新判断两项阈值，累计仍超限时会再次冷却。
             </HelpTip>
           </div>
           <div className="overload-rule-fields">
@@ -4615,7 +4638,10 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
               <span>{field.label}</span><div><input id={`overload-rule-${field.key}`} type="number" min={1} max={field.max} step="1" value={overloadRule[field.key]} disabled={saving} onChange={event => setOverloadRule(current => ({ ...current, [field.key]: event.target.value }))} /><span>{field.unit}</span></div>
             </label>)}
           </div>
-          <div className="task-auto-empty">当前 {overloadRule.windowMinutes || "—"} 分钟固定格内过载达到 {overloadRule.threshold || "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟；到期会及时唤醒恢复。</div>
+          <div className="task-auto-empty">当前 {overloadRule.windowMinutes || "—"} 分钟固定格达到 {overloadRule.threshold || "—"} 次，或图表累计达到 {overloadRule.threshold ? Number(overloadRule.threshold) * 3 : "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟；到期及时恢复。</div>
+          <label className="task-auto-action-option"><input type="checkbox" checked={resetAfterCooldown} disabled={saving}
+            onChange={event => setResetAfterCooldown(event.target.checked)} /><span>冷却结束后重登 Web 并重新授权</span></label>
+          <div className="task-auto-empty">默认关闭。开启后，到期先登出所有设备、重登 Web、完成 Codex OAuth 并原位更新号池凭据，成功后恢复调度；失败保持暂停。整个流程沿用原绑定 IP，不轮换密码或 2FA。</div>
           </div>
           <details className="task-overload-advanced">
             <summary>冷却操作并发</summary>
@@ -4672,6 +4698,7 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
             ))}
           </div>
         </section>
+        </div>
         {error && <div className="dialog-error" role="alert"><CircleAlert size={15} />{error}</div>}
         <div className="dialog-footer">
           <button type="button" className="selection-text-button" onClick={resetDefaults} disabled={saving} title="恢复基础与监控参数，保留已配置的 PlanType 自动任务">恢复默认</button>

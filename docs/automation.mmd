@@ -5,7 +5,7 @@ flowchart TB
 
     TRIGGER_OAUTH["号池状态刷新 / 降智检测<br/>捕获 OAuth 凭据失效 · 401"] --> CLASSIFY{"错误特征与资格审查"}
     TRIGGER_WEB["Web 会话定时例行巡检<br/>Cookie 实际测活"] --> CLASSIFY
-    TRIGGER_OVERLOAD["当前固定区间过载达到阈值<br/>≥ 阈值 (默认 10 次)"] --> COOLDOWN["暂停号池调度 · 自动冷却 60m<br/>到期自愈唤醒 · 不覆盖手动停用"]
+    TRIGGER_OVERLOAD["当前格 ≥ 阈值，或图表累计 ≥ 3 倍阈值<br/>默认 15m ≥ 10 次，或 90m ≥ 30 次"] --> COOLDOWN["暂停号池调度 · 自动冷却 60m<br/>到期自愈唤醒 · 不覆盖手动停用"]
 
     CLASSIFY -->|"明确永久封禁"| BLOCK["停用账号 · 关闭所有探测<br/>解绑代理 IP · 彻底阻断重登"]
     CLASSIFY -->|"临时网络波动 / 限流"| RETRY["按配置冷却退避重试<br/>保留原绑定，不猜测套餐"]

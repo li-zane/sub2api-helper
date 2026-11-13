@@ -5,8 +5,9 @@ const LABELS = {
   setup_2fa: "设置 2FA", replace_2fa: "更换 2FA", add_password: "添加密码", replace_password: "轮换密码",
   account_update: "更新账号资料", credential_update: "更新凭据", proxy_update: "更新代理 IP",
   cooldown: "账号冷却", workspace_switch: "切换空间",
+  session_reset: "重登并更新号池",
 };
-const AUTHORIZATION = new Set(["initial_authorization", "reauthorize", "relogin", "automatic_relogin", "resume"]);
+const AUTHORIZATION = new Set(["initial_authorization", "reauthorize", "relogin", "automatic_relogin", "resume", "session_reset"]);
 const UPDATES = new Set(["account_update", "credential_update", "proxy_update", "workspace_switch"]);
 const ACTIVE_STATUSES = new Set([
   "queued", "starting", "working", "totp_starting",

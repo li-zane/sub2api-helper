@@ -375,8 +375,9 @@ export class OverloadMonitor {
             entry.enabled ? collectRequestIntervals({ ...options, points: requestPlan.points }) : Promise.resolve(null),
           ]);
           if (!isEnabled()) continue;
+          const overloadPoints = overloads.status === "fulfilled" && overloads.value ? mergeCounts(overloadPlan, overloads.value) : null;
           this.accounts.set(email, { ...entry,
-            points: overloads.status === "fulfilled" && overloads.value ? mergeCounts(overloadPlan, overloads.value) : entry.points || [],
+            points: overloadPoints || entry.points || [],
             requestPoints: requests.status === "fulfilled" && requests.value ? mergeCounts(requestPlan, requests.value) : entry.requestPoints || [],
             ...(overloads.status === "fulfilled" && overloads.value ? { overloadScope: scope, overloadUpdatedAt: new Date(now).toISOString(), overloadReconciledAt: overloadPlan.full ? new Date(now).toISOString() : entry.overloadReconciledAt } : {}),
             ...(requests.status === "fulfilled" && requests.value ? { requestScope: scope, requestUpdatedAt: new Date(now).toISOString(), requestReconciledAt: requestPlan.full ? new Date(now).toISOString() : entry.requestReconciledAt } : {}),
@@ -385,7 +386,11 @@ export class OverloadMonitor {
             requestError: requests.status === "rejected" ? String(requests.reason?.message || requests.reason).slice(0, 500) : null,
           });
           if (overloads.status === "fulfilled" && overloads.value) {
-            await this.onOverloadCounts(email, { config, accountIds, point: overloads.value.at(-1), sampledAt: now, windowMinutes });
+            // The cooldown decision uses the exact same merged chart snapshot as
+            // the dashboard. Fresh buckets alone are insufficient: the 90-minute
+            // threshold must also see buckets retained in the warm cache.
+            const points = overloadPoints.slice(-overloadGrid(windowMinutes).pointCount);
+            await this.onOverloadCounts(email, { config, accountIds, point: points.at(-1), points, sampledAt: now, windowMinutes });
           }
         } catch (error) {
           if (isEnabled()) this.accounts.set(email, { ...entry, lastError: String(error.message).slice(0, 500), requestError: String(error.message).slice(0, 500) });

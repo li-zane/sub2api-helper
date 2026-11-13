@@ -13,6 +13,7 @@ const labels = {
   account_update: "更新账号", resume: "继续授权", retry: "重试授权", upload: "上传到 Sub2API",
   automatic_relogin: "自动重新登录并授权", cooldown: "账号冷却", workspace_switch: "切换工作空间",
   credential_update: "更新本地凭据", proxy_update: "更新账号代理", logout_all: "登出所有设备",
+  session_reset: "登出设备并重登授权",
 };
 const root = job => path.dirname(job.outputPath);
 const indexFile = (job, id) => path.join(root(job), "operation-logs", `${id}.json`);
