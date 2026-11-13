@@ -95,8 +95,12 @@ const webUrl = `http://127.0.0.1:${upstream.address().port}`;
 const wrapper = path.join(root, "protocol.mjs");
 let child, exited, headers, base, logs = "";
 const wait = async fn => {
-  for (let n = 0; n < 200; n++) { const value = await fn().catch(() => null); if (value) return value; if (child?.exitCode !== null && child?.exitCode !== undefined) throw new Error(logs); await new Promise(r => setTimeout(r, 50)); }
-  const details = headers ? await api(`/api/jobs/${id}/logs`).catch(() => null) : null;
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline;) { const value = await fn().catch(() => null); if (value) return value; if (child?.exitCode !== null && child?.exitCode !== undefined) throw new Error(logs); await new Promise(r => setTimeout(r, 50)); }
+  const details = headers ? {
+    logs: await api(`/api/jobs/${id}/logs`).catch(() => null),
+    job: (await api('/api/jobs').catch(() => null))?.body.jobs?.find(job => job.id === id),
+    monitor: await api('/api/web-session-monitor').catch(() => null),
+  } : null;
   throw new Error("fixture timed out\n" + logs + "\n" + JSON.stringify(details));
 };
 async function start() {
