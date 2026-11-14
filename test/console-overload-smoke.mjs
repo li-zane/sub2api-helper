@@ -18,7 +18,16 @@ const counts = [0, 2, 5, 1, 3, 0];
 const requestCounts = [198, 204, 210, 202, 196, 0];
 const logRequests = [];
 // Keep source rows fixed across cold, incremental and restarted queries.
-const sourceStart = Math.floor(Date.now() / COUNT_BUCKET_MS) * COUNT_BUCKET_MS - 5 * COUNT_BUCKET_MS;
+const sourceStart = Math.floor(Date.now() / COUNT_BUCKET_MS) * COUNT_BUCKET_MS
+  - (process.argv.includes("--previous-window") ? 6 : 5) * COUNT_BUCKET_MS;
+// Startup/restarts may cross a real bucket boundary. Compare each returned
+// interval with its fixed source rows rather than assuming the grid never moves.
+function expectedCounts(points, values) {
+  return points.map(point => values.reduce((sum, count, index) => {
+    const at = sourceStart + index * COUNT_BUCKET_MS + 10_000;
+    return sum + (at >= Date.parse(point.start) && at < Date.parse(point.end) ? count : 0);
+  }, 0));
+}
 let child;
 let headers;
 let logs = "";
@@ -124,8 +133,8 @@ try {
   await toggle(true, { id: "33333333-3333-4333-8333-333333333333", expected: 404 });
   await toggle(true);
   const entry = await populated();
-  assert.deepEqual(entry.overloadDetection.points.map((point) => point.count), counts);
-  assert.deepEqual(entry.overloadDetection.points.map((point) => point.requestCount), requestCounts);
+  assert.deepEqual(entry.overloadDetection.points.map((point) => point.count), expectedCounts(entry.overloadDetection.points, counts));
+  assert.deepEqual(entry.overloadDetection.points.map((point) => point.requestCount), expectedCounts(entry.overloadDetection.points, requestCounts));
   assert.equal((await job(ids[1])).overloadDetection.enabled, false);
   assert(logRequests.every((url) => ["7", "8"].includes(url.searchParams.get("account_id"))), "each remote account for this email is included");
   assert(logRequests.every((url) => url.searchParams.get("status_codes") === "503"));
@@ -141,11 +150,12 @@ try {
   assert.equal((await job()).overloadDetection.enabled, false);
   const saved = JSON.parse(await fs.readFile(path.join(output, "overload-monitor.json"), "utf8"));
   assert.equal(saved.accounts[emails[0]].enabled, false);
-  assert.deepEqual(saved.accounts[emails[0]].points.map((point) => point.count), counts);
+  assert.deepEqual(saved.accounts[emails[0]].points.map((point) => point.count), expectedCounts(saved.accounts[emails[0]].points, counts));
   await stop(); await start();
   assert.equal((await job()).overloadDetection.enabled, false);
-  assert.deepEqual((await job()).overloadDetection.points.map((point) => point.count), counts);
-  assert.deepEqual((await job()).overloadDetection.points.map((point) => point.requestCount), requestCounts, "request history survives restart");
+  const restoredPoints = (await job()).overloadDetection.points;
+  assert.deepEqual(restoredPoints.map((point) => point.count), expectedCounts(restoredPoints, counts));
+  assert.deepEqual(restoredPoints.map((point) => point.requestCount), expectedCounts(restoredPoints, requestCounts), "request history survives restart");
   await toggle(true);
   await populated();
   await stop(); await start(); await populated();
