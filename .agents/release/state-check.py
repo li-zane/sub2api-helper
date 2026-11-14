@@ -25,7 +25,24 @@ def main():
             return response.read()
 
     token = json.loads(get("/api/bootstrap"))["token"]
-    jobs = json.loads(get("/api/jobs", token))["jobs"]
+    # The console paginates jobs. Both the idle gate and binding verification
+    # must include later pages, including accounts with running tasks.
+    jobs = []
+    page = 1
+    expected_total = None
+    while True:
+        payload = json.loads(get(f"/api/jobs?page={page}", token))
+        jobs.extend(payload["jobs"])
+        pagination = payload.get("pagination", {})
+        total = pagination.get("total", len(jobs))
+        if expected_total is not None and total != expected_total:
+            raise RuntimeError("Account list changed during paginated check; retry when stable")
+        expected_total = total
+        if page >= pagination.get("totalPages", 1):
+            break
+        page += 1
+    if len(jobs) != expected_total or len({job["id"] for job in jobs}) != len(jobs):
+        raise RuntimeError("Incomplete or changing account list; refusing partial verification")
     bindings = sorted([{"id": job["id"], "proxyId": job.get("assignedProxyId")}
                        for job in jobs], key=lambda item: item["id"])
     snapshot = args.backup / "account-bindings-before.json"

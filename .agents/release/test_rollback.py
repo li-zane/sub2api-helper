@@ -53,7 +53,7 @@ class RollbackTest(unittest.TestCase):
                 def do_GET(self):
                     if self.path == "/api/bootstrap":
                         body = json.dumps({"token": "synthetic-fixture-token"}).encode()
-                    elif self.path == "/api/jobs":
+                    elif self.path.split("?", 1)[0] == "/api/jobs":
                         body = json.dumps({"jobs": [{"id": "fixture", "assignedProxyId": "fixture-proxy"}]}).encode()
                     else:
                         body = (app / "web/dist" / ("index.html" if self.path == "/" else self.path.lstrip("/"))).read_bytes()
