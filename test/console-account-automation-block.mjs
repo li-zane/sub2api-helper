@@ -50,7 +50,10 @@ const off = j => !j.overloadDetection.enabled && !j.overloadAutoCooldown.enabled
 try {
   for (const [i, email] of emails.entries()) {
     const dir = path.join(root, ids[i]); await fs.mkdir(dir);
-    await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: i === 0 ? "banned" : "completed", auto_repair_blocked: i === 0, result_saved: true, plan_type: "free", web_login_error: i === 2 ? "HTTP 403: temporary permission failure" : i === 3 ? "Workspace deleted or deactivated" : null }));
+    // Inspect startup classification before allowing the synthetic ban protocol to run.
+    // Manual Web login below explicitly clears this maintenance pause.
+    await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: i === 0 ? "banned" : "completed", auto_repair_blocked: i === 0, result_saved: true, plan_type: "free", web_login_error: i === 2 ? "HTTP 403: temporary permission failure" : i === 3 ? "Workspace deleted or deactivated" : null,
+      ...(i ? { web_session_maintenance_pause: { reason: "canceled", at: new Date().toISOString() } } : {}) }));
     await fs.writeFile(path.join(dir, "sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ credentials: { email, access_token: "fixture", refresh_token: "fixture" } }] }));
   }
   await fs.writeFile(path.join(root, "protocol.mjs"), `console.error(${JSON.stringify("[error] " + ban)}); process.exitCode=1;`);
