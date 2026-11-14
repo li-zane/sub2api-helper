@@ -12,7 +12,7 @@ import subprocess
 import tarfile
 
 ASSET = "helper-linux-x64-node22.tar.gz"
-ROOTS = ("src", "web/dist", "node_modules", "package.json", "package-lock.json", "requirements.txt")
+ROOTS = ("src", "web/src", "web/dist", "node_modules", "package.json", "package-lock.json", "requirements.txt")
 
 
 def digest(path):
@@ -95,6 +95,13 @@ def build(source, output, revision):
         with tarfile.open(archive, "w:gz", compresslevel=1) as tar:
             for path in sorted(stage.iterdir()):
                 tar.add(path, arcname=path.name)
+        smoke = output / "runtime-smoke"
+        try:
+            extract(archive, smoke, revision)
+            subprocess.run(["node", str(source / "test/production-console-smoke.mjs")], cwd=smoke, check=True)
+        finally:
+            if smoke.exists():
+                shutil.rmtree(smoke)
         (output / "SHA256SUMS").write_text(f"{digest(archive)}  {ASSET}\n")
         print(f"BUNDLE_OK revision={revision} files={len(metadata['files'])} asset={ASSET}")
     finally:

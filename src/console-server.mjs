@@ -3170,7 +3170,7 @@ async function restoreAccountSessionResets() {
       job.queuedMode = "full"; job.poolRefreshAction = "session-reset";
       continue;
     }
-    await forceReloginJob(job, {}, { automatic: true, sessionReset: true, poolRefreshAction: "session-reset" });
+    await forceReloginJob(job, {}, { automatic: true, sessionReset: true, resumeSessionReset: true, poolRefreshAction: "session-reset" });
   }
 }
 
@@ -3264,7 +3264,9 @@ async function forceReloginJob(job, options = {}, context = {}) {
     job.autoRepairPendingBackend = context.autoRepair.backend || null;
   }
   beginAuthorizationAutomationAttempt(job, context.autoRepair ? "sub2api_monitor" : "manual_relogin");
-  recordJobOperation(job, context.sessionReset ? "session_reset" : context.autoRepair ? "automatic_relogin" : context.unified ? "reauthorize" : "relogin");
+  // Restoring one durable reset continues its existing log across restarts.
+  if (!context.resumeSessionReset || job.logOperation?.type !== "session_reset")
+    recordJobOperation(job, context.sessionReset ? "session_reset" : context.autoRepair ? "automatic_relogin" : context.unified ? "reauthorize" : "relogin");
   if (!context.autoRepair && !context.authorizeOnly) {
     beginPoolRefresh(job, context.poolRefreshAction || "relogin");
   }
