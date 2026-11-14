@@ -26,7 +26,7 @@ ssh x3 'helper-update'
 ssh x3 'helper-update <40位SHA> --wait-seconds 1200'
 ```
 
-推送后等待对应提交的 GitHub Actions 和 Release 就绪，再按用户本轮授权执行更新。仅修改发布配置、规则或安装命令不代表要求切换业务版本；不执行更新时仍应使用 `--check` 验证完整下载和校验路径。
+推送后核实对应提交的 GitHub Actions 运行；若未自动创建，显式调度 `Check` 的 `workflow_dispatch`，`ref=main`，并再次核实运行 SHA。等待该提交的全部检查和 Release 就绪，再按用户本轮授权执行更新。仅修改发布配置、规则或安装命令不代表要求切换业务版本；不执行更新时仍应使用 `--check` 验证完整下载和校验路径。
 
 ## 更新、验证与清理
 

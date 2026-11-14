@@ -2,8 +2,9 @@ name: Check
 
 on:
   push:
-  pull_request:
-  workflow_dispatch:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
 
 permissions:
   contents: read

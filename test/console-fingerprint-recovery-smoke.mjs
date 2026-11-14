@@ -4,11 +4,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {createCredentialStore} from "../src/credential-store.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-fingerprint-console-")), output = path.join(temp, "output");
+const fixtureKey = crypto.randomBytes(32).toString("hex"), fixtureCredentials = path.join(temp, "credentials");
 const bannedScenario=process.argv.includes("--banned");
 let child, headers, logs = "", samples = 0;
 const account = { id: 42, name: "fingerprint@example.test", email: "fingerprint@example.test", platform: "openai", type: "oauth", status: "active", schedulable: true, group_ids: [10, 20, 99], credentials: { email: "fingerprint@example.test", plan_type: "free", access_token: "private-fixture-token", chatgpt_account_id: "fixture-account" }, extra: {} };
@@ -37,7 +39,7 @@ const inference = http.createServer(async (req, res) => {
 await Promise.all([listen(pool), listen(inference)]);
 const port = await freePort(), base = `http://127.0.0.1:${port}`;
 async function start() {
-  child = spawn(process.execPath, ["--import", pathToFileURL(path.join(root, "test/fingerprint-auth-reference-loader.mjs")).href, "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: temp, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_FINGERPRINT_TEST_URL: `http://127.0.0.1:${inference.address().port}/responses`, ONBOARDING_PROTOCOL_SCRIPT:path.join(temp,"protocol.mjs"), SUB2API_MONITOR_ENABLED: "0" } });
+  child = spawn(process.execPath, ["--import", pathToFileURL(path.join(root, "test/fingerprint-auth-reference-loader.mjs")).href, "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: output, LOCALAPPDATA: temp, TOSUB2_CREDENTIAL_KEY: fixtureKey, TOSUB2_LINUX_CREDENTIAL_ROOT: fixtureCredentials, TOSUB2_TLS_PROFILE: "chrome142", TOSUB2_FINGERPRINT_TEST_URL: `http://127.0.0.1:${inference.address().port}/responses`, ONBOARDING_PROTOCOL_SCRIPT:path.join(temp,"protocol.mjs"), SUB2API_MONITOR_ENABLED: "0" } });
   child.stdout.on("data", c => logs += c); child.stderr.on("data", c => logs += c);
   await waitFor(async () => { try { const r = await fetch(base + "/api/bootstrap"); const b = await r.json(); headers = { "x-console-token": b.token, "content-type": "application/json" }; return b.features.modelFingerprint; } catch { return false; } });
 }
@@ -48,7 +50,7 @@ try {
   const id="11111111-1111-4111-8111-111111111111",dir=path.join(output,id);await fs.mkdir(dir,{recursive:true});
   await fs.writeFile(path.join(dir,"job-meta.json"),JSON.stringify({version:1,email:account.email,status:"completed",result_saved:true,plan_type:"free",last_auth_automated:true,last_auth_requirements:{password:true}}));
   await fs.writeFile(path.join(dir,"sub2api-import-oauth.json"),JSON.stringify({type:"sub2api-data",accounts:[account]}));
-  const store=createCredentialStore({windowsRoot:path.join(temp,"toSub2","credentials")});await store.save(account.email,{password:"fixture-password"});
+  const store=createCredentialStore({windowsRoot:path.join(temp,"toSub2","credentials"),linuxRoot:fixtureCredentials,linuxKey:fixtureKey});await store.save(account.email,{password:"fixture-password"});
   const marker=path.join(temp,"login-count.txt");
   await fs.writeFile(path.join(temp,"protocol.mjs"),`import fs from 'node:fs/promises';await fs.appendFile(${JSON.stringify(marker)},'login\\n');console.log('[1/5] Start ChatGPT web login');console.log('Email OTP (r=resend, q=quit):');process.stdin.resume();`);
   await start();
