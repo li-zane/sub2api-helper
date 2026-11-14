@@ -40,6 +40,12 @@ const upstream = http.createServer((req, res) => {
 });
 const pool = http.createServer(async (req, res) => {
   const chunks = []; for await (const chunk of req) chunks.push(chunk);
+  // Automatic reset-card reads use this read-only POST. Keep credential,
+  // upload and rotation writes in the assertion below.
+  if (req.method === "POST" && /^\/api\/v1\/admin\/openai\/accounts\/\d+\/quota\/refresh$/.test(req.url)) {
+    res.setHeader("content-type", "application/json");
+    return res.end(JSON.stringify({ data: { rate_limit_reset_credits: { available_count: 0, credits: [] } } }));
+  }
   if (req.method !== "GET") updates.push(req.url);
   res.setHeader("content-type", "application/json");
   if (req.url.startsWith("/api/v1/admin/accounts")) return res.end(JSON.stringify({ data: { items: [{ id: 42, platform: "openai", type: "oauth", name: emailFor("valid"), status: "active", schedulable: true, credentials: { email: emailFor("valid"), plan_type: "business" } }], total: 1, pages: 1 } }));

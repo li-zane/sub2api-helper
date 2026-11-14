@@ -60,13 +60,14 @@ try {
   assert.equal(refreshed.totals.tokens, 2468); assert.equal(refreshed.primary.usedPercent, 37);
   assert.equal(calls.filter(url => url.pathname === "/api/v1/admin/usage/stats" && url.searchParams.get("nocache") === "true").length, 2);
   assert(calls.filter(url => url.pathname === "/api/v1/admin/usage/stats").every(url => url.searchParams.get("start_date") === "1970-01-01"));
+  const cardReads = calls.filter(url => url.pathname.endsWith("/quota/refresh")).length;
   const applied=await fetch(base+"/api/task-settings",{method:"POST",headers,body:JSON.stringify({monitoring:{accountStatusIntervalSeconds:1,usageTotalsIntervalSeconds:1,usageTotalsConcurrency:1}})});
   assert.equal(applied.status,200);
   const snapshots=calls.filter(url=>url.pathname==="/api/v1/admin/accounts").length;
   const stats=calls.filter(url=>url.pathname==="/api/v1/admin/usage/stats").length;
   // Wait on fixture counters only: no browser/API polling is driving the sync.
   await waitFor(async()=>calls.filter(url=>url.pathname==="/api/v1/admin/accounts").length>snapshots && calls.filter(url=>url.pathname==="/api/v1/admin/usage/stats").length>stats);
-  assert.equal(calls.filter(url=>url.pathname.endsWith("/quota/refresh")).length,2,"background sync never refreshes upstream quota");
+  assert.equal(calls.filter(url=>url.pathname.endsWith("/quota/refresh")).length,cardReads,"fast database polling must respect the independent reset-card cache interval");
   console.log("CONSOLE_USAGE_TOTALS_PASS asynchronous list safety; all-history per-account aggregation; A/U semantics; cache reuse; manual quota+totals refresh");
 } finally {
   release();

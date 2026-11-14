@@ -45,7 +45,7 @@ import { normalizeCodexAuthMode } from "./sub2api-oauth.mjs";
 import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-transport.mjs";
 import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
-import { normalizeResetCredits } from "./sub2api-reset-credits.mjs";
+import { normalizeResetCredits, createResetCreditsReader } from "./sub2api-reset-credits.mjs";
 import { DEFAULT_MONITORING, normalizeMonitoring, normalizeSavedMonitoring, TASK_SETTINGS_VERSION } from "../web/src/monitor-settings.mjs";
 import { normalizeTaskUploadActions, isRedundantTaskUpload, isRedundantTaskAuthorization } from "../web/src/task-auto-actions.mjs";
 import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "../web/src/login-settings.mjs";
@@ -282,6 +282,13 @@ const readUsageTotals = createUsageTotalsReader({
   isBlocked: id => [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
   request: (...args) => shuttingDown
   ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args) });
+const readResetCredits = createResetCreditsReader({
+  getSettings: () => ({ ttlMs: monitoringSettings.resetCreditsIntervalSeconds * 1000, concurrency: monitoringSettings.resetCreditsConcurrency }),
+  isBlocked: id => [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
+  normalize: payload => normalizeSub2ApiUsagePayload(payload, { resetCreditsRefreshed: true }),
+  request: (...args) => shuttingDown
+    ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args),
+});
 let sub2ApiAccountStatusCache = {
   backend: null,
   fetchedAt: null,
@@ -453,7 +460,7 @@ const modelFingerprint = new ModelFingerprintService({
   },
   getAccount: readFingerprintAccount, sample: fingerprintSampler,
   onAccountFailure: recoverFingerprintAuthorization,
-  updateGroups: async (config, id, ids) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ group_ids: ids.map(Number) }) }),
+  updateConcurrency: async (config, id, concurrency) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ concurrency }) }),
   onChange: invalidateSub2ApiAccountStatusCache,
 });
 async function recoverFingerprintAuthorization(email, failure) {
@@ -708,6 +715,7 @@ async function handleApi(req, res, requestUrl) {
         sub2apiAccountStatus: true,
         sub2apiAccountToggle: true,
         sub2apiAccountPriority: true,
+        sub2apiAccountConcurrency: true,
         accountRemarks: true,
         overloadDetection: true,
         proxyQuality: true,
@@ -733,11 +741,7 @@ async function handleApi(req, res, requestUrl) {
       const body = await readJson(req);
       await modelFingerprint.saveSettings(body.settings || body);
     } else if (req.method !== "GET") throw httpError(405, "Method not allowed");
-    let groups = [];
-    if (sub2ApiSettingsConfig?.baseUrl && sub2ApiSettingsConfig?.adminApiKey) {
-      try { groups = (await listSub2ApiTargetGroups(sub2ApiSettingsConfig)).map(g => ({ id: String(g.id), name: String(g.name || g.id) })); } catch {}
-    }
-    sendJson(res, 200, { ...modelFingerprint.publicSettings(), groups }); return;
+    sendJson(res, 200, modelFingerprint.publicSettings()); return;
   }
   if (req.method === "GET" && requestUrl.pathname === "/api/model-fingerprint/reference") {
     sendJson(res, 200, await modelFingerprint.referenceInfo()); return;
@@ -764,6 +768,7 @@ async function handleApi(req, res, requestUrl) {
     else {
       const body = await readJson(req);
       if (accountAutomationBlocked(job.email) && body.enabled !== false) throw httpError(409, "账号已确认永久停用，请先手动恢复账号后再启用自动化");
+      if (body.enabled === true && !modelFingerprint.settings.enabledPlanTypes.includes(planType.toLowerCase())) throw httpError(409, "请先在降智检测配置中添加该 PlanType");
       if (body.enabled !== false) await assertCodexMonitoringAllowed(job);
       await modelFingerprint.saveOverride(job.email, body);
     }
@@ -1398,11 +1403,13 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
-  const sub2ApiPriorityMatch = /^\/api\/sub2api\/accounts\/([a-f0-9-]+)\/priority$/.exec(requestUrl.pathname);
+  const sub2ApiPriorityMatch = /^\/api\/sub2api\/accounts\/([a-f0-9-]+)\/(priority|concurrency)$/.exec(requestUrl.pathname);
   if ((req.method === "POST" || req.method === "PUT") && sub2ApiPriorityMatch) {
     const body = await readJson(req);
-    const priority = parseOptionalSub2ApiInteger(body?.priority, "优先级", 0, 10000);
-    if (priority === null) throw httpError(400, "优先级必须是 0 到 10000 的整数");
+    const field = sub2ApiPriorityMatch[2], fieldName = field === "priority" ? "优先级" : "并发数";
+    if (typeof body?.[field] === "boolean") throw httpError(400, `${fieldName}必须是 0 到 10000 的整数`);
+    const value = parseOptionalSub2ApiInteger(body?.[field], fieldName, 0, 10000);
+    if (value === null) throw httpError(400, `${fieldName}必须是 0 到 10000 的整数`);
     const job = jobs.get(sub2ApiPriorityMatch[1]);
     if (!job) {
       sendJson(res, 404, { error: "Login flow not found" });
@@ -1415,14 +1422,16 @@ async function handleApi(req, res, requestUrl) {
     const accountIds = [...new Set(entry?.accountIds || [])];
     if (!accountIds.length) throw httpError(409, `${job.email} 尚未加入 Sub2API 号池`);
     try {
-      await Promise.all(accountIds.map((accountId) => requestSub2Api(
-        config,
-        `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`,
-        {
-          method: "PUT",
-          body: JSON.stringify({ priority }),
-        },
-      )));
+      const write = async (recordEdit = async () => {}) => {
+        const results = await Promise.allSettled(accountIds.map(async (accountId) => {
+          await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, { method: "PUT", body: JSON.stringify({ [field]: value }) });
+          await recordEdit(accountId);
+        }));
+        const failed = results.find(result => result.status === "rejected");
+        if (failed) throw failed.reason;
+      };
+      if (field === "concurrency") await modelFingerprint.manualConcurrency(job.email, write);
+      else await write();
     } finally {
       invalidateSub2ApiAccountStatusCache();
     }
@@ -1431,12 +1440,12 @@ async function handleApi(req, res, requestUrl) {
       ...(entry || {}),
       email: job.email.toLowerCase(),
       accountIds,
-      priority,
+      [field]: value,
       fetchedAt: new Date().toISOString(),
     };
     sendJson(res, 200, {
       updated: accountIds.length,
-      priority,
+      [field]: value,
       status: publicSub2ApiAccountStatusEntry(refreshedEntry),
     });
     return;
@@ -4981,7 +4990,7 @@ async function performUploadJobsToSub2Api(selected, config, profileState, { reco
       const accountUpdate = await buildSub2ApiAccountUpdate(account, accountConfig, remoteAccount);
       const dated = effective.find(item => item.id === remoteAccount.id);
       if (dayPriorities.has(dated)) accountUpdate.priority = dayPriorities.get(dated);
-      await requestSub2Api(accountConfig, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, { method: "PUT", body: JSON.stringify(accountUpdate) });
+      await writePoolAccount(accountConfig, remoteAccount, accountUpdate);
       const recoveryJob = downloadable.find(job => job.email.toLowerCase() === email);
       if (recoverAuthorization && (remoteAccount.status === "error" || recoveryJob?.poolRefreshRecovery)) await recoverSub2ApiAuthorization(accountConfig, accountId, email, { recoveryJob });
       updatedCount++; updatedAccountIds.push(accountId);
@@ -6408,6 +6417,13 @@ function unsyncableSub2ApiProfileFields(accountConfig, fields) {
   });
 }
 
+async function writePoolAccount(config, account, body, { profile = false } = {}) {
+  const id = normalizeSub2ApiAccountId(account.id);
+  return modelFingerprint.poolAccountUpdate(sub2ApiAccountEmail(account), id, monitorBackendIdentity(config), body,
+    update => (profile ? requestProfileSync : requestSub2Api)(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(update) }),
+    { updateBase: profile });
+}
+
 async function buildSub2ApiProfileSyncUpdate(remoteAccount, accountConfig, fields) {
   const changed = new Set(fields);
   const body = {};
@@ -6516,10 +6532,7 @@ async function syncSub2ApiProfileChanges(config, targets, profileState) {
       try {
         const body = await buildSub2ApiProfileSyncUpdate(account, target.accountConfig, target.fields);
         if (!Object.keys(body).length || accountSyncBlocked(account)) continue;
-        await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
-          method: "PUT",
-          body: JSON.stringify(body),
-        });
+        await writePoolAccount(config, account, body, { profile: true });
         result.updated += 1;
       } catch (error) {
         result.failed += 1;
@@ -6553,10 +6566,7 @@ async function updateSub2ApiAccountFromProfile(globalConfig, remoteAccount, prof
     };
   }
   if (accountSyncBlocked(remoteAccount)) return false;
-  await requestProfileSync(globalConfig, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
+  await writePoolAccount(globalConfig, remoteAccount, body, { profile: true });
   return true;
 }
 
@@ -6791,10 +6801,7 @@ async function synchronizeSub2ApiWorkspaceAccount(job) {
     if (!accountId) continue;
     const accountConfig = await resolveSub2ApiWriteConfig(resolveSub2ApiConfigForAccount(config, localAccount, profileState));
     const accountUpdate = await buildSub2ApiAccountUpdate(localAccount, accountConfig, remoteAccount);
-    await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
-      method: "PUT",
-      body: JSON.stringify(accountUpdate),
-    });
+    await writePoolAccount(config, remoteAccount, accountUpdate);
     accountIds.push(accountId);
   }
   if (accountIds.length) invalidateSub2ApiAccountStatusCache();
@@ -6945,6 +6952,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       const enabled = sub2ApiAccountSchedulable(remoteAccount);
       const rateLimit = accountRateLimit(remoteAccount);
       const priority = sub2ApiAccountPriority(remoteAccount);
+      const concurrency = sub2ApiAccountConcurrency(remoteAccount);
       const usage = normalizeSub2ApiUsage(remoteAccount, fetchedAt);
       const remoteStatus = String(remoteAccount?.status || "").trim().toLowerCase() || null;
       const current = accounts.get(email);
@@ -6958,6 +6966,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
           groupIds,
           enabled,
           priority,
+          concurrency,
           planType: extractPlanTypeFromAccount(remoteAccount, { preferJwt: false }) || null,
           remoteStatus,
           remoteErrors: [poolAccountError(remoteAccount)].filter(Boolean),
@@ -6977,6 +6986,9 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       current.quotaRestricted ||= usageRestricted(observedUsage);
       if (rateLimit.limited && rateLimit.until && (!current.rateLimitUntil || rateLimit.until > current.rateLimitUntil)) current.rateLimitUntil = rateLimit.until;
       current.priority = mergeSub2ApiPriority(current.priority, priority);
+      // Different remote rows must not silently display one row's setting as
+      // the shared concurrency. Editing this field updates every associated row.
+      if (current.concurrency !== concurrency) current.concurrency = null;
       current.planType ||= extractPlanTypeFromAccount(remoteAccount, { preferJwt: false }) || null;
       if (remoteStatus === "error") current.remoteStatus = "error";
       else current.remoteStatus ||= remoteStatus;
@@ -7009,6 +7021,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       .map(account => normalizeSub2ApiAccountId(account.id)).filter(Boolean);
     await persistUsageSnapshots(sub2ApiAccountStatusCache, { reconcile: true });
     void synchronizeCachedUsageTotals(config, sub2ApiAccountStatusCache).catch(() => {});
+    void synchronizeCachedResetCredits(config, sub2ApiAccountStatusCache).catch(() => {});
     queueSub2ApiRecovery(listing, config);
     return sub2ApiAccountStatusCache;
   })().finally(() => {
@@ -7031,6 +7044,26 @@ async function synchronizeCachedUsageTotals(config, state, options = {}) {
   await persistUsageSnapshots(state);
 }
 
+async function synchronizeCachedResetCredits(config, state, options = {}) {
+  const ids = state.usageIds || [];
+  if (!config?.baseUrl || !ids.length || monitorBackendIdentity(config) !== state.backend) return;
+  const records = await readResetCredits(config, ids, options);
+  // A list poll may replace the state while a provider query is still running.
+  // Apply only to the same backend and the same eligible remote account IDs.
+  const current = sub2ApiAccountStatusCache;
+  if (current.backend !== state.backend) return;
+  const eligible = new Set(current.usageIds || []);
+  for (const [email, entry] of current.accounts) {
+    if (accountAutomationBlocked(email) || !entry.accountIds.every(id => eligible.has(id) && records.has(String(id)))) continue;
+    const credits = entry.accountIds.map(id => records.get(String(id))).filter(Boolean).reduce((value, next) => mergeSub2ApiUsage(value, {
+      source: "sub2api", resetCredits: next.resetCredits, resetCreditsObserved: true,
+      resetCreditsFetchedAt: next.resetCreditsFetchedAt, resetCreditsStale: next.resetCreditsStale,
+    }), null);
+    if (credits) entry.usage = { ...mergeSub2ApiUsage(entry.usage, credits), cacheKey: usageSnapshotKey(current.backend, email, entry.accountIds) };
+  }
+  await persistUsageSnapshots(current);
+}
+
 async function persistUsageSnapshots(state, options) {
   try { await usageSnapshots.update(state.backend, [...state.accounts.values()], options); }
   catch { console.error("[usage-cache] 用量快照写入失败，保留内存数据并等待下次同步。"); }
@@ -7041,37 +7074,39 @@ function scheduleAccountDataSync() {
   accountDataSyncTimers = [];
   if (shuttingDown) return;
   const generation = accountDataSyncGeneration;
-  const schedule = (totals) => {
+  const schedule = (kind) => {
     if (shuttingDown || generation !== accountDataSyncGeneration) return;
-    const seconds = totals ? monitoringSettings.usageTotalsIntervalSeconds : monitoringSettings.accountStatusIntervalSeconds;
+    const seconds = [monitoringSettings.accountStatusIntervalSeconds, monitoringSettings.usageTotalsIntervalSeconds, monitoringSettings.resetCreditsIntervalSeconds][kind];
     const timer = setTimeout(() => {
       if (shuttingDown || generation !== accountDataSyncGeneration) return;
       const operation = (async () => {
         const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
         const state = await loadSub2ApiAccountStatus();
-        if (totals) await synchronizeCachedUsageTotals(config, state, { forceRefresh: true });
+        if (kind === 1) await synchronizeCachedUsageTotals(config, state, { forceRefresh: true });
+        if (kind === 2) await synchronizeCachedResetCredits(config, state);
       })().catch(() => {}).finally(() => {
         accountDataSyncOperations.delete(operation);
-        schedule(totals);
+        schedule(kind);
       });
       accountDataSyncOperations.add(operation);
     }, seconds * 1000);
     timer.unref?.();
-    accountDataSyncTimers[totals ? 1 : 0] = timer;
+    accountDataSyncTimers[kind] = timer;
   };
   // Independent cadences: 25s status + 60s totals must not turn into 75s totals.
-  schedule(false); schedule(true);
+  schedule(0); schedule(1); schedule(2);
 }
 function applyMonitoringSettings(previous) {
   if (previous.webSessionScanIntervalSeconds !== monitoringSettings.webSessionScanIntervalSeconds) webSessionMonitor.setTickMs(monitoringSettings.webSessionScanIntervalSeconds * 1000);
   if (previous.fingerprintScanIntervalSeconds !== monitoringSettings.fingerprintScanIntervalSeconds) modelFingerprint.setTickMs(monitoringSettings.fingerprintScanIntervalSeconds * 1000);
   if (previous.usageTotalsIntervalSeconds !== monitoringSettings.usageTotalsIntervalSeconds || previous.usageTotalsConcurrency !== monitoringSettings.usageTotalsConcurrency) readUsageTotals.refreshSettings();
+  if (previous.resetCreditsIntervalSeconds !== monitoringSettings.resetCreditsIntervalSeconds || previous.resetCreditsConcurrency !== monitoringSettings.resetCreditsConcurrency) readResetCredits.refreshSettings();
   if (previous.profileSyncConcurrency !== monitoringSettings.profileSyncConcurrency) requestProfileSync.drain();
   if (previous.overloadIntervalSeconds !== monitoringSettings.overloadIntervalSeconds || previous.overloadConcurrency !== monitoringSettings.overloadConcurrency) {
     overloadMonitor.request.drain(); overloadMonitor.trigger();
   }
   if (previous.overloadCooldownConcurrency !== monitoringSettings.overloadCooldownConcurrency) overloadCooldown.request.drain();
-  if (previous.accountStatusIntervalSeconds !== monitoringSettings.accountStatusIntervalSeconds || previous.usageTotalsIntervalSeconds !== monitoringSettings.usageTotalsIntervalSeconds) scheduleAccountDataSync();
+  if (previous.accountStatusIntervalSeconds !== monitoringSettings.accountStatusIntervalSeconds || previous.usageTotalsIntervalSeconds !== monitoringSettings.usageTotalsIntervalSeconds || previous.resetCreditsIntervalSeconds !== monitoringSettings.resetCreditsIntervalSeconds) scheduleAccountDataSync();
 }
 
 function invalidateSub2ApiAccountStatusCache() {
@@ -7153,6 +7188,7 @@ function publicSub2ApiAccountStatusEntry(entry) {
     inPool: true,
     enabled: entry.enabled ?? null,
     priority: entry.priority ?? null,
+    concurrency: entry.concurrency ?? null,
     planType: entry.planType || null,
     groupIds: [...(entry.groupIds || [])],
     remoteStatus: entry.remoteStatus || null,
@@ -7237,6 +7273,7 @@ function publicSub2ApiUsage(usage, quotaRestricted = false) {
     totals: usage.totals ? { ...usage.totals } : null,
     resetCreditsObserved: usage.resetCreditsObserved === true,
     resetCreditsStale: usage.resetCreditsStale === true,
+    resetCreditsFetchedAt: usage.resetCreditsFetchedAt || null,
     resetCredits: usage.resetCredits ? normalizeResetCredits({
       available_count: usage.resetCredits.availableCount,
       credits: usage.resetCredits.credits.map((credit) => ({ expires_at: credit.expiresAt })),
@@ -7369,15 +7406,16 @@ function getSub2ApiAccountStatusForJob(job, state = sub2ApiAccountStatusCache) {
   const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
   const expectedBackend = config?.baseUrl ? monitorBackendIdentity(config) : null;
   if (!state?.fetchedAt || state.backend !== expectedBackend) {
-    return { inPool: null, enabled: null, priority: null, accountId: null, accountIds: [], groupIds: [], remoteStatus: null, planType: null,
+    return { inPool: null, enabled: null, priority: null, concurrency: null, accountId: null, accountIds: [], groupIds: [], remoteStatus: null, planType: null,
       usage: expectedBackend ? usageSnapshots.get(expectedBackend, job.email)?.usage || null : null };
   }
   const entry = state.accounts.get(String(job.email || "").toLowerCase());
-  if (!entry) return { inPool: false, enabled: null, priority: null, accountId: null, accountIds: [], groupIds: [], remoteStatus: null, planType: null, usage: null };
+  if (!entry) return { inPool: false, enabled: null, priority: null, concurrency: null, accountId: null, accountIds: [], groupIds: [], remoteStatus: null, planType: null, usage: null };
   return {
     inPool: true,
     enabled: entry.enabled ?? null,
     priority: entry.priority ?? null,
+    concurrency: entry.concurrency ?? null,
     accountId: entry.accountIds?.[0] || null,
     accountIds: [...(entry.accountIds || [])],
     proxyIds: [...(entry.proxyIds || [])],
@@ -7445,6 +7483,13 @@ function sub2ApiAccountPriority(account) {
     if (text.length <= 64 && !/[\r\n]/.test(text)) return text;
   }
   return null;
+}
+
+function sub2ApiAccountConcurrency(account) {
+  const value = account?.concurrency;
+  if (value === null || value === undefined || typeof value === "boolean" || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 && number <= 10000 ? number : null;
 }
 
 function mergeSub2ApiPriority(current, next) {
@@ -8156,10 +8201,7 @@ async function performSub2ApiAutoRepairSuccess(job) {
         ...(accountConfig.loadFactor !== null ? { load_factor: accountConfig.loadFactor } : {}),
         ...(accountConfig.priority !== null && !accountConfig.importDatePriority?.enabled ? { priority: accountConfig.priority } : {}),
       };
-      await requestSub2Api(operation.config, `/api/v1/admin/accounts/${accountId}`, {
-        method: "PUT",
-        body: JSON.stringify(accountUpdate),
-      });
+      await writePoolAccount(operation.config, remoteAccount, accountUpdate);
       await recoverSub2ApiAuthorization(operation.config, accountId, job.email, { monitorRepair: true });
       pendingIds.delete(accountId);
       job.autoRepairPendingAccountIds = [...pendingIds];
@@ -8290,6 +8332,7 @@ function publicJob(job) {
     sub2apiInPool: sub2ApiStatus.inPool,
     sub2apiEnabled: sub2ApiStatus.enabled,
     sub2apiPriority: sub2ApiStatus.priority,
+    sub2apiConcurrency: sub2ApiStatus.concurrency,
     sub2apiAccountId: sub2ApiStatus.accountId,
     sub2apiAccountIds: sub2ApiStatus.accountIds,
     sub2apiGroupIds: sub2ApiStatus.groupIds,
@@ -8445,15 +8488,14 @@ async function refreshSub2ApiAccountUsage(config, accountIds) {
   if (!config?.baseUrl || !config?.adminApiKey) return null;
   const ids = [...new Set(accountIds.map((value) => normalizeSub2ApiAccountId(value)).filter(Boolean))].slice(0, 8);
   if (!ids.length) return null;
-  const responses = await Promise.allSettled(ids.flatMap((accountId) => [
+  const [responses, resetCredits] = await Promise.all([Promise.allSettled(ids.map((accountId) =>
     requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/usage?source=active&force=true`).then((payload) => normalizeSub2ApiUsagePayload(payload)),
-    // This is Sub2API's read/refresh endpoint, not the reset/consume action.
-    requestSub2Api(config, `/api/v1/admin/openai/accounts/${encodeURIComponent(accountId)}/quota/refresh`, { method: "POST" }).then((payload) => normalizeSub2ApiUsagePayload(payload, { resetCreditsRefreshed: true })),
-  ]));
+  )), readResetCredits(config, ids, { forceRefresh: true, manual: true })]);
   const usages = responses
     .filter((result) => result.status === "fulfilled")
     .map((result) => result.value)
     .filter(Boolean);
+  usages.push(...[...resetCredits.values()].filter(Boolean));
   if (!usages.length) return null;
   return usages.reduce((current, next) => mergeSub2ApiUsage(current, next), null);
 }
@@ -8628,6 +8670,7 @@ function publicSelectionJob(job) {
     sub2apiInPool: sub2ApiStatus.inPool,
     sub2apiEnabled: sub2ApiStatus.enabled,
     sub2apiPriority: sub2ApiStatus.priority,
+    sub2apiConcurrency: sub2ApiStatus.concurrency,
     sub2apiAccountId: sub2ApiStatus.accountId,
     sub2apiAccountIds: sub2ApiStatus.accountIds,
     canDownload: Boolean(job.resultSaved),

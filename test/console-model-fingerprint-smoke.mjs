@@ -52,7 +52,7 @@ try {
   assert.equal(job.modelFingerprint.enabled, false); assert.equal(samples, 0, "new deployments send no model requests by default");
   assert.equal((await post("/api/model-fingerprint/settings", { settings: { ...settings, intervalMinutes: 1 } })).status, 400);
   assert.equal((await post("/api/model-fingerprint/settings", { settings })).status, 200);
-  assert((await get("/api/model-fingerprint/settings")).groups.some(g => g.id === "20"));
+  assert.equal((await get("/api/model-fingerprint/settings")).groups, undefined, "retired group catalog is no longer requested");
   const before = calls.length;
   const started = await post(`/api/jobs/${job.id}/model-fingerprint/check`, {}); assert.equal(started.status, 202, JSON.stringify(started.data));
   let checked;
@@ -85,13 +85,13 @@ try {
   assert.equal((await get(detailPath)).record.models[0].requests[0].prompt, transcriptInputs[0]);
   assert.equal((await get(`/api/jobs/${job.id}/model-fingerprint/history`)).records.length, 1); assert.equal((await get("/api/model-fingerprint/settings")).settings.maxConcurrentAccounts, 2);
   const task = await post("/api/task-settings", { modelFingerprint: { models: ["gpt-5.4"], intervalMinutes: 60, minProbability: .85 } }); assert.equal(task.status, 200);
-  assert.equal((await get("/api/model-fingerprint/settings")).settings.groupPolicies.default[20], "verified", "task defaults retain profile group policies");
+  assert.equal((await get("/api/model-fingerprint/settings")).settings.groupPolicies, undefined, "task defaults do not restore retired policies");
   assert.equal((await get("/api/model-fingerprint/settings")).settings.models[0].model, "gpt-5.4");
   const puts = calls.filter(c => c.method === "PUT").length;
   const updated = await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20, 30] }], planTypeBindings: { free: "default" } }); assert.equal(updated.status, 200);
   const groupPut = calls.filter(c => c.method === "PUT").slice(puts).find(c => c.body.group_ids);
   assert.deepEqual(groupPut.body.group_ids.map(String), ["10", "20", "30"], "unknown evidence preserves existing conditional membership during profile updates");
-  console.log("PASS: fingerprint lazy transcript HTTP auth/404, full prompts/replies, lightweight polling and restart; fingerprint HTTP authentication, defaults-off, plan/group discovery, real per-account prompt transport, multi-model three-sample checks, unknown preservation, restart/overrides, task defaults and profile admission gating");
+  console.log("PASS: fingerprint lazy transcript HTTP auth/404, full prompts/replies, lightweight polling and restart; fingerprint HTTP authentication, defaults-off, PlanType allowlist migration, real per-account prompt transport, multi-model three-sample checks, unknown preservation, restart/overrides, task defaults and ordinary profile group sync");
   if (process.argv.includes('--candy-cycle')) {
     const sequence = {first:'fingerprint',fingerprint:1,candy:2};
     assert.equal((await post('/api/task-settings',{modelFingerprint:{testSequence:sequence}})).status,200);

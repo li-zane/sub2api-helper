@@ -34,6 +34,11 @@ try {
   assert.equal(mergeUsageSnapshot(before, { resetCreditsObserved: true, resetCredits: null }).resetCredits, null, "confirmed unknown card result must not claim an old positive count is current");
   assert.equal(mergeUsageSnapshot(updated, { ...before }).primary.usedPercent, 0, "older polling snapshots must not overwrite a newer refresh");
   assert.equal(mergeUsageSnapshot(before, { cacheKey: "other", totals: null }).primary, undefined, "backend/remote-ID changes must isolate display data");
+  const freshCards = { ...updated, resetCreditsObserved: true, resetCreditsFetchedAt: "2026-11-07T03:00:00Z", resetCredits: { availableCount: 1, credits: [] } };
+  const cardUpdate = mergeUsageSnapshot(freshCards, { fetchedAt: at, resetCreditsObserved: true, resetCreditsFetchedAt: "2026-11-07T04:00:00Z", resetCredits: { availableCount: 0, credits: [] }, resetCreditsStale: false });
+  assert.equal(cardUpdate.resetCredits.availableCount, 0, "new card reads update independently of old quota-window timestamps");
+  assert.equal(cardUpdate.primary.usedPercent, 0, "card reads must not overwrite newer quota windows");
+  assert.equal(mergeUsageSnapshot(cardUpdate, freshCards).resetCredits.availableCount, 0, "late polls cannot overwrite newer card counts");
   await Promise.all([cache.update(backend, [{ email, accountIds: [1, 2], usage: updated }]), cache.update(other, [{ email, accountIds: [1], usage }])]);
   const again = new UsageSnapshots(file); await again.load(); assert.equal(again.get(backend, email).usage.primary.usedPercent, 0); assert(again.get(other, email));
   await again.removeEmail(email); const removed = new UsageSnapshots(file); await removed.load(); assert.equal(removed.get(backend, email), null); assert.equal(removed.get(other, email), null);

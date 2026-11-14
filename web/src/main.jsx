@@ -74,7 +74,7 @@ import "./styles.css";
 import { logoutAccountSessions, proxySwitchSelectionState } from "./account-session-actions.mjs";
 import { ProxyQualityPanel } from "./proxy-quality.jsx";
 import { WebLoginBatch } from "./web-login-batch.jsx";
-import { FingerprintSettingsButton } from "./model-fingerprint.jsx";
+import { FingerprintSettingsButton, ModelFingerprintPolicyContext, readEnabledPlanTypes } from "./model-fingerprint.jsx";
 import { CodexStatus } from "./codex-status.jsx";
 import { CodexIcon } from "./codex-icon.jsx";
 import { SessionResetDialog } from "./session-reset-dialog.jsx";
@@ -363,7 +363,15 @@ function App() {
   const [sub2apiAccountStatus, setSub2apiAccountStatus] = useState({ configured: false, fetchedAt: null, accounts: {} });
   const [sub2apiToggleBusy, setSub2apiToggleBusy] = useState(() => new Set());
   const [sub2apiPriorityBusy, setSub2apiPriorityBusy] = useState(() => new Set());
+  const [sub2apiConcurrencyBusy, setSub2apiConcurrencyBusy] = useState(() => new Set());
+  const [jobsRefreshKey, setJobsRefreshKey] = useState(0);
   const [accountUsageByJobId, setAccountUsageByJobId] = useState({});
+  const fpSettings = taskSettings?.modelFingerprint;
+  const fpHasPlanPolicy = Boolean(fpSettings && (Array.isArray(fpSettings.enabledPlanTypes) || fpSettings.planDefaults));
+  const fpPlansSerialized = fpHasPlanPolicy ? readEnabledPlanTypes(fpSettings).join("\n") : null;
+  const enabledFingerprintPlans = useMemo(() => (
+    fpPlansSerialized === null ? null : (fpPlansSerialized ? fpPlansSerialized.split("\n") : [])
+  ), [fpPlansSerialized]);
 
   const accountUsageJobKey = jobs
     .filter((job) => job.canDownload || job.sub2apiInPool === true || job.sub2apiUsage)
@@ -602,7 +610,7 @@ function App() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, page, searchQuery, lockedOnly, webSessionFilter, summaryFilter, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter]);
+  }, [token, page, searchQuery, lockedOnly, webSessionFilter, summaryFilter, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter, jobsRefreshKey]);
 
   useEffect(() => {
     if (!token || !features.sub2apiMonitor) return undefined;
@@ -1072,17 +1080,26 @@ function App() {
     }
   }
 
-  async function updateSub2ApiPriority(job, priority) {
-    if (!job?.sub2apiInPool || sub2apiPriorityBusy.has(job.id)) return;
-    setSub2apiPriorityBusy((current) => new Set(current).add(job.id));
+  async function updateSub2ApiAccountField(job, {
+    busySet,
+    setBusySet,
+    endpoint,
+    payload,
+    statusField,
+    responseField,
+    label,
+  }) {
+    if (!job?.sub2apiInPool || busySet.has(job.id)) return false;
+    setBusySet((current) => new Set(current).add(job.id));
     try {
-      const data = await apiFetch(token, `/api/sub2api/accounts/${encodeURIComponent(job.id)}/priority`, {
+      const data = await apiFetch(token, `/api/sub2api/accounts/${encodeURIComponent(job.id)}/${endpoint}`, {
         method: "POST",
-        body: JSON.stringify({ priority }),
+        body: JSON.stringify(payload),
       });
+      const fieldValue = data.status?.[statusField] ?? data[responseField] ?? null;
       const status = {
         ...(data.status || {}),
-        priority: data.status?.priority ?? data.priority ?? null,
+        [statusField]: fieldValue,
       };
       const fields = sub2ApiStatusJobFields(status);
       const emailKey = String(job.email || "").toLowerCase();
@@ -1102,22 +1119,48 @@ function App() {
         fetchedAt: status.fetchedAt || current.fetchedAt,
         accounts: {
           ...(current.accounts || {}),
-          [emailKey]: status,
+          [emailKey]: status?.inPool === true
+            ? { ...(current.accounts?.[emailKey] || {}), ...status }
+            : status,
         },
       }));
-      setUploadNotice(`已更新 ${job.email} 的 Sub2API 优先级为 ${status.priority}`);
+      setUploadNotice(`已更新 ${job.email} 的 Sub2API ${label}为 ${status[statusField]}`);
       setError("");
       return true;
     } catch (requestError) {
       setError(requestError.message);
       return false;
     } finally {
-      setSub2apiPriorityBusy((current) => {
+      setBusySet((current) => {
         const next = new Set(current);
         next.delete(job.id);
         return next;
       });
     }
+  }
+
+  function updateSub2ApiPriority(job, priority) {
+    return updateSub2ApiAccountField(job, {
+      busySet: sub2apiPriorityBusy,
+      setBusySet: setSub2apiPriorityBusy,
+      endpoint: "priority",
+      payload: { priority },
+      statusField: "priority",
+      responseField: "priority",
+      label: "优先级",
+    });
+  }
+
+  function updateSub2ApiConcurrency(job, concurrency) {
+    return updateSub2ApiAccountField(job, {
+      busySet: sub2apiConcurrencyBusy,
+      setBusySet: setSub2apiConcurrencyBusy,
+      endpoint: "concurrency",
+      payload: { concurrency: Number(concurrency) },
+      statusField: "concurrency",
+      responseField: "concurrency",
+      label: "并发",
+    });
   }
 
   function formatSub2ApiUploadNotice(data) {
@@ -1852,7 +1895,17 @@ function App() {
               <Tags size={14} />
               PlanType 映射
             </button>
-            {features.modelFingerprint && <FingerprintSettingsButton token={token} planTypes={availablePlanTypes} />}
+            {features.modelFingerprint && (
+              <FingerprintSettingsButton
+                token={token}
+                planTypes={availablePlanTypes}
+                planTypeMapping={planTypeMapping}
+                onSettingsSaved={(saved) => {
+                  setTaskSettings((current) => (current ? { ...current, modelFingerprint: saved } : current));
+                  setJobsRefreshKey((current) => current + 1);
+                }}
+              />
+            )}
             {features.taskSettings && (
               <button ref={taskSettingsButtonRef} type="button" className="secondary-button topbar-action-button" onClick={openTaskSettings} disabled={!token || taskSettingsOpening}>
                 {taskSettingsOpening ? <LoaderCircle className="spin" size={14} /> : <Settings2 size={14} />}任务设置
@@ -2264,8 +2317,9 @@ function App() {
           </div>
         )}
 
-        <div className="table-frame">
-          <table>
+        <ModelFingerprintPolicyContext.Provider value={enabledFingerprintPlans}>
+          <div className="table-frame">
+            <table>
             <colgroup>
               <col className="select-column" />
               <col className="account-column" />
@@ -2401,6 +2455,9 @@ function App() {
                   sub2apiPriorityAvailable={Boolean(features.sub2apiAccountPriority && hasUsableSub2ApiSettings(sub2apiSettings))}
                   sub2apiPriorityBusy={sub2apiPriorityBusy.has(job.id)}
                   onUpdateSub2ApiPriority={(priority) => updateSub2ApiPriority(job, priority)}
+                  sub2apiConcurrencyAvailable={Boolean(features.sub2apiAccountConcurrency && hasUsableSub2ApiSettings(sub2apiSettings))}
+                  sub2apiConcurrencyBusy={sub2apiConcurrencyBusy.has(job.id)}
+                  onUpdateSub2ApiConcurrency={(concurrency) => updateSub2ApiConcurrency(job, concurrency)}
                   totpSetupAvailable={Boolean(features.totpSetup)}
                   passwordAddAvailable={Boolean(features.passwordAdd)}
                   webLoginAvailable={Boolean(features.webLogin)}
@@ -2428,6 +2485,7 @@ function App() {
             </tbody>
           </table>
         </div>
+        </ModelFingerprintPolicyContext.Provider>
         {features.pagination && pagination.totalPages > 1 && (
           <nav className="pagination" aria-label="任务分页">
             <button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page <= 1} title="上一页">
@@ -3794,7 +3852,7 @@ function BulkMoreMenu({
 
 // The boundary keeps event handlers fresh without invalidating unchanged memoized rows.
 const MemoizedJobRow = React.memo(JobRow);
-const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onOpenCost", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
+const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onUpdateSub2ApiConcurrency", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onOpenCost", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
 function JobRowBoundary(props) {
   const latest = useRef(props);
   useLayoutEffect(() => { latest.current = props; });
@@ -3802,40 +3860,89 @@ function JobRowBoundary(props) {
   return <MemoizedJobRow {...props} {...callbacks} />;
 }
 
-function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
+function Sub2ApiPoolNumberField({ kind, label, email, inPool, value, available, busy, onSave, onError }) {
+  const [draft, setDraft] = useState(() => (value === null || value === undefined ? "" : String(value)));
+  const inputRef = useRef(null);
+  const savingRef = useRef(false);
+  const savedRef = useRef(draft);
+
+  useEffect(() => {
+    const saved = value == null ? "" : String(value);
+    savedRef.current = saved;
+    if (document.activeElement !== inputRef.current && !savingRef.current) {
+      setDraft(saved);
+    }
+  }, [value, inPool]);
+
+  async function save() {
+    if (!available || !inPool || busy || savingRef.current) return;
+    const text = draft.trim();
+    if (text === "" && savedRef.current === "") return;
+    if (!/^\d+$/.test(text) || Number(text) < 0 || Number(text) > 10000) {
+      onError(`${label}必须为 0–10000 的整数`);
+      return;
+    }
+    if (savedRef.current !== "" && Number(text) === Number(savedRef.current)) {
+      if (text !== draft) setDraft(String(Number(text)));
+      return;
+    }
+    savingRef.current = true;
+    try {
+      if (await onSave(text)) {
+        savedRef.current = text;
+      }
+    } finally {
+      savingRef.current = false;
+    }
+  }
+
+  return (
+    <div
+      className={`sub2api-${kind}-cell ${!inPool ? "unknown" : ""}`}
+      title={!inPool ? `尚未同步 Sub2API ${label}` : `离开输入框时自动保存 Sub2API ${label}`}
+    >
+      <span className={`pool-field-label pool-${kind}-label`}>{label}</span>
+      {inPool ? (
+        <div className={`sub2api-pool-number-editor sub2api-${kind}-editor`}>
+          <input
+            ref={inputRef}
+            type="number"
+            min="0"
+            max="10000"
+            step="1"
+            inputMode="numeric"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={save}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                event.currentTarget.blur();
+              }
+            }}
+            disabled={!available || busy}
+            aria-busy={busy}
+            aria-label={`编辑 ${email} 的 Sub2API ${label}`}
+          />
+        </div>
+      ) : (
+        <span className={`pool-${kind}-placeholder muted`}>—</span>
+      )}
+    </div>
+  );
+}
+
+function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
   useDisplayTimeZone();
   const [value, setValue] = useState("");
   const [smsPopoverOpen, setSmsPopoverOpen] = useState(false);
   const smsTriggerRef = useRef(null);
   const [submitting, setSubmitting] = useState(false);
-  const [priorityValue, setPriorityValue] = useState(() => job.sub2apiPriority === null || job.sub2apiPriority === undefined ? "" : String(job.sub2apiPriority));
-  const priorityInputRef = useRef(null);
-  const prioritySavingRef = useRef(false);
-  const prioritySavedRef = useRef(priorityValue);
   const [accountNameCopied, setAccountNameCopied] = useState(false);
   const rowBusy = submitting || workflowBusy;
   const mutationReason = accountMutationBlockReason(job, { workflowBusy, submitting });
 
   useEffect(() => setValue(""), [job.status]);
-  useEffect(() => {
-    const saved = job.sub2apiPriority == null ? "" : String(job.sub2apiPriority);
-    prioritySavedRef.current = saved;
-    if (document.activeElement !== priorityInputRef.current && !prioritySavingRef.current) setPriorityValue(saved);
-  }, [job.sub2apiPriority]);
-
-  async function savePriority() {
-    if (!sub2apiPriorityAvailable || job.sub2apiInPool !== true || sub2apiPriorityBusy || prioritySavingRef.current) return;
-    const value = priorityValue.trim();
-    if (!value || !Number.isInteger(Number(value)) || Number(value) < 0 || Number(value) > 10000) {
-      onError("优先级必须为 0–10000 的整数");
-      return;
-    }
-    if (prioritySavedRef.current !== "" && Number(value) === Number(prioritySavedRef.current)) return;
-    prioritySavingRef.current = true;
-    try {
-      if (await onUpdateSub2ApiPriority(value)) prioritySavedRef.current = value;
-    } finally { prioritySavingRef.current = false; }
-  }
 
   async function sendInput(action, submittedValue = value) {
     setSubmitting(true);
@@ -4032,38 +4139,28 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
               onChange={onToggleSub2Api}
             />
           </div>
-          <div
-            className={`sub2api-priority-cell ${job.sub2apiInPool !== true ? "unknown" : ""}`}
-            title={job.sub2apiInPool !== true ? "尚未同步 Sub2API 优先级" : "离开输入框时自动保存 Sub2API 优先级"}
-          >
-            <span className="pool-priority-label">优先级</span>
-            {job.sub2apiInPool === true ? (
-              <div className="sub2api-priority-editor">
-                <input
-                  ref={priorityInputRef}
-                  type="number"
-                  min="0"
-                  max="10000"
-                  step="1"
-                  inputMode="numeric"
-                  value={priorityValue}
-                  onChange={(event) => setPriorityValue(event.target.value)}
-                  onBlur={savePriority}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      event.currentTarget.blur();
-                    }
-                  }}
-                  disabled={!sub2apiPriorityAvailable || sub2apiPriorityBusy}
-                  aria-busy={sub2apiPriorityBusy}
-                  aria-label={`编辑 ${job.email} 的 Sub2API 优先级`}
-                />
-              </div>
-            ) : (
-              <span className="pool-priority-placeholder muted">—</span>
-            )}
-          </div>
+          <Sub2ApiPoolNumberField
+            kind="priority"
+            label="优先级"
+            email={job.email}
+            inPool={job.sub2apiInPool === true}
+            value={job.sub2apiPriority}
+            available={sub2apiPriorityAvailable}
+            busy={sub2apiPriorityBusy}
+            onSave={onUpdateSub2ApiPriority}
+            onError={onError}
+          />
+          <Sub2ApiPoolNumberField
+            kind="concurrency"
+            label="并发"
+            email={job.email}
+            inPool={job.sub2apiInPool === true}
+            value={job.sub2apiConcurrency}
+            available={sub2apiConcurrencyAvailable}
+            busy={sub2apiConcurrencyBusy}
+            onSave={onUpdateSub2ApiConcurrency}
+            onError={onError}
+          />
         </div>
       </td>
       <td className="status-cell">
@@ -7028,7 +7125,12 @@ function sub2ApiStatusJobFields(status) {
   const fields = {
     sub2apiInPool: status?.inPool ?? null,
     sub2apiEnabled: status?.enabled ?? null,
-    sub2apiPriority: status?.priority ?? null,
+    ...(status?.inPool !== true || Object.hasOwn(status || {}, "priority")
+      ? { sub2apiPriority: status?.priority ?? null }
+      : {}),
+    ...(status?.inPool !== true || Object.hasOwn(status || {}, "concurrency")
+      ? { sub2apiConcurrency: status?.concurrency ?? null }
+      : {}),
     sub2apiAccountId: status?.accountId || null,
     sub2apiAccountIds: Array.isArray(status?.accountIds) ? status.accountIds : [],
     ...(Array.isArray(status?.boundIps) ? { boundIps: status.boundIps, boundProxyStatus: status.boundProxyStatus || (status.proxyIds?.length ? "bound" : "direct") } : {}),

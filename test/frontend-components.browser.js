@@ -40,11 +40,11 @@ async(page)=>{
   let release;const held=new Promise(r=>release=r);
   await page.route('**/api/model-fingerprint/settings',async route=>{
     if(route.request().method()==='POST'){await held;return route.fulfill({json:{}});}
-    return route.fulfill({json:{settings:{models:[],intervalMinutes:360,maxConcurrentAccounts:3,minProbability:0.8,planDefaults:{free:false},groupPolicies:{}},profiles:[],groups:[],runtime:{activeAccounts:0,queuedAccounts:0}}});
+    return route.fulfill({json:{settings:{models:[],intervalMinutes:360,maxConcurrentAccounts:3,minProbability:0.8,enabledPlanTypes:["free"],matchedConcurrency:{enabled:false,value:10}},profiles:[],groups:[],runtime:{activeAccounts:0,queuedAccounts:0}}});
   });
   try{
     await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const modal=page.getByRole('dialog',{name:'降智检测设置',exact:true});await modal.getByRole('button',{name:'保存降智检测设置',exact:true}).click();
-    await page.keyboard.press('Escape');check(await modal.isVisible(),'Escape dismissed pending save');check(await modal.getByRole('button',{name:'关闭降智检测设置',exact:true}).isDisabled(),'close not disabled');check(await modal.getByRole('checkbox',{name:'free',exact:true}).isDisabled(),'plan switch editable during save');
+    await page.keyboard.press('Escape');check(await modal.isVisible(),'Escape dismissed pending save');check(await modal.getByRole('button',{name:'关闭降智检测设置',exact:true}).isDisabled(),'close not disabled');check(await modal.getByRole('button',{name:'移除 free',exact:true}).isDisabled(),'plan switch editable during save');
     release();await modal.waitFor({state:'hidden'});
   }finally{release();await page.unroute('**/api/model-fingerprint/settings');}
  });

@@ -2182,7 +2182,7 @@ select {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   width: 108px;
   margin: 0 auto;
 }
@@ -2289,8 +2289,9 @@ select {
   transform: translateX(29px);
 }
 
-/* Sub2API Priority Compound Group */
-.pool-account-controls .sub2api-priority-cell {
+/* Sub2API Priority & Concurrency Compound Groups */
+.pool-account-controls .sub2api-priority-cell,
+.pool-account-controls .sub2api-concurrency-cell {
   display: flex;
   align-items: center;
   width: 100%;
@@ -2298,7 +2299,8 @@ select {
   box-sizing: border-box;
 }
 
-.pool-account-controls .sub2api-priority-cell:not(.unknown) {
+.pool-account-controls .sub2api-priority-cell:not(.unknown),
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown) {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface);
@@ -2306,22 +2308,28 @@ select {
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
-.pool-account-controls .sub2api-priority-cell:not(.unknown):hover {
+.pool-account-controls .sub2api-priority-cell:not(.unknown):hover,
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown):hover {
   border-color: var(--line-strong);
 }
 
-.pool-account-controls .sub2api-priority-cell:not(.unknown):focus-within {
+.pool-account-controls .sub2api-priority-cell:not(.unknown):focus-within,
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown):focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.15);
 }
 
-.pool-account-controls .sub2api-priority-cell:not(.unknown) .pool-priority-label {
+.pool-account-controls .sub2api-priority-cell:not(.unknown) .pool-priority-label,
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown) .pool-concurrency-label {
+  width: 44px;
+  flex: 0 0 44px;
   background: var(--surface-muted);
   color: var(--muted);
   font-size: 10.5px;
   font-weight: 500;
-  padding: 0 6px;
+  padding: 0 4px;
   height: 100%;
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2330,14 +2338,17 @@ select {
   white-space: nowrap;
 }
 
-.pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor {
+.pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor,
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown) .sub2api-concurrency-editor {
   flex: 1;
+  min-width: 0;
   height: 100%;
   display: flex;
   align-items: center;
 }
 
-.pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor input {
+.pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor input,
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown) .sub2api-concurrency-editor input {
   width: 100%;
   height: 100%;
   border: none;
@@ -2354,28 +2365,34 @@ select {
 }
 
 .pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor input::-webkit-inner-spin-button,
-.pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor input::-webkit-outer-spin-button {
+.pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor input::-webkit-outer-spin-button,
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown) .sub2api-concurrency-editor input::-webkit-inner-spin-button,
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown) .sub2api-concurrency-editor input::-webkit-outer-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
 
-.pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor input:disabled {
+.pool-account-controls .sub2api-priority-cell:not(.unknown) .sub2api-priority-editor input:disabled,
+.pool-account-controls .sub2api-concurrency-cell:not(.unknown) .sub2api-concurrency-editor input:disabled {
   opacity: 0.6;
   cursor: not-allowed;
   background: var(--surface-muted);
 }
 
-.pool-account-controls .sub2api-priority-cell.unknown {
+.pool-account-controls .sub2api-priority-cell.unknown,
+.pool-account-controls .sub2api-concurrency-cell.unknown {
   justify-content: space-between;
   padding: 0 2px;
 }
 
-.pool-account-controls .sub2api-priority-cell.unknown .pool-priority-label {
+.pool-account-controls .sub2api-priority-cell.unknown .pool-priority-label,
+.pool-account-controls .sub2api-concurrency-cell.unknown .pool-concurrency-label {
   color: var(--subtle);
   font-size: 11px;
 }
 
 .pool-account-controls .pool-priority-placeholder,
+.pool-account-controls .pool-concurrency-placeholder,
 .pool-account-controls .pool-toggle-placeholder {
   color: var(--subtle);
   font-size: 11px;
@@ -3776,6 +3793,18 @@ button.status-toggle.on .status-toggle-thumb {
   display: flex;
   align-items: center;
   gap: 3px;
+}
+
+.fingerprint-rounds.is-sync-error {
+  outline: 1px solid rgba(220, 38, 38, 0.45);
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+
+.fingerprint-rounds.is-sync-pending {
+  outline: 1px dashed rgba(217, 119, 6, 0.45);
+  outline-offset: 2px;
+  border-radius: 999px;
 }
 
 .fingerprint-round {
@@ -6367,43 +6396,6 @@ section.workspace-dialog {
   gap: 8px;
 }
 
-.fingerprint-add-plan input {
-  flex: 1;
-  height: 36px;
-  padding: 0 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.fingerprint-profile {
-  margin: 0;
-  padding: 12px 14px;
-  border: 1px solid rgba(226, 232, 240, 0.7);
-  border-radius: 8px;
-  background: #ffffff;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  box-shadow: none;
-}
-
-.fingerprint-group-rule {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 12px;
-}
-
-.fingerprint-group-rule select {
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
 .spin {
   animation: spin 900ms linear infinite;
 }
@@ -8648,52 +8640,96 @@ select option {
 .fingerprint-settings-dialog .fingerprint-section {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   padding-top: 4px;
+}
+
+.fingerprint-settings-dialog .fingerprint-section .section-title-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.fingerprint-settings-dialog .fingerprint-plan-count {
+  margin-left: auto;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted, #64748b);
+}
+
+.fingerprint-settings-dialog .empty-inline-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted, #64748b);
+  line-height: 1.45;
 }
 
 .fingerprint-settings-dialog .fingerprint-plan-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
-.fingerprint-settings-dialog .plan-check-pill {
-  min-height: 28px;
-  height: auto;
-  padding: 4px 10px;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  background: #ffffff;
-  font-size: 12.5px;
+.fingerprint-settings-dialog .plan-tag-pill {
+  min-height: 26px;
+  padding: 2px 6px 2px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  font-size: 12px;
   font-weight: 500;
-  color: var(--ink-2, #334155);
+  color: #1e40af;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  word-break: break-all;
-  white-space: normal;
-  transition: all 120ms ease;
+  gap: 4px;
+  max-width: 100%;
 }
 
-.fingerprint-settings-dialog .plan-check-pill:hover {
-  background: #f8fafc;
-  border-color: #94a3b8;
+.fingerprint-settings-dialog .plan-tag-name {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  min-width: 0;
+  word-break: break-word;
 }
 
-.fingerprint-settings-dialog .plan-check-pill:has(input:checked) {
-  background: #eff6ff;
-  border-color: #93c5fd;
-  color: #1e40af;
+.fingerprint-settings-dialog .plan-tag-alias {
+  font-size: 11px;
+  font-weight: 400;
+  color: #3b82f6;
 }
 
-.fingerprint-settings-dialog .plan-check-pill input[type="checkbox"] {
-  accent-color: #0071e3;
-  width: 14px;
-  height: 14px;
-  margin: 0;
+.fingerprint-settings-dialog .plan-tag-remove {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #1d4ed8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.fingerprint-settings-dialog .plan-tag-remove:hover:not(:disabled) {
+  background: #dbeafe;
+  color: #1e3a8a;
+}
+
+.fingerprint-settings-dialog .plan-tag-remove:focus-visible {
+  outline: 2px solid var(--accent, #0071e3);
+  outline-offset: 1px;
+}
+
+.fingerprint-settings-dialog .plan-tag-remove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .fingerprint-settings-dialog .fingerprint-add-plan {
@@ -8703,106 +8739,54 @@ select option {
   margin-top: 2px;
 }
 
-.fingerprint-settings-dialog .fingerprint-add-plan input {
+.fingerprint-settings-dialog .fingerprint-add-plan .custom-select-container {
   flex: 1;
+  width: auto;
   min-width: 0;
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  background: #ffffff;
-  font-size: 12.5px;
 }
 
-.fingerprint-settings-dialog .fingerprint-add-plan input:focus {
-  border-color: var(--accent, #0071e3);
-  box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.16);
-  outline: none;
-}
-
-.fingerprint-settings-dialog .fingerprint-add-plan button {
+.fingerprint-settings-dialog .fingerprint-add-plan > button {
   height: 34px;
   padding: 0 14px;
   font-size: 12.5px;
+  border-radius: 8px;
   flex-shrink: 0;
 }
 
-/* Group Rules Profiles Cards */
-.fingerprint-settings-dialog .fingerprint-profile-card {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #f8fafc;
-  overflow: hidden;
+/* Matched Account Concurrency */
+.fingerprint-settings-dialog .fingerprint-concurrency-row {
   display: flex;
-  flex-direction: column;
-}
-
-.fingerprint-settings-dialog .fingerprint-profile-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 12px;
-  background: #f1f5f9;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.fingerprint-settings-dialog .fingerprint-profile-name {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--ink, #0f172a);
-}
-
-.fingerprint-settings-dialog .fingerprint-profile-plans {
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--muted, #64748b);
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-  padding: 1px 6px;
-  word-break: break-all;
-}
-
-.fingerprint-settings-dialog .fingerprint-group-rules-list {
-  display: flex;
-  flex-direction: column;
-  background: #ffffff;
-}
-
-.fingerprint-settings-dialog .fingerprint-group-rule {
-  display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
-  padding: 7px 12px;
-  border-bottom: 1px solid #f1f5f9;
-  font-size: 12.5px;
+  flex-wrap: wrap;
 }
 
-.fingerprint-settings-dialog .fingerprint-group-rule:last-child {
-  border-bottom: none;
+.fingerprint-settings-dialog .fingerprint-concurrency-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
 }
 
-.fingerprint-settings-dialog .fingerprint-group-rule-name {
-  font-weight: 500;
-  color: var(--ink-2, #334155);
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.fingerprint-settings-dialog .fingerprint-matched-concurrency-field {
+  flex: 0 1 170px;
+  min-width: 140px;
 }
 
-.fingerprint-settings-dialog .fingerprint-group-rule .custom-select-container {
-  width: 190px;
-  flex-shrink: 0;
+.fingerprint-settings-dialog .fingerprint-compact-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted, #64748b);
 }
 
-.fingerprint-settings-dialog .fingerprint-group-rule .custom-select-trigger {
-  height: 30px;
-  font-size: 12px;
+.fingerprint-dialog .fingerprint-plan-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #b45309;
 }
 
 /* Dialog actions footer (sticky for easy reach) */
@@ -8836,20 +8820,25 @@ select option {
     gap: 10px;
   }
 
-  .fingerprint-settings-dialog .fingerprint-group-rule {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
-    padding: 8px 10px;
-  }
-
-  .fingerprint-settings-dialog .fingerprint-group-rule .custom-select-container {
-    width: 100%;
-  }
-
   .fingerprint-settings-dialog .fingerprint-add-plan {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .fingerprint-settings-dialog .fingerprint-add-plan .custom-select-container {
+    width: 100%;
+  }
+
+  .fingerprint-settings-dialog .fingerprint-concurrency-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .fingerprint-settings-dialog .fingerprint-matched-concurrency-field {
+    flex: none;
+    width: 100%;
+    min-width: 0;
   }
 
   .fingerprint-settings-dialog .dialog-actions {

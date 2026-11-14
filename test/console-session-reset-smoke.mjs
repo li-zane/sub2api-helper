@@ -53,7 +53,15 @@ for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSIO
     if (url.pathname.endsWith("/upstream-errors") || url.pathname.endsWith("/requests")) return json(res, { data: { items: [], total: 0 } });
     return json(res, []);
   });
-  const listen = async server => { await new Promise(r => server.listen(0, "127.0.0.1", r)); return server.address().port; };
+  const listen = async server => {
+    // Windows may allocate ephemeral ports that fetch rejects as unsafe.
+    while (true) {
+      await new Promise(r => server.listen(0, "127.0.0.1", r));
+      const port = server.address().port;
+      if (port > 10080) return port;
+      await new Promise(r => server.close(r));
+    }
+  };
   const officialBase = `http://127.0.0.1:${await listen(official)}`, poolBase = `http://127.0.0.1:${await listen(pool)}`;
   const config = { baseUrl: poolBase, adminApiKey: "fixture" }, backend = crypto.createHash("sha256").update(poolBase + "\0fixture").digest("hex").slice(0, 24);
   const slot = http.createServer(), port = await listen(slot); await new Promise(r => slot.close(r)); const base = `http://127.0.0.1:${port}`;

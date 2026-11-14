@@ -21,6 +21,13 @@ export function mergeUsageSnapshot(before, after) {
   merged.totals = olderTotals ? knownFields(after.totals, before.totals) : knownFields(before.totals, after.totals);
   for (const key of ["resetCredits", "allowed", "limitReached", "fetchedAt"]) merged[key] = last[key] ?? first[key] ?? null;
   if (last.resetCreditsObserved === true) merged.resetCredits = last.resetCredits;
+  // Card checks have their own cadence; quota-window timestamps may be older.
+  const beforeCardsAt = Date.parse(before.resetCreditsFetchedAt || before.fetchedAt || "") || 0;
+  const afterCardsAt = Date.parse(after.resetCreditsFetchedAt || after.fetchedAt || "") || 0;
+  const cards = after.resetCreditsObserved === true && (before.resetCreditsObserved !== true || afterCardsAt >= beforeCardsAt) ? after : before;
+  if (cards.resetCreditsObserved === true) {
+    for (const key of ["resetCredits", "resetCreditsObserved", "resetCreditsStale", "resetCreditsFetchedAt"]) merged[key] = cards[key];
+  }
   if (!older && after.fetchedAt && after.fetchedAt !== before.fetchedAt) merged.error = null;
   return merged;
 }

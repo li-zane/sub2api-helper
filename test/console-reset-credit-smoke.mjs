@@ -26,7 +26,7 @@ const records = [
   credentials: { email: r.email, plan_type: r.plan, access_token: "fixture-token", refresh_token: "fixture-refresh" }, group_ids: [] }));
 const calls = [];
 let liveCount = 4;
-let quotaAvailable = true;
+let quotaAvailable = false;
 let child;
 let headers;
 let logs = "";
@@ -132,6 +132,7 @@ try {
   assert.equal(records[0].extra.auto_reset_credit_5h_threshold, 0.001);
   assert.equal(records[0].extra.auto_reset_credit_7d_threshold, 1);
   assert.equal((await post("/api/sub2api/settings", { config: { ...config, autoResetCreditEnabled: "true" } })).status, 400);
+  quotaAvailable = true;
   let usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
   assert.equal(usage.resetCredits.availableCount, 4, "explicit refresh reads Sub2API quota endpoint");
   assert.equal(usage.primary.usedPercent, 37);

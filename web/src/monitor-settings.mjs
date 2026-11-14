@@ -3,6 +3,8 @@ export const MONITOR_FIELDS = Object.freeze([
   { key: "accountStatusIntervalSeconds", group: "号池与用量同步", label: "号池状态刷新间隔", unit: "秒", min: 1, max: 86400, default: 15 },
   { key: "usageTotalsIntervalSeconds", group: "号池与用量同步", label: "累计用量与金额同步间隔", unit: "秒", min: 1, max: 86400, default: 60 },
   { key: "usageTotalsConcurrency", group: "号池与用量同步", label: "累计用量同步并发", unit: "请求", min: 1, max: 1000, default: 100 },
+  { key: "resetCreditsIntervalSeconds", group: "号池与用量同步", label: "重置卡自动读取间隔", unit: "秒", min: 1, max: 86400, default: 900 },
+  { key: "resetCreditsConcurrency", group: "号池与用量同步", label: "重置卡读取并发", unit: "请求", min: 1, max: 20, default: 4 },
   { key: "profileSyncConcurrency", group: "号池与用量同步", label: "号池配置同步并发", unit: "请求", min: 1, max: 1000, default: 100 },
   { key: "poolRepairRetrySeconds", group: "号池异常恢复", label: "异常重新授权重试间隔", unit: "秒", min: 0, max: 86400, default: 300 },
   { key: "overloadIntervalSeconds", group: "号池与用量同步", label: "调用与过载统计间隔", unit: "秒", min: 1, max: 86400, default: 60 },

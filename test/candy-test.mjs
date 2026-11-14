@@ -37,7 +37,7 @@ try{
   }
   assert.equal(loads,1);assert.equal(service.snapshot('b@test','free').sequence.method,'fingerprint');
   assert(service.filterGroups('a@test','free','default',['1'],account).includes('1'),'either method can supply a passing latest round');
-  assert(!service.filterGroups('b@test','free','default',['1'],{...account,group_ids:[]}).includes('1'),'another account cannot borrow fingerprint evidence for new group admission');
+  assert.deepEqual(service.filterGroups('b@test','free','default',['1'],{...account,group_ids:[]}),['1'],'testing no longer gates group membership');
   let next=service.snapshot('a@test','free').sequence;
   await service.stop(); service=new ModelFingerprintService(options); await service.load();
   assert.deepEqual(service.snapshot('a@test','free').sequence,next,'restart keeps the cycle cursor');
@@ -56,6 +56,6 @@ try{
   const short=new ModelFingerprintService({...options,filePath:path.join(dir,'short.json'),sample:async(_c,_a,_m,p,_s,{onMetadata})=>{onMetadata({});return p==='fingerprint-2'?'1, 2, 3':full;}});
   try { await short.saveSettings({models:['fixture'],testSequence:{first:'fingerprint',fingerprint:1,candy:0}});const shortState=await short.run('a@test','free',{manual:true});assert.equal(shortState.result.status,'unknown');assert.equal(shortState.result.models[0].usedOutputs,2);assert.equal(shortState.result.models[0].samplingComplete,false); } finally { await short.stop(); }
   const candyOnly=new ModelFingerprintService({...options,filePath:path.join(dir,'only.json'),detectorLoader:()=>{throw Error('must not load reference for candy');}});
-  try{await candyOnly.saveSettings({models:['fixture'],testSequence:{first:'candy',fingerprint:0,candy:1},groupPolicies:{default:{1:'verified'}}});assert.equal((await candyOnly.run('a@test','free',{manual:true})).result.status,'mismatch');assert.deepEqual(candyOnly.filterGroups('a@test','free','default',['1'],account),[]);}finally{await candyOnly.stop();}
+  try{await candyOnly.saveSettings({models:['fixture'],testSequence:{first:'candy',fingerprint:0,candy:1},groupPolicies:{default:{1:'verified'}}});assert.equal((await candyOnly.run('a@test','free',{manual:true})).result.status,'mismatch');assert.deepEqual(candyOnly.filterGroups('a@test','free','default',['1'],account),['1']);}finally{await candyOnly.stop();}
   console.log('CANDY_CYCLE_PASS prompt_hash=true grading=pass/fail/unknown order=both restart=true independent_accounts=true auth_recovery=true history=6 usage=true');
 }finally{await service.stop();await fs.rm(dir,{recursive:true,force:true});}

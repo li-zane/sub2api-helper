@@ -7,9 +7,8 @@ import { fingerprintFailure, fingerprintRecovery } from "./model-fingerprint-req
 import { CANDY_PROMPT, CANDY_PROMPT_SHA256, gradeCandy, DEFAULT_TEST_SEQUENCE, normalizeTestSequence, sequenceStep, aggregateRequestUsage } from "./candy-test.mjs";
 
 const invalid = message => Object.assign(new Error(message), { status: 400 });
-export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, failureRetries: 1, failureRetryDelaySeconds: 5, testSequence: DEFAULT_TEST_SEQUENCE, planDefaults: {}, groupPolicies: {} });
+export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, failureRetries: 1, failureRetryDelaySeconds: 5, testSequence: DEFAULT_TEST_SEQUENCE, enabledPlanTypes: [], matchedConcurrency: { enabled: false, value: 10 } });
 const HISTORY_WINDOW_MS = 60 * 60_000;
-const GROUP_POLICY_VERSION = 2;
 const roundSummary = record => record ? { ...record, models: record.models?.map(({ requests, ...model }) => model) } : null;
 export function normalizeFingerprintModels(value) {
   if (!Array.isArray(value) || value.length > 8) throw invalid("检测模型必须是最多 8 项的列表");
@@ -37,20 +36,14 @@ export function normalizeFingerprintSettings(raw = {}) {
   if (!Number.isInteger(failureRetryDelaySeconds) || failureRetryDelaySeconds < 1 || failureRetryDelaySeconds > 300) throw invalid("检测失败重试间隔必须为 1–300 秒的整数");
   if (typeof raw.maxConcurrentAccounts === "boolean" || !Number.isInteger(maxConcurrentAccounts) || maxConcurrentAccounts < 1 || maxConcurrentAccounts > 16) throw invalid("同时检测账号数量必须为 1–16 的整数");
   if (typeof raw.minProbability === "boolean" || !Number.isFinite(minProbability) || minProbability < 0.5 || minProbability > 1) throw invalid("指纹归因阈值必须为 0.5–1");
-  const planDefaults = Object.create(null), groupPolicies = Object.create(null);
-  for (const [key, value] of Object.entries(raw.planDefaults || {})) {
-    if (!key.trim() || key.length > 160 || typeof value !== "boolean") throw invalid("PlanType 指纹检测规则无效");
-    planDefaults[key.toLowerCase()] = value;
-  }
-  for (const [profile, rules] of Object.entries(raw.groupPolicies || {})) {
-    if (!profile || profile.length > 128 || !rules || typeof rules !== "object" || Array.isArray(rules)) throw invalid("指纹分组规则无效");
-    groupPolicies[profile] = Object.create(null);
-    for (const [id, mode] of Object.entries(rules)) {
-      if (!/^\d+$/.test(id) || !["default", "verified"].includes(mode)) throw invalid("指纹分组规则无效");
-      groupPolicies[profile][id] = mode;
-    }
-  }
-  return { models, intervalMinutes: interval(raw.intervalMinutes ?? 360), maxConcurrentAccounts, minProbability, failureRetries, failureRetryDelaySeconds, testSequence: normalizeTestSequence(raw.testSequence), planDefaults, groupPolicies };
+  // Upgrade the former boolean map once. An explicit empty list disables every
+  // PlanType, even if a stale client also sends the old map.
+  const plans = Object.hasOwn(raw, "enabledPlanTypes") ? raw.enabledPlanTypes : Object.entries(raw.planDefaults || {}).filter(([, enabled]) => enabled === true).map(([plan]) => plan);
+  if (!Array.isArray(plans) || plans.length > 100 || plans.some(plan => typeof plan !== "string" || !plan.trim() || plan.length > 160 || /[\r\n\x00]/.test(plan))) throw invalid("PlanType 必须为有效名称列表");
+  const enabledPlanTypes = [...new Set(plans.map(plan => plan.trim().toLowerCase()))].sort();
+  const matchedConcurrency = raw.matchedConcurrency === undefined ? { enabled: false, value: 10 } : raw.matchedConcurrency;
+  if (!matchedConcurrency || typeof matchedConcurrency.enabled !== "boolean" || !Number.isInteger(matchedConcurrency.value) || matchedConcurrency.value < 0 || matchedConcurrency.value > 10000) throw invalid("不降智账号并发必须为 0–10000 的整数，开关必须为布尔值");
+  return { models, intervalMinutes: interval(raw.intervalMinutes ?? 360), maxConcurrentAccounts, minProbability, failureRetries, failureRetryDelaySeconds, testSequence: normalizeTestSequence(raw.testSequence), enabledPlanTypes, matchedConcurrency: { enabled: matchedConcurrency.enabled, value: matchedConcurrency.value } };
 }
 export function normalizeFingerprintOverride(raw = {}) {
   if (raw.enabled != null && typeof raw.enabled !== "boolean") throw invalid("账号检测开关必须为布尔值或继承");
@@ -86,8 +79,8 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
-    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateGroups, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
+  constructor({ filePath, getContext, listTargets, getAccount, sample, updateConcurrency, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
+    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
     this.manualChecks = new Set();
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
     this.detectorLoader = detectorLoader || (() => loadDetector({ source: "https://lm.ikale.io/data/", cache: path.join(path.dirname(filePath), "model-fingerprint-data.bin") }));
@@ -124,14 +117,17 @@ export class ModelFingerprintService {
       const data = JSON.parse(await fs.readFile(this.filePath, "utf8"));
       if (data.version !== 1) throw new Error("版本无效");
       this.settings = normalizeFingerprintSettings(data.settings);
-      for (const [email, entry] of Object.entries(data.accounts || {})) this.accounts.set(email, { ...entry, override: normalizeFingerprintOverride(entry.override), recentResults: this.latestRounds(entry), result: roundSummary(entry.result), phase: "idle", groupSyncPending: entry.groupSyncPending || data.groupPolicyVersion !== GROUP_POLICY_VERSION && ["match", "mismatch"].includes(entry.result?.status) });
+      for (const [email, entry] of Object.entries(data.accounts || {})) {
+        const { groupSyncPending, groupSyncError, ...saved } = entry;
+        this.accounts.set(email, { ...saved, override: normalizeFingerprintOverride(entry.override), recentResults: this.latestRounds(entry), result: roundSummary(entry.result), phase: "idle", concurrencySyncPending: Boolean(entry.concurrencySyncPending || Object.keys(entry.concurrencyOverrides || {}).length || this.settings.matchedConcurrency.enabled && entry.result?.status === "match") });
+      }
       // Persist pruning immediately, including legacy histories that previously kept 200 rounds.
       await this.persist();
     } catch (error) { if (error.code !== "ENOENT") throw new Error(`模型指纹配置读取失败：${error.message}`); }
   }
   persist() {
     for (const entry of this.accounts.values()) { entry.recentResults = this.latestRounds(entry); entry.result = roundSummary(entry.result); delete entry.history; delete entry.fingerprintResult; }
-    const text = JSON.stringify({ version: 1, groupPolicyVersion: GROUP_POLICY_VERSION, settings: this.settings, accounts: Object.fromEntries(this.accounts) }, null, 2);
+    const text = JSON.stringify({ version: 1, settings: this.settings, accounts: Object.fromEntries(this.accounts) }, null, 2);
     const operation = this.writePromise.catch(() => {}).then(async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const temp = `${this.filePath}.${crypto.randomUUID()}.tmp`;
@@ -141,7 +137,7 @@ export class ModelFingerprintService {
   }
   effective(email, planType = "") {
     const override = this.accounts.get(label(email))?.override || {};
-    return { enabled: override.enabled ?? this.settings.planDefaults[label(planType)] ?? false, models: override.models ?? this.settings.models, intervalMinutes: override.intervalMinutes ?? this.settings.intervalMinutes, minProbability: this.settings.minProbability, testSequence: override.testSequence ?? this.settings.testSequence };
+    return { enabled: this.settings.enabledPlanTypes.includes(label(planType)) && override.enabled !== false, models: override.models ?? this.settings.models, intervalMinutes: override.intervalMinutes ?? this.settings.intervalMinutes, minProbability: this.settings.minProbability, testSequence: override.testSequence ?? this.settings.testSequence };
   }
   sequence(email, planType) {
     const { testSequence } = this.effective(email, planType);
@@ -162,7 +158,7 @@ export class ModelFingerprintService {
     const current = entry?.result?.signature === this.signature(email, planType);
     const config = this.effective(email, planType), queued = this.queued.has(email);
     const { signature: _signature, index: _index, ...sequence } = this.sequence(email, planType);
-    return { ...config, sequence, runningMethod: this.active.has(email) ? entry?.activeMethod : null, override: entry?.override || { enabled: null, models: null, intervalMinutes: null, testSequence: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status, method }) => ({ checkedAt, status, method: method || 'fingerprint' })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? roundSummary(entry?.result) : null, previousResult: !current ? roundSummary(entry?.result) : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncError: entry?.groupSyncError || null };
+    return { ...config, sequence, runningMethod: this.active.has(email) ? entry?.activeMethod : null, override: entry?.override || { enabled: null, models: null, intervalMinutes: null, testSequence: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status, method }) => ({ checkedAt, status, method: method || 'fingerprint' })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? roundSummary(entry?.result) : null, previousResult: !current ? roundSummary(entry?.result) : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, concurrencySyncPending: Boolean(entry?.concurrencySyncPending), concurrencySyncError: entry?.concurrencySyncError || null };
   }
   latestRounds(entry) {
     const records = new Map();
@@ -187,7 +183,7 @@ export class ModelFingerprintService {
   history(email, planType) {
     const state = this.snapshot(email, planType);
     const records = this.latestRounds(this.accounts.get(label(email))).map(roundSummary);
-    return { since: records.at(-1)?.checkedAt || new Date(this.now()).toISOString(), until: new Date(this.now()).toISOString(), records, phase: state.phase, runningMethod:state.runningMethod, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, testSequence:state.testSequence, sequence:state.sequence, lastError: state.lastError, groupSyncError: state.groupSyncError, groupSyncPending: Boolean(this.accounts.get(label(email))?.groupSyncPending) };
+    return { since: records.at(-1)?.checkedAt || new Date(this.now()).toISOString(), until: new Date(this.now()).toISOString(), records, phase: state.phase, runningMethod:state.runningMethod, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, testSequence:state.testSequence, sequence:state.sequence, lastError: state.lastError, concurrencySyncError: state.concurrencySyncError, concurrencySyncPending: state.concurrencySyncPending };
   }
   historyDetail(email, roundId) {
     const record = this.latestRounds(this.accounts.get(label(email))).find(r => (r.id || r.checkedAt) === roundId);
@@ -196,14 +192,15 @@ export class ModelFingerprintService {
   }
   saveSettings(raw) {
     const next = normalizeFingerprintSettings(raw);
-    const onlyConcurrency = JSON.stringify({ ...next, maxConcurrentAccounts: 0 }) === JSON.stringify({ ...this.settings, maxConcurrentAccounts: 0 });
-    if (!onlyConcurrency) this.invalidate();
+    const samplingSettings = settings => [settings.models, settings.minProbability, settings.intervalMinutes, settings.enabledPlanTypes, settings.testSequence];
+    const changedSampling = JSON.stringify(samplingSettings(next)) !== JSON.stringify(samplingSettings(this.settings));
+    if (changedSampling) this.invalidate();
     return this.mutate(async () => {
-      if (!onlyConcurrency) this.invalidate();
+      if (changedSampling) this.invalidate();
       const previous = this.settings, previousAccounts = this.accounts;
-      const changedSampling = JSON.stringify([previous.models, previous.minProbability, previous.intervalMinutes, previous.planDefaults, previous.testSequence]) !== JSON.stringify([next.models, next.minProbability, next.intervalMinutes, next.planDefaults, next.testSequence]);
       this.settings = next;
-      if (!onlyConcurrency) this.accounts = new Map([...this.accounts].map(([email, entry]) => [email, { ...entry, nextCheckAt: changedSampling ? null : entry.nextCheckAt, groupSyncPending: true }]));
+      // Keep active entry identities when only policy/queue limits change.
+      for (const entry of this.accounts.values()) { if (changedSampling) entry.nextCheckAt = null; entry.concurrencySyncPending = true; }
       try { await this.persist(); } catch (error) { this.settings = previous; this.accounts = previousAccounts; throw error; }
       this.onChange(); this.drain(); this.trigger(); return this.publicSettings();
     });
@@ -213,19 +210,15 @@ export class ModelFingerprintService {
     return this.mutate(async () => {
       this.invalidateAccount(email);
       const previous = this.accounts.get(email);
-      this.accounts.set(email, { ...previous, override, nextCheckAt: null, lastError: null });
+      this.accounts.set(email, { ...previous, override, nextCheckAt: null, lastError: null, concurrencySyncPending: true });
       try { await this.persist(); } catch (error) { if (previous) this.accounts.set(email, previous); else this.accounts.delete(email); throw error; }
       if (notify) this.onChange(); this.trigger();
     });
   }
   publicSettings() { return { settings: this.settings, profiles: this.getContext().profiles, runtime: { activeAccounts: this.active.size, queuedAccounts: this.queued.size, maxConcurrentAccounts: this.settings.maxConcurrentAccounts } }; }
-  // Apply only the conditional groups in the supplied profile; other groups retain existing behavior.
+  // Compatibility for upload/profile callers: detection no longer gates groups.
   filterGroups(email, planType, profileId, groups, currentAccount = null) {
-    const rules = this.settings.groupPolicies[profileId] || {};
-    const evidence = this.groupResult(email, planType);
-    const result = currentAccount && evidence?.routingIdentities?.[currentAccount.id] === fingerprintRoutingIdentity(currentAccount) ? evidence : null;
-    const existing = new Set((currentAccount?.group_ids || []).map(String));
-    return groups.filter(id => rules[String(id)] !== "verified" || result?.status === "match" || result?.status !== "mismatch" && existing.has(String(id)));
+    return groups;
   }
   assertRunnable(email, planType, { manual = false } = {}) {
     if (this.isBlocked(email, { manual })) throw Object.assign(new Error("账号已停用或不符合检测条件"), { status: 409 });
@@ -370,7 +363,7 @@ export class ModelFingerprintService {
         // A completed candy answer consumes its one scheduled turn even when
         // unscorable. Transport/auth failures keep the slot for the next check.
         if (results.length && results.every(r=>r.samplingComplete || method === 'candy' && r.responseComplete)) entry.sequenceCursor = {signature:step.signature,index:(step.index+1)%step.total};
-        entry.groupSyncPending = true;
+        entry.concurrencySyncPending = true;
         await this.persist();
       });
       await this.reconcile(email, planType, targets, revision);
@@ -401,25 +394,88 @@ export class ModelFingerprintService {
   async reconcileLocked(email, planType, targets, revision) {
     if (this.isBlocked(email)) return;
     const entry = this.accounts.get(email), result = this.groupResult(email, planType), context = this.getContext();
-    if (!["match", "mismatch"].includes(result?.status) || !entry.groupSyncPending) return;
+    if (!entry?.concurrencySyncPending || !this.updateConcurrency) return;
+    const policy = this.settings.matchedConcurrency;
+    const enabled = policy.enabled && this.effective(email, planType).enabled;
+    const overrides = entry.concurrencyOverrides ||= {};
+    const externalEdits = entry.concurrencyExternalEdits ||= {};
     try {
       for (const target of targets) {
         const account = await this.getAccount(context.config, target.id);
-        if (this.isBlocked(email) || revision !== this.revision || result.signature !== this.signature(email, planType)) return;
-        if (result.identities?.[target.id] !== fingerprintAccountIdentity(account)) { entry.groupSyncPending = false; entry.groupSyncError = "账号凭据或代理已变更，请重新检测"; await this.persist(); return; }
-        const profileId = target.profileId, profile = context.profiles.find(p => p.id === profileId);
-        if (!profile) continue;
-        const rules = this.settings.groupPolicies[profileId] || {};
-        const current = (account.group_ids || []).map(String), next = new Set(current);
-        for (const id of profile.groupIds.map(String)) {
-          if (rules[id] === "verified" && result.status !== "match") next.delete(id); else next.add(id);
+        if (this.isBlocked(email) || revision !== this.revision || context.backend !== this.getContext().backend) return;
+        let owned = overrides[target.id];
+        if (owned && owned.backend !== context.backend) continue;
+        if (!owned && (!enabled || result?.status !== "match")) continue;
+        const current = account.concurrency;
+        if (!Number.isInteger(current) || current < 0 || current > 10000) throw new Error("账号并发值不可用");
+        // A write may have succeeded before a crash. Its intent was persisted
+        // first; the next read safely confirms it or retries from the old value.
+        if (owned && current !== owned.appliedValue && !(owned.pending && current === owned.previousValue)) {
+          delete overrides[target.id]; externalEdits[target.id] = entry.result?.id;
+          continue;
         }
-        const ids = [...next];
-        if (JSON.stringify([...current].sort()) !== JSON.stringify([...ids].sort())) await this.updateGroups(context.config, target.id, ids);
+        const restore = !enabled || result?.status === "mismatch" || !result;
+        if (restore) {
+          if (owned) {
+            if (current !== owned.baseValue) await this.updateConcurrency(context.config, target.id, owned.baseValue);
+            delete overrides[target.id];
+            await this.persist();
+          }
+          continue;
+        }
+        // Transport/unknown results preserve existing values. Only a current,
+        // explicit pass can apply the special concurrency, for either method.
+        if (result?.status !== "match" || externalEdits[target.id] === result.id) continue;
+        if (result.identities?.[target.id] !== fingerprintAccountIdentity(account)) continue;
+        if (!owned && current === policy.value) continue;
+        const intent = { baseValue: owned?.baseValue ?? current, appliedValue: policy.value, previousValue: current, backend: context.backend, pending: true };
+        overrides[target.id] = intent;
+        await this.persist();
+        if (current !== policy.value) await this.updateConcurrency(context.config, target.id, policy.value);
+        intent.pending = false;
+        await this.persist();
       }
-      entry.groupSyncPending = false; entry.groupSyncError = null;
-    } catch { entry.groupSyncError = "检测结果已保存，条件分组同步失败；稍后自动重试"; }
+      entry.concurrencySyncPending = false; entry.concurrencySyncError = null;
+    } catch { entry.concurrencySyncError = "检测结果已保存，并发同步失败；稍后自动重试"; }
     await this.persist();
+    this.onChange();
+  }
+  // Serialize manual pool edits with policy writes. A new test round may apply
+  // the policy again; polling/restarts never undo the user's latest edit.
+  manualConcurrency(email, operation) {
+    return this.mutate(async () => {
+      const entry = this.accounts.get(label(email));
+      return operation(async (id) => {
+        if (!entry) return;
+        delete (entry.concurrencyOverrides ||= {})[id];
+        (entry.concurrencyExternalEdits ||= {})[id] = entry.result?.id;
+        await this.persist();
+      });
+    });
+  }
+  poolAccountUpdate(email, id, backend, body, write, { updateBase = false } = {}) {
+    if (!Object.hasOwn(body, "concurrency")) return write(body);
+    // With the optional policy off and no managed override, profile syncing
+    // retains its existing network concurrency instead of taking the state lock.
+    if (!this.settings.matchedConcurrency.enabled && !this.accounts.get(label(email))?.concurrencyOverrides?.[id]) return write(body);
+    return this.mutate(async () => {
+      const entry = this.accounts.get(label(email)), owned = entry?.concurrencyOverrides?.[id];
+      if (!owned || owned.backend !== backend) return write(body);
+      const account = await this.getAccount(this.getContext().config, id);
+      if (account.concurrency !== owned.appliedValue) {
+        delete entry.concurrencyOverrides[id];
+        (entry.concurrencyExternalEdits ||= {})[id] = entry.result?.id;
+        await this.persist();
+        return write(body);
+      }
+      // Profile edits change the value restored later; credential refreshes
+      // keep both the effective override and its original base.
+      if (updateBase && Number.isInteger(body.concurrency)) {
+        owned.baseValue = body.concurrency;
+        await this.persist();
+      }
+      return write({ ...body, concurrency: owned.appliedValue });
+    });
   }
   setTickMs(ms) {
     this.tickMs = ms;
@@ -434,7 +490,7 @@ export class ModelFingerprintService {
       if (this.isBlocked(job.email)) continue;
       if (this.inFlight.has(label(job.email))) continue;
       const state = this.snapshot(job.email, job.planType), entry = this.accounts.get(label(job.email));
-      if (entry?.groupSyncPending && ["match", "mismatch"].includes(this.groupResult(job.email,job.planType)?.status)) {
+      if (entry?.concurrencySyncPending) {
         const targets = (await this.listTargets(context.config)).filter(t => label(t.email) === label(job.email));
         await this.reconcile(label(job.email), job.planType, targets);
       }

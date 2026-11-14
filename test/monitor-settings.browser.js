@@ -10,7 +10,9 @@ async (page) => {
     check(await modal.locator('#task-login-timeout').inputValue()==='3','login timeout default');
     await modal.locator('#task-login-timeout').scrollIntoViewIfNeeded();
     await page.screenshot({path:evidenceDir+'/login-timeout-desktop.png'});
-    check(await modal.locator('input[id^="monitor-"]').count()===9,'obsolete monitor settings remain or settings are missing');
+    check(await modal.locator('input[id^="monitor-"]').count()===11,'obsolete monitor settings remain or settings are missing');
+    check(await modal.locator('#monitor-resetCreditsIntervalSeconds').inputValue()==='900','reset-card interval default');
+    check(await modal.locator('#monitor-resetCreditsConcurrency').inputValue()==='4','reset-card concurrency default');
     check(await modal.locator('#monitor-poolMonitorIntervalSeconds, #monitor-overloadCooldownIntervalSeconds').count()===0,'duplicate polling intervals remain');
     check((await modal.getByRole('region',{name:'号池异常恢复',exact:true}).innerText()).includes('发现可恢复错误立即加入共享授权队列'),'immediate recovery explanation missing');
     const overloadSection=modal.locator('.task-overload-settings');
@@ -45,6 +47,8 @@ async (page) => {
     await modal.locator('#task-login-timeout').fill('5');
     await modal.locator('#monitor-accountStatusIntervalSeconds').fill('25');
     await modal.locator('#monitor-usageTotalsConcurrency').fill('11');
+    await modal.locator('#monitor-resetCreditsIntervalSeconds').fill('600');
+    await modal.locator('#monitor-resetCreditsConcurrency').fill('2');
     await modal.locator('#monitor-webSessionScanIntervalSeconds').fill('45');
     const reply=page.waitForResponse(r=>r.url().includes('/api/task-settings')&&r.request().method()==='POST');
     await modal.getByRole('button',{name:'保存设置',exact:true}).click();const r=await reply;savedBody=r.request().postDataJSON();check(r.ok(),'save failed');
@@ -53,6 +57,8 @@ async (page) => {
     check(await modal.locator('#monitor-overloadConcurrency').inputValue()==='12','overload not persisted');
     check(await modal.locator('#monitor-usageTotalsConcurrency').inputValue()==='11','usage not persisted');
     check(savedBody.monitoring.accountStatusIntervalSeconds===25,'cadence omitted');
+    check(savedBody.monitoring.resetCreditsIntervalSeconds===600&&await modal.locator('#monitor-resetCreditsIntervalSeconds').inputValue()==='600','reset-card interval not persisted');
+    check(savedBody.monitoring.resetCreditsConcurrency===2&&await modal.locator('#monitor-resetCreditsConcurrency').inputValue()==='2','reset-card concurrency not persisted');
     check(savedBody.monitoring.webSessionScanIntervalSeconds===45&&await modal.locator('#monitor-webSessionScanIntervalSeconds').inputValue()==='45','relocated scheduler value not persisted');
     check(!Object.hasOwn(savedBody,'modelFingerprint'),'task settings overwrite detection settings');
   });

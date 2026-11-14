@@ -26,7 +26,12 @@ const wait = async fn => { for (const end = Date.now() + 20000; Date.now() < end
 const api = async (p, body) => { const r = await fetch(base + p, { headers, ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }) }); return { status: r.status, data: await r.json() }; };
 const job = async () => (await api("/api/jobs")).data.jobs.find(j => j.id === id);
 async function emit(text) {
-  commands.push(text); const temporary = events + ".tmp"; await fs.writeFile(temporary, JSON.stringify(commands)); await fs.rename(temporary, events);
+  commands.push(text); const temporary = events + ".tmp"; await fs.writeFile(temporary, JSON.stringify(commands));
+  // The mock worker can briefly hold the target open on Windows.
+  for (let attempt = 0; ; attempt++) {
+    try { await fs.rename(temporary, events); break; }
+    catch (error) { if (attempt >= 20 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error; await sleep(10); }
+  }
   await wait(async () => JSON.parse(await fs.readFile(ack, "utf8")).cursor === commands.length); await sleep(80);
 }
 const challenge = "[auth-expired] fixture\n[codex-auth-login] fixture\n[ok] Password accepted\n[mfa] TOTP 2FA challenge reached.\n[mfa] Generated a 6-digit code from the configured 2FA key.\n[ok] 2FA verification accepted\n";

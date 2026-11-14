@@ -36,6 +36,14 @@ async page => {
     check((await cell.innerText()).includes('T 0'),'real zero token count not applied');check((await cell.innerText()).includes('0 张'),'real zero card count not applied');
     await page.reload();await cell.waitFor();check((await cell.innerText()).includes('A $0'),'updated snapshot not used after reload');
   });
+  await run('automatic-card-update-uses-independent-timestamp',async()=>{
+    snapshot={...snapshot,resetCreditsObserved:true,resetCreditsFetchedAt:'2026-11-07T02:00:00Z',resetCredits:{availableCount:1,credits:[]}};
+    await page.waitForFunction(()=>document.querySelector('.usage-reset-credits')?.textContent.includes('1 张'));
+    snapshot={...snapshot,fetchedAt:'2026-11-07T00:00:00Z',resetCreditsFetchedAt:'2026-11-07T03:00:00Z',resetCredits:{availableCount:0,credits:[]}};
+    await page.waitForFunction(()=>document.querySelector('.usage-reset-credits')?.textContent.includes('0 张'));
+    check((await cell.innerText()).includes('A $0'),'card-only polling replaced newer accounting');
+    await page.screenshot({path:evidence+'/automatic-reset-cards.png'});
+  });
   await run('mobile-no-new-styles-or-runtime-errors',async()=>{
     await page.setViewportSize({width:375,height:812});check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'mobile overflow');check(!errors.length,errors.join('; '));
   });
