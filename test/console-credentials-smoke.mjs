@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,8 @@ const server = spawn(process.execPath, [
     ONBOARDING_PROTOCOL_SCRIPT: path.join(projectRoot, "test", "mock-protocol-login.mjs"),
     LOCALAPPDATA: path.join(outputRoot, "localappdata"),
     TOSUB2_MAC_CREDENTIAL_ROOT: path.join(outputRoot, "credentials"),
+    TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(outputRoot, "credentials"),
+    TOSUB2_CREDENTIAL_KEY: crypto.randomBytes(32).toString("hex"),
   },
   stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true,

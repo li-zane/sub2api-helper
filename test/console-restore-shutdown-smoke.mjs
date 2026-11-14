@@ -5,6 +5,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -134,6 +135,9 @@ const child = spawn(process.execPath, [
     ONBOARDING_OUTPUT_ROOT: outputRoot,
     ONBOARDING_PROTOCOL_SCRIPT: path.join(projectRoot, "test", "mock-protocol-login.mjs"),
     TOSUB2_MAC_CREDENTIAL_ROOT: path.join(tempRoot, "credentials"),
+    LOCALAPPDATA: path.join(tempRoot, "localappdata"),
+    TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(tempRoot, "credentials"),
+    TOSUB2_CREDENTIAL_KEY: crypto.randomBytes(32).toString("hex"),
     TOSUB2_TLS_PROFILE: "chrome142",
   },
   stdio: ["ignore", "pipe", "pipe"],
