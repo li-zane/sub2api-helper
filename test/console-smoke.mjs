@@ -5,11 +5,16 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-console-"));
+// This fixture drives refreshes explicitly; periodic refreshes must not race its counters.
+await fs.writeFile(path.join(outputRoot, "task-settings.json"), JSON.stringify({
+  maxActiveJobs: 4, monitoring: { accountStatusIntervalSeconds: 86400, usageTotalsIntervalSeconds: 86400 },
+}));
 const port = await findAvailablePort();
 const baseUrl = `http://127.0.0.1:${port}`;
 const officialPort = await findAvailablePort();
@@ -246,6 +251,9 @@ const child = spawn(process.execPath, [
     PROXY_CONNECTION_RETRY_BASE_MS: "1",
     SUB2API_AUTO_REPAIR_COOLDOWN_MS: "0",
     TOSUB2_MAC_CREDENTIAL_ROOT: path.join(outputRoot, "test-mac-credentials"),
+    LOCALAPPDATA: path.join(outputRoot, "test-localappdata"),
+    TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(outputRoot, "test-linux-credentials"),
+    TOSUB2_CREDENTIAL_KEY: crypto.randomBytes(32).toString("hex"),
   },
   stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true,
@@ -1858,6 +1866,9 @@ try {
     body: JSON.stringify({ enabled: true, config: monitorConfig }),
   });
   assert.equal(restoreProxyMonitorResponse.status, 200, await restoreProxyMonitorResponse.text());
+  // Finish the configuration-triggered refresh while the fixture account list is still empty.
+  const settledMonitor = await fetch(`${baseUrl}/api/sub2api/monitor/check`, { method: "POST", headers });
+  assert.equal(settledMonitor.status, 200, await settledMonitor.text());
 
   remoteErrorAccounts = [{
     id: 91,
