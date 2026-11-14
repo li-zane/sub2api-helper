@@ -246,7 +246,7 @@ API Key 只会随取号请求临时发送给本地服务，不会写入任务元
 
 账号列表的“账号”表头提供“全部”“密码 + 2FA”和“仅号池”筛选；“密码 + 2FA”仅匹配密码登录且已记录 2FA 密钥的本地账号。“仅号池”匹配从号池同步且尚未补充本地登录资料的账号。筛选在服务端分页前执行，支持与邮箱、PlanType、状态和号池筛选组合；切换筛选时清空勾选并返回第一页。
 
-开发与部署统一使用个人仓库 `li-zane/sub2api-helper` 的 `main` 分支。应用代码位于 x3 的 `/opt/tosub2/app`，运行数据和敏感凭据位于独立的 `/var/lib/tosub2`，不会随 Git 提交、拉取或更新覆盖。更新时先在本地提交并推送 `main`，再在 x3 执行 `git pull --ff-only origin main`，完成依赖安装、生产构建和源码检查后执行 `systemctl restart tosub2.service`；更新前应保留 `/var/lib/tosub2` 备份。后续直接在个人仓库的 `main` 开发，不自动同步原项目分支。
+开发与部署统一使用个人仓库 `li-zane/sub2api-helper` 的 `main` 分支。应用代码位于 x3 的 `/opt/tosub2/app`，运行数据和敏感凭据位于独立的 `/var/lib/tosub2`，不会随更新覆盖。提交并推送 `main` 后，GitHub Actions 通过 Linux/Windows 检查和依赖审计，再发布 `helper-<完整提交 SHA>`：Linux x64 / Node 22 运行包包含源码、`web/dist` 和 Node 依赖，并附 SHA256 校验。服务器执行 `helper-update` 下载并校验最新已发布版本、等待任务空闲、临时备份、切换代码和运行包后重启服务；无需在线上执行 npm 安装或前端构建。`helper-update --check` 只下载校验、不切换版本或重启；`helper-update <完整提交 SHA>` 固定到指定的已发布提交。Python 环境沿用 `/opt/tosub2/venv`，Python 依赖声明变化时预检停止，先单独准备匹配的环境。发布失败自动恢复本次临时备份，运行数据保留；发布成功后删除本次临时构建包和旧运行文件，不保留服务器历史版本。完整运维约定和脚本见 `.agents/release.md`。后续直接在个人仓库的 `main` 开发，不自动同步原项目分支。
 
 上传选项的非敏感界面缓存仍会保存在当前浏览器的 `localStorage`（本地存储），服务端配置以设置文件为准。批量上传时，未完成的任务会自动跳过；服务端返回的各方案创建失败数量会汇总显示在控制台中。
 

@@ -3,6 +3,7 @@ name: Check
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
+          - ubuntu-24.04
           - windows-latest
     steps:
       - name: Checkout
@@ -36,7 +37,61 @@ jobs:
         run: npm ci
       - name: Build production frontend
         run: npm run build
+      - name: Check release tooling
+        run: python -m unittest discover -s .agents/release -p 'test_*.py' -v
       - name: Check source and credential storage
         run: npm run check
       - name: Audit dependencies
         run: npm audit --audit-level=high
+      - name: Package Linux runtime
+        if: runner.os == 'Linux' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: python .agents/release/bundle.py --output release-dist --revision "$GITHUB_SHA"
+      - name: Upload runtime bundle
+        if: runner.os == 'Linux' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: helper-linux-runtime
+          path: |
+            release-dist/helper-linux-x64-node22.tar.gz
+            release-dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish runtime release
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: helper-runtime-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: helper-linux-runtime
+          path: release-dist
+      - name: Publish immutable commit bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="helper-$GITHUB_SHA"
+          if gh release view "$tag" --json targetCommitish,assets > existing-release.json 2>/dev/null; then
+            python3 - <<'PY'
+          import json, os
+          release = json.load(open('existing-release.json'))
+          assert release['targetCommitish'] == os.environ['GITHUB_SHA']
+          assert {'helper-linux-x64-node22.tar.gz', 'SHA256SUMS'} <= {a['name'] for a in release['assets']}
+          print('Existing immutable release retained')
+          PY
+            exit 0
+          fi
+          latest=false
+          if [[ $(gh api "repos/$GH_REPO/commits/main" --jq .sha) == "$GITHUB_SHA" ]]; then latest=true; fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "Helper ${GITHUB_SHA:0:12}" \
+            --notes "Linux x64 / Node 22 runtime bundle for commit $GITHUB_SHA. Includes built frontend and Node dependencies; x3 performs no npm install or frontend build." \
+            --latest="$latest" release-dist/helper-linux-x64-node22.tar.gz release-dist/SHA256SUMS

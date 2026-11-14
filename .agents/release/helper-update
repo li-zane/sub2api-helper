@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+version=latest
+mode=apply
+idle_limit=1200
+while (($#)); do
+  case "$1" in
+    --check) mode=check ;;
+    --wait-seconds) shift; idle_limit=${1:?Pass wait seconds} ;;
+    -h|--help)
+      printf 'Usage: helper-update [latest|FULL_COMMIT_SHA] [--check] [--wait-seconds 1200]\n'
+      exit 0 ;;
+    *) [[ $1 == latest || $1 =~ ^[0-9a-f]{40}$ ]]; version=$1 ;;
+  esac
+  shift
+done
+[[ $EUID == 0 ]]
+source_dir=/opt/tosub2/app/.agents/release
+[[ -f "$source_dir/download.py" ]] || source_dir=/usr/local/lib/sub2api-helper-release
+work=$(mktemp -d /root/.tmp/helper-update-XXXXXXXX)
+trap 'rm -rf -- "$work"' EXIT
+for name in deploy-x3.sh rollback-x3.sh state-check.py download.py bundle.py; do
+  cp "$source_dir/$name" "$work/$name"
+done
+revision=$(python3 "$work/download.py" resolve "$version")
+before=$(git -C /opt/tosub2/app rev-parse HEAD)
+bash "$work/deploy-x3.sh" "$revision" "$before" "$idle_limit" "$mode"
