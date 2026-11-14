@@ -264,6 +264,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         testSequence: { first: seq.first, fingerprint: fp, candy: cd },
         enabledPlanTypes: enabledPlans,
         matchedConcurrency: nextMatchedConcurrency,
+        groupPolicies: data.settings.groupPolicies || {},
       };
       const saved = await api(token, "/api/model-fingerprint/settings", { settings: payload });
       onSettingsSaved?.(saved.settings);
@@ -381,6 +382,27 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
           </label>
         </div>
         <p className="fingerprint-compact-note">仅明确通过时生效；请求失败或证据不足不算明确降智，保持当前并发；明确不通过或关闭本选项将恢复原并发。</p>
+      </section>
+      <section className="fingerprint-section" aria-label="号池分组加入规则">
+        <div className="section-title-row">
+          <h3>号池分组加入规则</h3>
+          <HelpTip title="号池分组加入规则" label="查看号池分组加入规则说明">
+            默认加入按方案保留；不降智加入依据最近一轮检测，指纹或糖果通过即可加入（本轮指定模型需全部通过）。明确未通过时移出条件组；证据不足或请求失败保留已有分组，新账号通过后才加入。不改其它分组，独立并发设置仍单独生效。
+          </HelpTip>
+        </div>
+        {data.groupsError && <p role="status" className="proxy-quality-error">{data.groupsError}，已配置的规则会保留。</p>}
+        {!(data.profiles || []).length && <p className="empty-inline-note">请先在 Sub2API 配置中添加方案并选择分组。</p>}
+        {(data.profiles || []).map(profile => <div key={profile.id} className="fingerprint-group-profile">
+          <div className="section-title-row"><strong>{profile.name}</strong><small>{(profile.planTypes || []).join(" / ") || "未绑定 PlanType"}</small></div>
+          {!(profile.groupIds || []).length ? <p className="empty-inline-note">此方案未指定分组</p> : profile.groupIds.map(id => <div className="settings-field fingerprint-group-rule" key={id}>
+            <span>{(data.groups || []).find(group => String(group.id) === String(id))?.name || `分组 ${id}`}</span>
+            <CustomSelect disabled={busy} aria-label={`${profile.name} 分组 ${id} 加入规则`}
+              value={data.settings.groupPolicies?.[profile.id]?.[id] || "default"}
+              onChange={event => patch({ groupPolicies: { ...data.settings.groupPolicies, [profile.id]: { ...data.settings.groupPolicies?.[profile.id], [id]: event.target.value } } })}>
+              <option value="default">默认加入</option><option value="verified">不降智加入</option>
+            </CustomSelect>
+          </div>)}
+        </div>)}
       </section>
       {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" disabled={busy} onClick={() => setData(null)}>取消</button><button className="primary-button" disabled={busy}>{busy ? "保存中…" : "保存降智检测设置"}</button></div>
     </form></Dialog>}
@@ -699,6 +721,8 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
     </div>
     {data && <>
       {!data.models.length && <p className="proxy-quality-error">尚未配置检测模型，请先在“降智检测设置”或账号独立设置中添加。</p>}
+      {data.groupSyncError && <p role="alert" className="proxy-quality-error">分组同步：{data.groupSyncError}</p>}
+      {!data.groupSyncError && data.groupSyncPending && <p role="status" className="fingerprint-transcript-note">分组同步待完成，系统将在号池可用时自动重试。</p>}
       {data.concurrencySyncError && <p role="alert" className="proxy-quality-error">并发同步：{data.concurrencySyncError}</p>}
       {!data.concurrencySyncError && data.concurrencySyncPending && <p className="fingerprint-transcript-note" role="status">并发同步待完成，系统将在号池可用时自动重试。</p>}
       {data.lastError && <p role="alert" className="proxy-quality-error">{data.lastError}</p>}
@@ -953,6 +977,8 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
           </p>;
         })}
       </section>}
+      {!error && state.groupSyncError && <p role="alert" className="proxy-quality-error">分组同步：{state.groupSyncError}</p>}
+      {!error && !state.groupSyncError && state.groupSyncPending && <p role="status" className="fingerprint-transcript-note">号池分组同步待完成，号池可用时将自动重试。</p>}
       {!error && state.concurrencySyncError && <p role="alert" className="proxy-quality-error">并发同步：{state.concurrencySyncError}</p>}
       {!error && !state.concurrencySyncError && state.concurrencySyncPending && <p className="fingerprint-transcript-note" role="status">号池并发同步待完成，号池可用时将自动重试。</p>}
       {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" disabled={busy} onClick={() => setEditing(false)}>取消</button><button className="primary-button" disabled={busy}>保存账号检测设置</button></div>

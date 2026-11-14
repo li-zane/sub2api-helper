@@ -460,6 +460,7 @@ const modelFingerprint = new ModelFingerprintService({
   },
   getAccount: readFingerprintAccount, sample: fingerprintSampler,
   onAccountFailure: recoverFingerprintAuthorization,
+  updateGroups: async (config, id, ids) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ group_ids: ids.map(Number) }) }),
   updateConcurrency: async (config, id, concurrency) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ concurrency }) }),
   onChange: invalidateSub2ApiAccountStatusCache,
 });
@@ -741,7 +742,12 @@ async function handleApi(req, res, requestUrl) {
       const body = await readJson(req);
       await modelFingerprint.saveSettings(body.settings || body);
     } else if (req.method !== "GET") throw httpError(405, "Method not allowed");
-    sendJson(res, 200, modelFingerprint.publicSettings()); return;
+    let groups = [], groupsError = null;
+    if (sub2ApiSettingsConfig?.baseUrl && sub2ApiSettingsConfig?.adminApiKey) {
+      try { groups = await listSub2ApiTargetGroups(sub2ApiSettingsConfig); }
+      catch { groupsError = "号池分组读取失败，请稍后重新打开设置"; }
+    }
+    sendJson(res, 200, { ...modelFingerprint.publicSettings(), groups, groupsError }); return;
   }
   if (req.method === "GET" && requestUrl.pathname === "/api/model-fingerprint/reference") {
     sendJson(res, 200, await modelFingerprint.referenceInfo()); return;

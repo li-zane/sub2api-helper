@@ -52,7 +52,7 @@ try {
   assert.equal(job.modelFingerprint.enabled, false); assert.equal(samples, 0, "new deployments send no model requests by default");
   assert.equal((await post("/api/model-fingerprint/settings", { settings: { ...settings, intervalMinutes: 1 } })).status, 400);
   assert.equal((await post("/api/model-fingerprint/settings", { settings })).status, 200);
-  assert.equal((await get("/api/model-fingerprint/settings")).groups, undefined, "retired group catalog is no longer requested");
+  assert((await get("/api/model-fingerprint/settings")).groups.some(g => g.name === "验证组"), "group catalog is available for settings");
   const before = calls.length;
   const started = await post(`/api/jobs/${job.id}/model-fingerprint/check`, {}); assert.equal(started.status, 202, JSON.stringify(started.data));
   let checked;
@@ -85,7 +85,7 @@ try {
   assert.equal((await get(detailPath)).record.models[0].requests[0].prompt, transcriptInputs[0]);
   assert.equal((await get(`/api/jobs/${job.id}/model-fingerprint/history`)).records.length, 1); assert.equal((await get("/api/model-fingerprint/settings")).settings.maxConcurrentAccounts, 2);
   const task = await post("/api/task-settings", { modelFingerprint: { models: ["gpt-5.4"], intervalMinutes: 60, minProbability: .85 } }); assert.equal(task.status, 200);
-  assert.equal((await get("/api/model-fingerprint/settings")).settings.groupPolicies, undefined, "task defaults do not restore retired policies");
+  assert.equal((await get("/api/model-fingerprint/settings")).settings.groupPolicies.default[20], "verified", "task default updates preserve group rules");
   assert.equal((await get("/api/model-fingerprint/settings")).settings.models[0].model, "gpt-5.4");
   const puts = calls.filter(c => c.method === "PUT").length;
   const updated = await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20, 30] }], planTypeBindings: { free: "default" } }); assert.equal(updated.status, 200);

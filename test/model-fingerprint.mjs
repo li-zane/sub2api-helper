@@ -38,8 +38,8 @@ try {
   await service.load(); assert.equal(service.snapshot("a@example.test", "free").enabled, false);
   await service.saveSettings(settings);
   assert.deepEqual(service.settings.enabledPlanTypes, ["free"], "legacy true PlanTypes migrate to the allowlist");
-  assert.equal(service.settings.groupPolicies, undefined, "legacy admission policies are removed");
-  assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["10", "20", "99"]), ["10", "20", "99"]);
+  assert.equal(service.settings.groupPolicies.default[20], "verified", "group admission rules survive PlanType migration");
+  assert.deepEqual(service.filterGroups("a@example.test", "free", "default", ["10", "20", "99"]), ["10", "99"]);
   let state = await service.run("a@example.test", "free", { manual: true });
   assert.equal(state.result.status, "match"); assert.equal(calls, 3);
   phase = "mismatch"; state = await service.run("a@example.test", "free", { manual: true });
@@ -48,7 +48,7 @@ try {
   assert.equal(state.result.status, "unknown");
   phase = "error"; state = await service.run("a@example.test", "free", { manual: true });
   assert.equal(state.result.status, "error"); assert.equal(state.result.models[0].failure.code, "UNKNOWN"); assert(!JSON.stringify(state).includes("private-token"));
-  assert.equal(writes, 0, "fingerprint results never modify pool groups");
+  assert.equal(writes, 2, "explicit pass admits; explicit failure removes; unknown/error preserve groups");
   await service.saveOverride("a@example.test", { enabled: false, models: ["gpt-5.4"], intervalMinutes: 10 });
   assert.equal(service.snapshot("a@example.test", "free").enabled, false); assert.equal(service.snapshot("a@example.test", "free").models[0].model, "gpt-5.4");
   const restored = new ModelFingerprintService(options); await restored.load(); assert.equal(restored.snapshot("a@example.test", "free").intervalMinutes, 10); assert.equal(restored.snapshot("a@example.test", "free").enabled, false); await restored.stop();

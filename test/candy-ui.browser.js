@@ -6,11 +6,12 @@ async (page) => {
   const defaults=()=>({models:[{model:'fixture-model',expected:'fixture-model'}],intervalMinutes:10,maxConcurrentAccounts:3,minProbability:.8,enabledPlanTypes:[],matchedConcurrency:{enabled:false,value:10},testSequence:{first:'fingerprint',fingerprint:1,candy:4}});
   const profiles=[{id:'business',name:'Business Premium',planTypes:['self_serve_business_prolite'],groupIds:['1','2','3','4','5']},{id:'free',name:'Free',planTypes:['free'],groupIds:['1','2']}],groups=['Default','GPT 高级分组','GPT 标准分组','测试','指纹一致'].map((name,i)=>({id:String(i+1),name}));
   let freezeJobs=false;const waitingJobs=[];
+  let groupsUnavailable=false;
   let settings=defaults(),override={enabled:true,models:null,intervalMinutes:null,testSequence:null};
   let state=()=>({enabled:true,models:settings.models,override,intervalMinutes:10,testSequence:override.testSequence||settings.testSequence,sequence:{method:'candy',position:2,total:5},phase:'idle',recentResults:[{status:'match',method:'candy',checkedAt:'2026-11-08T11:00:00Z'},{status:'mismatch',method:'fingerprint',checkedAt:'2026-11-08T10:50:00Z'}]});
   const records=[{id:'candy-round',method:'candy',checkedAt:'2026-11-08T11:00:00Z',status:'match',source:'scheduled',transcriptVersion:1,requestCount:1,durationMs:2345,usage:{inputTokens:100,outputTokens:null,totalTokens:100,complete:false,reportedRequests:1,totalRequests:2},models:[{model:'fixture-model',method:'candy',accountId:'42',status:'match',extractedFinalAnswer:21,expectedAnswer:21,websiteRulePassed:true,usedOutputs:1,reason:'糖果题最终答案为21，单题通过'}]},
     {id:'fingerprint-round',method:'fingerprint',checkedAt:'2026-11-08T10:50:00Z',status:'unknown',source:'manual',requestCount:0,models:[{model:'fixture-model',status:'unknown',usedOutputs:2,reason:'仅获得 2/3 份有效检测样本'}]}];
-  await page.route('**/api/model-fingerprint/settings',async route=>{if(route.request().method()==='POST'){settings=route.request().postDataJSON().settings;saves.push({kind:'global',value:settings});}await route.fulfill({json:{settings,profiles,groups,runtime:{activeAccounts:0,queuedAccounts:0,maxConcurrentAccounts:3}}});});
+  await page.route('**/api/model-fingerprint/settings',async route=>{if(route.request().method()==='POST'){settings=route.request().postDataJSON().settings;saves.push({kind:'global',value:settings});}await route.fulfill({json:{settings,profiles,groups:groupsUnavailable?[]:groups,groupsError:groupsUnavailable?'fixture-group-catalog-failed':null,runtime:{activeAccounts:0,queuedAccounts:0,maxConcurrentAccounts:3}}});});
   await page.route('**/api/model-fingerprint/reference',r=>r.fulfill({json:{models:[],builtAt:null}}));
   await page.route('**/api/task-settings',async route=>{if(route.request().method()==='GET'){const r=await route.fetch();const data=await r.json();data.settings.modelFingerprint=settings;data.settings.monitoring={...data.settings.monitoring,fingerprintScanIntervalSeconds:77};await route.fulfill({json:data});}else{const body=route.request().postDataJSON();saves.push({kind:'task',value:body});await route.fulfill({json:{settings:{...body,default:3,current:body.maxActiveJobs,max:20}}});}});
   for(const path of ['**/api/sub2api/settings','**/api/sub2api/monitor'])await page.route(path,r=>r.fulfill({json:{hasAdminApiKey:true,config:{baseUrl:'https://fixture.test'}}}));
@@ -22,7 +23,8 @@ async (page) => {
   await page.setViewportSize({width:1480,height:1000});await page.reload();await page.waitForFunction(()=>document.querySelectorAll('tr.job-row').length===20);
   await test('global-test-sequence-validation-and-save',async()=>{
     await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const d=page.getByRole('dialog',{name:'降智检测设置',exact:true});
-    check(await d.getByText('号池分组加入规则',{exact:true}).count()===0,'retired group controls remain');
+    await d.getByRole('heading',{name:'号池分组加入规则',exact:true}).waitFor();
+    await choose(d,'Business Premium 分组 2 加入规则','不降智加入');
     const plans=d.getByRole('combobox',{name:'添加检测 PlanType',exact:true});
     await plans.click();await page.getByRole('option',{name:'free',exact:true}).click();await d.getByRole('button',{name:'添加类型',exact:true}).click();
     check(await d.getByRole('button',{name:'移除 free',exact:true}).count()===1,'selected PlanType was not added');
@@ -35,14 +37,22 @@ async (page) => {
     await matched.check();await value.fill('0');
     check(await d.getByText('不降智加入（指纹一致）',{exact:true}).count()===0,'fingerprint-only policy label remains');
     await page.screenshot({path:evidence+'/settings-desktop.png'});
-    await page.setViewportSize({width:375,height:812});check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'settings horizontal overflow');await page.screenshot({path:evidence+'/settings-mobile.png'});await page.setViewportSize({width:1480,height:1000});
+    await page.setViewportSize({width:375,height:812});await choose(d,'Business Premium 分组 2 加入规则','默认加入');await choose(d,'Business Premium 分组 2 加入规则','不降智加入');await page.screenshot({path:evidence+'/groups-mobile.png'});check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'settings horizontal overflow');await page.screenshot({path:evidence+'/settings-mobile.png'});await page.setViewportSize({width:1480,height:1000});
     await d.getByRole('spinbutton',{name:'指纹检测次数',exact:true}).fill('0');await d.getByRole('spinbutton',{name:'糖果检测次数',exact:true}).fill('0');await d.getByRole('button',{name:'保存降智检测设置'}).click();check((await d.innerText()).includes('不能同时为 0'),'zero sequence not rejected');check(saves.length===0,'invalid settings sent');
     await d.getByRole('spinbutton',{name:'糖果检测次数',exact:true}).fill('1');await d.getByRole('spinbutton',{name:'指纹检测次数',exact:true}).fill('');await d.getByRole('button',{name:'保存降智检测设置'}).click();check(saves.length===0,'empty count silently became zero');
     await choose(d,'检测首项','糖果检测');await d.getByRole('spinbutton',{name:'指纹检测次数',exact:true}).fill('5');await d.getByRole('spinbutton',{name:'糖果检测次数',exact:true}).fill('1');await d.getByRole('button',{name:'保存降智检测设置'}).click();await d.waitFor({state:'detached'});
     check(JSON.stringify(saves[0].value.testSequence)===JSON.stringify({first:'candy',fingerprint:5,candy:1}),'global request incorrect');
     check(JSON.stringify(saves[0].value.enabledPlanTypes)===JSON.stringify(['free']),'PlanType allowlist not saved');
     check(saves[0].value.matchedConcurrency.enabled&&saves[0].value.matchedConcurrency.value===0,'zero matched concurrency not saved');
-    check(!Object.hasOwn(saves[0].value,'groupPolicies')&&!Object.hasOwn(saves[0].value,'planDefaults'),'legacy policies still submitted');
+    check(saves[0].value.groupPolicies.business['2']==='verified'&&!Object.hasOwn(saves[0].value,'planDefaults'),'group rules not saved alongside allowlist');
+  });
+  await test('missing-group-catalog-retains-configured-rules',async()=>{
+    groupsUnavailable=true;
+    await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const d=page.getByRole('dialog',{name:'降智检测设置',exact:true});
+    await d.getByText(/fixture-group-catalog-failed/).waitFor();
+    check((await d.getByRole('combobox',{name:'Business Premium 分组 2 加入规则',exact:true}).innerText()).includes('不降智加入'),'missing catalog reset configured rule');
+    await d.getByRole('button',{name:'保存降智检测设置'}).click();await d.waitFor({state:'detached'});
+    check(saves.at(-1).value.groupPolicies.business['2']==='verified','failed catalog erased saved rule');groupsUnavailable=false;
   });
   await test('mobile-remove-last-PlanType-updates-policy-immediately',async()=>{
     const row=page.locator('tr.job-row').first(),toggle=row.getByRole('switch',{name:/降智检测/});

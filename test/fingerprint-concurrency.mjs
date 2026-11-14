@@ -26,7 +26,7 @@ const save = patch => service.saveSettings({ ...service.settings, ...patch });
 try {
   assert.deepEqual(normalizeFingerprintSettings({ planDefaults: { free: true, business: false } }).enabledPlanTypes, ['free']);
   assert.deepEqual(normalizeFingerprintSettings({ enabledPlanTypes: [], planDefaults: { free: true }, groupPolicies: { legacy: { 1: 'verified' } } }).enabledPlanTypes, []);
-  assert.equal(normalizeFingerprintSettings({ groupPolicies: { bad: 'ignored' } }).groupPolicies, undefined);
+  assert.throws(() => normalizeFingerprintSettings({ groupPolicies: { bad: 'ignored' } }));
   for (const patch of [{ enabledPlanTypes: [''] }, { enabledPlanTypes: 'free' }, { matchedConcurrency: { enabled: 'yes', value: 2 } }, { matchedConcurrency: { enabled: true, value: -1 } }, { matchedConcurrency: { enabled: true, value: 1.5 } }, { matchedConcurrency: { enabled: true, value: 10001 } }]) assert.throws(() => normalizeFingerprintSettings(patch));
   await service.saveSettings(settings);
   await service.saveOverride('b@test', { enabled: true });

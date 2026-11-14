@@ -2,45 +2,65 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ModelFingerprintService } from '../src/model-fingerprint.mjs';
-import { CANDY_PROMPT } from '../src/candy-test.mjs';
-const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'helper-detection-policy-'));
-let phase = 'match', groupWrites = 0;
-const email = 'policy@example.test', account = { id: 9, type: 'oauth', status: 'active', concurrency: 3, credentials: { access_token: 'fixture' }, group_ids: ['10', '99'] };
-const options = {
-  filePath: path.join(dir, 'state.json'),
-  getContext: () => ({ backend: 'fixture', config: { baseUrl: 'https://fixture', adminApiKey: 'fixture' }, profiles: [], jobs: [{ email, planType: 'free' }] }),
-  listTargets: async () => [{ id: 9, email }], getAccount: async () => structuredClone(account),
-  sample: async (_c, _a, model, prompt) => prompt === CANDY_PROMPT ? `最终答案：${phase === 'mismatch' || phase === 'mixed' && model === 'second' ? 22 : 21}` : Array.from({ length: 100 }, (_, i) => i + 1).join(','),
-  challenges: () => [1, 2, 3].map(i => ({ prompt: 'fingerprint-' + i, expected_count: 100 })),
-  detectorLoader: async () => ({ analyze: () => ({ decision: 'scored', used_outputs: 3, probability_status: 'reference_calibrated', probability: .99, prediction: phase === 'mismatch' ? 'other' : 'fixture', results: [{ model: 'fixture' }, { model: 'other' }] }) }),
-  updateGroups: async () => { groupWrites++; },
-  updateConcurrency: async (_c, _id, value) => { account.concurrency = value; },
-};
-let service = new ModelFingerprintService(options);
-const run = async (method, status) => {
-  phase = status;
-  await service.saveOverride(email, { testSequence: { first: method, fingerprint: method === 'fingerprint' ? 1 : 0, candy: method === 'candy' ? 1 : 0 } });
-  return service.run(email, 'free', { manual: true });
-};
-try {
-  await service.saveSettings({ models: ['fixture'], enabledPlanTypes: ['free'], matchedConcurrency: { enabled: true, value: 20 }, groupPolicies: { default: { 20: 'verified' } } });
-  for (const [first, second] of [['fingerprint', 'candy'], ['candy', 'fingerprint']]) {
-    assert.equal((await run(first, 'match')).result.status, 'match'); assert.equal(account.concurrency, 20);
-    assert.equal((await run(second, 'mismatch')).result.status, 'mismatch'); assert.equal(account.concurrency, 3, 'new explicit failure supersedes the previous method');
-    assert.equal((await run(second, 'match')).result.status, 'match'); assert.equal(account.concurrency, 20, 'either method passes independently');
-  }
-  await service.saveSettings({ ...service.settings, models: ['fixture', 'second'] });
-  assert.equal((await run('candy', 'mixed')).result.status, 'mismatch'); assert.equal(account.concurrency, 3, 'every configured model in the current round must pass');
-  assert.equal(groupWrites, 0); assert.deepEqual(account.group_ids, ['10', '99']);
-  assert.deepEqual(service.filterGroups(email, 'free', 'default', ['10', '20', '99']), ['10', '20', '99'], 'group profile membership is unconditional');
-  await service.stop();
-  const saved = JSON.parse(await fs.readFile(options.filePath, 'utf8'));
-  saved.groupPolicyVersion = 2; saved.settings.groupPolicies = { default: { 20: 'verified' } }; saved.accounts[email].groupSyncPending = true; saved.accounts[email].groupSyncError = 'stale group error';
-  await fs.writeFile(options.filePath, JSON.stringify(saved));
-  service = new ModelFingerprintService(options); await service.load();
-  const migrated = JSON.parse(await fs.readFile(options.filePath, 'utf8'));
-  assert.equal(migrated.settings.groupPolicies, undefined); assert.equal(migrated.accounts[email].groupSyncPending, undefined); assert.equal(migrated.accounts[email].groupSyncError, undefined);
-  assert(service.history(email, 'free').records.length > 0, 'migration preserves test history');
-  console.log('PASS: fingerprint/candy share latest-round concurrency policy, all-model verdict, retired group writes, legacy pending-policy cleanup and history retention');
-} finally { await service.stop(); await fs.rm(dir, { recursive: true, force: true }); }
+import {ModelFingerprintService} from '../src/model-fingerprint.mjs';
+import {CANDY_PROMPT} from '../src/candy-test.mjs';
+const dir=await fs.mkdtemp(path.join(os.tmpdir(),'helper-group-policy-')),results=[];
+const test=async(name,fn)=>{try{await fn();results.push({name,passed:true});}catch(error){results.push({name,passed:false,error:error.message});}};
+let count=0;
+async function fixture(models=['fixture']){
+ const email='groups@example.test',account={id:9,type:'oauth',status:'active',credentials:{access_token:'fixture',_token_version:1},concurrency:3,group_ids:['10','99']};
+ let calls=0,writes=0,clock=Date.now(),phase='match',failWrites=false,backend='fixture',blocked=false;
+ const options={filePath:path.join(dir,'groups-'+(++count)+'.json'),now:()=>++clock,
+  getContext:()=>({backend,config:{baseUrl:'https://fixture',adminApiKey:'fixture'},profiles:[{id:'default',groupIds:['10','20']}],jobs:[{email,planType:'free'}]}),
+  listTargets:async()=>[{email,id:9,profileId:'default'}],getAccount:async()=>structuredClone(account),isBlocked:()=>blocked,
+  sample:async(_config,_account,model,prompt)=>{calls++;if(phase==='error')throw Object.assign(Error('fixture'),{fingerprintFailure:true,code:'AUTH',httpStatus:401});return prompt===CANDY_PROMPT?(phase==='unknown'?'未给出最终答案':`<final_answer>${phase==='mismatch'||phase==='mixed'&&model==='second'?29:21}</final_answer>`):Array.from({length:100},(_,i)=>i+1).join(',');},
+  challenges:()=>[1,2,3].map(i=>({prompt:'fingerprint-'+i,expected_count:100})),
+  detectorLoader:async()=>({analyze:()=>({decision:'scored',used_outputs:3,probability_status:'reference_calibrated',probability:.99,prediction:phase==='mismatch'?'other':'fixture',results:[{model:'fixture'},{model:'other'}]})}),
+  updateConcurrency:async(_config,_id,value)=>{account.concurrency=value;},
+  updateGroups:async(_config,_id,ids)=>{if(failWrites)throw Error('fixture group failure');writes++;account.group_ids=ids;}};
+ const service=new ModelFingerprintService(options);
+ await service.saveSettings({models,enabledPlanTypes:['free'],matchedConcurrency:{enabled:true,value:20},groupPolicies:{default:{10:'default',20:'verified'}}});
+ const run=async(method,status='match')=>{phase=status;await service.saveOverride(email,{testSequence:{first:method,fingerprint:method==='fingerprint'?1:0,candy:method==='candy'?1:0}});return service.run(email,'free',{manual:true});};
+ return{service,options,email,account,run,calls:()=>calls,writes:()=>writes,setFail:v=>failWrites=v,setBackend:v=>backend=v,setBlocked:v=>blocked=v};
+}
+try{
+ await test('candy-pass-admits-without-any-fingerprint-and-preserves-unrelated-groups',async()=>{
+  const f=await fixture();try{const state=await f.run('candy');assert.equal(state.result.status,'match');assert.equal(f.account.concurrency,20,'group and concurrency policies coexist');assert.deepEqual([...f.account.group_ids].sort(),['10','20','99']);assert.equal(f.calls(),1);assert.deepEqual(f.service.filterGroups(f.email,'free','default',['10','20','99'],f.account),['10','20','99']);}finally{await f.service.stop();}
+ });
+ await test('candy-failure-removes-after-fingerprint-pass',async()=>{
+  const f=await fixture();try{await f.run('fingerprint');assert(f.account.group_ids.includes('20'));await f.run('candy','mismatch');assert.equal(f.account.concurrency,3);assert.deepEqual([...f.account.group_ids].sort(),['10','99']);assert(!f.service.filterGroups(f.email,'free','default',['20'],f.account).includes('20'));}finally{await f.service.stop();}
+ });
+ await test('candy-pass-recovers-after-fingerprint-failure',async()=>{
+  const f=await fixture();try{await f.run('fingerprint','mismatch');assert(!f.account.group_ids.includes('20'));await f.run('candy');assert(f.account.group_ids.includes('20'));}finally{await f.service.stop();}
+ });
+ await test('fingerprint-failure-removes-after-candy-pass',async()=>{
+  const f=await fixture();try{await f.run('candy');assert(f.account.group_ids.includes('20'));await f.run('fingerprint','mismatch');assert(!f.account.group_ids.includes('20'));}finally{await f.service.stop();}
+ });
+ for(const status of ['unknown','error'])await test(status+'-preserves-existing-membership-without-new-admission',async()=>{
+  const f=await fixture();try{await f.run('fingerprint');const writes=f.writes();const state=await f.run('candy',status);assert.equal(state.result.status,status);assert.equal(f.writes(),writes);assert(f.account.group_ids.includes('20'));assert(f.service.filterGroups(f.email,'free','default',['20'],f.account).includes('20'));assert.deepEqual(f.service.filterGroups(f.email,'free','default',['20'],{...f.account,group_ids:[]}),[]);}finally{await f.service.stop();}
+ });
+ await test('current-round-still-requires-all-configured-models-to-pass',async()=>{
+  const f=await fixture(['fixture','second']);try{const state=await f.run('candy','mixed');assert.equal(state.result.status,'mismatch');assert.equal(f.calls(),2);assert(!f.account.group_ids.includes('20'));}finally{await f.service.stop();}
+ });
+ await test('identity-backend-and-plan-isolation-apply-to-candy-evidence',async()=>{
+  const f=await fixture();try{await f.run('candy');const filtered=account=>f.service.filterGroups(f.email,'free','default',['20'],account);assert(filtered(f.account).includes('20'));assert.deepEqual(filtered({...f.account,credentials:{...f.account.credentials,_token_version:2},group_ids:[]}),[]);f.setBackend('other');assert.deepEqual(filtered({...f.account,group_ids:[]}),[]);f.setBackend('fixture');assert.deepEqual(f.service.filterGroups(f.email,'team','default',['20'],{...f.account,group_ids:[]}),[]);}finally{await f.service.stop();}
+ });
+ await test('pending-candy-group-sync-retries-after-restart-without-resampling',async()=>{
+  const f=await fixture();let restored;try{f.setFail(true);const state=await f.run('candy');assert(state.groupSyncError);assert.equal(f.service.history(f.email,'free').groupSyncPending,true);await f.service.stop();restored=new ModelFingerprintService(f.options);await restored.load();f.setFail(false);const calls=f.calls();restored.stopped=false;await restored.tick();restored.stopped=true;assert.equal(f.calls(),calls);assert(f.account.group_ids.includes('20'));assert.equal(restored.history(f.email,'free').groupSyncError,null);}finally{await restored?.stop();await f.service.stop();}
+ });
+ await test('legacy-latest-candy-result-migrates-and-reconciles-without-sampling',async()=>{
+  const f=await fixture();let restored;try{
+   await f.run('candy');await f.service.stop();f.account.group_ids=['10','99'];
+   const saved=JSON.parse(await fs.readFile(f.options.filePath,'utf8'));delete saved.groupPolicyVersion;saved.accounts[f.email].fingerprintResult={...saved.accounts[f.email].result,method:'fingerprint',status:'mismatch'};saved.accounts[f.email].groupSyncPending=false;await fs.writeFile(f.options.filePath,JSON.stringify(saved));
+   restored=new ModelFingerprintService(f.options);await restored.load();assert.equal(restored.history(f.email,'free').groupSyncPending,true);const calls=f.calls();restored.stopped=false;await restored.tick();restored.stopped=true;assert.equal(f.calls(),calls);assert(f.account.group_ids.includes('20'));const migrated=JSON.parse(await fs.readFile(f.options.filePath,'utf8'));assert.equal(migrated.groupPolicyVersion,2);assert(!Object.hasOwn(migrated.accounts[f.email],'fingerprintResult'));
+  }finally{await restored?.stop();await f.service.stop();}
+ });
+ await test('group-write-failure-does-not-block-independent-concurrency',async()=>{
+  const f=await fixture();try{f.setFail(true);const state=await f.run('candy');assert(state.groupSyncError);assert.equal(f.account.concurrency,20);assert.equal(state.concurrencySyncError,null);assert(!f.account.group_ids.includes('20'));f.setFail(false);const calls=f.calls();await f.service.reconcile(f.email,'free',[{id:9,email:f.email,profileId:'default'}]);assert.equal(f.calls(),calls);assert(f.account.group_ids.includes('20'));}finally{await f.service.stop();}
+ });
+ await test('partial-settings-update-preserves-group-rules-and-validates-modes',async()=>{
+  const f=await fixture();try{await f.service.saveSettings({models:['fixture'],enabledPlanTypes:['free']});assert.equal(f.service.settings.groupPolicies.default[20],'verified');assert.throws(()=>f.service.saveSettings({...f.service.settings,groupPolicies:{default:{20:'wrong'}}}),/分组规则/);assert.throws(()=>f.service.saveSettings({...f.service.settings,groupPolicies:{default:{'-1':'verified'}}}),/分组规则/);}finally{await f.service.stop();}
+ });
+}finally{await fs.rm(dir,{recursive:true,force:true});}
+for(const r of results)console.log((r.passed?'PASS: ':'FAIL: ')+r.name+(r.error?' — '+r.error:''));
+const passed=results.filter(r=>r.passed).length;console.log('GROUP_POLICY_REGRESSION '+passed+'/'+results.length);if(passed!==results.length)process.exitCode=1;

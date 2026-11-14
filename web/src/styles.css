@@ -8754,6 +8754,16 @@ select option {
 }
 
 /* Matched Account Concurrency */
+.fingerprint-settings-dialog .fingerprint-group-profile + .fingerprint-group-profile {
+  margin-top: 16px;
+}
+.fingerprint-settings-dialog .fingerprint-group-rule {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 180px);
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
 .fingerprint-settings-dialog .fingerprint-concurrency-row {
   display: flex;
   align-items: flex-end;
