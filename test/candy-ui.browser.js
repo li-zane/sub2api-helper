@@ -3,8 +3,8 @@ async (page) => {
   const check=(ok,message)=>{if(!ok)throw Error(message);};
   const test=async(name,fn)=>{try{await fn();results.push({name,passed:true});}catch(error){await page.screenshot({path:evidence+'/failure-'+results.length+'.png'});const dialogs=await page.locator('dialog[open]').evaluateAll(els=>els.map(e=>({name:e.getAttribute('aria-label'),modal:e.matches(':modal'),html:e.outerHTML.slice(0,300)})));results.push({name,passed:false,error:error.message+' dialogs='+JSON.stringify(dialogs)});await page.keyboard.press('Escape');await page.keyboard.press('Escape');}};
   page.setDefaultTimeout(7000);page.on('pageerror',e=>errors.push(e.message));
-  const defaults=()=>({models:[{model:'fixture-model',expected:'fixture-model'}],intervalMinutes:10,maxConcurrentAccounts:3,minProbability:.8,enabledPlanTypes:[],matchedConcurrency:{enabled:false,value:10},testSequence:{first:'fingerprint',fingerprint:1,candy:4}});
-  const profiles=[{id:'business',name:'Business Premium',planTypes:['self_serve_business_prolite'],groupIds:['1','2','3','4','5']},{id:'free',name:'Free',planTypes:['free'],groupIds:['1','2']}],groups=['Default','GPT 高级分组','GPT 标准分组','测试','指纹一致'].map((name,i)=>({id:String(i+1),name}));
+  const defaults=()=>({models:[{model:'fixture-model',expected:'fixture-model'}],intervalMinutes:10,maxConcurrentAccounts:3,minProbability:.8,enabledPlanTypes:[],groupPolicies:{plus:{'2':'verified'}},matchedConcurrency:{enabled:false,value:10},testSequence:{first:'fingerprint',fingerprint:1,candy:4}});
+  const profiles=[{id:'business',name:'Business Premium',planTypes:['Self_Serve_Business_Prolite','business_disabled'],groupIds:['1','2','3','4','5']},{id:'free',name:'Free',planTypes:['free'],groupIds:['1','2']},{id:'plus',name:'Plus',planTypes:['plus'],groupIds:['2']}],groups=['Default','GPT 高级分组','GPT 标准分组','测试','指纹一致'].map((name,i)=>({id:String(i+1),name}));
   let freezeJobs=false;const waitingJobs=[];
   let groupsUnavailable=false;
   let settings=defaults(),override={enabled:true,models:null,intervalMinutes:null,testSequence:null};
@@ -24,8 +24,14 @@ async (page) => {
   await test('global-test-sequence-validation-and-save',async()=>{
     await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const d=page.getByRole('dialog',{name:'降智检测设置',exact:true});
     await d.getByRole('heading',{name:'号池分组加入规则',exact:true}).waitFor();
-    await choose(d,'Business Premium 分组 2 加入规则','不降智加入');
+    check(await d.locator('.fingerprint-group-profile').count()===0,'disabled PlanType rules visible');
     const plans=d.getByRole('combobox',{name:'添加检测 PlanType',exact:true});
+    await plans.fill('self_serve_business_prolite');await d.getByRole('button',{name:'添加类型',exact:true}).click();
+    check(await d.locator('.fingerprint-group-profile').count()===1,'disabled profiles not filtered');
+    check(!(await d.locator('.fingerprint-group-profile').innerText()).includes('business_disabled'),'disabled PlanType leaked into profile header');
+    const rule=d.getByRole('button',{name:'Business Premium 分组 2 加入规则',exact:true});
+    check(await rule.getAttribute('aria-pressed')==='false','default rule incorrect');await rule.click();check(await rule.getAttribute('aria-pressed')==='true'&&(await rule.innerText())==='不降智加入','click did not enable conditional rule');
+    await rule.press('Enter');check(await rule.getAttribute('aria-pressed')==='false','keyboard did not toggle rule');await rule.press('Space');check(await rule.getAttribute('aria-pressed')==='true','Space did not toggle rule');
     await plans.click();await page.getByRole('option',{name:'free',exact:true}).click();await d.getByRole('button',{name:'添加类型',exact:true}).click();
     check(await d.getByRole('button',{name:'移除 free',exact:true}).count()===1,'selected PlanType was not added');
     await plans.fill('Custom_Plan');await d.getByRole('button',{name:'添加类型',exact:true}).click();
@@ -37,20 +43,29 @@ async (page) => {
     await matched.check();await value.fill('0');
     check(await d.getByText('不降智加入（指纹一致）',{exact:true}).count()===0,'fingerprint-only policy label remains');
     await page.screenshot({path:evidence+'/settings-desktop.png'});
-    await page.setViewportSize({width:375,height:812});await choose(d,'Business Premium 分组 2 加入规则','默认加入');await choose(d,'Business Premium 分组 2 加入规则','不降智加入');await page.screenshot({path:evidence+'/groups-mobile.png'});check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'settings horizontal overflow');await page.screenshot({path:evidence+'/settings-mobile.png'});await page.setViewportSize({width:1480,height:1000});
+    await page.setViewportSize({width:375,height:812});await rule.click();check(await rule.getAttribute('aria-pressed')==='false','mobile toggle off failed');await rule.click();check(await rule.getAttribute('aria-pressed')==='true','mobile toggle on failed');await page.screenshot({path:evidence+'/groups-mobile.png'});check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'settings horizontal overflow');await page.screenshot({path:evidence+'/settings-mobile.png'});await page.setViewportSize({width:1480,height:1000});
     await d.getByRole('spinbutton',{name:'指纹检测次数',exact:true}).fill('0');await d.getByRole('spinbutton',{name:'糖果检测次数',exact:true}).fill('0');await d.getByRole('button',{name:'保存降智检测设置'}).click();check((await d.innerText()).includes('不能同时为 0'),'zero sequence not rejected');check(saves.length===0,'invalid settings sent');
     await d.getByRole('spinbutton',{name:'糖果检测次数',exact:true}).fill('1');await d.getByRole('spinbutton',{name:'指纹检测次数',exact:true}).fill('');await d.getByRole('button',{name:'保存降智检测设置'}).click();check(saves.length===0,'empty count silently became zero');
     await choose(d,'检测首项','糖果检测');await d.getByRole('spinbutton',{name:'指纹检测次数',exact:true}).fill('5');await d.getByRole('spinbutton',{name:'糖果检测次数',exact:true}).fill('1');await d.getByRole('button',{name:'保存降智检测设置'}).click();await d.waitFor({state:'detached'});
     check(JSON.stringify(saves[0].value.testSequence)===JSON.stringify({first:'candy',fingerprint:5,candy:1}),'global request incorrect');
-    check(JSON.stringify(saves[0].value.enabledPlanTypes)===JSON.stringify(['free']),'PlanType allowlist not saved');
+    check(JSON.stringify(saves[0].value.enabledPlanTypes)===JSON.stringify(['free','self_serve_business_prolite']),'PlanType allowlist not saved');
     check(saves[0].value.matchedConcurrency.enabled&&saves[0].value.matchedConcurrency.value===0,'zero matched concurrency not saved');
     check(saves[0].value.groupPolicies.business['2']==='verified'&&!Object.hasOwn(saves[0].value,'planDefaults'),'group rules not saved alongside allowlist');
+    check(saves[0].value.groupPolicies.plus['2']==='verified','hidden rules erased on save');
+  });
+  await test('draft-PlanType-changes-hide-and-restore-group-rules',async()=>{
+    await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const d=page.getByRole('dialog',{name:'降智检测设置',exact:true});
+    await d.getByRole('button',{name:'移除 self_serve_business_prolite',exact:true}).click();
+    check(await d.getByRole('button',{name:'Business Premium 分组 2 加入规则',exact:true}).count()===0,'removed PlanType rules remain visible');
+    const plans=d.getByRole('combobox',{name:'添加检测 PlanType',exact:true});await plans.fill('self_serve_business_prolite');await d.getByRole('button',{name:'添加类型',exact:true}).click();
+    check(await d.getByRole('button',{name:'Business Premium 分组 2 加入规则',exact:true}).getAttribute('aria-pressed')==='true','re-enabling PlanType lost draft policy');
+    await d.getByRole('button',{name:'取消',exact:true}).click();await d.waitFor({state:'detached'});
   });
   await test('missing-group-catalog-retains-configured-rules',async()=>{
     groupsUnavailable=true;
     await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const d=page.getByRole('dialog',{name:'降智检测设置',exact:true});
     await d.getByText(/fixture-group-catalog-failed/).waitFor();
-    check((await d.getByRole('combobox',{name:'Business Premium 分组 2 加入规则',exact:true}).innerText()).includes('不降智加入'),'missing catalog reset configured rule');
+    check(await d.getByRole('button',{name:'Business Premium 分组 2 加入规则',exact:true}).getAttribute('aria-pressed')==='true','missing catalog reset configured rule');
     await d.getByRole('button',{name:'保存降智检测设置'}).click();await d.waitFor({state:'detached'});
     check(saves.at(-1).value.groupPolicies.business['2']==='verified','failed catalog erased saved rule');groupsUnavailable=false;
   });
@@ -59,7 +74,9 @@ async (page) => {
     await page.waitForFunction(()=>document.querySelector('.fingerprint-toggle-control button')?.getAttribute('aria-checked')==='true');
     await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const d=page.getByRole('dialog',{name:'降智检测设置',exact:true});
     await page.setViewportSize({width:375,height:812});
+    await d.getByRole('button',{name:'移除 self_serve_business_prolite',exact:true}).click();
     await d.getByRole('button',{name:'移除 free',exact:true}).click();
+    check(await d.locator('.fingerprint-group-profile').count()===0,'all PlanTypes off still displays group rules');
     await d.getByRole('checkbox',{name:'不降智账号独立并发',exact:true}).uncheck();
     check(await d.getByRole('spinbutton',{name:'不降智账号独立并发值',exact:true}).isDisabled(),'disabled matched-concurrency input still editable');
     check((await d.innerText()).includes('已全部关闭'),'empty allowlist is not explained');
@@ -68,6 +85,7 @@ async (page) => {
     try{await d.getByRole('button',{name:'保存降智检测设置'}).click();await d.waitFor({state:'detached'});
       check(await toggle.isDisabled()&&await toggle.getAttribute('aria-checked')==='false','saved empty list was lost before next server poll');
       check(saves.at(-1).value.enabledPlanTypes.length===0&&!saves.at(-1).value.matchedConcurrency.enabled,'empty list/off policy not saved');
+      check(saves.at(-1).value.groupPolicies.business['2']==='verified'&&saves.at(-1).value.groupPolicies.plus['2']==='verified','hidden policies erased when disabling all PlanTypes');
     }finally{freezeJobs=false;for(const release of waitingJobs.splice(0))release();await page.setViewportSize({width:1480,height:1000});}
   });
   await test('account-independent-sequence-and-inheritance',async()=>{

@@ -207,7 +207,7 @@ async (page) => {
       for (const name of ["设置 2FA", "添加密码"]) {
         check(await row().getByRole("button", { name, exact: true }).count() === 0, name + " still appears in the row action column");
       }
-      for (const name of ["查看协议日志", "查看或修改账号凭据", "查看已登录设备和会话", "查看并切换工作空间", "下载导入文件"]) {
+      for (const name of ["查看协议日志", "查看或修改账号凭据", "查看已登录设备和会话", "查看并切换工作空间", "复制账号凭据"]) {
         check(await row().getByRole("button", { name, exact: true }).isEnabled(), name + " unnecessarily disabled while batch busy");
       }
       check((await row().getByRole("button", { name: "检测 Web 会话", exact: true }).getAttribute("title")).includes("批量操作"), "batch lock does not explain the reason");
@@ -310,7 +310,7 @@ async (page) => {
         check(await button.isDisabled(), name + " overlaps phone input");
         check((await button.getAttribute("title")).includes("等待绑定手机号"), name + " hides phone lock reason");
       }
-      for (const name of ["查看或修改账号凭据", "查看已登录设备和会话", "查看并切换工作空间", "下载导入文件"]) {
+      for (const name of ["查看或修改账号凭据", "查看已登录设备和会话", "查看并切换工作空间", "复制账号凭据"]) {
         check(await row().getByRole("button", { name, exact: true }).isEnabled(), name + " blocked during phone input");
       }
       for (mode of ["continue", "missing"]) {

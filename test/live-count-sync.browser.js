@@ -57,7 +57,7 @@ async page => {
     await page.screenshot({path:evidence+'/fixed-bins-mobile.png'});
     await page.keyboard.press('Escape');await page.getByRole('button',{name:'任务设置',exact:true}).click();
     const dialog=page.getByRole('dialog',{name:'任务设置',exact:true});await dialog.waitFor();
-    const sync=dialog.getByLabel(/^调用与过载次数同步间隔/);await sync.scrollIntoViewIfNeeded();
+    const sync=dialog.locator('#monitor-overloadIntervalSeconds');await sync.scrollIntoViewIfNeeded();
     check(await sync.inputValue()==='60','minute default missing');check(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'mobile dialog overflows');
     const b=await sync.boundingBox();check(b.x>=0&&b.x+b.width<=376,'sync control off screen');
     await page.screenshot({path:evidence+'/count-sync-mobile.png'});await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'});check(!errors.length,errors.join('; '));

@@ -9,8 +9,8 @@ import { spawn } from "node:child_process";
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-usage-totals-"));
 const output = path.join(temp, "output"); await fs.mkdir(output);
 const records = [101, 102].map(id => ({ id, name: "total@example.test", platform: "openai", type: "oauth", status: "active", schedulable: true,
-  credentials: { email: "total@example.test", access_token: "fixture-token", refresh_token: "fixture-refresh" }, extra: { codex_5h_used_percent: 25 }, group_ids: [] }));
-const calls = []; let holdStats = true, release = () => {}, child;
+  credentials: { email: "total@example.test", access_token: "fixture-token", refresh_token: "fixture-refresh", plan_type: "team" }, extra: { codex_5h_used_percent: 25 }, group_ids: [] }));
+const calls = []; let holdStats = true, userCost = 2, release = () => {}, child;
 const held = new Promise(resolve => { release = resolve; });
 const pool = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://fixture.test"); calls.push(url);
@@ -20,7 +20,7 @@ const pool = http.createServer(async (req, res) => {
   if (url.pathname.endsWith("/groups/all") || url.pathname.endsWith("/proxies/all")) return send([]);
   if (url.pathname === "/api/v1/admin/usage/stats") {
     if (holdStats) await held;
-    return send({ total_account_cost: 10, total_actual_cost: 2, total_cost: 100, total_tokens: 1234 });
+    return send({ total_account_cost: 10, total_actual_cost: userCost, total_cost: 100, total_tokens: 1234 });
   }
   if (url.pathname.endsWith("/usage")) return send({ five_hour: { utilization: 37 } });
   if (url.pathname.endsWith("/quota/refresh")) return send({ rate_limit_reset_credits: { available_count: 0 } });
@@ -53,6 +53,10 @@ try {
   let job;
   await waitFor(async () => { job = (await get("/api/jobs")).jobs[0]; return job.sub2apiUsage?.totals?.tokens === 2468; });
   assert.equal(job.sub2apiUsage.totals.accountCost, 20); assert.equal(job.sub2apiUsage.totals.userCost, 4);
+  assert.equal((await get("/api/subscription-history")).records.length, 1, "duplicate pool rows duplicated subscription history");
+  assert.equal((await fetch(base + `/api/jobs/${job.id}/cost`, { method: "POST", headers, body: JSON.stringify({ accountCostCny: 12.34 }) })).status, 200);
+  assert.equal((await fetch(base + "/api/task-settings", { method: "POST", headers, body: JSON.stringify({ poolPriceMultiplier: 7 }) })).status, 200);
+  assert.equal((await get("/api/subscription-history")).records[0].profitCents, "1566");
   const count = calls.filter(url => url.pathname === "/api/v1/admin/usage/stats").length;
   await get("/api/sub2api/account-status?refresh=1");
   assert.equal(calls.filter(url => url.pathname === "/api/v1/admin/usage/stats").length, count, "ordinary list refresh should reuse total cache");
@@ -65,10 +69,13 @@ try {
   assert.equal(applied.status,200);
   const snapshots=calls.filter(url=>url.pathname==="/api/v1/admin/accounts").length;
   const stats=calls.filter(url=>url.pathname==="/api/v1/admin/usage/stats").length;
+  userCost = 3;
   // Wait on fixture counters only: no browser/API polling is driving the sync.
   await waitFor(async()=>calls.filter(url=>url.pathname==="/api/v1/admin/accounts").length>snapshots && calls.filter(url=>url.pathname==="/api/v1/admin/usage/stats").length>stats);
+  await waitFor(async () => (await get("/api/subscription-history")).records[0].profitCents === "2966");
   assert.equal(calls.filter(url=>url.pathname.endsWith("/quota/refresh")).length,cardReads,"fast database polling must respect the independent reset-card cache interval");
   console.log("CONSOLE_USAGE_TOTALS_PASS asynchronous list safety; all-history per-account aggregation; A/U semantics; cache reuse; manual quota+totals refresh");
+  console.log("SUBSCRIPTION_USAGE_PASS same-email aggregation; live cost/rate; server-timer usage updates history profit without manual refresh");
 } finally {
   release();
   if (child && child.exitCode === null) { const exit = new Promise(resolve => child.once("exit", resolve)); child.kill("SIGTERM"); await exit; }

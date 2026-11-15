@@ -360,6 +360,30 @@ select {
   width: 1px;
   height: 14px;
   background: rgba(15, 23, 42, 0.08);
+  flex-shrink: 0;
+}
+
+.telemetry-history-pill {
+  color: #475569;
+}
+
+.telemetry-history-pill svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.telemetry-history-pill.is-open {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.telemetry-history-pill.is-open strong {
+  color: var(--accent-strong);
+}
+
+.telemetry-history-pill:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .status-dot {
@@ -388,7 +412,6 @@ select {
 }
 
 .pool-error-detail-trigger { cursor: pointer; max-width: 180px; gap: 4px; text-align: left; }
-.pool-error-detail-trigger code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; }
 .pool-error-detail-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pool-error-dialog { width: min(620px, calc(100vw - 32px)); }
 .pool-error-message { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; user-select: text; text-align: left; }
@@ -6534,8 +6557,11 @@ section.workspace-dialog {
   }
 
   .telemetry-capsule {
-    height: 28px;
-    padding: 0 3px;
+    max-width: 100%;
+    height: auto;
+    min-height: 28px;
+    flex-wrap: wrap;
+    padding: 2px 3px;
   }
 
   .summary-pill {
@@ -8764,6 +8790,26 @@ select option {
   gap: 12px;
   margin-top: 8px;
 }
+.fingerprint-group-policy-button {
+  min-height: 32px;
+  padding: 5px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.fingerprint-group-policy-button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+.fingerprint-group-policy-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.fingerprint-group-policy-button:disabled { opacity: 0.5; cursor: default; }
 .fingerprint-settings-dialog .fingerprint-concurrency-row {
   display: flex;
   align-items: flex-end;

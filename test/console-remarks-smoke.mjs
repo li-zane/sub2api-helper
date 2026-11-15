@@ -27,6 +27,8 @@ let logs = "";
 const remote = http.createServer(async (req, res) => {
   res.setHeader("content-type", "application/json");
   if (req.method === "GET") {
+    const account = records.find(account => req.url === `/api/v1/admin/accounts/${account.id}`);
+    if (account) return res.end(JSON.stringify({ data: account }));
     const response = JSON.stringify({ data: { items: incomplete ? null : records, pages: 1, total: records.length } });
     if (delayedRead) {
       const barrier = delayedRead;
@@ -48,6 +50,7 @@ const remote = http.createServer(async (req, res) => {
   }
   if (req.method === "POST" && req.url === "/api/v1/admin/accounts/batch") {
     creates.push(...body.accounts);
+    for (const account of body.accounts) records.push({ ...account, id: Math.max(...records.map(record => record.id)) + 1 });
     return res.end(JSON.stringify({ success: body.accounts.length }));
   }
   res.statusCode = 404;

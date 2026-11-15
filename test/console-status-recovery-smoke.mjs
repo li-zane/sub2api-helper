@@ -6,11 +6,12 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { createCredentialStore } from "../src/credential-store.mjs";
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "helper-status-recovery-")), trace = path.join(root, "attempts.jsonl");
-let child, headers, logs = "", filteredLists = 0, fullLists = 0, incomplete = false, status = "active";
+let child, headers, logs = "", filteredLists = 0, fullLists = 0, incomplete = false, status = "active", firstErrorSnapshotAt = null;
 const email = "immediate@example.test", id = "11111111-1111-4111-8111-111111111111";
 const remote = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture"); res.setHeader("content-type", "application/json");
   if (url.pathname === "/api/v1/admin/accounts") {
+    if (status === "error" && firstErrorSnapshotAt === null) firstErrorSnapshotAt = Date.now();
     if (url.searchParams.has("status")) filteredLists++; else fullLists++;
     if (incomplete) return res.end(JSON.stringify({ data: { message: "incomplete fixture", pages: 1 } }));
     return res.end(JSON.stringify({ data: { items: [{ id: 7, name: email, platform: "openai", type: "oauth", schedulable: true, status,
@@ -44,7 +45,11 @@ try {
   const beforeLists = fullLists, started = Date.now(); status = "error";
   // A normal scheduled status refresh alone must authorize; never call monitor/check.
   await wait(async () => (await attempts()).length === 1);
-  assert(Date.now() - started < 5000, "recovery waited for retired 86400s monitor interval");
+  // Measure the status cadence separately from local credential preparation.
+  // The bounded wait above still rejects a recovery deferred to the retired
+  // 86400-second monitor, including on hosts with slower DPAPI operations.
+  assert(firstErrorSnapshotAt >= started && firstErrorSnapshotAt - started < 5000, "scheduled status refresh missed its configured cadence");
+  assert(Number((await attempts())[0]) >= firstErrorSnapshotAt, "authorization ran before the error snapshot");
   await wait(async () => ["failed", "completed"].includes((await job()).status));
   await post("/api/task-settings", { monitoring: { accountStatusIntervalSeconds: 3600 } });
   const listsBeforeParallel = fullLists;

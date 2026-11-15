@@ -202,6 +202,8 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
   }
   const patch = changes => setData(current => ({ ...current, settings: { ...current.settings, ...changes } }));
   const enabledPlans = data ? readEnabledPlanTypes(data.settings) : [];
+  const groupProfiles = (data?.profiles || []).filter(profile =>
+    normalizePlanList(profile.planTypes).some(plan => enabledPlans.includes(plan)));
   const knownPlans = data
     ? normalizePlanList([...planTypes, ...(data.profiles || []).flatMap(p => p.planTypes || [])])
     : [];
@@ -391,16 +393,18 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
           </HelpTip>
         </div>
         {data.groupsError && <p role="status" className="proxy-quality-error">{data.groupsError}，已配置的规则会保留。</p>}
-        {!(data.profiles || []).length && <p className="empty-inline-note">请先在 Sub2API 配置中添加方案并选择分组。</p>}
-        {(data.profiles || []).map(profile => <div key={profile.id} className="fingerprint-group-profile">
-          <div className="section-title-row"><strong>{profile.name}</strong><small>{(profile.planTypes || []).join(" / ") || "未绑定 PlanType"}</small></div>
+        {!groupProfiles.length && <p className="empty-inline-note">暂无已启用自动检测的 PlanType 分组，请先启用对应类型并在 Sub2API 方案中选择分组。</p>}
+        {groupProfiles.map(profile => <div key={profile.id} className="fingerprint-group-profile">
+          <div className="section-title-row"><strong>{profile.name}</strong><small>{normalizePlanList(profile.planTypes).filter(plan => enabledPlans.includes(plan)).join(" / ")}</small></div>
           {!(profile.groupIds || []).length ? <p className="empty-inline-note">此方案未指定分组</p> : profile.groupIds.map(id => <div className="settings-field fingerprint-group-rule" key={id}>
             <span>{(data.groups || []).find(group => String(group.id) === String(id))?.name || `分组 ${id}`}</span>
-            <CustomSelect disabled={busy} aria-label={`${profile.name} 分组 ${id} 加入规则`}
-              value={data.settings.groupPolicies?.[profile.id]?.[id] || "default"}
-              onChange={event => patch({ groupPolicies: { ...data.settings.groupPolicies, [profile.id]: { ...data.settings.groupPolicies?.[profile.id], [id]: event.target.value } } })}>
-              <option value="default">默认加入</option><option value="verified">不降智加入</option>
-            </CustomSelect>
+            <button type="button" className="fingerprint-group-policy-button" disabled={busy}
+              aria-label={`${profile.name} 分组 ${id} 加入规则`}
+              aria-pressed={data.settings.groupPolicies?.[profile.id]?.[id] === "verified"}
+              title="点击切换默认加入 / 不降智加入"
+              onClick={() => patch({ groupPolicies: { ...data.settings.groupPolicies, [profile.id]: { ...data.settings.groupPolicies?.[profile.id], [id]: data.settings.groupPolicies?.[profile.id]?.[id] === "verified" ? "default" : "verified" } } })}>
+              {data.settings.groupPolicies?.[profile.id]?.[id] === "verified" ? "不降智加入" : "默认加入"}
+            </button>
           </div>)}
         </div>)}
       </section>

@@ -168,7 +168,7 @@ export function OverloadDetection({ job, token, onError }) {
           {detection?.requestUpdatedAt && <span>请求统计至：{displayDateTime(detection.requestUpdatedAt, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>}
           <span className="overload-scale-note">{errors ? "同步异常，保留上次成功数据；" : ""}独立缩放</span>
         </div>}
-        {errors && <span className="overload-error" role="img" aria-label={errors} title={errors}>!</span>}
+        {errors && eligible && <span className="overload-error" role="img" aria-label={errors} title={errors}>!</span>}
       </div>
       <OverloadEnergy value={dashboard.total} enabled={enabled} />
       </div>

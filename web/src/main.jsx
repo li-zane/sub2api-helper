@@ -1,5 +1,6 @@
 import { SmsNumberEstimate } from "./sms-number-estimate.jsx";
 import { ProxyCreateDialog } from "./proxy-create-dialog.jsx";
+import { SubscriptionHistoryDialog } from "./subscription-history.jsx";
 import { Sub2ApiPoolBadge } from "./pool-status-badge.jsx";
 import { SmsProviderBalance } from "./sms-provider-balance.jsx";
 import { formatSmsMoney } from "./sms-money.mjs";
@@ -9,7 +10,7 @@ import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone, setDisplayTimeZone
 import { useDisplayTimeZone } from "./use-display-time.jsx";
 import { usageRestricted } from "./codex-eligibility.mjs";
 import { totpRotationView } from "./totp-rotation-state.mjs";
-import React, { useLayoutEffect, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useLayoutEffect, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { readJsonResponse, workspaceFailureTooltip } from "./response-errors.js";
 import { accountMutationBlockReason } from "./account-action-state.mjs";
@@ -36,7 +37,6 @@ import {
   CircleAlert,
   ArrowRight,
   Copy,
-  Download,
   Database,
   Eye,
   EyeOff,
@@ -45,6 +45,7 @@ import {
   Filter,
   BriefcaseBusiness,
   Globe2,
+  History,
   Info,
   KeyRound,
   ListPlus,
@@ -291,7 +292,9 @@ function App() {
   const logoutRunningRef = useRef(false);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 1 });
-  const [stats, setStats] = useState({ active: 0, queued: 0, normal: 0, abnormal: 0 });
+  const [stats, setStats] = useState({ active: 0, queued: 0, normal: 0, abnormal: 0, historicalSubscriptions: 0 });
+  const [subscriptionHistoryOpen, setSubscriptionHistoryOpen] = useState(false);
+  const [subscriptionHistoryTotal, setSubscriptionHistoryTotal] = useState(null);
   const [taskSettings, setTaskSettings] = useState(null);
   useDisplayTimeZone();
   useLayoutEffect(() => { setDisplayTimeZone(taskSettings?.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE); }, [taskSettings?.displayTimeZone]);
@@ -378,6 +381,7 @@ function App() {
     .map((job) => `${job.id}:${job.lastOperationAt || job.updatedAt || ""}:${JSON.stringify(job.sub2apiUsage || null)}`)
     .join("|");
 
+  useEffect(() => { setSubscriptionHistoryTotal(null); }, [token]);
   useEffect(() => writeLocalJson(SMS_PROVIDER_SETTINGS_KEY, smsSettings), [smsSettings]);
   useEffect(() => {
     if (!token) return undefined;
@@ -571,7 +575,7 @@ function App() {
           setWorkspaceJob(current => shareSnapshot(current, data.jobs.find(job => job.id === current?.id) || current));
           setJobSelectionIndex(current => shareJobList(current, preserveNewerAccountCosts(current, data.selection || data.jobs)));
           setPagination(current => shareSnapshot(current, data.pagination || { page, pageSize: 20, total: data.jobs.length, totalPages: 1 }));
-          setStats(current => shareSnapshot(current, data.stats || { active: 0, queued: 0, normal: 0, abnormal: 0 }));
+          setStats(current => shareSnapshot(current, data.stats || { active: 0, queued: 0, normal: 0, abnormal: 0, historicalSubscriptions: 0 }));
           if (data.taskSettings) setTaskSettings(current => shareSnapshot(current, data.taskSettings));
           const nextPlanTypeOptions = Array.isArray(data.filterOptions?.planTypes) ? data.filterOptions.planTypes : [];
           const nextPlanTypeUnknown = data.filterOptions?.planTypeUnknown === true;
@@ -692,6 +696,18 @@ function App() {
     () => resolveSmsProvider(smsProviderDefinitions, smsSettingsDraft),
     [smsProviderDefinitions, smsSettingsDraft],
   );
+  const subscriptionHistoryRequest = useMemo(
+    () => (url, options) => apiFetch(token, url, options),
+    [token],
+  );
+  const formatSubscriptionPlanLabel = useCallback(
+    (value) => formatPlanTypeLabel(value, planTypeMapping),
+    [planTypeMapping],
+  );
+  const historicalSubscriptionCount = typeof stats.historicalSubscriptions === "number"
+    ? stats.historicalSubscriptions
+    : (subscriptionHistoryTotal ?? 0);
+
   const selectedJobs = useMemo(
     () => jobSelectionIndex.filter((job) => selectedJobIds.has(job.id)),
     [jobSelectionIndex, selectedJobIds],
@@ -710,8 +726,7 @@ function App() {
     : null;
   const downloadableSelectedCount = selectedJobs.filter((job) => job.canDownload).length;
   const allPageSelected = pageJobIds.length > 0 && pageJobIds.every((id) => selectedJobIds.has(id));
-  const canDownloadSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
-    && downloadableSelectedCount > 0;
+  const canCopyCredentialsSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size;
   const canReauthorizeSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && selectedJobs.every((job) => !isBlockedAccount(job) && job.canForceRelogin);
   const webLoginSelectedCount = selectedJobs.filter((job) => job.canLoginWeb).length;
@@ -1572,17 +1587,16 @@ function App() {
     });
   }
 
-  async function downloadSelected() {
-    if (!canDownloadSelected || batchAction) return;
-    setBatchAction("download");
+  async function copySelectedCredentials() {
+    if (!canCopyCredentialsSelected || batchAction) return;
+    setBatchAction("copy-credentials");
     try {
-      const response = await fetch("/api/jobs/download-batch", {
+      const data = await apiFetch(token, "/api/jobs/copy-credentials", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-console-token": token },
         body: JSON.stringify({ ids: [...selectedJobIds] }),
       });
-      if (!response.ok) throw new Error((await response.json()).error || "批量下载失败");
-      await saveDownloadResponse(response, `sub2api-import-oauth-${downloadableSelectedCount}-accounts-${localTimestamp()}.json`);
+      await copyText(data.text);
+      notify(`已复制 ${data.count} 个账号的凭据`);
       setError("");
     } catch (requestError) {
       setError(requestError.message);
@@ -1880,6 +1894,21 @@ function App() {
               <i className="status-dot abnormal" />
               <span>异常</span>
               <strong>{stats.abnormal ?? 0}</strong>
+            </button>
+            <span className="telemetry-divider" aria-hidden="true" />
+            <button
+              type="button"
+              className={`summary-pill telemetry-history-pill ${subscriptionHistoryOpen ? "is-open" : ""}`}
+              title={`查看历史订阅账号（共 ${historicalSubscriptionCount} 条）`}
+              aria-label="历史订阅"
+              aria-haspopup="dialog"
+              aria-expanded={subscriptionHistoryOpen}
+              disabled={!token}
+              onClick={() => setSubscriptionHistoryOpen(true)}
+            >
+              <History size={12} aria-hidden="true" />
+              <span>历史订阅</span>
+              <strong>{historicalSubscriptionCount}</strong>
             </button>
           </div>
 
@@ -2191,7 +2220,7 @@ function App() {
             <div className="selection-summary">
               <span className="selection-count"><strong>{selectedJobIds.size}</strong> 已选</span>
               <span className="selection-detail">
-                共 {jobs.length} 项{downloadableSelectedCount > 0 ? ` · 可下载 ${downloadableSelectedCount} 项` : ""}
+                共 {jobs.length} 项{downloadableSelectedCount > 0 ? ` · 可上传 ${downloadableSelectedCount} 项` : ""}
               </span>
               <button type="button" className="selection-text-button" onClick={toggleAllOnPage} disabled={allPageSelected || !pageJobIds.length || Boolean(batchAction)}>
                 {allPageSelected ? "已全选" : "全选"}
@@ -2202,7 +2231,7 @@ function App() {
                 </button>
               )}
               <HelpTip title="批量操作说明" label="查看批量操作说明">
-                <div>勾选列表中的账号后可执行批量下载、上传号池、重新授权、Web 会话检测，或在“更多”中换绑 IP、冷却及配置 2FA。</div>
+                <div>勾选列表中的账号后可批量复制凭据、上传号池、重新授权、Web 会话检测，或在“更多”中换绑 IP、冷却及配置 2FA。</div>
                 {features.accountSessions && selectedJobIds.size > 0 && (
                   <div style={{ marginTop: 4 }}>代理状态：{proxySwitchSelection.reason}</div>
                 )}
@@ -2226,12 +2255,13 @@ function App() {
                 <button
                   type="button"
                   className="secondary-button bulk-button"
-                  onClick={downloadSelected}
-                  disabled={!canDownloadSelected || Boolean(batchAction)}
-                  title="批量下载选中账号的凭据文件"
+                  onClick={copySelectedCredentials}
+                  disabled={!canCopyCredentialsSelected || Boolean(batchAction)}
+                  title="复制选中账号的邮箱----密码----2FA，每个账号一行"
+                  aria-label="批量复制凭据"
                 >
-                  {batchAction === "download" ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />}
-                  <span>下载</span>
+                  {batchAction === "copy-credentials" ? <LoaderCircle className="spin" size={14} /> : <Copy size={14} />}
+                  <span>复制凭据</span>
                 </button>
 
                 {features.sub2apiUpload && (
@@ -2761,6 +2791,17 @@ function App() {
       {proxyCreateOpen && <ProxyCreateDialog request={(url, options) => apiFetch(token, url, options)} onClose={() => setProxyCreateOpen(false)} onCreated={() => {
         void refreshAccountProxyDistribution().catch(error => notify(`代理已保存，刷新列表失败：${error.message}`, { tone: "error" }));
       }} />}
+      {subscriptionHistoryOpen && (
+        <SubscriptionHistoryDialog
+          open={subscriptionHistoryOpen}
+          token={token}
+          request={subscriptionHistoryRequest}
+          copyText={copyText}
+          formatPlanType={formatSubscriptionPlanLabel}
+          onTotalChange={setSubscriptionHistoryTotal}
+          onClose={() => setSubscriptionHistoryOpen(false)}
+        />
+      )}
       {smsSettingsOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !smsSettingsSaving) setSmsSettingsOpen(false);
@@ -3939,6 +3980,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
   const smsTriggerRef = useRef(null);
   const [submitting, setSubmitting] = useState(false);
   const [accountNameCopied, setAccountNameCopied] = useState(false);
+  const [copyingCredentials, setCopyingCredentials] = useState(false);
   const rowBusy = submitting || workflowBusy;
   const mutationReason = accountMutationBlockReason(job, { workflowBusy, submitting });
 
@@ -4047,15 +4089,21 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
     }
   }
 
-  async function download() {
+  async function copyCredentials() {
+    if (copyingCredentials) return;
+    setCopyingCredentials(true);
     try {
-      const response = await fetch(`/api/jobs/${job.id}/download`, {
-        headers: { "x-console-token": token },
+      const data = await apiFetch(token, "/api/jobs/copy-credentials", {
+        method: "POST",
+        body: JSON.stringify({ ids: [job.id] }),
       });
-      if (!response.ok) throw new Error((await response.json()).error || "下载失败");
-      await saveDownloadResponse(response, `${job.email}-sub2api-import-oauth-${localTimestamp()}.json`);
+      await copyText(data.text);
+      notify("账号凭据已复制");
+      onError("");
     } catch (requestError) {
       onError(requestError.message);
+    } finally {
+      setCopyingCredentials(false);
     }
   }
 
@@ -4334,12 +4382,12 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
           <button
             type="button"
             className="download-button icon-only-action"
-            onClick={download}
-            disabled={!job.canDownload}
-            title={job.canDownload ? "下载已有导入文件；当前授权任务未完成时下载的是上次保存的结果" : "尚未完成授权，暂无导入文件可下载"}
-            aria-label="下载导入文件"
+            onClick={copyCredentials}
+            disabled={copyingCredentials}
+            title="复制邮箱----密码----2FA"
+            aria-label="复制账号凭据"
           >
-            <Download size={13} />
+            {copyingCredentials ? <LoaderCircle className="spin" size={13} /> : <Copy size={13} />}
           </button>
           <button
             type="button"

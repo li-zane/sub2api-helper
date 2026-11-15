@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 const root = path.resolve(import.meta.dirname, ".."), temp = await fs.mkdtemp(path.join(os.tmpdir(), "helper-upload-pipeline-"));
 const trace = path.join(temp, "pipeline.trace");
 const failedStage = process.argv.includes("--rotation-failure") ? "rotation" : process.argv.includes("--logout-failure") ? "logout" : null;
+const deletedGroup = process.argv.includes("--deleted-group");
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let child, headers, output = "", base, held = null, first = true, creates = 0, rows = [], nextId = 1, logouts = 0;
 const json = (res, data, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
@@ -47,9 +48,9 @@ async function listen(server) {
 }
 const officialUrl = `http://127.0.0.1:${await listen(official)}`, poolUrl = `http://127.0.0.1:${await listen(pool)}`;
 const listener = http.createServer(), port = await listen(listener); await new Promise(resolve => listener.close(resolve)); base = `http://127.0.0.1:${port}`;
-await fs.writeFile(path.join(temp, "task-settings.json"), JSON.stringify({ maxActiveJobs: 2, autoActions: { free: ["rotate-logout-reauthorize-upload"] } }));
-await fs.writeFile(path.join(temp, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { baseUrl: poolUrl, adminApiKey: "fixture-admin-key", groupIds: [1] },
-  profiles: [{ id: "default", name: "fixture", groupIds: [1] }], activeProfileId: "default" }));
+await fs.writeFile(path.join(temp, "task-settings.json"), JSON.stringify({ maxActiveJobs: 2, autoActions: { free: ["rotate-logout-reauthorize-upload", ...(deletedGroup ? ["enable-overload-detection", "enable-overload-cooldown"] : [])] } }));
+await fs.writeFile(path.join(temp, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { baseUrl: poolUrl, adminApiKey: "fixture-admin-key", groupIds: deletedGroup ? [1, 35] : [1] },
+  profiles: [{ id: "default", name: "fixture", groupIds: deletedGroup ? [1, 35] : [1] }], activeProfileId: "default" }));
 const wait = async fn => { const end = Date.now() + 30000; while (Date.now() < end) { const result = await fn().catch(() => null); if (result) return result; if (child?.exitCode !== null && child?.exitCode !== undefined) throw Error("helper exited\n" + output); await pause(40); } throw Error("pipeline fixture timeout\n" + output + "\n" + JSON.stringify((await api("/api/jobs")).data.jobs.map(({status,prompt,autoTaskError,autoTaskActions})=>({status,prompt,autoTaskError,autoTaskActions}))) + "\n" + await fs.readFile(trace,"utf8").catch(()=>"")); };
 async function api(route, body) { const r = await fetch(base + route, { headers, ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }) }); return { status: r.status, data: await r.json() }; }
 try {
@@ -89,6 +90,12 @@ try {
     held(); held = null;
     await wait(async () => (await job())?.autoTaskStatus === "completed");
     const final = await job(); assert.equal(final.poolRefreshAction, null); assert.equal(final.poolRefreshError, null);
+    if (deletedGroup) {
+      assert.deepEqual(rows[0].group_ids, [1], 'deleted group reached account creation');
+      assert.equal(final.overloadDetection.enabled, true, 'deleted group prevented the later overload action');
+      assert.equal(final.overloadAutoCooldown.enabled, true, 'deleted group prevented the later cooldown action');
+      console.log('DELETED_GROUP_PIPELINE_PASS upload=true overload_detection=true auto_cooldown=true');
+    }
     assert.equal(creates, 1); assert.equal(rows.length, 1);
     const logs = (await api(`/api/jobs/${id}/logs?view=protocol`)).data;
     assert.deepEqual(logs.entries.filter(e => e.type !== "background").sort((a,b) => a.at.localeCompare(b.at)).map(e => [e.type,e.status]),

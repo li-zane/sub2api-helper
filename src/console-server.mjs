@@ -21,6 +21,7 @@ import { normalizeSecurityState, mergeSecurityState, publicSecurityState } from 
 import { PoolUploadLocks, uniquePoolUploadAccounts } from "./pool-upload-lock.mjs";
 import { PoolUploadIntents } from "./pool-upload-intents.mjs";
 import { poolCreateAccount, poolBatchResult } from "./pool-batch-result.mjs";
+import { Sub2ApiGroupReferences, isMissingPoolGroup } from "./sub2api-group-references.mjs";
 import {
   listAccountSessions,
   revokeAccountSession,
@@ -59,13 +60,14 @@ import { normalizeLoginAutomationPause, loginAutomationBlocked, loginAutomationP
 import { limitPoolRequests } from "./pool-network.mjs";
 import { createUsageTotalsReader, combineUsageTotals, mergeUsageTotals } from "./sub2api-usage-totals.mjs";
 import { UsageSnapshots, usageSnapshotKey } from "./usage-snapshots.mjs";
+import { SubscriptionHistory, isSubscribedPlan, historicalSubscriptionEvidence } from "./subscription-history.mjs";
 import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier, normalizeAccountCost, restoredAccountCost } from "../web/src/account-pricing.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService, normalizeFingerprintSettings } from "./model-fingerprint.mjs";
 import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
 import { WebSessionMonitor, normalizeWebSessionMonitor, DEFAULT_WEB_SESSION_MONITOR } from "./web-session-monitor.mjs";
 import { accountHealth } from "./account-health.mjs";
-import { AccountSessionResets, sessionResetPending, resetCredentialUpdate, normalizeSessionResetDelay } from "./account-session-reset.mjs";
+import { AccountSessionResets, sessionResetPending, sessionResetBlocksAutomation, resetCredentialUpdate, normalizeSessionResetDelay } from "./account-session-reset.mjs";
 import { createProxyImporter } from "./sub2api-proxy-create.mjs";
 import { poolAccountError } from "../web/src/pool-account-error.mjs";
 
@@ -172,8 +174,13 @@ const loginTimeouts = new LoginTimeouts({
     scheduleQueuedJobs();
   }); },
 });
-const requestProfileSync = limitPoolRequests(requestSub2Api, () => monitoringSettings.profileSyncConcurrency);
+const requestProfileSync = limitPoolRequests((config, endpoint, options = {}) => {
+  const accountId = /^\/api\/v1\/admin\/accounts\/(\d+)(?:\/|$)/.exec(endpoint)?.[1];
+  if (accountId && sessionResetPoolIdPaused(accountId, config)) throw httpError(409, "一键重登期间暂停套餐与分组同步");
+  return requestSub2Api(config, endpoint, options);
+}, () => monitoringSettings.profileSyncConcurrency);
 const poolUploadLocks = new PoolUploadLocks();
+const sub2ApiGroupReferences = new Sub2ApiGroupReferences({ request: requestSub2Api, onCatalog: pruneDeletedSub2ApiGroupReferences });
 let accountDataSyncTimers = [], accountDataSyncGeneration = 0;
 const accountDataSyncOperations = new Set();
 const MAIL_POLL_INTERVAL_MS = 2_500;
@@ -277,14 +284,19 @@ let sub2ApiRecoverySnapshot = null;
 let sub2ApiMonitorPromise = null;
 let sub2ApiAccountStatusPromise = null;
 const usageSnapshots = new UsageSnapshots(path.join(OUTPUT_ROOT, "usage-snapshots.json"));
+const subscriptionHistory = new SubscriptionHistory(path.join(OUTPUT_ROOT, "subscription-history.json"));
+const subscriptionBackfill = new Map();
+const subscriptionBackfillVersions = new Map();
+const subscriptionOAuthCache = new Map();
+let subscriptionHistorySync = null, subscriptionHistoryDirty = false;
 const readUsageTotals = createUsageTotalsReader({
   getSettings: () => ({ ttlMs: monitoringSettings.usageTotalsIntervalSeconds * 1000, concurrency: monitoringSettings.usageTotalsConcurrency }),
-  isBlocked: id => [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
+  isBlocked: id => sessionResetPoolIdPaused(id) || [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
   request: (...args) => shuttingDown
   ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args) });
 const readResetCredits = createResetCreditsReader({
   getSettings: () => ({ ttlMs: monitoringSettings.resetCreditsIntervalSeconds * 1000, concurrency: monitoringSettings.resetCreditsConcurrency }),
-  isBlocked: id => [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
+  isBlocked: id => sessionResetPoolIdPaused(id) || [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
   normalize: payload => normalizeSub2ApiUsagePayload(payload, { resetCreditsRefreshed: true }),
   request: (...args) => shuttingDown
     ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args),
@@ -326,7 +338,7 @@ const webSessionMonitor = new WebSessionMonitor({
     await loadSub2ApiAccountStatus();
     return listUniqueJobs();
   },
-  isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || accountAutomationBlocked(job.email) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
+  isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || accountAutomationBlocked(job.email) || sessionResetAutomationPaused(job.email) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
   hasSession: async job => {
     try { await fs.access(webSessionPathForJob(job)); return true; }
     catch (error) { return error.code !== "ENOENT"; } // Permissions/I/O errors must reach the probe, not trigger a login.
@@ -405,7 +417,7 @@ const overloadMonitor = new OverloadMonitor({
 
 const overloadCooldown = new OverloadCooldown({
   getMonitoringSettings: () => ({ intervalMs: monitoringSettings.overloadIntervalSeconds * 1000, concurrency: monitoringSettings.overloadCooldownConcurrency }),
-  isBlocked: accountAutomationBlocked,
+  isBlocked: email => accountAutomationBlocked(email) || sessionResetAutomationPaused(email),
   isCountBlocked: codexChecksBlocked,
   filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
   getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
@@ -467,7 +479,7 @@ const modelFingerprint = new ModelFingerprintService({
 async function recoverFingerprintAuthorization(email, failure) {
   return withEmailJobLock(email, async () => {
     const job = findJobByEmail(email);
-    if (!job || shuttingDown || accountAutomationBlocked(email)) return;
+    if (!job || shuttingDown || accountAutomationBlocked(email) || sessionResetAutomationPaused(email)) return;
     if (failure.httpStatus === 429 || failure.code === "QUOTA") { await stopUnavailableCodexChecks(email, failure.httpStatus === 429 ? "429 限流" : "上游返回用量限额"); return; }
     if (failure.code === "BANNED") {
       markAutoRepairBlocked(job, failure.upstreamCode || "account_deactivated");
@@ -528,13 +540,17 @@ await loadPlanTypeLabelMapping();
 await loadSub2ApiSettingsConfiguration();
 await loadSub2ApiMonitorConfiguration();
 await usageSnapshots.load().catch(() => console.error("[usage-cache] 用量快照暂不可读，等待上游同步恢复；其他功能继续运行。"));
+await subscriptionHistory.load();
 await overloadMonitor.load();
 await overloadCooldown.load();
 await accountSessionResets.load();
 await modelFingerprint.load();
 await syncCompletedOutputs(true);
 for (const job of jobs.values()) {
-  try { await readCredentialHistory(path.dirname(job.outputPath)); }
+  try {
+    const evidence = historicalSubscriptionEvidence(await readCredentialHistory(path.dirname(job.outputPath)));
+    if (evidence) subscriptionBackfill.set(job.email.toLowerCase(), evidence);
+  }
   catch (error) { appendJobLog(job, `[history] 凭据历史整理待重试：${error.code || "READ_FAILED"}\n`); }
 }
 await webSessionMonitor.load();
@@ -580,6 +596,7 @@ for (const job of jobs.values()) {
     await automationBlockWrites.get(job.email.toLowerCase());
   }
 }
+await syncSubscriptionHistory();
 await restoreAccountSessionResets();
 for (const job of jobs.values()) {
   if (job.poolRefreshAction) {
@@ -729,6 +746,23 @@ async function handleApi(req, res, requestUrl) {
 
   if (req.headers["x-console-token"] !== consoleToken) {
     sendJson(res, 403, { error: "Invalid console token" });
+    return;
+  }
+
+  if (req.method === "GET" && requestUrl.pathname === "/api/subscription-history") {
+    await syncCompletedOutputs();
+    await syncSubscriptionHistory();
+    const records = subscriptionHistory.list(poolPriceMultiplier);
+    sendJson(res, 200, { records, total: records.length });
+    return;
+  }
+  const subscriptionCredentialMatch = /^\/api\/subscription-history\/([a-f0-9]{32})\/credentials$/.exec(requestUrl.pathname);
+  if (req.method === "GET" && subscriptionCredentialMatch) {
+    await syncSubscriptionHistory();
+    const value = subscriptionHistory.credentials(subscriptionCredentialMatch[1]);
+    if (value === null) throw httpError(404, "历史订阅账号不存在");
+    if (!value) throw httpError(409, "该账号尚无可复制的凭据");
+    sendJson(res, 200, { text: value });
     return;
   }
 
@@ -979,6 +1013,12 @@ async function handleApi(req, res, requestUrl) {
       updated: results.filter((item) => item.updated).length,
       remarkSync: results.reduce((total, item) => ({ updated: total.updated + (item.sub2api?.updated || 0), failed: total.failed + (item.sub2api?.failed || 0), error: total.error || item.sub2api?.error || null }), { updated: 0, failed: 0, error: null }),
     });
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/jobs/copy-credentials") {
+    const body = await readJson(req);
+    sendJson(res, 200, await accountCredentialsForCopy(body.ids));
     return;
   }
 
@@ -1380,19 +1420,23 @@ async function handleApi(req, res, requestUrl) {
       return;
     }
     if (body.enabled && accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认封禁，请先完成重新登录授权以确认恢复");
+    if (body.enabled && sessionResetAutomationPaused(job.email)) throw httpError(409, "一键重登尚未成功，号池保持暂停；请完成或重试一键重登");
     const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
     if (!config?.baseUrl || !config?.adminApiKey) throw httpError(409, "请先配置 Sub2API 后端和管理员 API Key");
     const state = await loadSub2ApiAccountStatus({ forceRefresh: true });
     const entry = state.accounts.get(job.email.toLowerCase());
     if (!entry?.accountIds?.length) throw httpError(409, `${job.email} 尚未加入 Sub2API 号池`);
-    await overloadCooldown.manualOverride(job.email, entry.accountIds, () => Promise.all(entry.accountIds.map((accountId) => requestSub2Api(
+    await overloadCooldown.manualOverride(job.email, entry.accountIds, () => {
+      if (body.enabled && sessionResetAutomationPaused(job.email)) throw httpError(409, "一键重登尚未成功，号池保持暂停");
+      return Promise.all(entry.accountIds.map((accountId) => requestSub2Api(
       config,
       `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/schedulable`,
       {
         method: "POST",
         body: JSON.stringify({ schedulable: body.enabled }),
       },
-    ))), { enabled: body.enabled });
+    )));
+    }, { enabled: body.enabled });
     const nextEntry = {
       ...entry,
       enabled: body.enabled,
@@ -1787,9 +1831,11 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
   if (req.method === "POST" && action === "session-reset") {
-    await readJson(req);
+    const body = await readJson(req);
+    let cooldownMinutes;
+    try { cooldownMinutes = normalizeSessionResetDelay(body.cooldownMinutes); } catch (error) { throw httpError(400, error.message); }
     await loadSub2ApiAccountStatus({ forceRefresh: true });
-    await withEmailJobLock(job.email, () => startAccountSessionReset(job));
+    await withEmailJobLock(job.email, () => startAccountSessionReset(job, { cooldownMinutes }));
     sendJson(res, 202, { job: publicJob(job) });
     return;
   }
@@ -1878,6 +1924,7 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
     if (filters.sub2apiPool || filters.sub2apiEnabled) throw error;
   }
   const allJobs = listUniqueJobs();
+  await syncSubscriptionHistory();
   await Promise.all(allJobs.map(inspectAccountWebSession));
   const healthCounts = { normal: 0, abnormal: 0, pending: 0 };
   for (const job of allJobs) healthCounts[accountHealth(job, getSub2ApiAccountStatusForJob(job), accountAutomationBlocked(job.email))]++;
@@ -1922,6 +1969,7 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
     },
     stats: {
       ...healthCounts,
+      historicalSubscriptions: subscriptionHistory.size,
       active: allJobs.filter(occupiesActiveSlot).length + activeWebSessionChecks,
       webSessionChecks: activeWebSessionChecks,
       queued: allJobs.filter((job) => job.status === "queued").length,
@@ -2836,7 +2884,7 @@ function drainWebSessionChecks() {
 
 async function reconcilePlanAutomations(job, planType) {
   const plan = normalizePlanType(planType);
-  if (!plan || accountAutomationBlocked(job.email)) return;
+  if (!plan || accountAutomationBlocked(job.email) || sessionResetAutomationPaused(job.email)) return;
   const previousPlan = normalizePlanType(job.planAutomationPlanType || getJobPlanType(job));
   job.planAutomationPlanType = previousPlan;
   const changed = previousPlan !== plan;
@@ -2858,6 +2906,7 @@ async function reconcilePlanAutomations(job, planType) {
 }
 
 async function startWebLogin(job, { maintenance = false, checkTask = null, initialImport = false } = {}) {
+  if (maintenance && sessionResetAutomationPaused(job.email)) throw httpError(409, "一键重登尚未成功，自动登录已暂停");
   if (maintenance && automaticLoginBlocked(job, "web")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
   const checking = Boolean(checkTask && manualWebSessionChecks.get(job.id) === checkTask);
   await automationBlockWrites.get(job.email.toLowerCase());
@@ -3024,6 +3073,105 @@ function activeSessionReset(job) {
   return sessionResetPending(state) ? state : null;
 }
 
+function sessionResetAutomationPaused(email) {
+  return sessionResetBlocksAutomation(accountSessionResets.get(email));
+}
+
+function sessionResetPoolIdPaused(id, config = sub2ApiSettingsConfig || sub2ApiMonitorConfig) {
+  const backend = monitorBackendIdentity(config);
+  return [...accountSessionResets.accounts.values()].some(state => state.backend === backend
+    && sessionResetBlocksAutomation(state) && state.accountIds?.includes(String(id)));
+}
+
+async function sessionResetPoolRecords(job, state, config) {
+  if (monitorBackendIdentity(config) !== state.backend) throw Error("号池后端已变化，原号池保持暂停");
+  const records = [];
+  for (const id of state.accountIds) {
+    const response = await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`);
+    const account = response?.data || response;
+    if (account.platform !== "openai" || account.type !== "oauth" || sub2ApiAccountEmail(account) !== job.email.toLowerCase()
+      || (normalizeStoredProxyId(account.proxy_id) || 0) !== state.proxyId) throw Error("号池账号身份或 IP 绑定已变化，已停止会话重建");
+    records.push(account);
+  }
+  return records;
+}
+
+async function ensureSessionResetPoolPaused(job) {
+  return overloadCooldown.lock(job.email.toLowerCase(), async () => {
+    let state = accountSessionResets.get(job.email);
+    if (!sessionResetBlocksAutomation(state)) return false;
+    const config = sub2ApiSettingsConfig;
+    const records = await sessionResetPoolRecords(job, state, config);
+    if (!state.poolPauseActive) {
+      // Persist ownership BEFORE the first remote write, including uncertain
+      // responses. A retry must not mistake our own pause for a user disable.
+      state = await accountSessionResets.save(job.email, { poolPauseActive: true,
+        resumeAccountIds: records.filter(a => sub2ApiAccountSchedulable(a) === true).map(a => String(a.id)) });
+    }
+    modelFingerprint.invalidateAccount(job.email);
+    try {
+      for (const account of records) {
+        if (sub2ApiAccountSchedulable(account) === false) continue;
+        await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(account.id)}/schedulable`, {
+          method: "POST", body: JSON.stringify({ schedulable: false }),
+        });
+      }
+      await accountSessionResets.save(job.email, { poolPausedAt: new Date().toISOString() });
+      return true;
+    } finally { invalidateSub2ApiAccountStatusCache(); }
+  });
+}
+
+async function finishSessionResetPoolPause(job, expected) {
+  return overloadCooldown.lock(job.email.toLowerCase(), async () => {
+    const config = sub2ApiSettingsConfig, attempted = [];
+    const current = () => {
+      const state = accountSessionResets.get(job.email);
+      if (state?.id !== expected.id || !sessionResetPending(state) || accountAutomationBlocked(job.email))
+        throw Error("一键重登已停止，号池保持暂停");
+      return state;
+    };
+    const state = current(), records = await sessionResetPoolRecords(job, state, config);
+    try {
+      for (const account of records) {
+        current();
+        if (!(state.resumeAccountIds || []).includes(String(account.id)) || overloadCooldown.isPaused(job.email)
+          || overloadCooldown.isManuallyDisabled(job.email, account.id, config)) continue;
+        if (account.status !== "active" || accountRateLimit(account).limited || usageRestricted(normalizeSub2ApiUsage(account)))
+          throw Error("新凭据已保存，但号池仍有错误或用量限制，继续保持暂停");
+        attempted.push(account.id);
+        await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(account.id)}/schedulable`, {
+          method: "POST", body: JSON.stringify({ schedulable: true }),
+        });
+      }
+      current();
+      await accountSessionResets.complete(job.email);
+    } catch (error) {
+      // A later row/response/save failure must not leave earlier rows enabled.
+      const results = await Promise.allSettled(attempted.map(id => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}/schedulable`, {
+        method: "POST", body: JSON.stringify({ schedulable: false }),
+      })));
+      if (results.some(r => r.status === "rejected")) throw Error(`${error.message}；号池暂停请求待重试`);
+      throw error;
+    } finally { invalidateSub2ApiAccountStatusCache(); }
+  });
+}
+
+async function reconcileSessionResetPoolPauses(config, accounts) {
+  for (const [email, state] of accountSessionResets.accounts) {
+    if (!state.poolPauseActive || state.backend !== monitorBackendIdentity(config) || accountAutomationBlocked(email)) continue;
+    const matching = accounts.filter(a => state.accountIds.includes(String(a.id)));
+    if (!matching.some(a => sub2ApiAccountSchedulable(a) !== false)) continue;
+    const job = jobs.get(state.jobId);
+    if (!job) continue;
+    try {
+      if (await ensureSessionResetPoolPaused(job)) for (const account of matching) account.schedulable = false;
+    } catch (error) {
+      await accountSessionResets.save(email, { error: `号池暂停待重试：${String(error.message).slice(0, 400)}` });
+    }
+  }
+}
+
 function canResetAccountSessions(job, { requirePoolSnapshot = true } = {}) {
   const state = accountSessionResets.get(job.email);
   return canForceRelogin(job) && !sessionResetPending(state) && !job.autoRepairOperation
@@ -3075,19 +3223,24 @@ async function startAccountSessionReset(job, { automatic = false, requestId = nu
   if (proxyId && (!proxy?.url || isSub2ApiProxyExpired(proxy))) throw httpError(409, "原绑定代理不可用，已停止操作并保留绑定");
   if (proxyId) assertBoundProxyIp(job, proxy);
   const previous = accountSessionResets.get(job.email);
+  if (previous?.poolPauseActive && (previous.backend !== backend || previous.proxyId !== proxyId
+    || previous.accountIds.some(id => !records.some(a => String(a.id) === id)))) throw httpError(409, "上次一键重登尚未恢复，请保留原号池账号与 IP 绑定后重试");
   const state = await accountSessionResets.begin(job.email, { id: requestId || crypto.randomUUID(), backend,
     jobId: job.id, source: automatic ? "cooldown" : "manual", proxyId, proxyUrl: proxy?.url || null,
     boundIp: proxy?.ipAddress || null, proxyName: proxy?.name || null, codexAuthMode,
     accountIds: records.map(a => String(a.id)), cooldownMinutes, resumeAt: null,
+    poolPauseActive: previous?.poolPauseActive === true,
+    resumeAccountIds: previous?.poolPauseActive ? previous.resumeAccountIds || [] : [],
     // An explicit retry after confirmed logout continues with login, never logs
     // out a newly recovered Web session for the same failed operation.
     logoutCompletedAt: !job.webSessionAvailable && previous?.status === "failed" ? previous.logoutCompletedAt || null : null });
   try {
     await validateSessionResetRoute(job, state);
+    await ensureSessionResetPoolPaused(job);
     await saveStoredLoginCredentials(job.email, job);
     await forceReloginJob(job, {}, { automatic, sessionReset: true, poolRefreshAction: "session-reset" });
     await accountSessionResets.save(job.email, { logOperationId: job.logOperation?.id || null });
-    appendJobLog(job, `[session-reset] 已加入共享任务队列：登出所有设备 → ${cooldownMinutes ? `冷却 ${cooldownMinutes} 分钟 → ` : ""}重新登录 Web → Codex OAuth → 更新现有号池凭据；全程保持原 IP 绑定${state.proxyId ? `（代理 ${state.proxyId}）` : "（直连）"}。\n`);
+    appendJobLog(job, `[session-reset] 已暂停号池与相关自动化，已加入共享任务队列：登出所有设备 → ${cooldownMinutes ? `冷却 ${cooldownMinutes} 分钟 → ` : ""}重新登录 Web → Codex OAuth → 更新现有号池凭据 → 恢复原启用状态；全程保持原 IP 绑定${state.proxyId ? `（代理 ${state.proxyId}）` : "（直连）"}。\n`);
     await saveJobMetadata(job);
   } catch (error) { await accountSessionResets.fail(job.email, error); throw error; }
 }
@@ -3122,6 +3275,7 @@ function prepareCooldownSessionReset(email, { id, backend }) {
 async function prepareSessionResetLogin(job, current = () => true) {
   let state = activeSessionReset(job);
   const route = await validateSessionResetRoute(job, state);
+  await ensureSessionResetPoolPaused(job);
   // Fresh Web login must exclude existing inbox codes just like ordinary login.
   if (job.mailApiUrl) await loadMailboxBaseline(job);
   if (!current()) return null;
@@ -3159,11 +3313,14 @@ async function prepareSessionResetLogin(job, current = () => true) {
 
 async function restoreAccountSessionResets() {
   for (const [email, state] of accountSessionResets.accounts) {
-    if (!sessionResetPending(state)) continue;
+    if (!sessionResetBlocksAutomation(state)) continue;
     const job = jobs.get(state.jobId);
     if (!job || accountAutomationBlocked(email) || automaticLoginBlocked(job, "oauth")) {
       await accountSessionResets.fail(email, "账号缺失、已封禁或自动登录暂停，需要手动处理"); continue;
     }
+    try { await ensureSessionResetPoolPaused(job); }
+    catch (error) { await accountSessionResets.fail(email, error); continue; }
+    if (!sessionResetPending(state)) continue;
     if (state.status === "logging_out") {
       await accountSessionResets.fail(email, "服务重启中断了登出请求，远端结果待确认，请手动检查后重试"); continue;
     }
@@ -3196,6 +3353,7 @@ async function synchronizeSessionResetCredentials(job) {
   const state = activeSessionReset(job), config = sub2ApiSettingsConfig;
   if (!state) throw Error("会话重建上下文缺失，已停止更新号池");
   await validateSessionResetRoute(job, state);
+  await ensureSessionResetPoolPaused(job);
   await accountSessionResets.save(job.email, { status: "syncing", error: null });
   const payload = await buildSub2ApiUploadPayload([job]);
   const local = payload.accounts.find(a => sub2ApiAccountEmail(a) === job.email.toLowerCase());
@@ -3207,16 +3365,17 @@ async function synchronizeSessionResetCredentials(job) {
     await recoverSub2ApiAuthorization(config, id, job.email, { recoveryJob: job });
   }
   invalidateSub2ApiAccountStatusCache();
-  await accountSessionResets.complete(job.email);
+  await finishSessionResetPoolPause(job, state);
   await reconcilePlanAutomations(job, job.planType);
   const entry = job.logOperation || (state.logOperationId ? await privateJsonIfPresent(path.join(path.dirname(job.outputPath), "operation-logs", `${state.logOperationId}.json`)) : null);
-  appendJobLog(job, "[session-reset] 4/4：已原位更新号池 Codex 凭据，未新增账号，原 IP 绑定保持不变。\n");
+  appendJobLog(job, "[session-reset] 4/4：已原位更新号池 Codex 凭据并恢复原启用状态；原先关闭的账号保持关闭，原 IP 绑定保持不变。\n");
   if (entry?.type === "session_reset") finishAccountLogOperation(job, entry, "completed");
   overloadCooldown.trigger();
 }
 
 async function forceReloginJob(job, options = {}, context = {}) {
   const automatic = context.autoRepair || context.webSessionMonitorRepair || context.automatic;
+  if (automatic && !context.sessionReset && sessionResetAutomationPaused(job.email)) throw httpError(409, "一键重登尚未成功，自动授权已暂停");
   if (automatic && automaticLoginBlocked(job, "oauth")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
   await automationBlockWrites.get(job.email.toLowerCase());
   if (sessionResetPending(accountSessionResets.get(job.email)) && !context.sessionReset) throw httpError(409, "会话重建正在进行，请等待完成");
@@ -3225,6 +3384,7 @@ async function forceReloginJob(job, options = {}, context = {}) {
   }
   await reloadMissingJobCredentials(job);
   if (!automatic) { job.webSessionMaintenancePause = null; clearAutomaticLoginPause(job); }
+  if (context.sessionReset && !activeSessionReset(job)) throw httpError(409, "一键重登已停止，号池保持暂停");
   job.webSessionMonitorRepair = context.webSessionMonitorRepair === true;
   if (!context.sessionReset) job.proxyUrl = effectiveAccountProxyUrl(job.proxyUrl, globalProxyUrl);
   if (!canForceRelogin(job)) {
@@ -4990,10 +5150,10 @@ async function performUploadJobsToSub2Api(selected, config, profileState, { reco
       if (remote && (!isOAuthPoolAccount(remote) || sub2ApiAccountEmail(remote) !== email)) throw httpError(409, "号池账号身份已改变，已停止重传旧创建意图");
       return remote;
     };
-    const updateExisting = async (account, remoteAccount) => {
+    const updateExisting = async (account, remoteAccount, writeConfig = accountConfig) => {
       const email = sub2ApiAccountEmail(account), accountId = normalizeSub2ApiAccountId(remoteAccount?.id);
       if (!accountId) throw new Error("号池账号缺少有效 ID");
-      const accountUpdate = await buildSub2ApiAccountUpdate(account, accountConfig, remoteAccount);
+      const accountUpdate = await buildSub2ApiAccountUpdate(account, writeConfig, remoteAccount);
       const dated = effective.find(item => item.id === remoteAccount.id);
       if (dayPriorities.has(dated)) accountUpdate.priority = dayPriorities.get(dated);
       await writePoolAccount(accountConfig, remoteAccount, accountUpdate);
@@ -5021,20 +5181,55 @@ async function performUploadJobsToSub2Api(selected, config, profileState, { reco
     }
     for (const account of accountsToCreate) {
       const email = sub2ApiAccountEmail(account);
+      // Validate before freezing the create intent, never change a POST body
+      // while reusing its original idempotency key.
+      const groups = await sub2ApiGroupReferences.resolve(accountConfig, account.group_ids);
+      if (shuttingDown) throw httpError(503, "服务正在关闭，已停止创建号池账号");
+      account.group_ids = groups.ids;
       const intent = await poolUploadIntents.prepare(accountConfig, poolCreateAccount(JSON.parse(JSON.stringify(account))), { lookupAccount: id => lookup(id, email) });
       if (intent.existingIds.length) {
         for (const id of intent.existingIds) await updateExisting(account, await lookup(id, email));
         continue;
       }
-      const response = await requestSub2Api(accountConfig, "/api/v1/admin/accounts/batch", {
-        method: "POST",
-        headers: { "Idempotency-Key": intent.key },
-        body: JSON.stringify({ accounts: [intent.account] }),
-      });
+      const recoverGroupFailure = async error => {
+        const removed = await sub2ApiGroupReferences.resolve(accountConfig, intent.account.group_ids, { force: true });
+        if (!removed.missing.length) throw error;
+        const fresh = await listSub2ApiAccounts(accountConfig, { withMeta: true });
+        const matches = fresh.accounts.filter(row => isOAuthPoolAccount(row) && sub2ApiAccountEmail(row) === email && normalizeSub2ApiAccountId(row.id));
+        if (!fresh.complete || !matches.length) throw httpError(502, "POOL_UPLOAD_GROUPS_PENDING: 失效分组已确认，旧创建请求尚未核对到账号；保留原幂等请求，等待重试核对，不重复创建");
+        const cleaned = await sub2ApiGroupReferences.resolve(accountConfig, accountConfig.groupIds, { force: true });
+        await poolUploadIntents.confirm(accountConfig, email, intent.id, matches.map(row => normalizeSub2ApiAccountId(row.id)));
+        for (const remote of matches) await updateExisting(account, await lookup(remote.id, email), { ...accountConfig, groupIds: cleaned.ids });
+        results.push({ recoveredGroupBinding: true, removedGroupIds: removed.missing, accountIds: matches.map(row => row.id) });
+        createdCount++;
+      };
+      const frozenGroups = await sub2ApiGroupReferences.resolve(accountConfig, intent.account.group_ids);
+      if (frozenGroups.missing.length) {
+        await recoverGroupFailure(new Error("GROUP_NOT_FOUND: 旧创建请求含已删除的分组"));
+        continue;
+      }
+      let response;
+      try {
+        if (shuttingDown) throw httpError(503, "服务正在关闭，已保留原上传请求");
+        response = await requestSub2Api(accountConfig, "/api/v1/admin/accounts/batch", {
+          method: "POST",
+          headers: { "Idempotency-Key": intent.key },
+          body: JSON.stringify({ accounts: [intent.account] }),
+        });
+      } catch (error) {
+        if (!isMissingPoolGroup(error)) throw error;
+        await recoverGroupFailure(error);
+        continue;
+      }
       results.push(response);
       const data = response?.data || response;
       const receipt = poolBatchResult(response, intent.account);
       if (receipt.rejected) {
+        if (isMissingPoolGroup(receipt.error)) {
+          results.pop();
+          await recoverGroupFailure(new Error(receipt.error));
+          continue;
+        }
         // A known account-insert FK failure permits a corrected generation.
         // Other item failures can follow a committed insert (e.g. BindGroups):
         // keep their original key until a later listing resolves the outcome.
@@ -5734,7 +5929,7 @@ function parseSub2ApiModelWhitelist(value) {
 }
 
 function requestSub2Api(config, endpoint, options = {}) {
-  const requestPromise = performSub2ApiRequest(config, endpoint, options);
+  const requestPromise = sub2ApiGroupReferences.write(config, endpoint, options, performSub2ApiRequest);
   sub2ApiRequestPromises.add(requestPromise);
   void requestPromise.then(
     () => sub2ApiRequestPromises.delete(requestPromise),
@@ -5771,6 +5966,7 @@ async function performSub2ApiRequest(config, endpoint, options = {}) {
       const message = sub2ApiResponseMessage(payload, text).slice(0, 500);
       const error = httpError(502, `Sub2API 返回 HTTP ${response.status}${message ? `：${message}` : ""}`);
       error.remoteStatus = response.status;
+      error.remoteCode = typeof payload?.code === "string" ? payload.code : payload?.error?.code;
       throw error;
     }
     return payload;
@@ -5889,6 +6085,27 @@ async function persistSub2ApiSettingsConfiguration() {
   const tempPath = `${SUB2API_SETTINGS_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await fs.writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
   await fs.rename(tempPath, SUB2API_SETTINGS_PATH);
+}
+
+async function pruneDeletedSub2ApiGroupReferences(config, catalog, missing) {
+  if (!sub2ApiSettingsConfig || monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiSettingsConfig)) return;
+  let changed = false;
+  const deleted = new Set(missing.map(String));
+  const prune = value => {
+    const ids = value.groupIds || [], kept = ids.filter(id => !deleted.has(String(id)));
+    // Empty means "monitor all groups" elsewhere. Retain an all-deleted scope
+    // until explicitly edited; write paths still skip its nonexistent IDs.
+    if (!kept.length || kept.length === ids.length) return value;
+    changed = true;
+    return { ...value, groupIds: kept };
+  };
+  sub2ApiSettingsConfig = prune(sub2ApiSettingsConfig);
+  if (sub2ApiMonitorConfig) sub2ApiMonitorConfig = prune(sub2ApiMonitorConfig);
+  for (const [id, profile] of sub2ApiProfiles) sub2ApiProfiles.set(id, prune(profile));
+  if (!changed) return;
+  await persistSub2ApiSettingsConfiguration();
+  if (sub2ApiMonitorConfig) await persistSub2ApiMonitorConfiguration();
+  console.warn("[groups] 已清理号池方案中确认删除的分组引用；保留有效分组及原有监控范围。");
 }
 
 async function loadSub2ApiMonitorConfiguration() {
@@ -6369,7 +6586,7 @@ async function fallBackExpiredSub2ApiProxies(config, profileState, accounts, sum
       const accountId = normalizeSub2ApiAccountId(account?.id);
       if (accountSyncBlocked(account)) continue;
       const reset = accountSessionResets.get(sub2ApiAccountEmail(account));
-      if (sessionResetPending(reset)) continue;
+      if (sessionResetBlocksAutomation(reset)) continue;
       if (!accountId || Number(account?.proxy_id) !== proxyId) continue;
       try {
         await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
@@ -6637,7 +6854,7 @@ async function buildSub2ApiAccountUpdate(localAccount, accountConfig, remoteAcco
 async function sub2ApiProxyFieldsForAccount(accountConfig, email, remoteAccount = {}) {
   if (accountAutomationBlocked(email)) return { proxy_id: 0 };
   const reset = accountSessionResets.get(email);
-  if (sessionResetPending(reset)) return { proxy_id: reset.proxyId || 0 };
+  if (sessionResetBlocksAutomation(reset)) return { proxy_id: reset.proxyId || 0 };
   if (accountProxyMode === "plan") {
     const job = findJobByEmail(email);
     return hasPlanProxyBinding(job) ? { proxy_id: normalizeStoredProxyId(job.assignedProxyId) || 0 } : {};
@@ -6845,6 +7062,7 @@ async function retryPendingSub2ApiUploads(config, summary, profileState = snapsh
         || !job.resultSaved
         || job.status !== "completed"
         || job.autoRepairOperation
+        || sessionResetAutomationPaused(job.email)
         || isAutoRepairCoolingDown(job)
       ) return;
       const accounts = [];
@@ -6943,6 +7161,7 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
     await listSub2ApiProxies(config).catch(() => []);
     await importSub2ApiPoolOnlyAccounts(remoteAccounts);
     await reconcileSub2ApiAccountBans(config, remoteAccounts);
+    await reconcileSessionResetPoolPauses(config, remoteAccounts);
     await syncImportDatePriorities(config, listing);
     await pullSub2ApiRemarks(listing, config, versions);
     const accounts = new Map();
@@ -7043,7 +7262,7 @@ async function synchronizeCachedUsageTotals(config, state, options = {}) {
   if (sub2ApiAccountStatusCache !== state) return;
   const eligible = new Set(ids);
   for (const [email, entry] of state.accounts) {
-    if (accountAutomationBlocked(email) || !entry.accountIds.every(id => eligible.has(id) && records.has(String(id)))) continue;
+    if (accountAutomationBlocked(email) || sessionResetAutomationPaused(email) || !entry.accountIds.every(id => eligible.has(id) && records.has(String(id)))) continue;
     entry.usage = { ...entry.usage, cacheKey: usageSnapshotKey(state.backend, email, entry.accountIds),
       totals: mergeUsageTotals(entry.usage?.totals, combineUsageTotals(entry.accountIds, records)) };
   }
@@ -7060,7 +7279,7 @@ async function synchronizeCachedResetCredits(config, state, options = {}) {
   if (current.backend !== state.backend) return;
   const eligible = new Set(current.usageIds || []);
   for (const [email, entry] of current.accounts) {
-    if (accountAutomationBlocked(email) || !entry.accountIds.every(id => eligible.has(id) && records.has(String(id)))) continue;
+    if (accountAutomationBlocked(email) || sessionResetAutomationPaused(email) || !entry.accountIds.every(id => eligible.has(id) && records.has(String(id)))) continue;
     const credits = entry.accountIds.map(id => records.get(String(id))).filter(Boolean).reduce((value, next) => mergeSub2ApiUsage(value, {
       source: "sub2api", resetCredits: next.resetCredits, resetCreditsObserved: true,
       resetCreditsFetchedAt: next.resetCreditsFetchedAt, resetCreditsStale: next.resetCreditsStale,
@@ -7073,6 +7292,60 @@ async function synchronizeCachedResetCredits(config, state, options = {}) {
 async function persistUsageSnapshots(state, options) {
   try { await usageSnapshots.update(state.backend, [...state.accounts.values()], options); }
   catch { console.error("[usage-cache] 用量快照写入失败，保留内存数据并等待下次同步。"); }
+  void syncSubscriptionHistory().catch(() => console.error("[subscription-history] 数据同步待重试。"));
+}
+
+function syncSubscriptionHistory() {
+  // Coalesce mutations/polls and read live values inside the serialized pass.
+  // This performs local I/O only; it never probes Web sessions or calls a pool.
+  subscriptionHistoryDirty = true;
+  if (subscriptionHistorySync) return subscriptionHistorySync;
+  subscriptionHistorySync = (async () => {
+    do {
+      subscriptionHistoryDirty = false;
+      const current = listUniqueJobs().filter(job => !job.deleted);
+      const observations = await Promise.all(current.map(async job => {
+        const email = job.email.toLowerCase(), planType = getJobPlanType(job);
+        let evidence = subscriptionBackfill.get(email);
+        let historicalPlanType = [job.planType, job.planAutomationPlanType, evidence?.planType].find(isSubscribedPlan);
+        if (!isSubscribedPlan(planType) && !historicalPlanType && !subscriptionHistory.has(email)) {
+          const historyRoot = path.dirname(job.outputPath);
+          try {
+            const stat = await fs.stat(path.join(historyRoot, "credential-history"));
+            if (subscriptionBackfillVersions.get(historyRoot) !== stat.mtimeMs) {
+              evidence = historicalSubscriptionEvidence(await readCredentialHistory(historyRoot));
+              subscriptionBackfillVersions.set(historyRoot, stat.mtimeMs);
+              if (evidence) subscriptionBackfill.set(email, evidence);
+              historicalPlanType = evidence?.planType;
+            }
+          } catch { /* A failed history read is not evidence of a subscription. */ }
+        }
+        if (!isSubscribedPlan(planType) && !historicalPlanType && !subscriptionHistory.has(email)) return null;
+        const credentials = { mailApiUrl: job.mailApiUrl || "", mailRequestBody: job.mailRequestBody || "" };
+        // A locked/unavailable secure store is not a successful credential clear.
+        if (job.password || !job.hasPasswordCredential) credentials.password = job.password || "";
+        if (job.totpSecret || !job.hasTotpCredential) credentials.totpSecret = job.totpSecret || "";
+        try {
+          const stat = await fs.stat(job.outputPath), key = `${stat.mtimeMs}:${stat.size}`;
+          let cached = subscriptionOAuthCache.get(job.outputPath);
+          if (cached?.key !== key) {
+            const value = JSON.parse(await fs.readFile(job.outputPath, "utf8"));
+            const accounts = value.type === "sub2api-data" && value.accounts?.filter(account => sub2ApiAccountEmail(account) === email);
+            if (accounts?.length && accounts.some(account => account.credentials?.access_token || account.credentials?.refresh_token)) {
+              cached = { key, json: JSON.stringify({ ...value, accounts }, null, 2) };
+              subscriptionOAuthCache.set(job.outputPath, cached);
+            }
+          }
+          if (cached?.json) credentials.sub2apiJson = cached.json;
+        } catch { /* Keep the last committed snapshot across temporary file/read failures. */ }
+        return { email, planType, historicalPlanType, firstSubscribedAt: evidence?.at,
+          remark: job.remark || "", accountCostCny: job.accountCostCny,
+          userCostUsd: getSub2ApiAccountStatusForJob(job).usage?.totals?.userCost, credentials };
+      }));
+      await subscriptionHistory.reconcile(observations.filter(Boolean), current.map(job => job.email));
+    } while (subscriptionHistoryDirty);
+  })().finally(() => { subscriptionHistorySync = null; });
+  return subscriptionHistorySync;
 }
 function scheduleAccountDataSync() {
   accountDataSyncGeneration++;
@@ -7201,7 +7474,7 @@ function publicSub2ApiAccountStatusEntry(entry) {
     remoteErrors: entry.remoteErrors || [],
     rateLimited: entry.rateLimited === true,
     quotaRestricted: entry.quotaRestricted === true || usageRestricted(entry.usage),
-    codexStatusEligible: !blocked && entry.enabled === true && entry.remoteStatus !== "error" && !entry.rateLimited && !entry.quotaRestricted && !usageRestricted(entry.usage),
+    codexStatusEligible: !blocked && !sessionResetAutomationPaused(entry.email) && entry.enabled === true && entry.remoteStatus !== "error" && !entry.rateLimited && !entry.quotaRestricted && !usageRestricted(entry.usage),
     rateLimitUntil: entry.rateLimitUntil || null,
     accountBlocked: blocked,
     accountBlockReason: blocked ? job?.autoRepairBlockedReason || null : null,
@@ -8058,7 +8331,7 @@ function isAutoRepairCoolingDown(job) {
 }
 
 function codexChecksBlocked(email) {
-  if (activeSessionReset(findJobByEmail(email))) return true;
+  if (sessionResetAutomationPaused(email)) return true;
   if (pendingCodexBlocks.has(String(email).toLowerCase()) || accountAutomationBlocked(email)) return true;
   const state = getSub2ApiAccountStatusForJob({ email });
   // Before a cache exists, the schedulers' fresh account mappings remain the
@@ -8080,11 +8353,12 @@ async function stopUnavailableCodexChecks(email, reason = "达到用量限额") 
 }
 
 function codexMonitoringAllowed(job) {
+  if (sessionResetAutomationPaused(job.email)) return false;
   const state = getSub2ApiAccountStatusForJob(job);
   return !pendingCodexBlocks.has(String(job.email).toLowerCase()) && !accountAutomationBlocked(job.email) && state.remoteStatus !== "error" && !state.rateLimited && !state.quotaRestricted && !usageRestricted(state.usage) && state.inPool === true && state.enabled === true;
 }
 function manualFingerprintAllowed(job) {
-  if (activeSessionReset(job)) return false;
+  if (job && sessionResetAutomationPaused(job.email)) return false;
   if (!job || job.deleted || pendingCodexBlocks.has(String(job.email).toLowerCase()) || accountAutomationBlocked(job.email)) return false;
   const state = getSub2ApiAccountStatusForJob(job);
   if (state.inPool !== true || state.remoteStatus === "error" || state.rateLimited || state.quotaRestricted || usageRestricted(state.usage)) return false;
@@ -8249,6 +8523,31 @@ async function finishSub2ApiAutoRepairFailure(job) {
   }
   touch(job);
   await saveJobMetadata(job);
+}
+
+async function accountCredentialsForCopy(ids) {
+  const selected = resolveSelectedJobs(ids);
+  const lines = [];
+  for (const job of selected) {
+    let password = job.password || "";
+    let totpSecret = job.totpSecret || "";
+    if ((!password && job.hasPasswordCredential) || (!totpSecret && job.hasTotpCredential)) {
+      const stored = await loadStoredLoginCredentials(job.email);
+      if (job.hasPasswordCredential) password ||= stored.password;
+      if (job.hasTotpCredential) totpSecret ||= stored.totpSecret;
+    }
+    if ((job.hasPasswordCredential || job.loginMode === "password") && !password) {
+      throw httpError(409, `${job.email} 的密码未能从系统安全凭据存储读取，请重新导入该账号资料`);
+    }
+    if (job.hasTotpCredential && !totpSecret) {
+      throw httpError(409, `${job.email} 的 2FA 密钥未能从系统安全凭据存储读取，请重新导入该账号资料`);
+    }
+    if ([job.email, password, totpSecret].some(value => /[\r\n]|----/.test(value))) {
+      throw httpError(409, `${job.email} 的凭据包含换行或分隔符，请在账号凭据中单独复制`);
+    }
+    lines.push([job.email, password, totpSecret].join("----"));
+  }
+  return { text: lines.join("\n"), count: lines.length };
 }
 
 async function exportSourceAccounts(res, ids) {
@@ -8948,7 +9247,7 @@ async function releaseBlockedAccountProxies(email, { config = sub2ApiSettingsCon
 }
 
 function accountSyncBlocked(account) {
-  return accountAutomationBlocked(sub2ApiAccountEmail(account)) || Boolean(sub2ApiPermanentAccountFailure(account));
+  return accountAutomationBlocked(sub2ApiAccountEmail(account)) || sessionResetAutomationPaused(sub2ApiAccountEmail(account)) || Boolean(sub2ApiPermanentAccountFailure(account));
 }
 
 function sub2ApiPermanentAccountFailure(account) {
@@ -9121,7 +9420,7 @@ async function recoverSub2ApiAuthorization(config, accountId, email, { monitorRe
     const pending = recoveryJob?.poolRefreshRecovery?.[recoveryKey] === true;
     // A durable intent covers partial clear-error success across retries/restarts.
     if (!monitorRepair && !authError && !pending) return;
-    const schedulable = !overloadCooldown.isPaused(email)
+    const schedulable = !sessionResetAutomationPaused(email) && !overloadCooldown.isPaused(email)
       && !overloadCooldown.isManuallyDisabled(email, accountId, config);
     if (recoveryJob) {
       recoveryJob.poolRefreshRecovery = { ...recoveryJob.poolRefreshRecovery, [recoveryKey]: true };
@@ -9271,6 +9570,7 @@ async function deleteSub2ApiAccountsByEmail(email) {
 }
 
 async function deleteJobsByEmail(email) {
+  await syncSubscriptionHistory();
   const sub2api = await deleteSub2ApiAccountsByEmail(email);
   await usageSnapshots.removeEmail(email).catch(() => console.error("[usage-cache] 账号用量缓存清理待重试，账号删除流程继续。"));
   await poolUploadIntents.forgetEmail(email);
@@ -9300,6 +9600,8 @@ async function deleteJobsByEmail(email) {
     ...[...directories].map((directory) => fs.rm(directory, { recursive: true, force: true })),
     deleteStoredLoginCredentials(email),
   ]);
+  await syncSubscriptionHistory();
+  for (const job of matching) subscriptionOAuthCache.delete(job.outputPath);
   scheduleQueuedJobs();
   return { email, sub2api };
 }
@@ -10839,6 +11141,7 @@ async function saveJobMetadata(job) {
         }
       } finally { await fs.rm(tempPath, { force: true }); }
     });
+  void job.metadataWritePromise.then(() => syncSubscriptionHistory()).catch(() => console.error("[subscription-history] 账号数据同步待重试。"));
   return job.metadataWritePromise;
 }
 
@@ -11162,6 +11465,8 @@ async function shutdown() {
       ...[...jobs.values()].map((job) => job.metadataWritePromise).filter(Boolean),
     ]);
     await usageSnapshots.flush().catch(() => {});
+    await subscriptionHistorySync?.catch(() => {});
+    await subscriptionHistory.flush().catch(() => {});
     await vite?.close();
     await closeHttpServer(server);
   })();

@@ -4,6 +4,10 @@ import crypto from "node:crypto";
 
 const pending = new Set(["queued", "logging_out", "cooling", "authorizing", "syncing"]);
 export function sessionResetPending(state) { return pending.has(state?.status); }
+// A failed/canceled reset retains its pause until an explicit reset succeeds.
+export function sessionResetBlocksAutomation(state) {
+  return sessionResetPending(state) || state?.poolPauseActive === true;
+}
 
 export function normalizeSessionResetDelay(value = 0) {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 43200)
@@ -28,9 +32,9 @@ export class AccountSessionResets {
   publicState(email) {
     const state = this.get(email);
     if (!state) return null;
-    const { id, status, source, startedAt, completedAt, error, proxyId, resumeAt, cooldownMinutes } = state;
+    const { id, status, source, startedAt, completedAt, error, proxyId, resumeAt, cooldownMinutes, poolPauseActive } = state;
     return { id, status, source, startedAt, completedAt: completedAt || null, error: error || null, proxyId,
-      resumeAt: resumeAt || null, cooldownMinutes: cooldownMinutes || 0 };
+      resumeAt: resumeAt || null, cooldownMinutes: cooldownMinutes || 0, poolPaused: poolPauseActive === true };
   }
   async save(email, changes) {
     email = email.toLowerCase();
@@ -52,7 +56,7 @@ export class AccountSessionResets {
     return this.save(email, { ...state, id: state.id || crypto.randomUUID(), status: "queued", startedAt: new Date().toISOString(), completedAt: null, error: null });
   }
   fail(email, error) { return this.save(email, { status: "failed", error: String(error?.message || error).slice(0, 500) }); }
-  complete(email) { return this.save(email, { status: "completed", completedAt: new Date().toISOString(), error: null }); }
+  complete(email) { return this.save(email, { status: "completed", poolPauseActive: false, completedAt: new Date().toISOString(), error: null }); }
   remove(email) { return this.save(email, null); }
 }
 

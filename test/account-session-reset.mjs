@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { AccountSessionResets, sessionResetPending, resetCredentialUpdate, normalizeSessionResetDelay } from "../src/account-session-reset.mjs";
+import { AccountSessionResets, sessionResetPending, sessionResetBlocksAutomation, resetCredentialUpdate, normalizeSessionResetDelay } from "../src/account-session-reset.mjs";
 import { OverloadCooldown, normalizeOverloadCooldown } from "../src/overload-cooldown.mjs";
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "helper-session-reset-")), email = "reset@example.test";
@@ -10,6 +10,14 @@ try {
   let store = new AccountSessionResets(path.join(dir, "reset.json")); await store.load();
   await store.begin(email, { id: "fixture", proxyId: 3, proxyUrl: "http://fixture:8080", accountIds: ["7"] });
   assert(sessionResetPending(store.get(email))); assert(!JSON.stringify(store.publicState(email)).includes("proxyUrl"));
+  assert(sessionResetBlocksAutomation(store.get(email)));
+  await store.save(email, { poolPauseActive: true, resumeAccountIds: ["7"] });
+  await store.fail(email, "fixture failure");
+  assert(!sessionResetPending(store.get(email))); assert(sessionResetBlocksAutomation(store.get(email)));
+  const failed = new AccountSessionResets(path.join(dir, "reset.json")); await failed.load();
+  assert(sessionResetBlocksAutomation(failed.get(email)), "restart lost a failed reset's automation pause");
+  assert.equal(failed.publicState(email).poolPaused, true);
+  await store.save(email, { status: "queued" });
   assert.throws(() => store.begin(email, { id: "duplicate" }));
   assert.equal(normalizeSessionResetDelay(), 0);
   for (const value of [0, 1, 43200]) assert.equal(normalizeSessionResetDelay(value), value);
@@ -22,6 +30,7 @@ try {
   store = new AccountSessionResets(path.join(dir, "reset.json")); await store.load();
   assert.equal(store.get(email).id, "fixture"); assert(store.get(email).logoutCompletedAt);
   await store.complete(email); assert(!sessionResetPending(store.get(email)));
+  assert(!sessionResetBlocksAutomation(store.get(email))); assert.equal(store.publicState(email).poolPaused, false);
   await store.remove(email); assert.equal(store.get(email), null);
   const remote = { proxy_id: 3, group_ids: [1], schedulable: false, priority: 8, credentials: { email, access_token: "old", custom: "retain" } };
   const update = resetCredentialUpdate({ credentials: { email, access_token: "new", refresh_token: "new-refresh", plan_type: "free" } }, remote);

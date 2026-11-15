@@ -14,9 +14,15 @@ async (page) => {
   const fingerprintState = () => ({ enabled: fingerprint, models: [{ model: 'fixture-model', expected: 'fixture-model' }], override: { enabled: null, models: null, intervalMinutes: null }, intervalMinutes: 15, phase, recentResults: [{ status: 'match', checkedAt: '2026-11-05T04:00:00Z' }, { status: 'mismatch', checkedAt: '2026-11-05T03:00:00Z' }] });
   for (const route of ['**/api/sub2api/settings', '**/api/sub2api/monitor']) await page.route(route, r => r.fulfill({ json: { hasAdminApiKey: true, config: { baseUrl: 'http://fixture.test' } } }));
   await page.route('**/api/sub2api/account-status*', route => route.fulfill({ json: { configured: false, accounts: {} } }));
+  await page.route('**/api/task-settings', async route => {
+    const response = await route.fetch(), data = await response.json();
+    data.settings.modelFingerprint = { ...data.settings.modelFingerprint, enabledPlanTypes: ['free'] };
+    await route.fulfill({ response, json: data });
+  });
   await page.route(/\/api\/jobs(?:\?|$)/, async route => {
     const response = await route.fetch(), data = await response.json();
-    data.jobs = data.jobs.map((job, i) => ({ ...job, status: 'completed', autoRepairBlocked: false, sub2apiInPool: i !== 8, sub2apiEnabled: i !== 7, codexStatusEligible: i !== 7 && i !== 8 && i !== 9, sub2apiRateLimited: i === 9, sub2apiPriority: 3,
+    data.taskSettings = { ...data.taskSettings, modelFingerprint: { ...data.taskSettings?.modelFingerprint, enabledPlanTypes: ['free'] } };
+    data.jobs = data.jobs.map((job, i) => ({ ...job, planType: 'free', status: 'completed', autoRepairBlocked: false, sub2apiInPool: i !== 8, sub2apiEnabled: i !== 7, codexStatusEligible: i !== 7 && i !== 8 && i !== 9, sub2apiRateLimited: i === 9, sub2apiPriority: 3, sub2apiConcurrency: 20,
       lastOperationType: 'relogin', lastOperationAt: '2026-11-05T04:05:06Z', createdAt: '2026-11-01T01:02:03Z',
       overloadDetection: { ...detectionState(), enabled: i === 4 ? false : overload, recentCount: i === 3 ? null : 0, points: i === 3 ? points.map(p => ({ ...p, count: null })) : points.map((p,n)=>n===points.length-1?({...p,count:i===1?0:i===2?5:2}):p) },
       overloadAutoCooldown: { ...cooldownState(), windowCount: i === 1 ? 0 : i === 2 ? 5 : i === 3 ? null : 2 },
@@ -52,7 +58,8 @@ async (page) => {
     const headings = await page.locator('thead th').allTextContents();
     check(headings.length === 12 && headings.includes('Codex 状态'), 'table has wrong headers/column count');
     check(!headings.includes('过载检测') && !headings.includes('降智检测') && !headings.includes('优先级') && !headings.includes('启用'), 'old columns remain');
-    check(await row.locator('.pool-status-cell input[type=number]').count() === 1, 'priority is not inside pool cell');
+    check(await row.locator('.pool-status-cell .sub2api-priority-cell input[type=number]').count() === 1, 'priority is not inside pool cell');
+    check(await row.locator('.pool-status-cell .sub2api-concurrency-cell input[type=number]').count() === 1, 'concurrency is not inside pool cell');
     check(await row.locator('.pool-status-cell').getByRole('switch', { name: '停用号池账号', exact: true }).count() === 1, 'enabled switch is not inside pool cell');
     const poolHeading = page.getByRole('columnheader').filter({ hasText: '号池' });
     await poolHeading.getByRole('button', { name: /^筛选启用/ }).click();

@@ -1,0 +1,890 @@
+/* ==========================================================================
+   Subscription History Dialog (Clean Hairlines, Light/Dark & 375px Support)
+   ========================================================================== */
+
+dialog.batch-dialog.subscription-history-dialog {
+  --sh-surface: var(--surface, #ffffff);
+  --sh-surface-subtle: var(--surface-subtle, #fafafa);
+  --sh-surface-muted: var(--surface-muted, #f4f5f7);
+  --sh-surface-hover: rgba(15, 23, 42, 0.028);
+  --sh-ink: var(--ink, #1d1d1f);
+  --sh-ink-2: var(--ink-2, #3a3a3c);
+  --sh-muted: var(--muted, #6e6e73);
+  --sh-subtle: var(--subtle, #86868b);
+  --sh-line: var(--line, rgba(0, 0, 0, 0.08));
+  --sh-line-strong: var(--line-strong, rgba(0, 0, 0, 0.14));
+  --sh-accent: var(--accent, #0071e3);
+  --sh-accent-hover: var(--accent-hover, #0077ed);
+  --sh-accent-soft: var(--accent-soft, #eff6ff);
+  --sh-accent-line: var(--accent-line, #bfdbfe);
+  --sh-emerald: var(--emerald, #10b981);
+  --sh-emerald-strong: var(--emerald-strong, #047857);
+  --sh-emerald-soft: var(--emerald-soft, #ecfdf5);
+  --sh-emerald-line: var(--emerald-line, #a7f3d0);
+  --sh-amber: var(--amber, #d97706);
+  --sh-amber-strong: var(--amber-strong, #b45309);
+  --sh-amber-soft: var(--amber-soft, #fffbeb);
+  --sh-amber-line: var(--amber-line, #fde68a);
+  --sh-danger-strong: var(--danger-strong, #be123c);
+  --sh-danger-soft: var(--danger-soft, #fff1f2);
+  --sh-danger-line: var(--danger-line, #fecdd3);
+  --sh-input-bg: var(--surface, #ffffff);
+  --sh-btn-bg: var(--surface-subtle, #fafafa);
+  --sh-btn-hover: var(--surface-muted, #f4f5f7);
+  --sh-shadow: 0 28px 64px -12px rgba(15, 23, 42, 0.25), 0 0 0 1px rgba(0, 0, 0, 0.06);
+
+  width: min(900px, calc(100vw - 24px));
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  padding: 22px 24px 18px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--sh-line);
+  border-radius: 18px;
+  background: var(--sh-surface);
+  color: var(--sh-ink);
+  box-shadow: var(--sh-shadow);
+  box-sizing: border-box;
+}
+
+/* Header */
+.subscription-history-dialog .sub-history-header {
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--sh-line);
+  align-items: flex-start;
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.subscription-history-dialog .sub-history-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.subscription-history-dialog .sub-history-title-icon {
+  color: var(--sh-accent);
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-header h2 {
+  color: var(--sh-ink);
+}
+
+.subscription-history-dialog .sub-history-subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--sh-muted);
+}
+
+.subscription-history-dialog .sub-history-sync-pill {
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--sh-surface-muted);
+  color: var(--sh-muted);
+  font-size: 11px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.subscription-history-dialog .sub-history-sync-pill.is-syncing {
+  background: var(--sh-accent-soft);
+  color: var(--sh-accent);
+}
+
+.subscription-history-dialog .sub-history-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sh-emerald);
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .dialog-header .icon-button {
+  border-color: var(--sh-line) !important;
+  background: var(--sh-btn-bg) !important;
+  color: var(--sh-muted) !important;
+}
+
+.subscription-history-dialog .dialog-header .icon-button:hover:not(:disabled) {
+  background: var(--sh-btn-hover) !important;
+  color: var(--sh-ink) !important;
+  border-color: var(--sh-line-strong) !important;
+}
+
+/* Search & Summary Bar */
+.subscription-history-dialog .sub-history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-search-box {
+  position: relative;
+  flex: 1 1 280px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.subscription-history-dialog .sub-history-search-icon {
+  position: absolute;
+  left: 11px;
+  color: var(--sh-subtle);
+  pointer-events: none;
+}
+
+.subscription-history-dialog .sub-history-search-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 32px 0 32px;
+  border: 1px solid var(--sh-line-strong);
+  border-radius: 10px;
+  background: var(--sh-input-bg);
+  color: var(--sh-ink);
+  font-size: 12.5px;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.subscription-history-dialog .sub-history-search-input::placeholder {
+  color: var(--sh-subtle);
+}
+
+.subscription-history-dialog .sub-history-search-input:focus {
+  outline: none;
+  border-color: var(--sh-accent);
+  box-shadow: 0 0 0 3px var(--sh-accent-soft);
+}
+
+.subscription-history-dialog .sub-history-search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.subscription-history-dialog .sub-history-search-clear {
+  position: absolute;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--sh-muted);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.subscription-history-dialog .sub-history-search-clear:hover {
+  background: var(--sh-surface-muted);
+  color: var(--sh-ink);
+}
+
+.subscription-history-dialog .sub-history-search-clear:focus-visible {
+  outline: 2px solid var(--sh-accent);
+  outline-offset: 1px;
+}
+
+.subscription-history-dialog .sub-history-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--sh-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.subscription-history-dialog .sub-history-meta-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--sh-line-strong);
+}
+
+/* Inline Refresh Error */
+.subscription-history-dialog .sub-history-inline-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--sh-danger-line);
+  background: var(--sh-danger-soft);
+  color: var(--sh-danger-strong);
+  font-size: 12px;
+  line-height: 1.45;
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-inline-error span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.subscription-history-dialog .sub-history-retry-link {
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-retry-link:focus-visible {
+  outline: 2px solid var(--sh-accent);
+  outline-offset: 1px;
+}
+
+/* Body & States */
+.subscription-history-dialog .sub-history-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.subscription-history-dialog .sub-history-state {
+  min-height: 220px;
+  padding: 32px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+  color: var(--sh-muted);
+}
+
+.subscription-history-dialog .sub-history-state-icon {
+  color: var(--sh-subtle);
+  margin-bottom: 2px;
+}
+
+.subscription-history-dialog .sub-history-state.is-error .sub-history-state-icon,
+.subscription-history-dialog .sub-history-state.is-error strong {
+  color: var(--sh-danger-strong);
+}
+
+.subscription-history-dialog .sub-history-state strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--sh-ink);
+}
+
+.subscription-history-dialog .sub-history-state span {
+  max-width: 420px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Clean Hairline List */
+.subscription-history-dialog .sub-history-list-head {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(136px, 0.95fr) 86px 98px 96px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--sh-line);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--sh-subtle);
+  letter-spacing: 0.01em;
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-head-num {
+  text-align: right;
+}
+
+.subscription-history-dialog .sub-history-head-action {
+  text-align: right;
+}
+
+.subscription-history-dialog .sub-history-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+}
+
+.subscription-history-dialog .sub-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(136px, 0.95fr) 86px 98px 96px;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 8px;
+  border-bottom: 1px solid var(--sh-line);
+  transition: background-color 120ms ease;
+}
+
+.subscription-history-dialog .sub-history-row:last-child {
+  border-bottom: 0;
+}
+
+.subscription-history-dialog .sub-history-row:hover {
+  background: var(--sh-surface-hover);
+}
+
+/* Account & Remark Column */
+.subscription-history-dialog .sub-history-col-account {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.subscription-history-dialog .sub-history-email {
+  display: inline;
+  max-width: 100%;
+  min-width: 0;
+  align-self: flex-start;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--sh-ink);
+  text-align: left;
+}
+
+.subscription-history-dialog .sub-history-email-text {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.subscription-history-dialog .sub-history-email-copy-icon {
+  display: inline;
+  vertical-align: -2px;
+  margin-left: 5px;
+  opacity: 0;
+  color: var(--sh-accent);
+  transition: opacity 120ms ease;
+}
+
+.subscription-history-dialog .sub-history-email:hover .sub-history-email-copy-icon,
+.subscription-history-dialog .sub-history-email:focus-visible .sub-history-email-copy-icon {
+  opacity: 1;
+}
+
+.subscription-history-dialog .sub-history-remark {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--sh-ink-2);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.subscription-history-dialog .sub-history-time {
+  font-size: 11px;
+  color: var(--sh-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Plan & Status Column */
+.subscription-history-dialog .sub-history-col-plan {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.subscription-history-dialog .sub-history-plan-tag {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subscription-history-dialog .sub-history-plan-tag.tone-plus {
+  background: var(--sh-accent-soft);
+  border-color: var(--sh-accent-line);
+  color: #0369a1;
+}
+
+.subscription-history-dialog .sub-history-plan-tag.tone-team {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+  color: #4338ca;
+}
+
+.subscription-history-dialog .sub-history-plan-tag.tone-business {
+  background: #faf5ff;
+  border-color: #e9d5ff;
+  color: #7e22ce;
+}
+
+.subscription-history-dialog .sub-history-plan-tag.tone-pro {
+  background: var(--sh-amber-soft);
+  border-color: var(--sh-amber-line);
+  color: var(--sh-amber-strong);
+}
+
+.subscription-history-dialog .sub-history-plan-tag.tone-free {
+  background: var(--sh-surface-muted);
+  border-color: var(--sh-line-strong);
+  color: var(--sh-muted);
+}
+
+.subscription-history-dialog .sub-history-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--sh-muted);
+  white-space: nowrap;
+}
+
+.subscription-history-dialog .sub-history-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sh-subtle);
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-status.status-active {
+  color: var(--sh-emerald-strong);
+}
+
+.subscription-history-dialog .sub-history-status.status-active .sub-history-status-dot {
+  background: var(--sh-emerald);
+}
+
+.subscription-history-dialog .sub-history-status.status-downgraded {
+  color: var(--sh-amber-strong);
+}
+
+.subscription-history-dialog .sub-history-status.status-downgraded .sub-history-status-dot {
+  background: var(--sh-amber);
+}
+
+.subscription-history-dialog .sub-history-status.status-changed {
+  color: var(--sh-accent);
+}
+
+.subscription-history-dialog .sub-history-status.status-changed .sub-history-status-dot {
+  background: var(--sh-accent);
+}
+
+.subscription-history-dialog .sub-history-status.status-removed {
+  color: var(--sh-muted);
+}
+
+/* Cost & Profit Columns */
+.subscription-history-dialog .sub-history-col-cost,
+.subscription-history-dialog .sub-history-col-profit {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.subscription-history-dialog .sub-history-mobile-label {
+  display: none;
+  font-size: 11px;
+  color: var(--sh-subtle);
+}
+
+.subscription-history-dialog .sub-history-money {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--sh-ink-2);
+}
+
+.subscription-history-dialog .sub-history-profit {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--sh-muted);
+}
+
+.subscription-history-dialog .sub-history-profit.tone-positive {
+  color: var(--sh-emerald-strong);
+}
+
+.subscription-history-dialog .sub-history-profit.tone-negative {
+  color: var(--sh-danger-strong);
+}
+
+/* Action Column */
+.subscription-history-dialog .sub-history-col-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.subscription-history-dialog .sub-history-copy-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--sh-line-strong);
+  border-radius: 8px;
+  background: var(--sh-btn-bg);
+  color: var(--sh-ink-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease;
+}
+
+.subscription-history-dialog .sub-history-copy-btn:hover:not(:disabled) {
+  background: var(--sh-accent-soft);
+  border-color: var(--sh-accent-line);
+  color: var(--sh-accent);
+}
+
+.subscription-history-dialog .sub-history-copy-btn.is-copied {
+  background: var(--sh-emerald-soft);
+  border-color: var(--sh-emerald-line);
+  color: var(--sh-emerald-strong);
+}
+
+.subscription-history-dialog .sub-history-copy-btn:focus-visible {
+  outline: 2px solid var(--sh-accent);
+  outline-offset: 2px;
+}
+
+.subscription-history-dialog .sub-history-copy-btn:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+/* Footer */
+.subscription-history-dialog .sub-history-footer {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--sh-line);
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-footer-note {
+  font-size: 11.5px;
+  color: var(--sh-subtle);
+}
+
+.subscription-history-dialog .sub-history-footer .cancel-button,
+.subscription-history-dialog .sub-history-state .secondary-button {
+  border-color: var(--sh-line-strong);
+  background: var(--sh-btn-bg);
+  color: var(--sh-ink-2);
+}
+
+.subscription-history-dialog .sub-history-footer .cancel-button:hover:not(:disabled),
+.subscription-history-dialog .sub-history-state .secondary-button:hover:not(:disabled) {
+  background: var(--sh-btn-hover);
+  border-color: var(--sh-line-strong);
+  color: var(--sh-ink);
+}
+
+/* ==========================================================================
+   Dark Mode Support (OS Preference or Explicit Theme Class/Attribute)
+   ========================================================================== */
+@media (prefers-color-scheme: dark) {
+  dialog.batch-dialog.subscription-history-dialog {
+    color-scheme: dark;
+    --sh-surface: #16181d;
+    --sh-surface-subtle: #1e2128;
+    --sh-surface-muted: #242832;
+    --sh-surface-hover: rgba(255, 255, 255, 0.04);
+    --sh-ink: #f3f4f6;
+    --sh-ink-2: #d1d5db;
+    --sh-muted: #9ca3af;
+    --sh-subtle: #6b7280;
+    --sh-line: rgba(255, 255, 255, 0.1);
+    --sh-line-strong: rgba(255, 255, 255, 0.18);
+    --sh-accent: #4aa3ff;
+    --sh-accent-hover: #67b2ff;
+    --sh-accent-soft: rgba(74, 163, 255, 0.14);
+    --sh-accent-line: rgba(74, 163, 255, 0.34);
+    --sh-emerald: #34d399;
+    --sh-emerald-strong: #34d399;
+    --sh-emerald-soft: rgba(16, 185, 129, 0.14);
+    --sh-emerald-line: rgba(16, 185, 129, 0.34);
+    --sh-amber: #fbbf24;
+    --sh-amber-strong: #fbbf24;
+    --sh-amber-soft: rgba(245, 158, 11, 0.14);
+    --sh-amber-line: rgba(245, 158, 11, 0.32);
+    --sh-danger-strong: #fb7185;
+    --sh-danger-soft: rgba(244, 63, 94, 0.14);
+    --sh-danger-line: rgba(244, 63, 94, 0.34);
+    --sh-input-bg: #111318;
+    --sh-btn-bg: #1e222b;
+    --sh-btn-hover: #282d39;
+    --sh-shadow: 0 28px 64px -12px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+  }
+
+  dialog.batch-dialog.subscription-history-dialog::backdrop {
+    background: rgba(5, 7, 12, 0.68);
+  }
+
+  .subscription-history-dialog .sub-history-plan-tag.tone-plus {
+    color: #7dd3fc;
+  }
+
+  .subscription-history-dialog .sub-history-plan-tag.tone-team {
+    background: rgba(99, 102, 241, 0.18);
+    border-color: rgba(129, 140, 248, 0.36);
+    color: #a5b4fc;
+  }
+
+  .subscription-history-dialog .sub-history-plan-tag.tone-business {
+    background: rgba(168, 85, 247, 0.18);
+    border-color: rgba(192, 132, 252, 0.36);
+    color: #d8b4fe;
+  }
+
+  .subscription-history-dialog .task-count-badge {
+    background: var(--sh-surface-muted);
+    color: var(--sh-ink-2);
+    border-color: var(--sh-line);
+  }
+
+  .subscription-history-dialog .task-toast {
+    background: #142621;
+    border-color: rgba(52, 211, 153, 0.36);
+    color: #6ee7b7;
+  }
+
+  .subscription-history-dialog .task-toast.error {
+    background: #2b151c;
+    border-color: rgba(251, 113, 133, 0.36);
+    color: #fda4af;
+  }
+}
+
+:root[data-theme="dark"] dialog.batch-dialog.subscription-history-dialog,
+body[data-theme="dark"] dialog.batch-dialog.subscription-history-dialog,
+.dark dialog.batch-dialog.subscription-history-dialog {
+  color-scheme: dark;
+  --sh-surface: #16181d;
+  --sh-surface-subtle: #1e2128;
+  --sh-surface-muted: #242832;
+  --sh-surface-hover: rgba(255, 255, 255, 0.04);
+  --sh-ink: #f3f4f6;
+  --sh-ink-2: #d1d5db;
+  --sh-muted: #9ca3af;
+  --sh-subtle: #6b7280;
+  --sh-line: rgba(255, 255, 255, 0.1);
+  --sh-line-strong: rgba(255, 255, 255, 0.18);
+  --sh-accent: #4aa3ff;
+  --sh-accent-hover: #67b2ff;
+  --sh-accent-soft: rgba(74, 163, 255, 0.14);
+  --sh-accent-line: rgba(74, 163, 255, 0.34);
+  --sh-emerald: #34d399;
+  --sh-emerald-strong: #34d399;
+  --sh-emerald-soft: rgba(16, 185, 129, 0.14);
+  --sh-emerald-line: rgba(16, 185, 129, 0.34);
+  --sh-amber: #fbbf24;
+  --sh-amber-strong: #fbbf24;
+  --sh-amber-soft: rgba(245, 158, 11, 0.14);
+  --sh-amber-line: rgba(245, 158, 11, 0.32);
+  --sh-danger-strong: #fb7185;
+  --sh-danger-soft: rgba(244, 63, 94, 0.14);
+  --sh-danger-line: rgba(244, 63, 94, 0.34);
+  --sh-input-bg: #111318;
+  --sh-btn-bg: #1e222b;
+  --sh-btn-hover: #282d39;
+  --sh-shadow: 0 28px 64px -12px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+:root[data-theme="dark"] dialog.batch-dialog.subscription-history-dialog::backdrop,
+body[data-theme="dark"] dialog.batch-dialog.subscription-history-dialog::backdrop,
+.dark dialog.batch-dialog.subscription-history-dialog::backdrop {
+  background: rgba(5, 7, 12, 0.68);
+}
+
+:root[data-theme="dark"] .subscription-history-dialog .sub-history-plan-tag.tone-plus,
+body[data-theme="dark"] .subscription-history-dialog .sub-history-plan-tag.tone-plus,
+.dark .subscription-history-dialog .sub-history-plan-tag.tone-plus {
+  color: #7dd3fc;
+}
+
+:root[data-theme="dark"] .subscription-history-dialog .sub-history-plan-tag.tone-team,
+body[data-theme="dark"] .subscription-history-dialog .sub-history-plan-tag.tone-team,
+.dark .subscription-history-dialog .sub-history-plan-tag.tone-team {
+  background: rgba(99, 102, 241, 0.18);
+  border-color: rgba(129, 140, 248, 0.36);
+  color: #a5b4fc;
+}
+
+:root[data-theme="dark"] .subscription-history-dialog .sub-history-plan-tag.tone-business,
+body[data-theme="dark"] .subscription-history-dialog .sub-history-plan-tag.tone-business,
+.dark .subscription-history-dialog .sub-history-plan-tag.tone-business {
+  background: rgba(168, 85, 247, 0.18);
+  border-color: rgba(192, 132, 252, 0.36);
+  color: #d8b4fe;
+}
+
+:root[data-theme="dark"] .subscription-history-dialog .task-count-badge,
+body[data-theme="dark"] .subscription-history-dialog .task-count-badge,
+.dark .subscription-history-dialog .task-count-badge {
+  background: var(--sh-surface-muted);
+  color: var(--sh-ink-2);
+  border-color: var(--sh-line);
+}
+
+:root[data-theme="dark"] .subscription-history-dialog .task-toast,
+body[data-theme="dark"] .subscription-history-dialog .task-toast,
+.dark .subscription-history-dialog .task-toast {
+  background: #142621;
+  border-color: rgba(52, 211, 153, 0.36);
+  color: #6ee7b7;
+}
+
+:root[data-theme="dark"] .subscription-history-dialog .task-toast.error,
+body[data-theme="dark"] .subscription-history-dialog .task-toast.error,
+.dark .subscription-history-dialog .task-toast.error {
+  background: #2b151c;
+  border-color: rgba(251, 113, 133, 0.36);
+  color: #fda4af;
+}
+
+/* ==========================================================================
+   Responsive (Narrow Screens <= 640px, including 375px)
+   ========================================================================== */
+@media (max-width: 640px) {
+  dialog.batch-dialog.subscription-history-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 20px);
+    max-height: calc(100dvh - 20px);
+    padding: 16px 14px 14px;
+    border-radius: 14px;
+  }
+
+  .subscription-history-dialog .sub-history-header {
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+  }
+
+  .subscription-history-dialog .sub-history-sync-pill {
+    display: none;
+  }
+
+  .subscription-history-dialog .sub-history-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .subscription-history-dialog .sub-history-search-box {
+    flex: none;
+  }
+
+  .subscription-history-dialog .sub-history-meta {
+    justify-content: space-between;
+  }
+
+  .subscription-history-dialog .sub-history-list-head {
+    display: none;
+  }
+
+  .subscription-history-dialog .sub-history-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "account plan"
+      "cost action"
+      "profit action";
+    align-items: center;
+    row-gap: 4px;
+    column-gap: 10px;
+    padding: 11px 4px;
+  }
+
+  .subscription-history-dialog .sub-history-col-account {
+    grid-area: account;
+  }
+
+  .subscription-history-dialog .sub-history-col-plan {
+    grid-area: plan;
+    align-items: flex-end;
+    align-self: start;
+  }
+
+  .subscription-history-dialog .sub-history-col-cost {
+    grid-area: cost;
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .subscription-history-dialog .sub-history-col-profit {
+    grid-area: profit;
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .subscription-history-dialog .sub-history-mobile-label {
+    display: inline;
+  }
+
+  .subscription-history-dialog .sub-history-col-action {
+    grid-area: action;
+    align-self: end;
+  }
+
+  .subscription-history-dialog .sub-history-email-copy-icon {
+    opacity: 0.72;
+  }
+
+  .subscription-history-dialog .sub-history-footer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .subscription-history-dialog .sub-history-footer-note {
+    text-align: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subscription-history-dialog .sub-history-search-input,
+  .subscription-history-dialog .sub-history-row,
+  .subscription-history-dialog .sub-history-email-copy-icon,
+  .subscription-history-dialog .sub-history-copy-btn {
+    transition: none;
+  }
+}

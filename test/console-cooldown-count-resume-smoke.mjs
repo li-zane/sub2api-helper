@@ -37,7 +37,14 @@ for (const scenario of scenarios) {
     }
     return res.end('{"data":{"items":[],"total":0}}');
   });
-  const listen = s => new Promise(r => s.listen(0, "127.0.0.1", r));
+  const listen = async s => {
+    // Windows can allocate ports such as 2049 that fetch rejects as unsafe.
+    for (;;) {
+      await new Promise(r => s.listen(0, "127.0.0.1", r));
+      if (s.address().port > 10080) return;
+      await new Promise(r => s.close(r));
+    }
+  };
   await listen(remote);
   const config = { baseUrl: `http://127.0.0.1:${remote.address().port}`, adminApiKey: "fixture" };
   const backend = crypto.createHash("sha256").update(config.baseUrl + "\0" + config.adminApiKey).digest("hex").slice(0, 24);
