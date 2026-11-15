@@ -135,7 +135,8 @@ try {
   if (child.exitCode === null) child.kill("SIGKILL");
   await Promise.race([childExit, delay(2_000)]);
   await new Promise((resolve) => mailbox.close(resolve));
-  await fs.rm(outputRoot, { recursive: true, force: true });
+  // Windows may briefly retain Vite/esbuild file handles after child exit.
+  await fs.rm(outputRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 async function waitForJson(url) {

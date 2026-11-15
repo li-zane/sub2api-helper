@@ -12,13 +12,16 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-reset-credit-"));
 const output = path.join(temp, "output");
 const future = new Date(Date.now() + 86_400_000).toISOString();
 const past = new Date(Date.now() - 86_400_000).toISOString();
+// Keep both provider timestamps in the same second to reproduce precision
+// differences even when Windows credential preparation takes several seconds.
+const snapshotTime = Math.floor(Date.now() / 1000) * 1000 + 123;
 const records = [
   { id: 101, email: "free-cards@example.test", plan: "free", extra: {
     keep: "unchanged", codex_fingerprint_mode: "full", auto_reset_credit_enabled: false,
     auto_reset_credit_5h_threshold: 0.75, auto_reset_credit_7d_threshold: 0.9,
     codex_auto_reset_credit_state: { status: "available", private: "runtime" },
     codex_reset_credit_snapshot: { available_count: 3, credits: [{ expires_at: past }, { expires_at: future }, { expires_at: future }] },
-    codex_5h_used_percent: 28, codex_usage_updated_at: new Date().toISOString(),
+    codex_5h_used_percent: 28, codex_usage_updated_at: new Date(snapshotTime).toISOString(),
   } },
   { id: 102, email: "plus-cards@example.test", plan: "plus", extra: { auto_reset_credit_enabled: true, codex_reset_credit_snapshot: { available_count: 0 } } },
   { id: 103, email: "unknown-cards@example.test", plan: "unknown", extra: {} },
@@ -27,6 +30,7 @@ const records = [
 const calls = [];
 let liveCount = 4;
 let quotaAvailable = false;
+let usageTimestamp = Math.floor(snapshotTime / 1000), usagePercent = 37;
 let child;
 let headers;
 let logs = "";
@@ -41,7 +45,7 @@ const pool = http.createServer(async (req, res) => {
     if (!quotaAvailable) { res.statusCode = 503; return send({ message: "fixture unavailable" }); }
     return send({ fetched_at: Math.floor(Date.now() / 1000), rate_limit_reset_credits: liveCount === null ? null : { available_count: liveCount, credits: Array.from({ length: liveCount }, () => ({ expires_at: future, id: "private-credit-id" })) } });
   }
-  if (req.url.includes("/usage?") && req.method === "GET") return send({ five_hour: { utilization: 37 }, fetched_at: Math.floor(Date.now() / 1000) });
+  if (req.url.includes("/usage?") && req.method === "GET") return send({ five_hour: { utilization: usagePercent }, fetched_at: usageTimestamp });
   const match = /^\/api\/v1\/admin\/accounts\/(\d+)$/.exec(req.url);
   if (match) {
     const record = records.find(r => r.id === Number(match[1]));
@@ -136,6 +140,11 @@ try {
   let usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
   assert.equal(usage.resetCredits.availableCount, 4, "explicit refresh reads Sub2API quota endpoint");
   assert.equal(usage.primary.usedPercent, 37);
+  await get("/api/sub2api/account-status?refresh=1");
+  assert.equal((await get(`/api/jobs/${free.id}/usage`)).usage.primary.usedPercent, 37, "account-list snapshot overwrote the newer active observation");
+  usageTimestamp -= 60; usagePercent = 99;
+  assert.equal((await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage.primary.usedPercent, 37, "a genuinely older active response overwrote fresh usage");
+  usageTimestamp = Math.floor(Date.now() / 1000); usagePercent = 37;
   assert(!JSON.stringify(usage).includes("private-credit-id"));
   liveCount = null; usage = (await get(`/api/jobs/${free.id}/usage?refresh=1`)).usage;
   assert.equal(usage.resetCredits.availableCount, 4, "unknown response retains last known card count");

@@ -7565,16 +7565,24 @@ function publicSub2ApiUsageWindow(window) {
   return { ...window };
 }
 
-function mergeSub2ApiUsage(current, next) {
+function mergeSub2ApiUsage(current, next, { activeRefresh = false } = {}) {
   if (!current) return next || null;
   if (!next) return current;
   const currentTimestamp = Date.parse(current.snapshotTimestamp || current.fetchedAt || "") || 0;
   const nextTimestamp = Date.parse(next.snapshotTimestamp || next.fetchedAt || "") || 0;
   const currentHasRemoteTimestamp = Boolean(current.snapshotTimestamp);
   const nextHasRemoteTimestamp = Boolean(next.snapshotTimestamp);
-  const preferNext = currentHasRemoteTimestamp !== nextHasRemoteTimestamp
+  const activeObservation = activeRefresh && Boolean(next.primary || next.secondary || next.credits);
+  // Active responses can use whole seconds while the account cache uses
+  // milliseconds. Their timestamps overlap within that second; use the new
+  // observation, while still rejecting responses from genuinely older seconds.
+  const coarseActiveTie = activeObservation && nextHasRemoteTimestamp && nextTimestamp % 1000 === 0
+    && nextTimestamp < currentTimestamp && Math.floor(nextTimestamp / 1000) === Math.floor(currentTimestamp / 1000);
+  const preferNext = coarseActiveTie || (currentHasRemoteTimestamp !== nextHasRemoteTimestamp
     ? nextHasRemoteTimestamp
-    : nextTimestamp >= currentTimestamp;
+    : nextTimestamp >= currentTimestamp);
+  const observedTimestamp = activeObservation && preferNext
+    ? new Date(Math.max(Date.now(), currentTimestamp, nextTimestamp)).toISOString() : null;
   const primary = preferNext ? (next.primary || current.primary) : (current.primary || next.primary);
   const secondary = preferNext ? (next.secondary || current.secondary) : (current.secondary || next.secondary);
   const creditBefore = preferNext ? current.credits : next.credits;
@@ -7589,7 +7597,7 @@ function mergeSub2ApiUsage(current, next) {
     ...current,
     ...next,
     fetchedAt: preferNext ? next.fetchedAt : current.fetchedAt,
-    snapshotTimestamp: preferNext ? (next.snapshotTimestamp || current.snapshotTimestamp || null) : (current.snapshotTimestamp || next.snapshotTimestamp || null),
+    snapshotTimestamp: observedTimestamp || (preferNext ? (next.snapshotTimestamp || current.snapshotTimestamp || null) : (current.snapshotTimestamp || next.snapshotTimestamp || null)),
     planType: preferNext ? (next.planType || current.planType || null) : (current.planType || next.planType || null),
     allowed: preferNext ? (next.allowed ?? current.allowed ?? null) : (current.allowed ?? next.allowed ?? null),
     limitReached: preferNext ? (next.limitReached ?? current.limitReached ?? null) : (current.limitReached ?? next.limitReached ?? null),
@@ -8755,7 +8763,7 @@ async function getAccountUsage(job, forceRefresh = false) {
     if (refreshed || totals.size) {
       const entry = state.accounts.get(String(job.email || "").toLowerCase());
       const previousUsage = entry?.usage || status.usage || null;
-      const merged = { ...mergeSub2ApiUsage(previousUsage, refreshed), cacheKey: usageSnapshotKey(state.backend, job.email, status.accountIds),
+      const merged = { ...mergeSub2ApiUsage(previousUsage, refreshed, { activeRefresh: true }), cacheKey: usageSnapshotKey(state.backend, job.email, status.accountIds),
         totals: mergeUsageTotals(previousUsage?.totals, combineUsageTotals(status.accountIds, totals)) };
       if (entry) {
         entry.usage = merged;
@@ -8800,7 +8808,12 @@ async function refreshSub2ApiAccountUsage(config, accountIds) {
     .filter((result) => result.status === "fulfilled")
     .map((result) => result.value)
     .filter(Boolean);
-  usages.push(...[...resetCredits.values()].filter(Boolean));
+  // Card refreshes have their own clock. They must not make an old usage
+  // response appear newer merely because a card request completed later.
+  usages.push(...[...resetCredits.values()].filter(Boolean).map(next => ({
+    source: "sub2api", resetCredits: next.resetCredits, resetCreditsObserved: true,
+    resetCreditsFetchedAt: next.resetCreditsFetchedAt, resetCreditsStale: next.resetCreditsStale,
+  })));
   if (!usages.length) return null;
   return usages.reduce((current, next) => mergeSub2ApiUsage(current, next), null);
 }
