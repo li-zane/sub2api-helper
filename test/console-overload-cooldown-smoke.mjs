@@ -83,6 +83,8 @@ try {
   assert.equal(records[0].schedulable, false);
   assert.deepEqual(changes, [{ id: 7, enabled: false }]);
   const cooling = await job();
+  assert((await get("/api/jobs?overload=overloaded")).jobs.some(row => row.id === jobId), "active overload-owned cooldown disappeared from overload filter");
+  assert(!(await get("/api/jobs?overload=normal")).jobs.some(row => row.id === jobId), "active cooldown was classified as normal");
   const coolingOperation = cooling.overloadAutoCooldown.operation;
   assert.equal(coolingOperation.status, "cooling"); assert.equal(coolingOperation.until, cooling.overloadAutoCooldown.coolingUntil);
   assert.equal(coolingOperation.threshold, rule.threshold); assert.equal(coolingOperation.cooldownMinutes, rule.cooldownMinutes);

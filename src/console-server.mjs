@@ -2123,8 +2123,20 @@ function matchesJobFilters(job, filters) {
   if (filters.sub2apiEnabled === "enabled" && sub2ApiStatus.enabled !== true) return false;
   if (filters.sub2apiEnabled === "disabled" && sub2ApiStatus.enabled !== false) return false;
   if (filters.sub2apiEnabled === "unknown" && sub2ApiStatus.enabled !== null) return false;
-  if (filters.overload && overloadFilterValue(overloadMonitor.snapshot(job.email), overloadCooldown.snapshot(job.email)) !== filters.overload) return false;
-  if (filters.fingerprint && fingerprintFilterValue(modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown")) !== filters.fingerprint) return false;
+  if (filters.overload) {
+    const eligible = codexMonitoringAllowed(job);
+    const detection = overloadMonitor.snapshot(job.email), cooldown = overloadCooldown.snapshot(job.email);
+    // An overload-owned pause temporarily disables pool scheduling. Keep that
+    // active cooldown searchable, without admitting other disabled accounts.
+    const ownsCooldown = cooldown.enabled && !pendingCodexBlocks.has(job.email.toLowerCase()) && !accountAutomationBlocked(job.email)
+      && sub2ApiStatus.inPool === true && sub2ApiStatus.remoteStatus === "active"
+      && !sub2ApiStatus.rateLimited && !sub2ApiStatus.quotaRestricted && !usageRestricted(sub2ApiStatus.usage)
+      && sub2ApiStatus.accountIds.some(id => overloadCooldown.ownsPause(job.email, id));
+    if (overloadFilterValue({ ...detection, enabled: eligible && detection.enabled },
+      { ...cooldown, enabled: Boolean(eligible || ownsCooldown) && cooldown.enabled }) !== filters.overload) return false;
+  }
+  if (filters.fingerprint && (!codexMonitoringAllowed(job)
+    || fingerprintFilterValue(modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown")) !== filters.fingerprint)) return false;
   return true;
 }
 
