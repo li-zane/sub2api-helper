@@ -88,7 +88,10 @@ try {
   config.importDatePriority.enabled = false; await api('/api/sub2api/settings', { config });
   await api(`/api/sub2api/accounts/${job.id}/priority`, { priority: 4 }); assert.equal(account.priority, 4);
   await api('/api/model-fingerprint/settings', { settings: { ...policy, matchedPriority: { enabled: true, value: 0 } } });
-  await runCheck(job); assert.equal(account.priority, 0);
+  for (let n = 0; n < 5; n++) {
+    await api('/api/task-settings', { modelFingerprint: { maxConcurrentAccounts: n % 2 ? 3 : 4 } });
+    await runCheck(job); assert.equal(account.priority, 0, 'policy/cache refresh race lost manual detection');
+  }
   await api(`/api/sub2api/accounts/${job.id}/priority`, { priority: 6 });
   await api('/api/task-settings', { modelFingerprint: { maxConcurrentAccounts: 4 } });
   assert.deepEqual((await api('/api/model-fingerprint/settings')).settings.matchedPriority, { enabled: true, value: 0 });

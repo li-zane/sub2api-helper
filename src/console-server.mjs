@@ -812,8 +812,8 @@ async function handleApi(req, res, requestUrl) {
     if (fingerprintMatch[2]) {
       if (accountAutomationBlocked(job.email)) throw httpError(409, "账号已确认永久停用，降智检测已停止");
       if (isActive(job.status)) throw httpError(409, "账号任务正在执行，请完成后再检测");
-      await loadSub2ApiAccountStatus({ forceRefresh: true });
-      if (!manualFingerprintAllowed(job)) throw httpError(409, "账号需已加入号池并启用，或仅处于 helper 自动冷却中，且未封禁、限流或达到用量限额，才能手动检测");
+      const poolState = await loadSub2ApiAccountStatus({ forceRefresh: true });
+      if (!manualFingerprintAllowed(job, poolState)) throw httpError(409, "账号需已加入号池并启用，或仅处于 helper 自动冷却中，且未封禁、限流或达到用量限额，才能手动检测");
       void modelFingerprint.run(job.email, planType, { manual: true }).catch(() => {});
       sendJson(res, 202, { job: publicJob(job) }); return;
     }
@@ -7246,7 +7246,8 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       entry.quotaRestricted ||= usageRestricted(entry.usage);
       if (entry.rateLimited || entry.quotaRestricted) await stopUnavailableCodexChecks(email, entry.rateLimited ? "429 限流" : "达到用量限额");
     }
-    sub2ApiAccountStatusCache = { backend, fetchedAt, accounts };
+    const state = { backend, fetchedAt, accounts };
+    sub2ApiAccountStatusCache = state;
     pendingCodexBlocks.clear();
     for (const [email, pause] of pausedCodexChecks) {
       const job = findJobByEmail(email);
@@ -7257,13 +7258,15 @@ async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
       overloadMonitor.trigger(); overloadCooldown.trigger(); modelFingerprint.trigger();
     }
     for (const job of jobs.values()) if (!codexMonitoringAllowed(job) && !(modelFingerprint.isManualCheck(job.email) && manualFingerprintAllowed(job))) modelFingerprint.invalidateAccount(job.email);
-    sub2ApiAccountStatusCache.usageIds = remoteAccounts.filter(account => account.platform === "openai" && account.type === "oauth" && sub2ApiAccountEmail(account) && !accountSyncBlocked(account))
+    state.usageIds = remoteAccounts.filter(account => account.platform === "openai" && account.type === "oauth" && sub2ApiAccountEmail(account) && !accountSyncBlocked(account))
       .map(account => normalizeSub2ApiAccountId(account.id)).filter(Boolean);
-    await persistUsageSnapshots(sub2ApiAccountStatusCache, { reconcile: true });
-    void synchronizeCachedUsageTotals(config, sub2ApiAccountStatusCache).catch(() => {});
-    void synchronizeCachedResetCredits(config, sub2ApiAccountStatusCache).catch(() => {});
+    await persistUsageSnapshots(state, { reconcile: true });
+    void synchronizeCachedUsageTotals(config, state).catch(() => {});
+    void synchronizeCachedResetCredits(config, state).catch(() => {});
     queueSub2ApiRecovery(listing, config);
-    return sub2ApiAccountStatusCache;
+    // Policy writes may invalidate the shared cache while snapshots are saved.
+    // The caller still needs the complete result of this particular refresh.
+    return state;
   })().finally(() => {
     sub2ApiAccountStatusPromise = null;
   });
@@ -8375,21 +8378,21 @@ async function stopUnavailableCodexChecks(email, reason = "达到用量限额") 
   if (job) appendJobLog(job, `[codex-status] ${reason}，已暂停过载、冷却统计与降智检测；保留原开关，解除限制后自动恢复。\n`);
 }
 
-function codexMonitoringAllowed(job) {
+function codexMonitoringAllowed(job, poolState = sub2ApiAccountStatusCache) {
   if (sessionResetAutomationPaused(job.email)) return false;
-  const state = getSub2ApiAccountStatusForJob(job);
+  const state = getSub2ApiAccountStatusForJob(job, poolState);
   return !pendingCodexBlocks.has(String(job.email).toLowerCase()) && !accountAutomationBlocked(job.email) && state.remoteStatus !== "error" && !state.rateLimited && !state.quotaRestricted && !usageRestricted(state.usage) && state.inPool === true && state.enabled === true;
 }
-function manualFingerprintAllowed(job) {
+function manualFingerprintAllowed(job, poolState = sub2ApiAccountStatusCache) {
   if (job && sessionResetAutomationPaused(job.email)) return false;
   if (!job || job.deleted || pendingCodexBlocks.has(String(job.email).toLowerCase()) || accountAutomationBlocked(job.email)) return false;
-  const state = getSub2ApiAccountStatusForJob(job);
+  const state = getSub2ApiAccountStatusForJob(job, poolState);
   if (state.inPool !== true || state.remoteStatus === "error" || state.rateLimited || state.quotaRestricted || usageRestricted(state.usage)) return false;
   return state.enabled === true || state.remoteStatus === "active" && (state.accountIds || []).some(id => overloadCooldown.ownsPause(job.email, id));
 }
 async function assertCodexMonitoringAllowed(job) {
-  await loadSub2ApiAccountStatus({ forceRefresh: true });
-  if (!codexMonitoringAllowed(job)) throw httpError(409, "账号需已加入号池并启用，且未达到用量限额、不处于 429 限流中，才能开启 Codex 检测");
+  const poolState = await loadSub2ApiAccountStatus({ forceRefresh: true });
+  if (!codexMonitoringAllowed(job, poolState)) throw httpError(409, "账号需已加入号池并启用，且未达到用量限额、不处于 429 限流中，才能开启 Codex 检测");
 }
 
 function accountLoginPause(job) {
