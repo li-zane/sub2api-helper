@@ -5,6 +5,7 @@ import path from "node:path";
 import http from "node:http";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { recentIntervals } from "../src/overload-monitor.mjs";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "helper-codex-filters-"));
@@ -62,8 +63,22 @@ try {
   await fs.writeFile(path.join(root, "overload-monitor.json"), JSON.stringify({ version: 2, backend, accounts: overload }));
   await fs.writeFile(path.join(root, "model-fingerprint.json"), JSON.stringify({ version: 1, settings: { enabledPlanTypes: ["team", "business"] }, accounts: fingerprints }));
   await fs.writeFile(path.join(root, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { baseUrl: poolBase, adminApiKey: "fixture" }, profiles: [] }));
+  const server = path.resolve(process.env.CODEX_FILTER_SERVER || "src/console-server.mjs");
+  const loaderPath = path.join(root, "cache-invalidation-loader.mjs"), registerPath = path.join(root, "register.mjs");
+  // Deterministically reproduce a policy update invalidating the shared cache
+  // after the list loaded it, before filtering, pagination and row rendering.
+  await fs.writeFile(loaderPath, `export async function load(url, context, nextLoad) {
+    const loaded = await nextLoad(url, context);
+    if (url !== ${JSON.stringify(pathToFileURL(server).href)}) return loaded;
+    const anchor = "await Promise.all(allJobs.map(inspectAccountWebSession));";
+    const source = String(loaded.source);
+    if (!source.includes(anchor)) throw Error("List snapshot test anchor missing");
+    return { ...loaded, source: source.replace(anchor, anchor + "\\n  invalidateSub2ApiAccountStatusCache();") };
+  }`);
+  await fs.writeFile(registerPath, `import { register } from "node:module"; register(${JSON.stringify(pathToFileURL(loaderPath).href)});`);
+  const loaderArgs = process.env.CODEX_FILTER_BASELINE === "1" ? [] : ["--import", pathToFileURL(registerPath).href];
   const listener = http.createServer(), port = await listen(listener); await new Promise(r => listener.close(r)); base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, [process.env.CODEX_FILTER_SERVER || "src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], {
+  child = spawn(process.execPath, [...loaderArgs, server, "--host", "127.0.0.1", "--port", String(port)], {
     windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: root,
       LOCALAPPDATA: root, TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(root, "credentials"), TOSUB2_MAC_CREDENTIAL_ROOT: path.join(root, "credentials"),
       TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), SUB2API_MONITOR_ENABLED: "0" } });
@@ -107,12 +122,13 @@ try {
     for (const query of ["fingerprint=match", "fingerprint=mismatch", "overload=normal", "overload=overloaded"]) {
       const result = await get("?" + query), key = query.startsWith("fingerprint") ? "modelFingerprint" : "overloadDetection";
       for (const j of result.jobs) { assert.equal(j.codexStatusEligible, true, j.email); assert.equal(j[key].enabled, true, j.email); }
+      for (const j of result.selection) { assert.equal(j.sub2apiInPool, true, j.email); assert.equal(j.sub2apiEnabled, true, j.email); }
     }
     const update = await fetch(base + "/api/model-fingerprint/settings", { method: "POST", headers,
       body: JSON.stringify({ settings: { enabledPlanTypes: ["team", "business", "free"] } }) });
     assert.equal(update.status, 200);
     assert((await get("?fingerprint=match")).selection.some(j => j.email === email(46)), "explicitly enabled free policy was excluded");
-    console.log("CODEX_FILTER_HTTP_PASS all56 cross-page23; disabled/plan/absent/paused/error/banned/rate/quota excluded; independent switches; enabled-free supported; combined filters and history retained");
+    console.log("CODEX_FILTER_HTTP_PASS all56 cross-page23; disabled/plan/absent/paused/error/banned/rate/quota excluded; independent switches; enabled-free supported; cache invalidation preserves filters, rows and selection");
   }
 } finally {
   if (child?.exitCode === null) { const done = new Promise(r => child.once("exit", r)); child.kill("SIGTERM"); await done; }

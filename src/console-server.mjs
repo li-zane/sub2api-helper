@@ -2001,8 +2001,9 @@ async function handleApi(req, res, requestUrl) {
 
 async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}) {
   await syncCompletedOutputs();
+  let poolState = sub2ApiAccountStatusCache;
   try {
-    await loadSub2ApiAccountStatus();
+    poolState = await loadSub2ApiAccountStatus();
   } catch (error) {
     if (filters.sub2apiPool || filters.sub2apiEnabled) throw error;
   }
@@ -2010,24 +2011,26 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
   await syncSubscriptionHistory();
   await Promise.all(allJobs.map(inspectAccountWebSession));
   const healthCounts = { normal: 0, abnormal: 0, pending: 0 };
-  for (const job of allJobs) healthCounts[accountHealth(job, getSub2ApiAccountStatusForJob(job), accountAutomationBlocked(job.email), accountSessionResets.get(job.email))]++;
-  const planTypes = [...new Set(allJobs.map((job) => getJobPlanType(job)).filter(Boolean))].sort();
-  const planTypeUnknown = allJobs.some((job) => !getJobPlanType(job));
-  const sub2apiPools = [...new Set(allJobs.map((job) => getSub2ApiPoolFilterValue(job)))];
-  const sub2apiEnabled = [...new Set(allJobs.map((job) => getSub2ApiEnabledFilterValue(job)))];
+  for (const job of allJobs) healthCounts[accountHealth(job, getSub2ApiAccountStatusForJob(job, poolState), accountAutomationBlocked(job.email), accountSessionResets.get(job.email))]++;
+  const planTypes = [...new Set(allJobs.map((job) => getJobPlanType(job, poolState)).filter(Boolean))].sort();
+  const planTypeUnknown = allJobs.some((job) => !getJobPlanType(job, poolState));
+  const sub2apiPools = [...new Set(allJobs.map((job) => getSub2ApiPoolFilterValue(job, getSub2ApiAccountStatusForJob(job, poolState))))];
+  const sub2apiEnabled = [...new Set(allJobs.map((job) => getSub2ApiEnabledFilterValue(job, poolState)))];
   const statuses = JOB_STATUS_FILTER_VALUES.filter((status) => allJobs.some((job) => job.status === status));
   const emailSet = emailFilter?.length ? new Set(emailFilter) : null;
   const visibleJobs = allJobs.filter((job) => {
     if (emailSet && !emailSet.has(job.loginEmail.toLowerCase())) return false;
-    return matchesJobFilters(job, filters);
+    return matchesJobFilters(job, filters, poolState);
   });
   const total = visibleJobs.length;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const page = Math.min(requestedPage, totalPages);
   const start = (page - 1) * PAGE_SIZE;
   sendJson(res, 200, {
-    jobs: visibleJobs.slice(start, start + PAGE_SIZE).map(publicJob),
-    selection: visibleJobs.map(publicSelectionJob),
+    // Background policy writes may invalidate the shared cache while the
+    // awaited inspections run. Filter and serialize the same loaded snapshot.
+    jobs: visibleJobs.slice(start, start + PAGE_SIZE).map(job => publicJobWithPoolState(job, poolState)),
+    selection: visibleJobs.map(job => publicSelectionJob(job, poolState)),
     pagination: { page, pageSize: PAGE_SIZE, total, totalPages, totalAll: allJobs.length },
     filter: {
       active: Boolean(emailSet || filters.search || filters.lockedOnly || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession || filters.summary || filters.overload || filters.fingerprint),
@@ -2091,8 +2094,8 @@ function normalizeJobFilters(value) {
   };
 }
 
-function matchesJobFilters(job, filters) {
-  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
+function matchesJobFilters(job, filters, poolState = sub2ApiAccountStatusCache) {
+  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job, poolState);
   if (filters.summary === "active" && !occupiesActiveSlot(job) && !activeWebSessionCheckAccounts.has(job.email.toLowerCase())) return false;
   if (filters.summary === "queued" && job.status !== "queued") return false;
   if (["normal", "abnormal"].includes(filters.summary)
@@ -2105,7 +2108,7 @@ function matchesJobFilters(job, filters) {
     const q = filters.search.toLowerCase();
     const emailMatch = String(job.loginEmail || job.email).toLowerCase().includes(q);
     const remarkMatch = String(job.remark || "").toLowerCase().includes(q);
-    const planMatch = String(getJobPlanType(job) || "").toLowerCase().includes(q)
+    const planMatch = String(getJobPlanType(job, poolState) || "").toLowerCase().includes(q)
       || String(sub2ApiStatus.planType || "").toLowerCase().includes(q);
     const proxyMatch = job.assignedProxyId ? String(job.assignedProxyId).includes(q) : false;
     if (!emailMatch && !remarkMatch && !planMatch && !proxyMatch) return false;
@@ -2116,7 +2119,7 @@ function matchesJobFilters(job, filters) {
     && (job.poolOnly || job.loginMode !== "password" || !hasJobTotpKey(job))) return false;
   if (filters.status && job.status !== filters.status) return false;
   if (filters.planType) {
-    const actualPlanType = getJobPlanType(job) || "__unknown__";
+    const actualPlanType = getJobPlanType(job, poolState) || "__unknown__";
     if (actualPlanType !== filters.planType) return false;
   }
   if (filters.sub2apiPool && getSub2ApiPoolFilterValue(job, sub2ApiStatus) !== filters.sub2apiPool) return false;
@@ -2124,7 +2127,7 @@ function matchesJobFilters(job, filters) {
   if (filters.sub2apiEnabled === "disabled" && sub2ApiStatus.enabled !== false) return false;
   if (filters.sub2apiEnabled === "unknown" && sub2ApiStatus.enabled !== null) return false;
   if (filters.overload) {
-    const eligible = codexMonitoringAllowed(job);
+    const eligible = codexMonitoringAllowed(job, poolState);
     const detection = overloadMonitor.snapshot(job.email), cooldown = overloadCooldown.snapshot(job.email);
     // An overload-owned pause temporarily disables pool scheduling. Keep that
     // active cooldown searchable, without admitting other disabled accounts.
@@ -2135,8 +2138,8 @@ function matchesJobFilters(job, filters) {
     if (overloadFilterValue({ ...detection, enabled: eligible && detection.enabled },
       { ...cooldown, enabled: Boolean(eligible || ownsCooldown) && cooldown.enabled }) !== filters.overload) return false;
   }
-  if (filters.fingerprint && (!codexMonitoringAllowed(job)
-    || fingerprintFilterValue(modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown")) !== filters.fingerprint)) return false;
+  if (filters.fingerprint && (!codexMonitoringAllowed(job, poolState)
+    || fingerprintFilterValue(modelFingerprint.snapshot(job.email, getJobPlanType(job, poolState) || "unknown")) !== filters.fingerprint)) return false;
   return true;
 }
 
@@ -2146,8 +2149,8 @@ function getSub2ApiPoolFilterValue(job, status = getSub2ApiAccountStatusForJob(j
   return value === true ? "added" : value === false ? "not_added" : "unknown";
 }
 
-function getSub2ApiEnabledFilterValue(job) {
-  const value = getSub2ApiAccountStatusForJob(job).enabled;
+function getSub2ApiEnabledFilterValue(job, poolState = sub2ApiAccountStatusCache) {
+  const value = getSub2ApiAccountStatusForJob(job, poolState).enabled;
   return value === true ? "enabled" : value === false ? "disabled" : "unknown";
 }
 
@@ -8741,12 +8744,16 @@ async function exportSourceAccounts(res, ids) {
 }
 
 function publicJob(job) {
+  return publicJobWithPoolState(job, sub2ApiAccountStatusCache);
+}
+
+function publicJobWithPoolState(job, poolState) {
   const autoRepair = getAutoRepairEligibility(job);
-  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
+  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job, poolState);
   const blocked = accountAutomationBlocked(job.email);
-  const codexEligible = codexMonitoringAllowed(job);
+  const codexEligible = codexMonitoringAllowed(job, poolState);
   const overloadState = overloadMonitor.snapshot(job.email), cooldownState = overloadCooldown.snapshot(job.email);
-  const fingerprintState = modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown");
+  const fingerprintState = modelFingerprint.snapshot(job.email, getJobPlanType(job, poolState) || "unknown");
   return {
     id: job.id,
     email: job.loginEmail,
@@ -8766,7 +8773,7 @@ function publicJob(job) {
     completedAt: job.completedAt,
     startedAt: job.startedAt,
     durationMs: getJobDurationMs(job),
-    planType: job.workspacePlanType || getJobPlanType(job),
+    planType: job.workspacePlanType || getJobPlanType(job, poolState),
     sub2apiInPool: sub2ApiStatus.inPool,
     sub2apiEnabled: sub2ApiStatus.enabled,
     sub2apiPriority: sub2ApiStatus.priority,
@@ -8779,7 +8786,7 @@ function publicJob(job) {
     sub2apiPlanType: sub2ApiStatus.planType,
     sub2apiUsage: publicSub2ApiUsage(sub2ApiStatus.usage, sub2ApiStatus.quotaRestricted),
     codexStatusEligible: codexEligible,
-    canCheckModelFingerprint: manualFingerprintAllowed(job),
+    canCheckModelFingerprint: manualFingerprintAllowed(job, poolState),
     sub2apiRateLimited: sub2ApiStatus.rateLimited === true,
     sub2apiQuotaRestricted: sub2ApiStatus.quotaRestricted === true || usageRestricted(sub2ApiStatus.usage),
     overloadDetection: { ...overloadState, enabled: codexEligible && overloadState.enabled },
@@ -8829,7 +8836,7 @@ function publicJob(job) {
     webSessionAvailable: Boolean(job.webSessionAvailable),
     webSessionStatus: blocked ? "banned" : job.webSessionStatus || "absent",
     webSessionVerifiedAt: job.webSessionVerifiedAt || null,
-    webCredentialSync: publicWebCredentialSync(job, getJobPlanType(job), { blocked }),
+    webCredentialSync: publicWebCredentialSync(job, getJobPlanType(job, poolState), { blocked }),
     webSessionReadError: job.webSessionReadError || null,
     webLoginAttemptId: job.webLoginAttemptId || null,
     webLoginPending: Boolean(job.webLoginPreviousState),
@@ -9103,13 +9110,13 @@ async function readPlanTypeFromOutput(outputPath) {
   }
 }
 
-function publicSelectionJob(job) {
-  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
+function publicSelectionJob(job, poolState = sub2ApiAccountStatusCache) {
+  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job, poolState);
   return {
     id: job.id,
     email: job.loginEmail,
     status: job.status,
-    planType: getJobPlanType(job),
+    planType: getJobPlanType(job, poolState),
     sub2apiInPool: sub2ApiStatus.inPool,
     sub2apiEnabled: sub2ApiStatus.enabled,
     sub2apiPriority: sub2ApiStatus.priority,
