@@ -1939,7 +1939,7 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
   await syncSubscriptionHistory();
   await Promise.all(allJobs.map(inspectAccountWebSession));
   const healthCounts = { normal: 0, abnormal: 0, pending: 0 };
-  for (const job of allJobs) healthCounts[accountHealth(job, getSub2ApiAccountStatusForJob(job), accountAutomationBlocked(job.email))]++;
+  for (const job of allJobs) healthCounts[accountHealth(job, getSub2ApiAccountStatusForJob(job), accountAutomationBlocked(job.email), accountSessionResets.get(job.email))]++;
   const planTypes = [...new Set(allJobs.map((job) => getJobPlanType(job)).filter(Boolean))].sort();
   const planTypeUnknown = allJobs.some((job) => !getJobPlanType(job));
   const sub2apiPools = [...new Set(allJobs.map((job) => getSub2ApiPoolFilterValue(job)))];
@@ -2021,7 +2021,7 @@ function matchesJobFilters(job, filters) {
   if (filters.summary === "active" && !occupiesActiveSlot(job) && !activeWebSessionCheckAccounts.has(job.email.toLowerCase())) return false;
   if (filters.summary === "queued" && job.status !== "queued") return false;
   if (["normal", "abnormal"].includes(filters.summary)
-    && accountHealth(job, sub2ApiStatus, accountAutomationBlocked(job.email)) !== filters.summary) return false;
+    && accountHealth(job, sub2ApiStatus, accountAutomationBlocked(job.email), accountSessionResets.get(job.email)) !== filters.summary) return false;
   if (filters.lockedOnly) {
     const isLocked = job.status === "banned" || Boolean(job.autoRepairBlocked);
     if (!isLocked) return false;

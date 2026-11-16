@@ -1890,7 +1890,7 @@ function App() {
               <span>正常</span>
               <strong>{stats.normal ?? 0}</strong>
             </button>
-            <button type="button" className="summary-pill" title="仅包括封禁、Web 会话失效、号池错误；再次点击清除筛选"
+            <button type="button" className="summary-pill" title="包括封禁、Web 会话失效、号池错误，以及重登失败后仍暂停的账号；再次点击清除筛选"
               aria-label="筛选异常账号" aria-pressed={summaryFilter === "abnormal"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "abnormal" ? "" : "abnormal")}>
               <i className="status-dot abnormal" />
               <span>异常</span>
