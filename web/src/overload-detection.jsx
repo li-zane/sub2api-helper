@@ -59,8 +59,9 @@ export function OverloadDetection({ job, token, onError }) {
   const cooldown = savedCooldown && (savedCooldown.revision ?? 0) > (cooldownSource?.revision ?? -1) ? savedCooldown : cooldownSource || savedCooldown;
   const cooldownEnabled = eligible && cooldown?.enabled === true;
   const coolingUntil = job.sessionReset?.status === "cooling" ? job.sessionReset.resumeAt : cooldown?.coolingUntil;
-  const cooling = Boolean(coolingUntil || ["pausing", "cooling", "refreshing", "resuming"].includes(cooldown?.phase));
+  const cooling = Boolean(coolingUntil || ["pausing", "logging_out", "cooling", "refreshing", "resuming"].includes(cooldown?.phase));
   const cooldownHint = cooldown?.lastError ? `自动冷却异常：${cooldown.lastError}`
+    : cooldown?.phase === "logging_out" ? "正在登出设备，完成后开始冷却…"
     : cooldown?.phase === "resuming" ? "正在恢复号池…" : cooldown?.phase === "refreshing" ? "重登授权后恢复…"
     : coolingUntil ? `冷却至 ${displayDateTime(coolingUntil, { hour: "2-digit", minute: "2-digit" })}` : "";
   const points = detection?.points || [];

@@ -4780,8 +4780,8 @@ function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMappi
           </div>
           <div className="task-auto-empty">当前 {overloadRule.windowMinutes || "—"} 分钟固定格达到 {overloadRule.threshold || "—"} 次，或图表累计达到 {overloadRule.threshold ? Number(overloadRule.threshold) * 3 : "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟；到期及时恢复。</div>
           <label className="task-auto-action-option"><input type="checkbox" checked={resetAfterCooldown} disabled={saving}
-            onChange={event => setResetAfterCooldown(event.target.checked)} /><span>冷却结束后重登 Web 并重新授权</span></label>
-          <div className="task-auto-empty">默认关闭。开启后，到期先登出所有设备、重登 Web、完成 Codex OAuth 并原位更新号池凭据，成功后恢复调度；失败保持暂停。整个流程沿用原绑定 IP，不轮换密码或 2FA。</div>
+            onChange={event => setResetAfterCooldown(event.target.checked)} /><span>冷却前登出所有设备，结束后重登授权</span></label>
+          <div className="task-auto-empty">默认关闭。开启后，触发冷却时先暂停调度并登出所有设备，确认登出后开始冷却；到期重新登录 Web、完成 Codex 授权并更新原号池凭据，成功后恢复调度，失败保持暂停。整个流程沿用原绑定 IP，不轮换密码或 2FA。</div>
           </div>
           <details className="task-overload-advanced">
             <summary>冷却操作并发</summary>

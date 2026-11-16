@@ -22,8 +22,8 @@ export function normalizeOverloadCooldown(value = DEFAULT_OVERLOAD_COOLDOWN) {
 }
 
 export class OverloadCooldown {
-  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, beforeResume = () => ({ status: "completed" }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, isCountBlocked, onChange, onNeedCounts, beforeResume, now, setTimer, clearTimer });
+  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, afterPause = null, beforeResume = () => ({ status: "completed" }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, isCountBlocked, onChange, onNeedCounts, afterPause, beforeResume, now, setTimer, clearTimer });
     this.request = limitPoolRequests(request, () => this.getMonitoringSettings().concurrency);
     this.accounts = new Map();
     this.locks = new Map();
@@ -249,7 +249,9 @@ export class OverloadCooldown {
     if (this.backendIdentity(this.getConfig()) !== backend) return;
     if (entry.resumeAccountIds?.length) {
       if (entry.backend !== backend) throw new Error("Sub2API 后端已变化，原冷却记录待恢复原后端后处理");
-      if (!entry.enabled && !entry.restrictionPaused || entry.phase === "resuming" || Date.parse(entry.coolingUntil) <= this.now()) {
+      if (entry.logoutBeforeCooldown && !entry.coolingUntil && entry.enabled && !entry.restrictionPaused) {
+        await this.pause(email, config, records);
+      } else if (!entry.enabled && !entry.restrictionPaused || entry.phase === "resuming" || Date.parse(entry.coolingUntil) <= this.now()) {
         await this.resume(email, config, records);
       } else {
         // Reassert the pause if an unrelated credential repair enabled the pool row.
@@ -306,9 +308,13 @@ export class OverloadCooldown {
         if (!targets.length) return;
         // Commit ownership before changing remote scheduling, as in restart recovery.
         const startedAt = new Date(this.now()).toISOString();
-        const coolingUntil = new Date(this.now() + settings.cooldownMinutes * 60_000).toISOString();
-        await this.update(email, { backend, phase: "pausing", resumeAccountIds: targets, resetRequestId: null, coolingUntil,
-          operation: { id: crypto.randomUUID(), startedAt, until: coolingUntil, cooldownMinutes: settings.cooldownMinutes,
+        const logoutBeforeCooldown = settings.reauthorizeAfterCooldown === true && typeof this.afterPause === "function";
+        const coolingUntil = logoutBeforeCooldown ? null : new Date(this.now() + settings.cooldownMinutes * 60_000).toISOString();
+        await this.update(email, { backend, phase: "pausing", resumeAccountIds: targets,
+          logoutBeforeCooldown, cooldownMinutes: settings.cooldownMinutes,
+          resetRequestId: logoutBeforeCooldown ? crypto.randomUUID() : null, coolingUntil,
+          operation: { id: crypto.randomUUID(), startedAt, coolingStartedAt: logoutBeforeCooldown ? null : startedAt,
+            until: coolingUntil, cooldownMinutes: settings.cooldownMinutes,
             windowMinutes, windowCount: point.count, threshold: settings.threshold,
             historyCount: history, historyMinutes: grid.historyMinutes, historyThreshold: settings.threshold * 3,
             windowStart: point.start, windowEnd: point.end, triggerReason, finishedAt: null } });
@@ -327,7 +333,14 @@ export class OverloadCooldown {
       if (!record || record.enabled === false) continue;
       await this.setSchedulable(config, id, false);
     }
-    await this.update(email, { phase: "cooling", lastError: null });
+    if (entry.logoutBeforeCooldown && entry.enabled && !entry.restrictionPaused && typeof this.afterPause === "function") {
+      const result = this.afterPause(email, { id: entry.resetRequestId, backend: entry.backend,
+        cooldownMinutes: entry.cooldownMinutes, logoutBeforeCooldown: true });
+      await this.update(email, { phase: result.resumeAt ? "cooling" : "logging_out",
+        ...(result.resumeAt ? { coolingUntil: result.resumeAt,
+          ...(entry.operation ? { operation: { ...entry.operation, until: result.resumeAt,
+            coolingStartedAt: result.logoutCompletedAt || entry.operation.coolingStartedAt || null } } : {}) } : {}), lastError: result.error || null });
+    } else await this.update(email, { phase: "cooling", lastError: null });
   }
 
   async resume(email, config, records) {

@@ -17,6 +17,7 @@ import { recordCredentialHistory, writePrivateJsonAtomic } from "./account-histo
 import { recordWorkspaceHistory, recordAcceptedPhone } from "./credential-events.mjs";
 import { readAccountWebSession, saveProtocolWebSession, normalizeHelperLoginProxy } from "./account-web-session.mjs";
 import { uniqueWorkspaceAccounts, isUsableWorkspaceAccount, isTeamWorkspaceAccount, webTokenWorkspaceId, workspaceProviderCode, isDeactivatedWorkspaceError } from "./workspace-accounts.mjs";
+import { workspaceSessionFromHtml } from "./auth-workspace-page.mjs";
 
 const DEFAULT_CHATGPT_BASE = "https://chatgpt.com";
 const DEFAULT_AUTH_BASE = "https://auth.openai.com";
@@ -1542,6 +1543,11 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
     loginMethod = "existing_session";
     authenticated = { continue_url: authPage.finalUrl };
     console.log("[3/5] Existing ChatGPT web session accepted.");
+  } else if (isWorkspaceSelectionPayload({ continue_url: authPage.finalUrl })) {
+    loginMethod = "existing_session";
+    authenticated = await loadWorkspaceSelectionPage(client, { authBase,
+      payload: { continue_url: authPage.finalUrl }, opened: authPage });
+    console.log("[3/5] Continue authenticated workspace selection.");
   } else {
     let pathname = authPage.finalUrl;
     try {
@@ -1608,6 +1614,9 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
 
 export async function selectChatgptLoginWorkspaceIfNeeded(client, { authBase, payload }) {
   if (!isWorkspaceSelectionPayload(payload)) return { payload, workspaceId: null };
+  if (!hasWorkspace(payload) && new URL(getContinueUrl(payload) || "/workspace", authBase).pathname === "/workspace") {
+    payload = await loadWorkspaceSelectionPage(client, { authBase, payload });
+  }
   const available = uniqueWorkspaceAccounts({ accounts: payload?.["oai-client-auth-session"]?.workspaces }).filter(isUsableWorkspaceAccount);
   const candidates = [...available.filter(isTeamWorkspaceAccount), ...available.filter(a => !isTeamWorkspaceAccount(a))];
   if (!candidates.length) {
@@ -1635,6 +1644,18 @@ export async function selectChatgptLoginWorkspaceIfNeeded(client, { authBase, pa
       (client.unavailableLoginWorkspaceIds ||= new Set()).add(workspaceId);
     }
   }
+}
+
+async function loadWorkspaceSelectionPage(client, { authBase, payload, opened }) {
+  const target = new URL(getContinueUrl(payload) || "/workspace", authBase);
+  if (target.origin !== new URL(authBase).origin) throw new Error("WORKSPACE_SELECTION_ORIGIN_INVALID: Workspace page origin does not match the active flow");
+  if (hasWorkspace(payload)) return payload;
+  const page = opened || await client.follow(target.href, { referer: target.href, allowedOrigin: target.origin });
+  assertWebAuthPageNotChallenge(page);
+  if (new URL(page.finalUrl).origin !== target.origin) throw new Error("WORKSPACE_SELECTION_ORIGIN_INVALID: Workspace page origin does not match the active flow");
+  const session = workspaceSessionFromHtml(page.last?.text || "");
+  if (!session) throw new Error("WORKSPACE_SELECTION_UNAVAILABLE: Workspace page did not include selectable workspaces");
+  return { ...payload, continue_url: page.finalUrl, page: { type: "workspace" }, "oai-client-auth-session": session };
 }
 
 async function verifyPassword(client, { authBase, rl, deviceId, password, referer }) {
@@ -2062,6 +2083,11 @@ async function followCodexAuthorization(client, options, authUrl, session) {
       { page: { type: "add_phone" }, continue_url: authorized.finalUrl },
       { ...session, state, redirectUri: options.codexRedirectUri });
   }
+  if (isWorkspaceSelectionPayload({ continue_url: authorized.finalUrl })) {
+    const current = await loadWorkspaceSelectionPage(client, { authBase: options.authBase,
+      payload: { continue_url: authorized.finalUrl }, opened: authorized });
+    return continueSelectedCodexAuthorization(client, options, current, { ...session, state, redirectUri: options.codexRedirectUri });
+  }
 
   if (isAuthLoginPage(authorized.finalUrl)) {
     const current = await continueCodexLogin(client, options, session, { url: authorized.finalUrl, emailOtpRequestedAt: requestedAt });
@@ -2093,6 +2119,11 @@ async function followCodexAuthorization(client, options, authUrl, session) {
 
 async function continueSelectedCodexAuthorization(client, options, initial, oauth) {
   let current = initial;
+  const next = getContinueUrl(current);
+  if (isAuthLoginPage(next) || isEmailOtpSendPayload(current)) {
+    current = await continueCodexLogin(client, options, oauth, { url: next, payload: current });
+  }
+  if (isWorkspaceSelectionPayload(current)) current = await loadWorkspaceSelectionPage(client, { authBase: options.authBase, payload: current });
   if (isPhoneBindingRequired(current)) {
     oauth = { ...oauth, addPhoneUrl: getContinueUrl(current) || `${options.authBase}/add-phone` };
     await options.saveCheckpoint?.("phone_required", { oauth });
@@ -2117,6 +2148,7 @@ async function continueCodexLogin(client, options, oauth, login) {
   let current = login.payload || null;
   let url = login.url;
   let emailOtpRequestedAt = login.emailOtpRequestedAt || new Date().toISOString();
+  let emailSent = false;
   const authOrigin = new URL(options.authBase).origin;
   for (let step = 0; step < 8; step++) {
     const target = new URL(url, options.authBase);
@@ -2125,11 +2157,17 @@ async function continueCodexLogin(client, options, oauth, login) {
       return { continue_url: target.href };
     }
     if (target.origin !== authOrigin) throw new Error("CODEX_AUTH_ORIGIN_INVALID: Codex 验证页面来源不匹配");
-    if (current && (isPhoneBindingRequired(current) || hasWorkspace(current))) return current;
+    if (current && (isPhoneBindingRequired(current) || hasWorkspace(current) || isWorkspaceSelectionPayload(current))) return current;
     await options.saveCheckpoint?.("oauth_login", { oauth: { ...oauth, login: { url: target.href, payload: current, emailOtpRequestedAt } } });
     const stepStartedAt = new Date().toISOString();
     try {
-      if (target.pathname === "/log-in" || target.pathname === "/log-in-or-create-account") {
+      if (isEmailOtpSendPayload(current)) {
+        if (emailSent) throw new Error("CODEX_AUTH_VERIFICATION_INCOMPLETE: Email verification did not advance after sending the code");
+        const method = String(current.method || "GET").toUpperCase();
+        if (target.pathname !== "/api/accounts/email-otp/send" || !["GET", "POST"].includes(method)) throw new Error("CODEX_AUTH_EMAIL_SEND_INVALID: Unrecognized email verification request");
+        ({ data: current } = await client.getJson(method, target.href, { origin: options.authBase, referer: `${options.authBase}/choose-an-account`, ...(method === "POST" ? { json: {} } : {}) }));
+        emailSent = true;
+      } else if (target.pathname === "/log-in" || target.pathname === "/log-in-or-create-account") {
         if (!options.expectedEmail) throw new Error("CODEX_AUTH_EMAIL_REQUIRED: Codex 登录缺少账号邮箱");
         const headers = await createSentinelHeaders(client, { authBase: options.authBase, deviceId: client.browserIdentity?.deviceId || client.jar.value("oai-did", options.authBase), flow: "authorize_continue" });
         ({ data: current } = await authJsonStep(client, options.authBase, "POST", "/api/accounts/authorize/continue", {
@@ -2166,7 +2204,7 @@ async function continueCodexLogin(client, options, oauth, login) {
     const next = new URL(url, options.authBase);
     if (!isLocalCallback(next.href) && next.origin !== authOrigin) throw new Error("CODEX_AUTH_ORIGIN_INVALID: Codex 下一步页面来源不匹配");
     url = next.href;
-    if (isPhoneBindingRequired(current) || hasWorkspace(current) || isLocalCallback(url)) continue;
+    if (isPhoneBindingRequired(current) || hasWorkspace(current) || isWorkspaceSelectionPayload(current) || isEmailOtpSendPayload(current) || isLocalCallback(url)) continue;
     const opened = await client.follow(url, { referer: target.href });
     url = opened.finalUrl;
     if (new URL(url).origin !== authOrigin && !isLocalCallback(url)) throw new Error("CODEX_AUTH_ORIGIN_INVALID: Codex 验证跳转来源不匹配");
@@ -2179,6 +2217,12 @@ async function continueCodexLogin(client, options, oauth, login) {
     }
   }
   throw new Error("CODEX_AUTH_STEP_LIMIT: Codex 验证步骤重复，已停止自动重试；Web 会话状态保持不变");
+}
+
+function isEmailOtpSendPayload(payload) {
+  if (payload?.page?.type === "email_otp_send") return true;
+  try { return new URL(getContinueUrl(payload)).pathname === "/api/accounts/email-otp/send"; }
+  catch { return false; }
 }
 
 async function resumeCodexOauth(client, options, checkpoint) {
@@ -3028,7 +3072,8 @@ async function removeProtocolCheckpoint(checkpointPath) {
 }
 
 function isExpiredCheckpointError(error) {
-  return /WEB_LOGIN_TOKEN_REVOKED|WEB_LOGIN_WORKSPACE_(?:UNAVAILABLE|MISMATCH)|CHECKPOINT_INVALID|SESSION_SELECTION_INVALID|TOTP_ACCESS_TOKEN_MISSING|invalid_state|no longer valid|session.+(?:invalid|expired)|expired.+session/i.test(
+  if (/^SESSION_SELECTION_INVALID:/.test(String(error?.message || ""))) return false;
+  return /WEB_LOGIN_TOKEN_REVOKED|WEB_LOGIN_WORKSPACE_(?:UNAVAILABLE|MISMATCH)|CHECKPOINT_INVALID|TOTP_ACCESS_TOKEN_MISSING|invalid_state|no longer valid|session.+(?:invalid|expired)|expired.+session/i.test(
     String(error?.message || ""),
   );
 }

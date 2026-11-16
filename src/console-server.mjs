@@ -426,6 +426,7 @@ const overloadCooldown = new OverloadCooldown({
   request: requestSub2Api,
   onChange: invalidateSub2ApiAccountStatusCache,
   onNeedCounts: () => overloadMonitor.trigger(),
+  afterPause: prepareCooldownSessionReset,
   beforeResume: prepareCooldownSessionReset,
   listAccounts: async config => {
     const listing = await listSub2ApiAccounts(config, { withMeta: true });
@@ -3257,12 +3258,13 @@ async function startAccountSessionReset(job, { automatic = false, requestId = nu
   } catch (error) { await accountSessionResets.fail(job.email, error); throw error; }
 }
 
-function prepareCooldownSessionReset(email, { id, backend }) {
+function prepareCooldownSessionReset(email, { id, backend, cooldownMinutes = 0, logoutBeforeCooldown = false }) {
   const job = findJobByEmail(email), state = accountSessionResets.get(email);
   if (!job) return { status: "failed", error: "冷却已到期，但本地账号记录不存在" };
   if (state?.id === id || state?.source === "manual" && Date.parse(state.startedAt) >= Date.parse(overloadCooldown.accounts.get(email)?.coolingUntil)) {
     if (state.status === "completed") return { status: "completed" };
-    return { status: "pending", error: state.status === "failed" ? `冷却后会话重建失败：${state.error}；请手动重试或关闭此选项恢复` : state.error };
+    return { status: "pending", resumeAt: state.resumeAt || null, logoutCompletedAt: state.logoutCompletedAt || null,
+      error: state.status === "failed" ? `会话重建失败：${state.error}；请手动重试` : state.error };
   }
   if (!sessionResetStarts.has(email) && !isActive(job.status) && !activeSessionReset(job)) {
     // Dispatch outside the cooldown lock; the account workflow later acquires
@@ -3271,7 +3273,7 @@ function prepareCooldownSessionReset(email, { id, backend }) {
       const entry = overloadCooldown.accounts.get(email);
       if (shuttingDown || !entry?.resumeAccountIds?.length || entry.resetRequestId !== id || entry.backend !== backend
         || overloadAutoCooldownSettings.reauthorizeAfterCooldown !== true) return;
-      try { await startAccountSessionReset(job, { automatic: true, requestId: id }); }
+      try { await startAccountSessionReset(job, { automatic: true, requestId: id, cooldownMinutes: logoutBeforeCooldown ? cooldownMinutes : 0 }); }
       catch (error) {
         await accountSessionResets.save(email, { id, source: "cooldown", jobId: job.id, status: "failed", logoutCompletedAt: null,
           completedAt: null, startedAt: new Date().toISOString(), error: String(error.message).slice(0, 500) });
@@ -3301,6 +3303,15 @@ async function prepareSessionResetLogin(job, current = () => true) {
       status: "authorizing" });
     await removePrivateFile(job.checkpointPath);
   } else await accountSessionResets.save(job.email, { status: "authorizing" });
+  if (state.source === "cooldown" && state.logoutCompletedAt && state.resumeAt) {
+    await overloadCooldown.lock(job.email, async () => {
+      const cooling = overloadCooldown.accounts.get(job.email);
+      if (cooling?.logoutBeforeCooldown && cooling.resetRequestId === state.id) {
+        await overloadCooldown.update(job.email, { phase: "cooling", coolingUntil: state.resumeAt, lastError: null,
+          ...(cooling.operation ? { operation: { ...cooling.operation, until: state.resumeAt, coolingStartedAt: state.logoutCompletedAt } } : {}) });
+      }
+    });
+  }
   if (!current()) { await accountSessionResets.fail(job.email, "会话重建已停止，已保存登出结果"); return null; }
   const remaining = Date.parse(state.resumeAt) - Date.now();
   if (remaining > 0) {

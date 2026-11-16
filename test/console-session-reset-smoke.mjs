@@ -8,11 +8,11 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { seedWebSession } from "./account-web-fixture.mjs";
 
-for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSION_RESET_SCENARIO] : ["manual-proxy", "manual-direct", "automatic", "automatic-overdue", "logout-failure", "oauth-failure", "proxy-changed", "sync-retry", "queued", "automation-paused", "local-oauth", "oauth-retry", "banned", "batch-default", "batch-delay", "batch-direct", "batch-cancel", "batch-mixed", "manual-disabled", "manual-disable-during-reset", "single-delay", "manual-logout-failure", "pause-failure", "restore-failure", "multi-sync-failure", "multi-original-off", "multi-restore-failure", "legacy-delay"])) {
+for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSION_RESET_SCENARIO] : ["manual-proxy", "manual-direct", "automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "oauth-failure", "proxy-changed", "sync-retry", "queued", "automation-paused", "local-oauth", "oauth-retry", "banned", "batch-default", "batch-delay", "batch-direct", "batch-cancel", "batch-mixed", "manual-disabled", "manual-disable-during-reset", "single-delay", "manual-logout-failure", "pause-failure", "restore-failure", "multi-sync-failure", "multi-original-off", "multi-restore-failure", "legacy-delay"])) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "helper-reset-http-")), email = "reset@example.test";
   const id = "11111111-1111-4111-8111-111111111111", dir = path.join(temp, id), trace = path.join(temp, "trace.jsonl");
-  const automatic = ["automatic", "automatic-overdue", "logout-failure", "automation-paused"].includes(scenario), direct = ["manual-direct", "batch-direct"].includes(scenario);
-  const batch = scenario.startsWith("batch-"), delayed = ["batch-delay", "batch-cancel", "single-delay", "legacy-delay"].includes(scenario);
+  const automatic = ["automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "automation-paused"].includes(scenario), direct = ["manual-direct", "batch-direct"].includes(scenario);
+  const batch = scenario.startsWith("batch-"), delayed = ["batch-delay", "batch-cancel", "single-delay", "legacy-delay", "automatic-logout-first"].includes(scenario);
   const multi = scenario.startsWith("multi-"), disabled = ["manual-disabled", "manual-disable-during-reset"].includes(scenario);
   let failPause = scenario === "pause-failure", failRestore = ["restore-failure", "multi-restore-failure"].includes(scenario);
   let child, headers, logs = "", logouts = 0, updates = 0, creates = 0, failSync = scenario === "sync-retry";
@@ -142,7 +142,9 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
     await fs.writeFile(path.join(temp, "task-settings.json"), JSON.stringify({ maxActiveJobs: 1, accountProxyMode: direct ? "global" : "plan", codexAuthMode: scenario === "local-oauth" ? "local" : "sub2api",
       overloadAutoCooldown: { windowMinutes: 15, threshold: 4, cooldownMinutes: 1, reauthorizeAfterCooldown: automatic }, monitoring: { overloadIntervalSeconds: 86400, accountStatusIntervalSeconds: 3600 } }));
     await fs.writeFile(path.join(temp, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { ...config, proxyId: "direct" }, profiles: [{ id: "default", name: "Direct plan", proxyId: "direct", groupIds: [] }], activeProfileId: "default" }));
-    if (automatic) await fs.writeFile(path.join(temp, "overload-cooldown.json"), JSON.stringify({ version: 1, accounts: { [email]: { enabled: true, backend, phase: "cooling", resumeAccountIds: ["7"], coolingUntil: new Date(Date.now() + (scenario === "automatic-overdue" ? -1000 : 1800)).toISOString() } } }));
+    if (automatic) await fs.writeFile(path.join(temp, "overload-cooldown.json"), JSON.stringify({ version: 1, accounts: { [email]: { enabled: true, backend, phase: "cooling", resumeAccountIds: ["7"], coolingUntil: new Date(Date.now() + (scenario === "automatic-overdue" ? -1000 : 1800)).toISOString(),
+      ...(scenario === 'automatic-logout-first' ? {phase:'pausing',coolingUntil:null,logoutBeforeCooldown:true,cooldownMinutes:1,resetRequestId:'fixture-logout-first',
+        operation:{id:'fixture-cooldown-operation',startedAt:new Date().toISOString(),until:null,cooldownMinutes:1,finishedAt:null}} : {}) } } }));
     await start();
     if (scenario !== "automatic-overdue") await api("/api/sub2api/account-status?refresh=1");
     if (scenario === "queued") {
@@ -192,6 +194,17 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
       assert(!(await fs.readFile(trace, 'utf8')).includes('"phase":"web"'), 'login happened before delay');
       assert.equal((await api('/api/jobs')).data.stats.active, 0, 'delay occupies shared login slot');
       const due = (await job()).sessionReset.resumeAt;
+      if (scenario === 'automatic-logout-first') {
+        const reset = (await job()).sessionReset;
+        assert.equal(reset.source, 'cooldown');
+        const disk = JSON.parse(await fs.readFile(path.join(temp, 'account-session-resets.json'), 'utf8')).accounts[email];
+        assert.equal(Date.parse(due) - Date.parse(disk.logoutCompletedAt), 60_000, 'cooldown did not start after confirmed logout');
+        const cooling = JSON.parse(await fs.readFile(path.join(temp, 'overload-cooldown.json'), 'utf8')).accounts[email];
+        assert.equal(cooling.coolingUntil, due); assert.equal(cooling.phase, 'cooling');
+        assert.equal(cooling.operation.until, due, 'recent operation retained the pre-logout deadline');
+        assert.equal(cooling.operation.coolingStartedAt, disk.logoutCompletedAt);
+        assert.equal((await job()).overloadAutoCooldown.operation.status, 'cooling');
+      }
       if (scenario === 'batch-cancel') {
         assert.equal((await api(`/api/jobs/${id}/cancel`, {})).status, 200);
         await stop(); await start();
@@ -268,6 +281,10 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
         }
         await wait(async () => (await job()).sessionReset?.status === "completed", "reset did not complete");
         if (automatic) await wait(async () => row.schedulable, "cooldown did not resume after reset");
+        if (scenario === 'automatic-logout-first') {
+          await wait(async () => (await job()).overloadAutoCooldown.operation?.status === 'completed', 'recent operation did not record recovery');
+          assert.equal((await job()).overloadAutoCooldown.operation.id, 'fixture-cooldown-operation');
+        }
         const expectedUpdates = scenario === "multi-restore-failure" ? 4 : scenario === "restore-failure" ? 2 : scenario === "multi-sync-failure" ? 3 : multi ? 2 : 1;
         assert.equal(updates, expectedUpdates); assert.equal(row.credentials.access_token, "reset-new-access"); assert.equal(row.credentials.custom, "retain");
         assert.equal(row.schedulable, !disabled, "original/manual disabled preference was not preserved");

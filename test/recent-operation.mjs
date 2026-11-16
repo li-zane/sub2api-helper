@@ -38,6 +38,11 @@ assert.equal(op.result, "冷却中"); assert.equal(op.at, cooldown.startedAt); a
 assert.equal(op.cooldown.duration, "360 分钟"); assert.equal(op.cooldown.timeLabel, "至"); assert.equal(op.cooldown.time, cooldown.until);
 assert(op.text.includes("11:13:00") && op.text.includes("17:13:00") && op.text.includes("4 / 4"));
 assert(!op.text.includes("old unrelated login failure"));
+const loggingOut = recentOperation({ ...coolingJob, overloadAutoCooldown: { operation: { ...cooldown, status: "logging_out", until: null } } }, labels);
+assert.equal(loggingOut.result, "登出设备中"); assert.equal(loggingOut.tone, "running"); assert.equal(loggingOut.cooldown.time, null);
+const confirmedStart = "2026-11-16T03:13:30Z";
+assert(recentOperation({ ...coolingJob, overloadAutoCooldown: { operation: { ...cooldown, coolingStartedAt: confirmedStart } } }, labels)
+  .text.includes("冷却开始\n2026/11/16 11:13:30"), "recent operation did not show the confirmed post-logout start");
 setDisplayTimeZone("UTC");
 assert(recentOperation(coolingJob, labels).text.includes("03:13:00"), "cooldown detail ignored display time zone");
 setDisplayTimeZone("Asia/Shanghai");

@@ -31,19 +31,20 @@ function recentCooldownOperation(job) {
   const reset = job.sessionReset;
   const relatedReset = !operation.finishedAt && reset?.source === "cooldown" && operation.resetRequestId && reset.id === operation.resetRequestId;
   if (Date.parse(at) < Date.parse(job.lastOperationAt || job.createdAt) && !relatedReset) return null;
-  const results = { pausing: "暂停中", cooling: "冷却中", refreshing: "重登授权中", resuming: "恢复中",
+  const results = { pausing: "暂停中", logging_out: "登出设备中", cooling: "冷却中", refreshing: "重登授权中", resuming: "恢复中",
     completed: "已恢复", manual_paused: "保持暂停", blocked: "封禁停用" };
   const error = operation.error;
   const restoring = ["refreshing", "resuming"].includes(operation.status);
   const result = error ? restoring ? "恢复待重试" : "暂停待重试" : results[operation.status] || "恢复待确认";
   const tone = error || operation.status === "blocked" ? "error" : operation.status === "completed" ? "success"
-    : restoring || operation.status === "pausing" ? "running" : "pending";
+    : restoring || ["pausing", "logging_out"].includes(operation.status) ? "running" : "pending";
   const duration = Number.isFinite(operation.cooldownMinutes) ? `${operation.cooldownMinutes} 分钟` : "时长待确认";
   const completed = operation.status === "completed";
   const time = completed ? operation.resumedAt || operation.finishedAt : operation.finishedAt || operation.until;
   const timeLabel = completed ? "恢复于" : operation.finishedAt ? "结束于" : "至";
-  const details = [`操作类型\noverload_cooldown`, `结果\n${result}`, `冷却开始\n${displayDateTime(operation.startedAt)}`,
+  const details = [`操作类型\noverload_cooldown`, `结果\n${result}`, `触发时间\n${displayDateTime(operation.startedAt)}`,
     `冷却时长\n${duration}`, `预计恢复时间\n${displayDateTime(operation.until)}`];
+  if (operation.coolingStartedAt) details.push(`冷却开始\n${displayDateTime(operation.coolingStartedAt)}`);
   if (operation.windowMinutes && operation.windowCount != null) details.push(`${operation.windowMinutes} 分钟窗口过载次数\n${operation.windowCount}${operation.threshold != null ? ` / ${operation.threshold}` : ""}`);
   if (operation.historyCount != null) details.push(`${operation.historyMinutes || 90} 分钟累计过载次数\n${operation.historyCount}${operation.historyThreshold != null ? ` / ${operation.historyThreshold}` : ""}`);
   if (operation.triggerReason) details.push(`触发条件\n${{ current: "当前窗口达到阈值", history: "累计次数达到阈值", both: "当前窗口和累计次数均达到阈值" }[operation.triggerReason] || operation.triggerReason}`);
