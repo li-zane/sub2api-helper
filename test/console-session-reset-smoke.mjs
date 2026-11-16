@@ -305,6 +305,6 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
   } finally {
     await fs.writeFile(gate, "continue").catch(() => {}); await stop();
     official.closeAllConnections(); pool.closeAllConnections(); await Promise.all([new Promise(r => official.close(r)), new Promise(r => pool.close(r))]);
-    await fs.rm(temp, { recursive: true, force: true });
+    await fs.rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }

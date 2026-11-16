@@ -103,5 +103,5 @@ try {
   assert.equal(state.sub2apiPriority, 6); assert.equal(state.modelFingerprint.prioritySyncPending, false); assert.equal(state.modelFingerprint.prioritySyncError, null);
   console.log('FINGERPRINT_PRIORITY_HTTP_PASS settings validation; real sampler to mock pool; date rule precedence/no repeat writes; restart; disable restores date baseline; manual priority ownership; task preservation; zero; mismatch restores; status sync');
 } finally {
-  await stop(); pool.closeAllConnections(); await new Promise(resolve => pool.close(resolve)); await fs.rm(output, { recursive: true, force: true });
+  await stop(); pool.closeAllConnections(); await new Promise(resolve => pool.close(resolve)); await fs.rm(output, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
