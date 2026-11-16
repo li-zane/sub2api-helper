@@ -3944,15 +3944,15 @@ button.status-toggle.on .status-toggle-thumb {
   padding: 2px;
 }
 
-.codex-status .overload-chart.is-cooling {
+.codex-status .overload-chart:is(.is-cooling, .is-unavailable) {
   background: var(--surface-strong);
   border-color: var(--line-strong);
 }
-.overload-chart.is-cooling .overload-line,
-.overload-chart.is-cooling .overload-request-line { stroke: var(--muted); }
-.overload-chart.is-cooling .overload-dot,
-.overload-chart.is-cooling .overload-request-dot { fill: var(--muted); }
-.overload-chart.is-cooling .codex-energy-fill { background: var(--muted) !important; }
+.overload-chart:is(.is-cooling, .is-unavailable) .overload-line,
+.overload-chart:is(.is-cooling, .is-unavailable) .overload-request-line { stroke: var(--muted); }
+.overload-chart:is(.is-cooling, .is-unavailable) .overload-dot,
+.overload-chart:is(.is-cooling, .is-unavailable) .overload-request-dot { fill: var(--muted); }
+.overload-chart:is(.is-cooling, .is-unavailable) .codex-energy-fill { background: var(--muted) !important; }
 
 .overload-plot {
   position: relative;

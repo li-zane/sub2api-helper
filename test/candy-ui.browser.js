@@ -41,6 +41,11 @@ async (page) => {
     const matched=d.getByRole('checkbox',{name:'不降智账号独立并发',exact:true}),value=d.getByRole('spinbutton',{name:'不降智账号独立并发值',exact:true});
     check(!await matched.isChecked()&&await value.isDisabled(),'independent concurrency must default off');
     await matched.check();await value.fill('0');
+    const priority=d.getByRole('checkbox',{name:'不降智账号独立优先级',exact:true}),priorityValue=d.getByRole('spinbutton',{name:'不降智账号独立优先级值',exact:true});
+    check(!await priority.isChecked()&&await priorityValue.isDisabled()&&await priorityValue.inputValue()==='1','independent priority must default off at 1 for legacy settings');
+    await priority.check();await priorityValue.fill('0');
+    check(await matched.isChecked()&&await value.inputValue()==='0','priority toggle changed independent concurrency');
+    await d.getByRole('region',{name:'不降智账号独立优先级',exact:true}).screenshot({path:evidence+'/priority-desktop.png'});
     check(await d.getByText('不降智加入（指纹一致）',{exact:true}).count()===0,'fingerprint-only policy label remains');
     await page.screenshot({path:evidence+'/settings-desktop.png'});
     await page.setViewportSize({width:375,height:812});await rule.click();check(await rule.getAttribute('aria-pressed')==='false','mobile toggle off failed');await rule.click();check(await rule.getAttribute('aria-pressed')==='true','mobile toggle on failed');await page.screenshot({path:evidence+'/groups-mobile.png'});check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'settings horizontal overflow');await page.screenshot({path:evidence+'/settings-mobile.png'});await page.setViewportSize({width:1480,height:1000});
@@ -50,6 +55,7 @@ async (page) => {
     check(JSON.stringify(saves[0].value.testSequence)===JSON.stringify({first:'candy',fingerprint:5,candy:1}),'global request incorrect');
     check(JSON.stringify(saves[0].value.enabledPlanTypes)===JSON.stringify(['free','self_serve_business_prolite']),'PlanType allowlist not saved');
     check(saves[0].value.matchedConcurrency.enabled&&saves[0].value.matchedConcurrency.value===0,'zero matched concurrency not saved');
+    check(saves[0].value.matchedPriority.enabled&&saves[0].value.matchedPriority.value===0,'zero matched priority not saved');
     check(saves[0].value.groupPolicies.business['2']==='verified'&&!Object.hasOwn(saves[0].value,'planDefaults'),'group rules not saved alongside allowlist');
     check(saves[0].value.groupPolicies.plus['2']==='verified','hidden rules erased on save');
   });
@@ -60,6 +66,23 @@ async (page) => {
     const plans=d.getByRole('combobox',{name:'添加检测 PlanType',exact:true});await plans.fill('self_serve_business_prolite');await d.getByRole('button',{name:'添加类型',exact:true}).click();
     check(await d.getByRole('button',{name:'Business Premium 分组 2 加入规则',exact:true}).getAttribute('aria-pressed')==='true','re-enabling PlanType lost draft policy');
     await d.getByRole('button',{name:'取消',exact:true}).click();await d.waitFor({state:'detached'});
+  });
+  await test('independent-priority-validates-reopens-and-disables-on-mobile',async()=>{
+    await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const d=page.getByRole('dialog',{name:'降智检测设置',exact:true});
+    const toggle=d.getByRole('checkbox',{name:'不降智账号独立优先级',exact:true}),value=d.getByRole('spinbutton',{name:'不降智账号独立优先级值',exact:true});
+    check(await toggle.isChecked()&&await value.inputValue()==='0','saved priority did not reopen');
+    const before=saves.length;await value.fill('-1');await d.getByRole('button',{name:'保存降智检测设置',exact:true}).click();
+    check(saves.length===before&&!await value.evaluate(el=>el.validity.valid),'negative priority was accepted');
+    await value.fill('1.5');check(!await value.evaluate(el=>el.validity.valid),'fractional priority accepted');
+    await value.fill('10001');check(!await value.evaluate(el=>el.validity.valid),'out-of-range priority accepted');
+    await value.fill('10000');await page.setViewportSize({width:375,height:812});
+    await d.getByRole('region',{name:'不降智账号独立优先级',exact:true}).screenshot({path:evidence+'/priority-mobile.png'});
+    check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'priority controls overflow on mobile');
+    await toggle.uncheck();check(await value.isDisabled(),'off switch leaves priority input enabled');
+    check(await d.getByRole('checkbox',{name:'不降智账号独立并发',exact:true}).isChecked(),'priority off changed concurrency policy');
+    await d.getByRole('button',{name:'保存降智检测设置',exact:true}).click();await d.waitFor({state:'detached'});
+    check(saves.at(-1).value.matchedPriority.enabled===false&&saves.at(-1).value.matchedPriority.value===10000,'off policy did not save independently');
+    await page.setViewportSize({width:1480,height:1000});
   });
   await test('missing-group-catalog-retains-configured-rules',async()=>{
     groupsUnavailable=true;

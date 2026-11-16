@@ -186,6 +186,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
       const next = await api(token, "/api/model-fingerprint/settings");
       const rawSettings = next?.settings || {};
       const matched = rawSettings.matchedConcurrency || {};
+      const priority = rawSettings.matchedPriority || {};
       setData({
         ...next,
         settings: {
@@ -195,6 +196,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
             enabled: matched.enabled === true,
             value: matched.value ?? 10,
           },
+          matchedPriority: { enabled: priority.enabled === true, value: priority.value ?? 1 },
         },
       });
       setNewPlan("");
@@ -215,6 +217,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
     })
     : [{ value: "__empty__", label: "暂无未添加的已识别套餐（请直接输入）", disabled: true }];
   const matchedConcurrency = data?.settings?.matchedConcurrency || { enabled: false, value: 10 };
+  const matchedPriority = data?.settings?.matchedPriority || { enabled: false, value: 1 };
   const candidatePlan = normalizePlanName(newPlan);
 
   function addEnabledPlan(raw) {
@@ -256,6 +259,12 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         enabled: mcEnabled,
         value: Number.isInteger(mcValue) && mcValue >= 0 && mcValue <= 10000 ? mcValue : 10,
       };
+      const mpEnabled = matchedPriority.enabled === true;
+      const mpText = String(matchedPriority.value ?? "").trim();
+      const mpValue = /^\d+$/.test(mpText) ? Number(mpText) : NaN;
+      if (mpEnabled && (!Number.isInteger(mpValue) || mpValue < 0 || mpValue > 10000)) {
+        throw new Error("不降智账号优先级必须为 0–10000 的整数");
+      }
       const payload = {
         models: data.settings.models ?? [],
         intervalMinutes: data.settings.intervalMinutes ?? 360,
@@ -266,6 +275,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         testSequence: { first: seq.first, fingerprint: fp, candy: cd },
         enabledPlanTypes: enabledPlans,
         matchedConcurrency: nextMatchedConcurrency,
+        matchedPriority: { enabled: mpEnabled, value: Number.isInteger(mpValue) && mpValue >= 0 && mpValue <= 10000 ? mpValue : 1 },
         groupPolicies: data.settings.groupPolicies || {},
       };
       const saved = await api(token, "/api/model-fingerprint/settings", { settings: payload });
@@ -384,6 +394,35 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
           </label>
         </div>
         <p className="fingerprint-compact-note">仅明确通过时生效；请求失败或证据不足不算明确降智，保持当前并发；明确不通过或关闭本选项将恢复原并发。</p>
+      </section>
+      <section className="fingerprint-section" aria-label="不降智账号独立优先级">
+        <div className="fingerprint-concurrency-row">
+          <div className="fingerprint-concurrency-toggle">
+            <label className="fingerprint-checkbox">
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={matchedPriority.enabled === true}
+                onChange={e => patch({ matchedPriority: { ...matchedPriority, enabled: e.target.checked } })}
+              />
+              <span>不降智账号独立优先级</span>
+            </label>
+            <HelpTip title="不降智账号独立优先级" label="查看不降智账号独立优先级说明">
+              检测明确通过后使用此优先级，优先于套餐和导入日期规则；明确不通过、关闭本选项或移除对应 PlanType 后恢复原优先级。请求失败或证据不足时保持当前值。与独立并发分开设置。
+            </HelpTip>
+          </div>
+          <label className="settings-field fingerprint-matched-concurrency-field">
+            <span>通过后优先级（0–10000）</span>
+            <input
+              aria-label="不降智账号独立优先级值"
+              type="number" min="0" max="10000" step="1" inputMode="numeric"
+              disabled={busy || matchedPriority.enabled !== true}
+              value={matchedPriority.value ?? 1}
+              onChange={e => patch({ matchedPriority: { ...matchedPriority, value: e.target.value } })}
+            />
+          </label>
+        </div>
+        <p className="fingerprint-compact-note">仅明确通过时生效；请求失败或证据不足保持当前值，明确不通过或关闭后恢复原优先级。</p>
       </section>
       <section className="fingerprint-section" aria-label="号池分组加入规则">
         <div className="section-title-row">
@@ -729,6 +768,8 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
       {!data.groupSyncError && data.groupSyncPending && <p role="status" className="fingerprint-transcript-note">分组同步待完成，系统将在号池可用时自动重试。</p>}
       {data.concurrencySyncError && <p role="alert" className="proxy-quality-error">并发同步：{data.concurrencySyncError}</p>}
       {!data.concurrencySyncError && data.concurrencySyncPending && <p className="fingerprint-transcript-note" role="status">并发同步待完成，系统将在号池可用时自动重试。</p>}
+      {data.prioritySyncError && <p role="alert" className="proxy-quality-error">优先级同步：{data.prioritySyncError}</p>}
+      {!data.prioritySyncError && data.prioritySyncPending && <p className="fingerprint-transcript-note" role="status">优先级同步待完成，系统将在号池可用时自动重试。</p>}
       {data.lastError && <p role="alert" className="proxy-quality-error">{data.lastError}</p>}
       {!data.records.length ? <p className="fingerprint-history-empty">暂无检测记录。</p> : <div className="fingerprint-timeline" role="list">
         {data.records.map((record, index) => {
@@ -843,11 +884,10 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
       : effectiveEnabled
         ? "关闭自动降智检测"
         : "开启自动降智检测";
-  const syncSuffix = state.concurrencySyncError
-    ? ` · 并发同步失败：${state.concurrencySyncError}`
-    : state.concurrencySyncPending
-      ? " · 并发同步待完成"
-      : "";
+  const syncError = state.concurrencySyncError || state.prioritySyncError;
+  const syncPending = state.concurrencySyncPending || state.prioritySyncPending;
+  const syncSuffix = [["并发", state.concurrencySyncError, state.concurrencySyncPending], ["优先级", state.prioritySyncError, state.prioritySyncPending]]
+    .map(([name, error, pending]) => error ? ` · ${name}同步失败：${error}` : pending ? ` · ${name}同步待完成` : "").join("");
 
   const checkTitle = () => {
     if (state.phase === "queued") {
@@ -862,17 +902,17 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
     return !manualEligible ? codexStatusBlockReason(job) : cooling ? "冷却中，可手动检测；不解除冷却" : "立即检测";
   };
 
-  return <div className={`fingerprint-cell-body${effectiveEnabled ? "" : " is-disabled"}${retainedHistory ? " has-retained-history" : ""}${state.concurrencySyncError ? " has-sync-error" : ""}`}>
+  return <div className={`fingerprint-cell-body${effectiveEnabled ? "" : " is-disabled"}${retainedHistory ? " has-retained-history" : ""}${syncError ? " has-sync-error" : ""}`}>
     <div className="fingerprint-cell-actions">
       <div className="overload-control fingerprint-toggle-control" title={toggleTitle}><span>降智</span>
       <button type="button" role="switch" aria-checked={effectiveEnabled} aria-label={`${job.email} 降智检测`} title={toggleTitle} className={`status-toggle ${effectiveEnabled ? "on" : ""}`} disabled={!eligible || !token || busy || !planInEnabledList} onClick={() => update({ ...state.override, enabled: !effectiveEnabled })}><span className="status-toggle-track"><span className="status-toggle-thumb" /></span></button>
       </div>
       <div className="fingerprint-action-pair">
       <button type="button" className="fingerprint-check-button" aria-label={`${job.email} 立即检测降智`} title={checkTitle()} aria-busy={checking || checkPending} disabled={!token || busy || checking || !state.models?.length || !manualEligible} onClick={() => update({}, true)}><RefreshCw size={13} className={checking || checkPending ? "spin" : ""} aria-hidden="true" /></button>
-      <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title={eligible ? (state.concurrencySyncError ? `独立降智检测设置（并发同步：${state.concurrencySyncError}）` : "独立降智检测设置") : codexStatusBlockReason(job)} disabled={!eligible || !token} onClick={open}><Settings2 size={14} /></button>
+      <button type="button" className="icon-button compact-icon-btn" aria-label={`${job.email} 独立降智检测设置`} title={eligible ? `独立降智检测设置${syncSuffix}` : codexStatusBlockReason(job)} disabled={!eligible || !token} onClick={open}><Settings2 size={14} /></button>
       </div>
     </div>
-    <div className={`fingerprint-rounds${state.concurrencySyncError ? " is-sync-error" : state.concurrencySyncPending ? " is-sync-pending" : ""}`} role="group" aria-label={`${job.email} 最近 6 轮检测结果${syncSuffix}`}>
+    <div className={`fingerprint-rounds${syncError ? " is-sync-error" : syncPending ? " is-sync-pending" : ""}`} role="group" aria-label={`${job.email} 最近 6 轮检测结果${syncSuffix}`}>
       {rounds.map((round, index) => {
         const status = !round ? "empty" : round.status === "match" ? "match" : round.status === "mismatch" ? "mismatch" : "error";
         const isCandy = round?.method === "candy";
@@ -985,6 +1025,8 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
       {!error && !state.groupSyncError && state.groupSyncPending && <p role="status" className="fingerprint-transcript-note">号池分组同步待完成，号池可用时将自动重试。</p>}
       {!error && state.concurrencySyncError && <p role="alert" className="proxy-quality-error">并发同步：{state.concurrencySyncError}</p>}
       {!error && !state.concurrencySyncError && state.concurrencySyncPending && <p className="fingerprint-transcript-note" role="status">号池并发同步待完成，号池可用时将自动重试。</p>}
+      {!error && state.prioritySyncError && <p role="alert" className="proxy-quality-error">优先级同步：{state.prioritySyncError}</p>}
+      {!error && !state.prioritySyncError && state.prioritySyncPending && <p className="fingerprint-transcript-note" role="status">号池优先级同步待完成，号池可用时将自动重试。</p>}
       {error && <p role="alert" className="proxy-quality-error">{error}</p>}<div className="dialog-actions"><span className="dialog-actions-spacer" /><button type="button" className="cancel-button" disabled={busy} onClick={() => setEditing(false)}>取消</button><button className="primary-button" disabled={busy}>保存账号检测设置</button></div>
     </form></Dialog>}
   </div>;

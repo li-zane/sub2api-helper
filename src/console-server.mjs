@@ -474,6 +474,7 @@ const modelFingerprint = new ModelFingerprintService({
   onAccountFailure: recoverFingerprintAuthorization,
   updateGroups: async (config, id, ids) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ group_ids: ids.map(Number) }) }),
   updateConcurrency: async (config, id, concurrency) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ concurrency }) }),
+  updatePriority: async (config, id, priority) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ priority }) }),
   onChange: invalidateSub2ApiAccountStatusCache,
 });
 async function recoverFingerprintAuthorization(email, failure) {
@@ -754,6 +755,17 @@ async function handleApi(req, res, requestUrl) {
     await syncSubscriptionHistory();
     const records = subscriptionHistory.list(poolPriceMultiplier);
     sendJson(res, 200, { records, total: records.length });
+    return;
+  }
+  if (req.method === "POST" && requestUrl.pathname === "/api/subscription-history/seen") {
+    const changes = (await readJson(req))?.changes;
+    if (!Array.isArray(changes) || changes.length > MAX_BATCH_JOBS || changes.some(change =>
+      typeof change?.id !== "string" || !/^[a-f0-9]{32}$/.test(change.id) || !Number.isSafeInteger(change.revision) || change.revision < 1)) {
+      throw httpError(400, "历史订阅变化标记无效");
+    }
+    await syncSubscriptionHistory();
+    const acknowledged = await subscriptionHistory.markSeen(changes);
+    sendJson(res, 200, { acknowledged });
     return;
   }
   const subscriptionCredentialMatch = /^\/api\/subscription-history\/([a-f0-9]{32})\/credentials$/.exec(requestUrl.pathname);
@@ -1480,8 +1492,7 @@ async function handleApi(req, res, requestUrl) {
         const failed = results.find(result => result.status === "rejected");
         if (failed) throw failed.reason;
       };
-      if (field === "concurrency") await modelFingerprint.manualConcurrency(job.email, write);
-      else await write();
+      await modelFingerprint.manualPoolNumber(job.email, field, write);
     } finally {
       invalidateSub2ApiAccountStatusCache();
     }
@@ -5422,9 +5433,13 @@ async function syncImportDatePriorities(config, listing, profileState = snapshot
     const id = normalizeSub2ApiAccountId(account.id);
     if (!id || accountSyncBlocked(account) || sub2ApiAccountPriority(account) === priority) continue;
     try {
-      await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ priority }) });
-      account.priority = priority;
-      result.updated += 1;
+      await modelFingerprint.poolAccountUpdate(sub2ApiAccountEmail(account), id, monitorBackendIdentity(config), { priority }, async update => {
+        if (sub2ApiAccountPriority(account) !== update.priority) {
+          await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(update) });
+          result.updated += 1;
+        }
+        account.priority = update.priority;
+      }, { updateBase: true });
     } catch (error) {
       result.failed += 1;
       result.error ||= String(error?.message || error).slice(0, 500);
@@ -7338,7 +7353,7 @@ function syncSubscriptionHistory() {
           }
           if (cached?.json) credentials.sub2apiJson = cached.json;
         } catch { /* Keep the last committed snapshot across temporary file/read failures. */ }
-        return { email, planType, historicalPlanType, firstSubscribedAt: evidence?.at,
+        return { email, planType, historicalPlanType, firstSubscribedAt: evidence?.at, accountBanned: accountAutomationBlocked(email),
           remark: job.remark || "", accountCostCny: job.accountCostCny,
           userCostUsd: getSub2ApiAccountStatusForJob(job).usage?.totals?.userCost, credentials };
       }));

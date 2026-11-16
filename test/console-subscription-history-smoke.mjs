@@ -50,6 +50,13 @@ try {
   assert.equal(first.data.total, 2); assert.equal(first.data.records.length, 2);
   let account = first.data.records.find(r => r.email === "history-1@example.test");
   assert.equal(account.accountCostCny, 12.34); assert.equal(account.remark, "原备注"); assert.equal(account.profitCents, null);
+  assert.equal(account.lastChange, null); assert.equal(account.accountBanned, false);
+  assert.equal((await api("/api/subscription-history/seen", { body: { changes: [] }, authenticated: false })).status, 403);
+  for (const body of [null, {}, { changes: null }, { changes: [null] }, { changes: [{ id: account.id, revision: 0 }] },
+    { changes: [{ id: account.id, revision: 1.5 }] }, { changes: [{ id: "invalid", revision: 1 }] },
+    { changes: Array(501).fill({ id: account.id, revision: 1 }) }]) {
+    assert.equal((await api("/api/subscription-history/seen", { body })).status, 400, "malformed acknowledgement was accepted");
+  }
   assert.equal(first.data.records.find(r => r.email === "history-3@example.test").lastPaidPlanType, "business");
   assert(!JSON.stringify(first.data).includes("fixture-access"), "list leaked OAuth credentials");
   assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptions, 2);
@@ -76,12 +83,30 @@ try {
   await start();
   account = (await api("/api/subscription-history")).data.records.find(r => r.id === account.id);
   assert.equal(account.planType, "free"); assert.equal(account.lastPaidPlanType, "team");
+  assert.deepEqual(account.lastChange.types, ["subscription"]); assert.equal(account.lastChange.unread, true);
+  assert(Number.isFinite(Date.parse(account.lastChange.at)), "change detection time missing");
+  const downgrade = account.lastChange;
+  const seen = await api("/api/subscription-history/seen", { body: { changes: [{ id: account.id, revision: downgrade.revision }] } });
+  assert.equal(seen.status, 200); assert.equal(seen.data.acknowledged, 1); assert.equal(seen.headers.get("cache-control"), "no-store");
+  assert.equal((await api("/api/subscription-history/seen", { body: { changes: [{ id: account.id, revision: downgrade.revision }] } })).data.acknowledged, 0);
+  await stop(); await start();
+  account = (await api("/api/subscription-history")).data.records.find(r => r.id === account.id);
+  assert.equal(account.lastChange.unread, false, "acknowledgement was lost on restart");
+  await stop();
+  const bannedMeta = JSON.parse(await fs.readFile(meta, "utf8"));
+  Object.assign(bannedMeta, { status: "banned", auto_repair_blocked: true, auto_repair_blocked_reason: "fixture account_deactivated" });
+  await fs.writeFile(meta, JSON.stringify(bannedMeta)); await start();
+  account = (await api("/api/subscription-history")).data.records.find(r => r.id === account.id);
+  assert.equal(account.accountBanned, true); assert.deepEqual(account.lastChange.types, ["banned"]); assert.equal(account.lastChange.unread, true);
+  assert.equal((await api("/api/subscription-history/seen", { body: { changes: [{ id: account.id, revision: downgrade.revision }] } })).data.acknowledged, 0);
+  const ban = account.lastChange;
   assert.equal((await api("/api/jobs/delete-batch", { body: { ids: [id(1)] } })).status, 200);
   account = (await api("/api/subscription-history")).data.records.find(r => r.id === account.id);
   assert.equal(account.present, false); assert.equal(account.remark, "最新备注");
+  assert.deepEqual(account.lastChange, ban, "removing an account discarded its unread notice");
   assert.equal((await api(`/api/subscription-history/${account.id}/credentials`)).data.text, `history-1@example.test----fixture-new-password----${secret}`);
   await stop(); await start();
   assert.equal((await api("/api/subscription-history")).data.total, 3);
   assert.equal((await api(`/api/subscription-history/${"a".repeat(32)}/credentials`)).status, 404);
-  console.log("SUBSCRIPTION_HISTORY_HTTP_PASS auth; paid-only/backfill; live cost/remark/credential updates; no secret list; downgrade/delete/restart retention; no-store copy");
+  console.log("SUBSCRIPTION_HISTORY_HTTP_PASS auth; paid-only/backfill; live cost/remark/credential updates; no secret list; downgrade/ban notices; ack validation/idempotence/restart/stale guard; delete retention; no-store copy/ack");
 } finally { await stop(); await fs.rm(temp, { recursive: true, force: true }); }

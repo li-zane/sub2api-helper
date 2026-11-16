@@ -30,6 +30,7 @@ const remote = http.createServer(async (req, res) => {
   let raw = ""; for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw || "{}");
   const account = records.find((row) => req.url === `/api/v1/admin/accounts/${row.id}`);
+  if (req.method === "GET" && account) return res.end(JSON.stringify({ data: account }));
   if (req.method === "PUT" && account) {
     if (account.id === failId) { res.statusCode = 500; return res.end('{"error":"fixture priority failure"}'); }
     puts.push({ id: account.id, body }); Object.assign(account, body); return res.end(JSON.stringify({ data: account }));

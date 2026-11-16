@@ -85,6 +85,10 @@ export function subscriptionStatusInfo(record, formatPlanType = defaultFormatPla
   const paidLabel = formatPlanType(paidRaw || currentRaw);
   const currentLabel = currentRaw ? formatPlanType(currentRaw) : "";
 
+  if (record?.accountBanned) {
+    return { kind: "banned", badgeText: "已封禁", planLabel: paidLabel,
+      rawPlan: paidRaw || currentRaw, detail: `账号已封禁，原订阅 ${paidLabel}` };
+  }
   if (!record?.present) {
     return {
       kind: "removed",
@@ -171,6 +175,14 @@ function formatRecordTimeSummary(record) {
   return { label, title: tooltipLines.join("\n") };
 }
 
+function subscriptionChangeLabel(change, formatPlanType) {
+  const labels = [];
+  if (change.types?.includes("subscription")) labels.push(`${formatPlanType(change.fromPlanType)} → ${formatPlanType(change.toPlanType)}`);
+  if (change.types?.includes("banned")) labels.push("账号封禁");
+  if (change.types?.includes("recovered")) labels.push("封禁解除");
+  return labels.join(" · ");
+}
+
 export function SubscriptionHistoryDialog({
   open = true,
   token,
@@ -193,6 +205,7 @@ export function SubscriptionHistoryDialog({
   const [copyingId, setCopyingId] = useState(null);
   const [copiedId, setCopiedId] = useState(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState(null);
+  const [highlightedChanges, setHighlightedChanges] = useState({});
 
   const openRef = useRef(open);
   openRef.current = open;
@@ -204,6 +217,9 @@ export function SubscriptionHistoryDialog({
   const credAbortRef = useRef(null);
   const copiedTimerRef = useRef(null);
   const loadHistoryRef = useRef(null);
+  const loadedEpochRef = useRef(0);
+  const acknowledgedRef = useRef(new Set());
+  const seenAbortRef = useRef(new Set());
   const onTotalChangeRef = useRef(onTotalChange);
   onTotalChangeRef.current = onTotalChange;
 
@@ -215,6 +231,10 @@ export function SubscriptionHistoryDialog({
   }, []);
 
   useEffect(() => {
+    loadedEpochRef.current = 0;
+    for (const controller of seenAbortRef.current) controller.abort();
+    seenAbortRef.current.clear();
+    acknowledgedRef.current = new Set();
     if (!open) {
       aliveRef.current = false;
       epochRef.current += 1;
@@ -249,6 +269,7 @@ export function SubscriptionHistoryDialog({
     setCopyingId(null);
     setCopiedId(null);
     setLastUpdatedAt(null);
+    setHighlightedChanges({});
 
     if (!token || typeof request !== "function") {
       if (token) {
@@ -282,6 +303,7 @@ export function SubscriptionHistoryDialog({
         const nextRecords = Array.isArray(data?.records) ? data.records : [];
         const nextTotal = typeof data?.total === "number" && Number.isFinite(data.total) ? data.total : nextRecords.length;
         setRecords((current) => shareJobList(current, nextRecords));
+        loadedEpochRef.current = epoch;
         setTotal(nextTotal);
         setHasLoaded(true);
         setError("");
@@ -331,6 +353,8 @@ export function SubscriptionHistoryDialog({
       listAbortRef.current = null;
       credAbortRef.current?.abort();
       credAbortRef.current = null;
+      for (const controller of seenAbortRef.current) controller.abort();
+      seenAbortRef.current.clear();
       clearCopiedTimer();
       loadHistoryRef.current = null;
     };
@@ -340,6 +364,35 @@ export function SubscriptionHistoryDialog({
     () => records.filter((record) => matchesSubscriptionSearch(record, search)),
     [records, search],
   );
+
+  useEffect(() => {
+    if (!open || !hasLoaded || loadedEpochRef.current !== epochRef.current) return;
+    const changes = filteredRecords.filter(record => record.lastChange?.unread)
+      .map(record => ({ id: record.id, revision: record.lastChange.revision }));
+    if (!changes.length) return;
+    // Keep the highlight throughout this visit, even after a poll returns the saved read state.
+    setHighlightedChanges(current => {
+      if (changes.every(change => current[change.id] === change.revision)) return current;
+      return { ...current, ...Object.fromEntries(changes.map(change => [change.id, change.revision])) };
+    });
+    const acknowledged = acknowledgedRef.current;
+    const pending = changes.filter(change => !acknowledged.has(`${change.id}:${change.revision}`));
+    for (const change of pending) acknowledged.add(`${change.id}:${change.revision}`);
+    const epoch = epochRef.current;
+    // Only rendered, search-visible records are acknowledged; GET never consumes notices.
+    for (let offset = 0; offset < pending.length; offset += 500) {
+      const batch = pending.slice(offset, offset + 500);
+      const controller = new AbortController();
+      seenAbortRef.current.add(controller);
+      void request("/api/subscription-history/seen", {
+        method: "POST", body: JSON.stringify({ changes: batch }), signal: controller.signal,
+      }).catch(() => {
+        if (epoch === epochRef.current) {
+          for (const change of batch) acknowledged.delete(`${change.id}:${change.revision}`);
+        }
+      }).finally(() => seenAbortRef.current.delete(controller));
+    }
+  }, [open, hasLoaded, filteredRecords, lastUpdatedAt, request]);
 
   const handleRetry = useCallback(() => {
     if (!loadHistoryRef.current) return;
@@ -576,9 +629,11 @@ export function SubscriptionHistoryDialog({
                 const isCopying = copyingId === record.id;
                 const isCopied = copiedId === record.id;
                 const pTone = planTone(status.rawPlan);
+                const change = record.lastChange;
+                const isUnread = change && (change.unread || highlightedChanges[record.id] === change.revision);
 
                 return (
-                  <div className="sub-history-row" role="listitem" key={record.id}>
+                  <div className={`sub-history-row${isUnread ? " is-unread" : ""}`} role="listitem" key={record.id}>
                     <div className="sub-history-col-account">
                       <button
                         type="button"
@@ -599,6 +654,12 @@ export function SubscriptionHistoryDialog({
                       {timeInfo.label && (
                         <span className="sub-history-time" title={timeInfo.title || undefined}>
                           {timeInfo.label}
+                        </span>
+                      )}
+                      {change?.at && (
+                        <span className="sub-history-change">
+                          <span>{isUnread && <strong className="sub-history-unread-label">新变化 · </strong>}{subscriptionChangeLabel(change, formatPlanType)}</span>
+                          <span>变化时间：<time dateTime={change.at}>{displayDateTime(change.at)}</time></span>
                         </span>
                       )}
                     </div>

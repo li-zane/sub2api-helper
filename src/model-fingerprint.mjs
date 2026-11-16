@@ -7,7 +7,8 @@ import { fingerprintFailure, fingerprintRecovery } from "./model-fingerprint-req
 import { CANDY_PROMPT, CANDY_PROMPT_SHA256, gradeCandy, DEFAULT_TEST_SEQUENCE, normalizeTestSequence, sequenceStep, aggregateRequestUsage } from "./candy-test.mjs";
 
 const invalid = message => Object.assign(new Error(message), { status: 400 });
-export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, failureRetries: 1, failureRetryDelaySeconds: 5, testSequence: DEFAULT_TEST_SEQUENCE, enabledPlanTypes: [], matchedConcurrency: { enabled: false, value: 10 }, groupPolicies: {} });
+export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, failureRetries: 1, failureRetryDelaySeconds: 5, testSequence: DEFAULT_TEST_SEQUENCE, enabledPlanTypes: [], matchedConcurrency: { enabled: false, value: 10 }, matchedPriority: { enabled: false, value: 1 }, groupPolicies: {} });
+const poolNumberPolicies = { concurrency: { setting: "matchedConcurrency", label: "并发", update: "updateConcurrency" }, priority: { setting: "matchedPriority", label: "优先级", update: "updatePriority" } };
 const HISTORY_WINDOW_MS = 60 * 60_000;
 const roundSummary = record => record ? { ...record, models: record.models?.map(({ requests, ...model }) => model) } : null;
 export function normalizeFingerprintModels(value) {
@@ -43,6 +44,8 @@ export function normalizeFingerprintSettings(raw = {}) {
   const enabledPlanTypes = [...new Set(plans.map(plan => plan.trim().toLowerCase()))].sort();
   const matchedConcurrency = raw.matchedConcurrency === undefined ? { enabled: false, value: 10 } : raw.matchedConcurrency;
   if (!matchedConcurrency || typeof matchedConcurrency.enabled !== "boolean" || !Number.isInteger(matchedConcurrency.value) || matchedConcurrency.value < 0 || matchedConcurrency.value > 10000) throw invalid("不降智账号并发必须为 0–10000 的整数，开关必须为布尔值");
+  const matchedPriority = raw.matchedPriority === undefined ? { enabled: false, value: 1 } : raw.matchedPriority;
+  if (!matchedPriority || typeof matchedPriority.enabled !== "boolean" || !Number.isInteger(matchedPriority.value) || matchedPriority.value < 0 || matchedPriority.value > 10000) throw invalid("不降智账号优先级必须为 0–10000 的整数，开关必须为布尔值");
   const groupPolicies = Object.create(null);
   if (raw.groupPolicies != null && (typeof raw.groupPolicies !== "object" || Array.isArray(raw.groupPolicies))) throw invalid("降智分组规则无效");
   for (const [profile, rules] of Object.entries(raw.groupPolicies || {})) {
@@ -53,7 +56,7 @@ export function normalizeFingerprintSettings(raw = {}) {
       groupPolicies[profile][id] = mode;
     }
   }
-  return { models, intervalMinutes: interval(raw.intervalMinutes ?? 360), maxConcurrentAccounts, minProbability, failureRetries, failureRetryDelaySeconds, testSequence: normalizeTestSequence(raw.testSequence), enabledPlanTypes, matchedConcurrency: { enabled: matchedConcurrency.enabled, value: matchedConcurrency.value }, groupPolicies };
+  return { models, intervalMinutes: interval(raw.intervalMinutes ?? 360), maxConcurrentAccounts, minProbability, failureRetries, failureRetryDelaySeconds, testSequence: normalizeTestSequence(raw.testSequence), enabledPlanTypes, matchedConcurrency: { enabled: matchedConcurrency.enabled, value: matchedConcurrency.value }, matchedPriority: { enabled: matchedPriority.enabled, value: matchedPriority.value }, groupPolicies };
 }
 export function normalizeFingerprintOverride(raw = {}) {
   if (raw.enabled != null && typeof raw.enabled !== "boolean") throw invalid("账号检测开关必须为布尔值或继承");
@@ -89,8 +92,8 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updateGroups, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
-    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updateGroups, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
+  constructor({ filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
+    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
     this.manualChecks = new Set();
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
     this.detectorLoader = detectorLoader || (() => loadDetector({ source: "https://lm.ikale.io/data/", cache: path.join(path.dirname(filePath), "model-fingerprint-data.bin") }));
@@ -130,6 +133,7 @@ export class ModelFingerprintService {
       for (const [email, entry] of Object.entries(data.accounts || {})) {
         const saved = entry;
         this.accounts.set(email, { ...saved, override: normalizeFingerprintOverride(entry.override), recentResults: this.latestRounds(entry), result: roundSummary(entry.result), phase: "idle", groupSyncPending: Boolean(entry.groupSyncPending || data.groupPolicyVersion !== 2 && Object.keys(this.settings.groupPolicies).length && ["match", "mismatch"].includes(entry.result?.status)), concurrencySyncPending: Boolean(entry.concurrencySyncPending || Object.keys(entry.concurrencyOverrides || {}).length || this.settings.matchedConcurrency.enabled && entry.result?.status === "match") });
+        this.accounts.get(email).prioritySyncPending = Boolean(entry.prioritySyncPending || Object.keys(entry.priorityOverrides || {}).length || this.settings.matchedPriority.enabled && entry.result?.status === "match");
       }
       // Persist pruning immediately, including legacy histories that previously kept 200 rounds.
       await this.persist();
@@ -168,7 +172,7 @@ export class ModelFingerprintService {
     const current = entry?.result?.signature === this.signature(email, planType);
     const config = this.effective(email, planType), queued = this.queued.has(email);
     const { signature: _signature, index: _index, ...sequence } = this.sequence(email, planType);
-    return { ...config, sequence, runningMethod: this.active.has(email) ? entry?.activeMethod : null, override: entry?.override || { enabled: null, models: null, intervalMinutes: null, testSequence: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status, method }) => ({ checkedAt, status, method: method || 'fingerprint' })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? roundSummary(entry?.result) : null, previousResult: !current ? roundSummary(entry?.result) : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncPending: Boolean(entry?.groupSyncPending), groupSyncError: entry?.groupSyncError || null, concurrencySyncPending: Boolean(entry?.concurrencySyncPending), concurrencySyncError: entry?.concurrencySyncError || null };
+    return { ...config, sequence, runningMethod: this.active.has(email) ? entry?.activeMethod : null, override: entry?.override || { enabled: null, models: null, intervalMinutes: null, testSequence: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status, method }) => ({ checkedAt, status, method: method || 'fingerprint' })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? roundSummary(entry?.result) : null, previousResult: !current ? roundSummary(entry?.result) : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncPending: Boolean(entry?.groupSyncPending), groupSyncError: entry?.groupSyncError || null, concurrencySyncPending: Boolean(entry?.concurrencySyncPending), concurrencySyncError: entry?.concurrencySyncError || null, prioritySyncPending: Boolean(entry?.prioritySyncPending), prioritySyncError: entry?.prioritySyncError || null };
   }
   latestRounds(entry) {
     const records = new Map();
@@ -193,7 +197,7 @@ export class ModelFingerprintService {
   history(email, planType) {
     const state = this.snapshot(email, planType);
     const records = this.latestRounds(this.accounts.get(label(email))).map(roundSummary);
-    return { since: records.at(-1)?.checkedAt || new Date(this.now()).toISOString(), until: new Date(this.now()).toISOString(), records, phase: state.phase, runningMethod:state.runningMethod, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, testSequence:state.testSequence, sequence:state.sequence, lastError: state.lastError, groupSyncPending: state.groupSyncPending, groupSyncError: state.groupSyncError, concurrencySyncError: state.concurrencySyncError, concurrencySyncPending: state.concurrencySyncPending };
+    return { since: records.at(-1)?.checkedAt || new Date(this.now()).toISOString(), until: new Date(this.now()).toISOString(), records, phase: state.phase, runningMethod:state.runningMethod, queuePosition: state.queuePosition, enabled: state.enabled, nextCheckAt: state.nextCheckAt, models: state.models, testSequence:state.testSequence, sequence:state.sequence, lastError: state.lastError, groupSyncPending: state.groupSyncPending, groupSyncError: state.groupSyncError, concurrencySyncError: state.concurrencySyncError, concurrencySyncPending: state.concurrencySyncPending, prioritySyncError: state.prioritySyncError, prioritySyncPending: state.prioritySyncPending };
   }
   historyDetail(email, roundId) {
     const record = this.latestRounds(this.accounts.get(label(email))).find(r => (r.id || r.checkedAt) === roundId);
@@ -201,7 +205,7 @@ export class ModelFingerprintService {
     return { record };
   }
   saveSettings(raw) {
-    const next = normalizeFingerprintSettings({ ...raw, groupPolicies: Object.hasOwn(raw, "groupPolicies") ? raw.groupPolicies : this.settings.groupPolicies });
+    const next = normalizeFingerprintSettings({ ...raw, matchedPriority: Object.hasOwn(raw, "matchedPriority") ? raw.matchedPriority : this.settings.matchedPriority, groupPolicies: Object.hasOwn(raw, "groupPolicies") ? raw.groupPolicies : this.settings.groupPolicies });
     const samplingSettings = settings => [settings.models, settings.minProbability, settings.intervalMinutes, settings.enabledPlanTypes, settings.testSequence];
     const changedSampling = JSON.stringify(samplingSettings(next)) !== JSON.stringify(samplingSettings(this.settings));
     if (changedSampling) this.invalidate();
@@ -210,7 +214,7 @@ export class ModelFingerprintService {
       const previous = this.settings, previousAccounts = this.accounts;
       this.settings = next;
       // Keep active entry identities when only policy/queue limits change.
-      for (const entry of this.accounts.values()) { if (changedSampling) entry.nextCheckAt = null; entry.concurrencySyncPending = true; entry.groupSyncPending = true; }
+      for (const entry of this.accounts.values()) { if (changedSampling) entry.nextCheckAt = null; entry.concurrencySyncPending = true; entry.prioritySyncPending = true; entry.groupSyncPending = true; }
       try { await this.persist(); } catch (error) { this.settings = previous; this.accounts = previousAccounts; throw error; }
       this.onChange(); this.drain(); this.trigger(); return this.publicSettings();
     });
@@ -220,7 +224,7 @@ export class ModelFingerprintService {
     return this.mutate(async () => {
       this.invalidateAccount(email);
       const previous = this.accounts.get(email);
-      this.accounts.set(email, { ...previous, override, nextCheckAt: null, lastError: null, concurrencySyncPending: true });
+      this.accounts.set(email, { ...previous, override, nextCheckAt: null, lastError: null, concurrencySyncPending: true, prioritySyncPending: true });
       try { await this.persist(); } catch (error) { if (previous) this.accounts.set(email, previous); else this.accounts.delete(email); throw error; }
       if (notify) this.onChange(); this.trigger();
     });
@@ -378,6 +382,7 @@ export class ModelFingerprintService {
         // unscorable. Transport/auth failures keep the slot for the next check.
         if (results.length && results.every(r=>r.samplingComplete || method === 'candy' && r.responseComplete)) entry.sequenceCursor = {signature:step.signature,index:(step.index+1)%step.total};
         entry.concurrencySyncPending = true;
+        entry.prioritySyncPending = true;
         entry.groupSyncPending = ["match", "mismatch"].includes(entry.result.status);
         entry.groupSyncError = null;
         await this.persist();
@@ -410,6 +415,7 @@ export class ModelFingerprintService {
   async reconcileLocked(email, planType, targets, revision) {
     await this.reconcileGroupsLocked(email, planType, targets, revision);
     await this.reconcileConcurrencyLocked(email, planType, targets, revision);
+    await this.reconcilePoolNumberLocked(email, planType, targets, revision, "priority");
   }
   async reconcileGroupsLocked(email, planType, targets, revision) {
     if (this.isBlocked(email)) return;
@@ -435,23 +441,28 @@ export class ModelFingerprintService {
     await this.persist();
     this.onChange();
   }
-  async reconcileConcurrencyLocked(email, planType, targets, revision) {
+  reconcileConcurrencyLocked(email, planType, targets, revision) {
+    return this.reconcilePoolNumberLocked(email, planType, targets, revision, "concurrency");
+  }
+  async reconcilePoolNumberLocked(email, planType, targets, revision, field) {
     if (this.isBlocked(email)) return;
     const entry = this.accounts.get(email), result = this.groupResult(email, planType), context = this.getContext();
-    if (!entry?.concurrencySyncPending || !this.updateConcurrency) return;
-    const policy = this.settings.matchedConcurrency;
+    const descriptor = poolNumberPolicies[field], update = this[descriptor.update];
+    const pendingKey = `${field}SyncPending`, errorKey = `${field}SyncError`;
+    if (!entry?.[pendingKey] || !update) return;
+    const policy = this.settings[descriptor.setting];
     const enabled = policy.enabled && this.effective(email, planType).enabled;
-    const overrides = entry.concurrencyOverrides ||= {};
-    const externalEdits = entry.concurrencyExternalEdits ||= {};
+    const overrides = entry[`${field}Overrides`] ||= {};
+    const externalEdits = entry[`${field}ExternalEdits`] ||= {};
     try {
       for (const target of targets) {
-        const account = await this.getAccount(context.config, target.id);
-        if (this.isBlocked(email) || revision !== this.revision || context.backend !== this.getContext().backend) return;
         let owned = overrides[target.id];
         if (owned && owned.backend !== context.backend) continue;
         if (!owned && (!enabled || result?.status !== "match")) continue;
-        const current = account.concurrency;
-        if (!Number.isInteger(current) || current < 0 || current > 10000) throw new Error("账号并发值不可用");
+        const account = await this.getAccount(context.config, target.id);
+        if (this.isBlocked(email) || revision !== this.revision || context.backend !== this.getContext().backend) return;
+        const current = account[field];
+        if (!Number.isInteger(current) || current < 0 || current > 10000) throw new Error(`账号${descriptor.label}值不可用`);
         // A write may have succeeded before a crash. Its intent was persisted
         // first; the next read safely confirms it or retries from the old value.
         if (owned && current !== owned.appliedValue && !(owned.pending && current === owned.previousValue)) {
@@ -461,64 +472,76 @@ export class ModelFingerprintService {
         const restore = !enabled || result?.status === "mismatch" || !result;
         if (restore) {
           if (owned) {
-            if (current !== owned.baseValue) await this.updateConcurrency(context.config, target.id, owned.baseValue);
+            if (current !== owned.baseValue) await update(context.config, target.id, owned.baseValue);
             delete overrides[target.id];
             await this.persist();
           }
           continue;
         }
         // Transport/unknown results preserve existing values. Only a current,
-        // explicit pass can apply the special concurrency, for either method.
+        // explicit pass can apply the special pool value, for either method.
         if (result?.status !== "match" || externalEdits[target.id] === result.id) continue;
         if (result.identities?.[target.id] !== fingerprintAccountIdentity(account)) continue;
         if (!owned && current === policy.value) continue;
         const intent = { baseValue: owned?.baseValue ?? current, appliedValue: policy.value, previousValue: current, backend: context.backend, pending: true };
         overrides[target.id] = intent;
         await this.persist();
-        if (current !== policy.value) await this.updateConcurrency(context.config, target.id, policy.value);
+        if (current !== policy.value) await update(context.config, target.id, policy.value);
         intent.pending = false;
         await this.persist();
       }
-      entry.concurrencySyncPending = false; entry.concurrencySyncError = null;
-    } catch { entry.concurrencySyncError = "检测结果已保存，并发同步失败；稍后自动重试"; }
+      entry[pendingKey] = false; entry[errorKey] = null;
+    } catch { entry[errorKey] = `检测结果已保存，${descriptor.label}同步失败；稍后自动重试`; }
     await this.persist();
     this.onChange();
   }
   // Serialize manual pool edits with policy writes. A new test round may apply
   // the policy again; polling/restarts never undo the user's latest edit.
   manualConcurrency(email, operation) {
+    return this.manualPoolNumber(email, "concurrency", operation);
+  }
+  manualPriority(email, operation) {
+    return this.manualPoolNumber(email, "priority", operation);
+  }
+  manualPoolNumber(email, field, operation) {
     return this.mutate(async () => {
       const entry = this.accounts.get(label(email));
       return operation(async (id) => {
         if (!entry) return;
-        delete (entry.concurrencyOverrides ||= {})[id];
-        (entry.concurrencyExternalEdits ||= {})[id] = entry.result?.id;
+        delete (entry[`${field}Overrides`] ||= {})[id];
+        (entry[`${field}ExternalEdits`] ||= {})[id] = entry.result?.id;
         await this.persist();
       });
     });
   }
   poolAccountUpdate(email, id, backend, body, write, { updateBase = false } = {}) {
-    if (!Object.hasOwn(body, "concurrency")) return write(body);
+    const fields = Object.keys(poolNumberPolicies).filter(field => Object.hasOwn(body, field));
+    if (!fields.length) return write(body);
     // With the optional policy off and no managed override, profile syncing
     // retains its existing network concurrency instead of taking the state lock.
-    if (!this.settings.matchedConcurrency.enabled && !this.accounts.get(label(email))?.concurrencyOverrides?.[id]) return write(body);
+    if (!fields.some(field => this.settings[poolNumberPolicies[field].setting].enabled || this.accounts.get(label(email))?.[`${field}Overrides`]?.[id])) return write(body);
     return this.mutate(async () => {
-      const entry = this.accounts.get(label(email)), owned = entry?.concurrencyOverrides?.[id];
-      if (!owned || owned.backend !== backend) return write(body);
-      const account = await this.getAccount(this.getContext().config, id);
-      if (account.concurrency !== owned.appliedValue) {
-        delete entry.concurrencyOverrides[id];
-        (entry.concurrencyExternalEdits ||= {})[id] = entry.result?.id;
-        await this.persist();
-        return write(body);
+      const entry = this.accounts.get(label(email)), next = { ...body };
+      let account;
+      for (const field of fields) {
+        const owned = entry?.[`${field}Overrides`]?.[id];
+        if (!owned || owned.backend !== backend) continue;
+        account ||= await this.getAccount(this.getContext().config, id);
+        if (account[field] !== owned.appliedValue && !(owned.pending && account[field] === owned.previousValue)) {
+          delete entry[`${field}Overrides`][id];
+          (entry[`${field}ExternalEdits`] ||= {})[id] = entry.result?.id;
+          await this.persist();
+          continue;
+        }
+        // Profile/date edits update the value restored later; OAuth refreshes
+        // retain both the applied policy and the original baseline.
+        if (updateBase && Number.isInteger(body[field]) && owned.baseValue !== body[field]) {
+          owned.baseValue = body[field];
+          await this.persist();
+        }
+        next[field] = owned.appliedValue;
       }
-      // Profile edits change the value restored later; credential refreshes
-      // keep both the effective override and its original base.
-      if (updateBase && Number.isInteger(body.concurrency)) {
-        owned.baseValue = body.concurrency;
-        await this.persist();
-      }
-      return write({ ...body, concurrency: owned.appliedValue });
+      return write(next);
     });
   }
   setTickMs(ms) {
@@ -534,7 +557,7 @@ export class ModelFingerprintService {
       if (this.isBlocked(job.email)) continue;
       if (this.inFlight.has(label(job.email))) continue;
       const state = this.snapshot(job.email, job.planType), entry = this.accounts.get(label(job.email));
-      if (entry?.concurrencySyncPending || entry?.groupSyncPending) {
+      if (entry?.concurrencySyncPending || entry?.prioritySyncPending || entry?.groupSyncPending) {
         const targets = (await this.listTargets(context.config)).filter(t => label(t.email) === label(job.email));
         await this.reconcile(label(job.email), job.planType, targets);
       }

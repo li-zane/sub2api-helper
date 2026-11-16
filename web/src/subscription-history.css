@@ -355,6 +355,30 @@ dialog.batch-dialog.subscription-history-dialog {
   background: var(--sh-surface-hover);
 }
 
+.subscription-history-dialog .sub-history-row.is-unread {
+  background: var(--sh-danger-soft);
+}
+
+.subscription-history-dialog .sub-history-row.is-unread .sub-history-email,
+.subscription-history-dialog .sub-history-row.is-unread .sub-history-change {
+  color: var(--sh-danger-strong);
+}
+
+.subscription-history-dialog .sub-history-change {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--sh-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.subscription-history-dialog .sub-history-unread-label {
+  font-weight: 600;
+}
+
 /* Account & Remark Column */
 .subscription-history-dialog .sub-history-col-account {
   min-width: 0;
@@ -500,6 +524,14 @@ dialog.batch-dialog.subscription-history-dialog {
 
 .subscription-history-dialog .sub-history-status.status-removed {
   color: var(--sh-muted);
+}
+
+.subscription-history-dialog .sub-history-status.status-banned {
+  color: var(--sh-danger-strong);
+}
+
+.subscription-history-dialog .sub-history-status.status-banned .sub-history-status-dot {
+  background: currentColor;
 }
 
 /* Cost & Profit Columns */

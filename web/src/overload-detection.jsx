@@ -139,8 +139,9 @@ export function OverloadDetection({ job, token, onError }) {
         disabled={!eligible || cooldownBusy || !token || (!cooldown?.configured && !cooldownEnabled)} onClick={toggleCooldown}><span aria-hidden="true" /></button></div>
       </div>
       <div className="overload-chart-status">
-      <div className={`overload-dashboard overload-chart${cooling ? " is-cooling" : ""}`}
-        title={cooldownHint || undefined} aria-label={cooldownHint || undefined}>
+      <div className={`overload-dashboard overload-chart${cooling ? " is-cooling" : ""}${!eligible ? " is-unavailable" : ""}`}
+        title={!eligible ? codexStatusBlockReason(job) : cooldownHint || undefined}
+        aria-label={!eligible ? codexStatusBlockReason(job) : cooldownHint || undefined}>
       <OverloadEnergy value={dashboard.quarter} enabled={enabled} />
       <div className="overload-plot" ref={plotRef}>
         <svg viewBox="0 0 164 56" role="group" aria-label={`${grid.historyMinutes} 分钟刻度的过载与请求数量，每格按过载统计窗口 ${grid.bucketMinutes} 分钟，当前格累计至最近同步，两条线独立缩放`}>

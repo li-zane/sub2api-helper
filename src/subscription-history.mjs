@@ -8,6 +8,11 @@ const emailKey = value => text(value).trim().toLowerCase();
 const timestamp = value => Number.isFinite(Date.parse(value)) ? value : null;
 const nonSubscriptions = new Set(["free", "free_plan", "chatgptfreeplan", "unknown", "null", "undefined", "none", "n/a"]);
 export const isSubscribedPlan = value => Boolean(text(value).trim()) && !nonSubscriptions.has(text(value).trim().toLowerCase());
+const knownPlan = value => {
+  const plan = text(value).trim().toLowerCase();
+  if (["free", "free_plan", "chatgptfreeplan"].includes(plan)) return "free";
+  return isSubscribedPlan(plan) ? plan : null;
+};
 const recordId = email => crypto.createHash("sha256").update(email).digest("hex").slice(0, 32);
 const secretKeys = ["password", "totpSecret", "mailApiUrl", "mailRequestBody", "sub2apiJson"];
 
@@ -68,14 +73,24 @@ export class SubscriptionHistory {
         if (!previous && !paidPlan) continue;
         const credentials = { ...previous?.credentials };
         for (const key of secretKeys) if (typeof observation.credentials?.[key] === "string") credentials[key] = observation.credentials[key];
+        const fromPlan = knownPlan(previous?.planType);
+        const toPlan = knownPlan(observation.planType) || fromPlan;
+        const accountBanned = typeof observation.accountBanned === "boolean" ? observation.accountBanned : previous?.accountBanned === true;
+        const types = [];
+        if (fromPlan && toPlan && fromPlan !== toPlan) types.push("subscription");
+        if (accountBanned && previous?.accountBanned !== true) types.push("banned");
+        if (!accountBanned && previous?.accountBanned === true) types.push("recovered");
         const record = { ...previous, id: recordId(email), email,
           remark: text(observation.remark), accountCostCny: restoredAccountCost(observation.accountCostCny),
-          planType: text(observation.planType) || previous?.planType || null,
+          planType: toPlan,
+          accountBanned,
           lastPaidPlanType: isSubscribedPlan(observation.planType) ? observation.planType : previous?.lastPaidPlanType || paidPlan,
           firstSubscribedAt: previous?.firstSubscribedAt || timestamp(observation.firstSubscribedAt) || at,
           userCostUsd: typeof observation.userCostUsd === "number" && Number.isFinite(observation.userCostUsd) && observation.userCostUsd >= 0
             ? observation.userCostUsd : previous?.userCostUsd ?? null,
           present: present.has(email), credentials };
+        if (types.length) record.lastChange = { revision: (previous?.lastChange?.revision || 0) + 1,
+          at, types, fromPlanType: fromPlan, toPlanType: toPlan };
         if (!previous || JSON.stringify({ ...previous, updatedAt: undefined }) !== JSON.stringify({ ...record, updatedAt: undefined })) record.updatedAt = at;
         next.set(email, record);
       }
@@ -87,6 +102,27 @@ export class SubscriptionHistory {
     this.writes = work;
     return work;
   }
+  markSeen(changes) {
+    const work = this.writes.catch(() => {}).then(async () => {
+      const revisions = new Map(changes.map(change => [change.id, change.revision]));
+      const next = new Map(this.records);
+      let acknowledged = 0;
+      for (const [email, record] of next) {
+        const revision = record.lastChange?.revision;
+        // Exact revisions prevent a delayed acknowledgement from hiding a newer change.
+        if (!revision || revisions.get(record.id) !== revision || record.lastSeenChangeRevision === revision) continue;
+        next.set(email, { ...record, lastSeenChangeRevision: revision });
+        acknowledged++;
+      }
+      if (acknowledged) {
+        await writePrivateJsonAtomic(this.file, { version: 1, records: [...next.values()] });
+        this.records = next;
+      }
+      return acknowledged;
+    });
+    this.writes = work;
+    return work;
+  }
   list(multiplier) {
     return [...this.records.values()].sort((a, b) => String(b.firstSubscribedAt).localeCompare(String(a.firstSubscribedAt)) || a.email.localeCompare(b.email)).map(record => {
       const profit = accountProfitCents(record.userCostUsd, multiplier, record.accountCostCny);
@@ -94,6 +130,8 @@ export class SubscriptionHistory {
         userCostUsd: record.userCostUsd, poolPriceMultiplier: multiplier,
         profitCents: profit === null ? null : profit.toString(), profitDisplay: formatCnyCents(profit),
         planType: record.planType, lastPaidPlanType: record.lastPaidPlanType,
+        accountBanned: record.accountBanned === true,
+        lastChange: record.lastChange ? { ...structuredClone(record.lastChange), unread: record.lastSeenChangeRevision !== record.lastChange.revision } : null,
         firstSubscribedAt: record.firstSubscribedAt, updatedAt: record.updatedAt, present: record.present,
         canCopyCredentials: Boolean(subscriptionCredentialText(record.email, record.credentials)) };
     });
