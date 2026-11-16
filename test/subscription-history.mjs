@@ -16,6 +16,15 @@ try {
   assert.equal(store.size, 1); let record = store.list(7)[0];
   assert.equal(record.profitCents, "5766"); assert.equal(record.profitDisplay, "￥57.66"); assert.equal(record.email, "paid@example.test");
   assert(!JSON.stringify(record).includes("password")); assert(!JSON.stringify(record).includes("private"));
+  const originalId = record.id, originalRevision = record.lastChange?.revision;
+  await store.reconcile([{ ...base, loginEmail: "edited@example.test" }], [base.email]);
+  assert.equal(store.size, 1); assert.equal(store.list(7)[0].id, originalId);
+  assert.equal(store.list(7)[0].email, "edited@example.test");
+  assert.equal(store.list(7)[0].lastChange?.revision, originalRevision, "local email edit created a subscription-change badge");
+  assert.equal(store.credentials(originalId), "edited@example.test----old-password----ABCDEFGHIJKLMNOP");
+  const emailRestored = new SubscriptionHistory(file); await emailRestored.load();
+  assert.equal(emailRestored.list(7)[0].email, "edited@example.test");
+  await store.reconcile([base], [base.email]);
   const original = await fs.readFile(file, "utf8");
   await store.reconcile([base], [base.email]); assert.equal(await fs.readFile(file, "utf8"), original, "unchanged polling rewrote history");
   now = "2026-11-15T01:00:00Z";

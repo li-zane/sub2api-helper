@@ -121,7 +121,7 @@ export function appendTimestampedAccountLog(job, text, now = new Date()) {
   appendAccountLog(job, stamped);
 }
 
-export async function readAccountLog(job, { full = false, credentials = false } = {}) {
+export async function readAccountLog(job, { full = false, credentials = false, emailHistory = [] } = {}) {
   hydrateAccountLog(job);
   const file = await fs.open(path.join(directory(job), "account.log"), "r");
   let text, totalBytes;
@@ -133,7 +133,7 @@ export async function readAccountLog(job, { full = false, credentials = false } 
     text = buffer.toString("utf8");
   } finally { await file.close(); }
   if (credentials) {
-    const events = await readCredentialHistory(directory(job));
+    const events = [...await readCredentialHistory(directory(job)), ...emailHistory];
     text += "\n=== 凭据历史（原始/候选新值；以 stage 区分准备与已提交） ===\n";
     text += events.map(event => JSON.stringify(event, null, 2)).join("\n");
   }

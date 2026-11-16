@@ -25,3 +25,4 @@ task-settings.json
 credentials/
 .vite/
 release-dist/
+account-login-emails.json

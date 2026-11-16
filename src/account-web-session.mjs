@@ -28,7 +28,11 @@ export async function readAccountWebSession(job) {
     setWebSessionState(job, "expired");
     throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: Web 登录态无效，请重新登录");
   }
-  try { validateAccountBrowserIdentity(session.identity, job.email || session.email); }
+  const allowedEmails = new Set([job.email || session.email, ...(job.emailAliases || [])].map(value => String(value).trim().toLowerCase()));
+  try {
+    validateAccountBrowserIdentity(session.identity, allowedEmails.has(session.identity?.email)
+      ? session.identity.email : job.email || session.email);
+  }
   catch (error) { setWebSessionState(job, "expired"); throw error; }
   if (session.email !== session.identity.email) { setWebSessionState(job, "expired"); throw new Error("SESSION_CREDENTIALS_UNAVAILABLE: Web 登录态与账号不匹配"); }
   job.webSessionContext = {

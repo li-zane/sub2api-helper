@@ -56,7 +56,7 @@ async (page) => {
 
   await run('pool-controls-and-separate-operation-time', async () => {
     const headings = await page.locator('thead th').allTextContents();
-    check(headings.length === 12 && headings.includes('Codex 状态'), 'table has wrong headers/column count');
+    check(headings.length === 12 && headings.some(text => text.startsWith('Codex 状态')), 'table has wrong headers/column count');
     check(!headings.includes('过载检测') && !headings.includes('降智检测') && !headings.includes('优先级') && !headings.includes('启用'), 'old columns remain');
     check(await row.locator('.pool-status-cell .sub2api-priority-cell input[type=number]').count() === 1, 'priority is not inside pool cell');
     check(await row.locator('.pool-status-cell .sub2api-concurrency-cell input[type=number]').count() === 1, 'concurrency is not inside pool cell');

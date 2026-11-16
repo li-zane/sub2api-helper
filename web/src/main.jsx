@@ -1,3 +1,4 @@
+import { OVERLOAD_FILTER_LABELS, FINGERPRINT_FILTER_LABELS } from "./codex-status-filter.mjs";
 import { SmsNumberEstimate } from "./sms-number-estimate.jsx";
 import { ProxyCreateDialog } from "./proxy-create-dialog.jsx";
 import { SubscriptionHistoryDialog } from "./subscription-history.jsx";
@@ -169,7 +170,7 @@ const REGION_NAMES = typeof Intl.DisplayNames === "function"
   ? new Intl.DisplayNames(["zh-CN"], { type: "region" })
   : null;
 
-function ColumnHeaderFilter({ title, value, onChange, options, activeLabel, align = "left" }) {
+function ColumnHeaderFilter({ title, value, onChange, options, activeLabel, align = "left", buttonLabel }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
   const active = Boolean(value);
@@ -210,6 +211,7 @@ function ColumnHeaderFilter({ title, value, onChange, options, activeLabel, alig
         aria-expanded={open}
         aria-label={`筛选${title}，当前：${activeLabel}`}
       >
+        {buttonLabel && <span>{buttonLabel}</span>}
         <Filter size={11} className="column-filter-icon" aria-hidden="true" />
         {active && <span className="column-filter-dot" aria-hidden="true" />}
       </button>
@@ -278,6 +280,8 @@ function App() {
   const [planTypeFilter, setPlanTypeFilter] = useState("");
   const [sub2apiPoolFilter, setSub2apiPoolFilter] = useState("");
   const [sub2apiEnabledFilter, setSub2apiEnabledFilter] = useState("");
+  const [overloadFilter, setOverloadFilter] = useState("");
+  const [fingerprintFilter, setFingerprintFilter] = useState("");
   const [planTypeOptions, setPlanTypeOptions] = useState([]);
   const [statusOptions, setStatusOptions] = useState([]);
   const [sub2apiPoolOptions, setSub2apiPoolOptions] = useState([]);
@@ -549,6 +553,8 @@ function App() {
           planType: planTypeFilter || undefined,
           sub2apiPool: sub2apiPoolFilter || undefined,
           sub2apiEnabled: sub2apiEnabledFilter || undefined,
+          overload: overloadFilter || undefined,
+          fingerprint: fingerprintFilter || undefined,
         };
         const data = emailFilter.length
           ? await apiFetch(token, "/api/jobs/query", {
@@ -567,6 +573,8 @@ function App() {
               ...(filters.planType ? { planType: filters.planType } : {}),
               ...(filters.sub2apiPool ? { sub2apiPool: filters.sub2apiPool } : {}),
               ...(filters.sub2apiEnabled ? { sub2apiEnabled: filters.sub2apiEnabled } : {}),
+              ...(filters.overload ? { overload: filters.overload } : {}),
+              ...(filters.fingerprint ? { fingerprint: filters.fingerprint } : {}),
             }).toString()}`, { signal: controller.signal });
         if (!stopped) {
           setJobs(current => shareJobList(current, preserveNewerAccountCosts(current, data.jobs)));
@@ -614,7 +622,7 @@ function App() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, page, searchQuery, lockedOnly, webSessionFilter, summaryFilter, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter, jobsRefreshKey]);
+  }, [token, page, searchQuery, lockedOnly, webSessionFilter, summaryFilter, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter, overloadFilter, fingerprintFilter, jobsRefreshKey]);
 
   useEffect(() => {
     if (!token || !features.sub2apiMonitor) return undefined;
@@ -754,7 +762,7 @@ function App() {
   const passwordAddSelectedCount = selectedJobs.filter((job) => job.canAddPassword).length;
   const canAddPasswordSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && passwordAddSelectedCount > 0;
-  const hasJobFilters = Boolean(summaryFilter || searchQuery.trim() || lockedOnly || webSessionFilter || emailFilter.length || accountTypeFilter || statusFilter || planTypeFilter || sub2apiPoolFilter || sub2apiEnabledFilter);
+  const hasJobFilters = Boolean(summaryFilter || searchQuery.trim() || lockedOnly || webSessionFilter || emailFilter.length || accountTypeFilter || statusFilter || planTypeFilter || sub2apiPoolFilter || sub2apiEnabledFilter || overloadFilter || fingerprintFilter);
   const availablePlanTypes = [...new Set([
     ...planTypeOptions,
     ...jobs.map((job) => job.planType).filter(Boolean),
@@ -1555,6 +1563,8 @@ function App() {
     setPlanTypeFilter("");
     setSub2apiPoolFilter("");
     setSub2apiEnabledFilter("");
+    setOverloadFilter("");
+    setFingerprintFilter("");
     setSelectedJobIds(new Set());
     setExpandedJobId(null);
     setPage(1);
@@ -2455,7 +2465,19 @@ function App() {
                 <th className="recent-operation-time-heading">最近操作时间</th>
                 <th className="added-time-heading">添加时间</th>
                 <th className="bound-ip-heading">绑定 IP</th>
-                <th className="codex-status-heading">Codex 状态</th>
+                <th className="codex-status-heading" aria-label="Codex 状态">
+                  <div className="column-filter-heading codex-status-filters">
+                    <span className="codex-status-title">Codex 状态</span>
+                    <ColumnHeaderFilter title="过载" buttonLabel="过载" value={overloadFilter}
+                      onChange={value => applyColumnFilter(setOverloadFilter, value)}
+                      options={[{ value: "", label: "全部" }, ...Object.entries(OVERLOAD_FILTER_LABELS).map(([value, label]) => ({ value, label }))]}
+                      activeLabel={OVERLOAD_FILTER_LABELS[overloadFilter] || "全部"} align="right" />
+                    <ColumnHeaderFilter title="降智" buttonLabel="降智" value={fingerprintFilter}
+                      onChange={value => applyColumnFilter(setFingerprintFilter, value)}
+                      options={[{ value: "", label: "全部" }, ...Object.entries(FINGERPRINT_FILTER_LABELS).map(([value, label]) => ({ value, label }))]}
+                      activeLabel={FINGERPRINT_FILTER_LABELS[fingerprintFilter] || "全部"} align="right" />
+                  </div>
+                </th>
                 <th className="actions-heading">操作</th>
               </tr>
             </thead>
@@ -2567,6 +2589,7 @@ function App() {
           onJobUpdate={(nextJob) => {
             setJobs(current => current.map(item => item.id === nextJob.id ? shareSnapshot(item, nextJob) : item));
             setCredentialJob(current => current?.id === nextJob.id ? shareSnapshot(current, nextJob) : current);
+            setJobSelectionIndex(current => current.map(item => item.id === nextJob.id ? { ...item, email: nextJob.email } : item));
           }}
           onClose={() => setCredentialJob(null)}
           onError={setError}
@@ -4868,6 +4891,8 @@ function LogDialog({ token, job, onClose }) {
 
 function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, totpReplaceAvailable, onJobUpdate, onClose, onError }) {
   const [details, setDetails] = useState(null);
+  const [loginEmail, setLoginEmail] = useState(job.email);
+  const [emailSaving, setEmailSaving] = useState(false);
   const [password, setPassword] = useState("");
   const [totpSecret, setTotpSecret] = useState("");
   const [sub2apiJson, setSub2apiJson] = useState("");
@@ -4885,7 +4910,8 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
   const [passwordReplacing, setPasswordReplacing] = useState(false);
   const mutationRequestRef = useRef(false);
   const [dialogError, setDialogError] = useState("");
-  const credentialBusy = saving || replacing || passwordReplacing;
+  const credentialBusy = saving || emailSaving || replacing || passwordReplacing;
+  const emailDirty = loginEmail !== (details?.email || job.email);
   const rotationView = totpRotationView(job, replacing);
 
   useEffect(() => {
@@ -4897,6 +4923,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
         if (stopped) return;
         const next = data.credentials || {};
         setDetails(next);
+        setLoginEmail(next.email || job.email);
         setPassword(next.password || "");
         setTotpSecret(next.totpSecret || "");
         setSub2apiJson(next.sub2apiJson || "");
@@ -4955,6 +4982,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
       const data = await apiFetch(token, `/api/jobs/${job.id}/credentials`);
       const next = data.credentials || {};
       setDetails(next);
+      setLoginEmail(next.email || job.email);
       setPassword(next.password || "");
       setTotpSecret(next.totpSecret || "");
       setSub2apiJson(next.sub2apiJson || "");
@@ -4970,7 +4998,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
 
   async function save(event) {
     event.preventDefault();
-    if (readOnlyReason || credentialBusy || mutationRequestRef.current) return;
+    if (readOnlyReason || credentialBusy || mutationRequestRef.current || emailDirty) return;
     const body = {};
     if (passwordDirty) body.password = password;
     if (totpDirty) {
@@ -4995,6 +5023,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
       });
       const next = data.credentials || {};
       setDetails(next);
+      setLoginEmail(next.email || job.email);
       setPassword(next.password || "");
       setTotpSecret(next.totpSecret || "");
       setSub2apiJson(next.sub2apiJson || sub2apiJson);
@@ -5012,8 +5041,36 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
     }
   }
 
+  async function saveLoginEmail() {
+    if (readOnlyReason || loading || refreshing || credentialBusy || mutationRequestRef.current || passwordDirty || totpDirty || !emailDirty) return;
+    const email = loginEmail.trim().toLowerCase();
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || /[\x00-\x1f\x7f]|----/.test(email)) {
+      setDialogError("请输入有效的登录邮箱");
+      return;
+    }
+    mutationRequestRef.current = true;
+    setEmailSaving(true);
+    setDialogError("");
+    try {
+      const data = await apiFetch(token, `/api/jobs/${job.id}/email`, {
+        method: "PUT", body: JSON.stringify({ email, expectedEmail: details?.email || job.email }),
+      });
+      const next = data.credentials || {};
+      setDetails(next);
+      setLoginEmail(next.email || email);
+      if (data.job) onJobUpdate?.(data.job);
+      notify("登录邮箱已保存，变更记录已加入凭据历史");
+      onError("");
+    } catch (error) {
+      setDialogError(error.message);
+    } finally {
+      mutationRequestRef.current = false;
+      setEmailSaving(false);
+    }
+  }
+
   async function replaceTotp() {
-    if (readOnlyReason || credentialBusy || mutationRequestRef.current || passwordDirty || totpDirty) return;
+    if (readOnlyReason || credentialBusy || mutationRequestRef.current || passwordDirty || totpDirty || emailDirty) return;
     const confirmed = window.confirm(
       "确定轮换该账号的 2FA 吗？服务会先停用旧 2FA，再创建并激活新密钥；如果远端创建失败，账号可能暂时没有 2FA，需要在本窗口重试。",
     );
@@ -5040,7 +5097,7 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
   }
 
   async function replacePassword() {
-    if (readOnlyReason || credentialBusy || mutationRequestRef.current || passwordDirty || totpDirty || !job.canReplacePassword) return;
+    if (readOnlyReason || credentialBusy || mutationRequestRef.current || passwordDirty || totpDirty || emailDirty || !job.canReplacePassword) return;
     if (!window.confirm("确定为该账号生成并轮换 12 位随机密码吗？原密码和候选新密码会保留在凭据历史中，成功后更新本地记录。")) return;
     mutationRequestRef.current = true;
     setPasswordReplacing(true);
@@ -5109,8 +5166,8 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
               type="button"
               className="icon-button"
               onClick={refreshCredentials}
-              disabled={loading || refreshing || credentialBusy || passwordDirty || totpDirty}
-              title={passwordDirty || totpDirty ? "请先保存当前修改" : "重新读取凭据"}
+              disabled={loading || refreshing || credentialBusy || passwordDirty || totpDirty || emailDirty}
+              title={passwordDirty || totpDirty || emailDirty ? "请先保存当前修改" : "重新读取凭据"}
               aria-label="重新读取凭据"
             >
               <RefreshCw className={refreshing ? "spin" : ""} size={17} />
@@ -5125,6 +5182,23 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
           <div className="credential-loading"><LoaderCircle className="spin" size={18} />正在读取凭据</div>
         ) : (
           <>
+            <div className="credential-field">
+              <strong>登录邮箱</strong>
+              <div className="secret-input-row">
+                <Mail size={15} aria-hidden="true" />
+                <input aria-label="登录邮箱" type="email" value={loginEmail}
+                  readOnly={Boolean(readOnlyReason) || credentialBusy}
+                  onChange={event => setLoginEmail(event.target.value)}
+                  onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void saveLoginEmail(); } }}
+                  autoComplete="off" spellCheck="false" style={{ minWidth: 0 }} />
+                <button type="button" className="secret-toggle" aria-label="保存登录邮箱" title={passwordDirty || totpDirty ? "请先保存密码或 2FA 的修改" : "保存登录邮箱"}
+                  disabled={Boolean(readOnlyReason) || refreshing || credentialBusy || !emailDirty || passwordDirty || totpDirty}
+                  onClick={saveLoginEmail}>
+                  {emailSaving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+                </button>
+              </div>
+            </div>
+            <p className="prompt-line" style={{ whiteSpace: "normal" }}>修改 Helper 中的登录邮箱；旧邮箱与变更时间保留在凭据历史中。</p>
             <div className="credential-field">
               <div className="credential-json-heading">
                 <strong>密码</strong>
@@ -5247,20 +5321,20 @@ function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, to
             {dialogError && <div className="dialog-error" role="alert"><CircleAlert size={15} /><AccountText text={dialogError} /></div>}
             <div className="dialog-actions credential-dialog-actions" style={{ flexWrap: "wrap" }}>
               {!isBlockedAccount(job) && totpReplaceAvailable && job.canReplaceTotp && (
-                <button type="button" className="danger-button" onClick={replaceTotp} disabled={credentialBusy || Boolean(readOnlyReason) || passwordDirty || totpDirty} title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : undefined)}>
+                <button type="button" className="danger-button" onClick={replaceTotp} disabled={credentialBusy || Boolean(readOnlyReason) || passwordDirty || totpDirty || emailDirty} title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : undefined)}>
                   {replacing ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}轮换 2FA
                 </button>
               )}
               {!isBlockedAccount(job) && (
                 <button type="button" className="danger-button" onClick={replacePassword}
-                  disabled={Boolean(readOnlyReason) || credentialBusy || !job.canReplacePassword || passwordDirty || totpDirty}
+                  disabled={Boolean(readOnlyReason) || credentialBusy || !job.canReplacePassword || passwordDirty || totpDirty || emailDirty}
                   aria-busy={passwordReplacing} title={readOnlyReason || (passwordDirty || totpDirty ? "请先保存当前修改" : "生成 12 位随机密码并轮换；原值和新值永久保留")}>
                   {passwordReplacing ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}一键轮换密码
                 </button>
               )}
               <span className="dialog-actions-spacer" />
               <button type="button" className="cancel-button" onClick={onClose} disabled={credentialBusy}>关闭</button>
-              <button type="submit" className="primary-button" disabled={Boolean(readOnlyReason) || loading || credentialBusy || (!passwordDirty && !totpDirty)} title={readOnlyReason || undefined}>
+              <button type="submit" className="primary-button" disabled={Boolean(readOnlyReason) || loading || credentialBusy || emailDirty || (!passwordDirty && !totpDirty)} title={readOnlyReason || undefined}>
                 {saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存凭据
               </button>
             </div>

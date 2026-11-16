@@ -3909,7 +3909,7 @@ button.status-toggle.on .status-toggle-thumb {
 .codex-status .fingerprint-toggle-control { grid-area: fingerprint; }
 .codex-status .fingerprint-action-pair { grid-area: actions; }
 .codex-status .overload-chart-status { grid-area: dashboard; min-width: 0; }
-.codex-status .fingerprint-rounds { grid-area: rounds; }
+.codex-status .fingerprint-rounds { grid-area: rounds; margin-top: 5px; }
 
 .codex-status .overload-control { justify-content: flex-start; gap: 4px; min-height: 20px; }
 .codex-status .overload-control > span { font-size: 11px; color: var(--muted); }
@@ -8930,3 +8930,7 @@ select option {
     flex: 1;
   }
 }
+
+.codex-status-filters { flex-wrap: wrap; justify-content: center; width: 132px; gap: 3px 8px; }
+.codex-status-filters .codex-status-title { flex-basis: 100%; }
+.codex-status-filters .column-filter-btn { width: auto; gap: 3px; padding: 0 5px; font-size: 10px; }

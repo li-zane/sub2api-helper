@@ -49,17 +49,19 @@ try {
   assert.equal(service.snapshot('a@test', 'free').concurrencySyncError, null);
   await save({ matchedConcurrency: { enabled: true, value: 30 } }); await reconcile();
   assert.deepEqual([...accounts.values()].map(a => a.concurrency), [30, 30]);
-  // Manual helper edits win until a new genuine round.
+  // Manual helper edits win across repeated rounds with the same verdict.
   await service.manualConcurrency('a@test', async record => { accounts.get(1).concurrency = 7; await record(1); });
   await save({ maxConcurrentAccounts: 4 }); await reconcile(); assert.equal(accounts.get(1).concurrency, 7);
   await service.stop(); service = new ModelFingerprintService(options); await service.load(); await reconcile(); assert.equal(accounts.get(1).concurrency, 7);
-  await service.run('a@test', 'free', { manual: true }); assert.equal(accounts.get(1).concurrency, 30);
+  await service.run('a@test', 'free', { manual: true }); assert.equal(accounts.get(1).concurrency, 7, 'same verdict must preserve manual concurrency');
   // External pool edit must not be overwritten by restore, either.
   accounts.get(2).concurrency = 8;
   await save({ matchedConcurrency: { enabled: false, value: 30 } }); await reconcile();
   assert.deepEqual([...accounts.values()].map(a => a.concurrency), [7, 8]);
   await save({ matchedConcurrency: { enabled: true, value: 40 } });
-  await service.run('a@test', 'free', { manual: true });
+  answer = '最终答案：22'; await service.run('a@test', 'free', { manual: true });
+  accounts.get(1).concurrency = 7; accounts.get(2).concurrency = 8;
+  answer = '最终答案：21'; await service.run('a@test', 'free', { manual: true });
   const writeProfile = body => { Object.assign(accounts.get(1), body); };
   await service.poolAccountUpdate('a@test', 1, backend, { concurrency: 12, name: 'new profile' }, writeProfile, { updateBase: true });
   assert.equal(accounts.get(1).concurrency, 40, 'profile changes preserve active special concurrency');

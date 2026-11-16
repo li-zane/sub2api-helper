@@ -92,8 +92,8 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
-    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
+  constructor({ filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
+    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolAccount, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
     this.manualChecks = new Set();
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
     this.detectorLoader = detectorLoader || (() => loadDetector({ source: "https://lm.ikale.io/data/", cache: path.join(path.dirname(filePath), "model-fingerprint-data.bin") }));
@@ -189,6 +189,12 @@ export class ModelFingerprintService {
   }
   historyRecord(result) { return { id: result.id, method: result.method || 'fingerprint', sequencePosition: result.sequencePosition, usage: result.usage, transcriptVersion: result.transcriptVersion, requestCount: result.requestCount, checkedAt: result.checkedAt, status: result.status, models: result.models, error: result.error || null, failure: result.failure || null, durationMs: result.durationMs ?? null, source: result.source || "legacy", legacy: !result.models?.every(m => m.method === 'candy' || m.probabilityStatus || m.status === "error") }; }
   recordResult(entry, result) {
+    if (["match", "mismatch"].includes(result.status)) {
+      for (const field of Object.keys(poolNumberPolicies)) for (const guard of Object.values(entry[`${field}ManualEdits`] || {})) {
+        if (guard.backend === (result.backend ?? this.getContext().backend) && guard.verdict !== result.status) guard.invalidated = true;
+      }
+      entry.poolNumberVerdict = result.status;
+    }
     const record = this.historyRecord({ ...result, id: crypto.randomUUID(), transcriptVersion: 1, requestCount: (result.models || []).reduce((n, m) => n + (m.requests?.length || 0), 0) });
     entry.recentResults = this.latestRounds({ recentResults: [record, ...this.latestRounds(entry)] });
     entry.result = roundSummary({ ...result, id: record.id, transcriptVersion: 1, requestCount: record.requestCount });
@@ -413,6 +419,7 @@ export class ModelFingerprintService {
     return this.mutate(() => this.reconcileLocked(email, planType, targets, revision));
   }
   async reconcileLocked(email, planType, targets, revision) {
+    await this.observePlanLocked(email, planType);
     await this.reconcileGroupsLocked(email, planType, targets, revision);
     await this.reconcileConcurrencyLocked(email, planType, targets, revision);
     await this.reconcilePoolNumberLocked(email, planType, targets, revision, "priority");
@@ -441,6 +448,37 @@ export class ModelFingerprintService {
     await this.persist();
     this.onChange();
   }
+  poolNumberState(email, planType, backend = this.getContext().backend) {
+    const entry = this.accounts.get(label(email));
+    const knownPlan = value => value && label(value) !== "unknown" ? label(value) : null;
+    const plan = knownPlan(planType) || knownPlan(this.getContext().jobs?.find(job => label(job.email) === label(email))?.planType)
+      || entry?.poolNumberPlanType || "unknown";
+    const verdict = entry?.poolNumberVerdict || this.latestRounds(entry).find(round => ["match", "mismatch"].includes(round.status))?.status || null;
+    return { planType: plan, verdict, backend };
+  }
+  manualPoolEditActive(guard, state) {
+    return Boolean(guard && guard.backend === state.backend && !guard.invalidated
+      && guard.planType === state.planType && guard.verdict === state.verdict);
+  }
+  observePlan(email, planType) {
+    return this.mutate(() => this.observePlanLocked(email, planType));
+  }
+  async observePlanLocked(email, planType, backend = this.getContext().backend) {
+    const entry = this.accounts.get(label(email));
+    if (!entry || !planType || label(planType) === "unknown") return;
+    const previous = structuredClone(entry);
+    let changed = entry.poolNumberPlanType !== label(planType);
+    for (const field of Object.keys(poolNumberPolicies)) for (const guard of Object.values(entry[`${field}ManualEdits`] || {})) {
+      if (guard.backend === backend && guard.planType !== label(planType) && !guard.invalidated) {
+        guard.invalidated = true; entry[`${field}SyncPending`] = true; changed = true;
+      }
+    }
+    entry.poolNumberPlanType = label(planType);
+    if (changed) {
+      try { await this.persist(); }
+      catch (error) { this.accounts.set(label(email), previous); throw error; }
+    }
+  }
   reconcileConcurrencyLocked(email, planType, targets, revision) {
     return this.reconcilePoolNumberLocked(email, planType, targets, revision, "concurrency");
   }
@@ -454,11 +492,25 @@ export class ModelFingerprintService {
     const enabled = policy.enabled && this.effective(email, planType).enabled;
     const overrides = entry[`${field}Overrides`] ||= {};
     const externalEdits = entry[`${field}ExternalEdits`] ||= {};
+    const manualEdits = entry[`${field}ManualEdits`] ||= {};
+    const state = this.poolNumberState(email, planType);
     try {
       for (const target of targets) {
         let owned = overrides[target.id];
+        let manual = manualEdits[target.id];
+        if (this.manualPoolEditActive(manual, state)) continue;
+        if (manual && manual.backend === context.backend) {
+          // Releasing a manual exception re-enters the current plan policy.
+          // Resolve current defaults so edits to the profile while protected
+          // become the baseline after the exception ends.
+          if (owned) {
+            const defaults = await this.getPoolNumberDefaults?.(email, target.id, state.planType);
+            if (Number.isInteger(defaults?.[field])) owned.baseValue = defaults[field];
+          }
+          delete manualEdits[target.id]; delete externalEdits[target.id];
+        }
         if (owned && owned.backend !== context.backend) continue;
-        if (!owned && (!enabled || result?.status !== "match")) continue;
+        if (!owned && !manual && !Object.hasOwn(externalEdits, target.id) && (!enabled || result?.status !== "match")) continue;
         const account = await this.getAccount(context.config, target.id);
         if (this.isBlocked(email) || revision !== this.revision || context.backend !== this.getContext().backend) return;
         const current = account[field];
@@ -466,7 +518,16 @@ export class ModelFingerprintService {
         // A write may have succeeded before a crash. Its intent was persisted
         // first; the next read safely confirms it or retries from the old value.
         if (owned && current !== owned.appliedValue && !(owned.pending && current === owned.previousValue)) {
-          delete overrides[target.id]; externalEdits[target.id] = entry.result?.id;
+          manualEdits[target.id] = { ...state, value: current };
+          entry.poolNumberVerdict ??= state.verdict;
+          owned.appliedValue = current; owned.pending = false;
+          delete externalEdits[target.id];
+          continue;
+        }
+        if (!manual && Object.hasOwn(externalEdits, target.id)) {
+          manualEdits[target.id] = { ...state, value: current };
+          entry.poolNumberVerdict ??= state.verdict;
+          delete externalEdits[target.id];
           continue;
         }
         const restore = !enabled || result?.status === "mismatch" || !result;
@@ -480,10 +541,10 @@ export class ModelFingerprintService {
         }
         // Transport/unknown results preserve existing values. Only a current,
         // explicit pass can apply the special pool value, for either method.
-        if (result?.status !== "match" || externalEdits[target.id] === result.id) continue;
+        if (result?.status !== "match") continue;
         if (result.identities?.[target.id] !== fingerprintAccountIdentity(account)) continue;
         if (!owned && current === policy.value) continue;
-        const intent = { baseValue: owned?.baseValue ?? current, appliedValue: policy.value, previousValue: current, backend: context.backend, pending: true };
+        const intent = { planType: state.planType, baseValue: owned?.baseValue ?? current, appliedValue: policy.value, previousValue: current, backend: context.backend, pending: true };
         overrides[target.id] = intent;
         await this.persist();
         if (current !== policy.value) await update(context.config, target.id, policy.value);
@@ -495,53 +556,94 @@ export class ModelFingerprintService {
     await this.persist();
     this.onChange();
   }
-  // Serialize manual pool edits with policy writes. A new test round may apply
-  // the policy again; polling/restarts never undo the user's latest edit.
-  manualConcurrency(email, operation) {
-    return this.manualPoolNumber(email, "concurrency", operation);
+  // A manual value survives polling, repeated equal verdicts, profile changes,
+  // OAuth refreshes and restarts. Only a plan or definitive verdict transition
+  // releases that field's exception; transport failures are not transitions.
+  manualConcurrency(email, operation, options) {
+    return this.manualPoolNumber(email, "concurrency", operation, options);
   }
-  manualPriority(email, operation) {
-    return this.manualPoolNumber(email, "priority", operation);
+  manualPriority(email, operation, options) {
+    return this.manualPoolNumber(email, "priority", operation, options);
   }
-  manualPoolNumber(email, field, operation) {
+  manualPoolNumber(email, field, operation, options = {}) {
     return this.mutate(async () => {
-      const entry = this.accounts.get(label(email));
-      return operation(async (id) => {
-        if (!entry) return;
-        delete (entry[`${field}Overrides`] ||= {})[id];
-        (entry[`${field}ExternalEdits`] ||= {})[id] = entry.result?.id;
-        await this.persist();
+      email = label(email);
+      const context = this.getContext();
+      const state = this.poolNumberState(email, options.planType, options.backend || context.backend);
+      let entry = this.accounts.get(email), recording = Promise.resolve();
+      return operation(id => {
+        const task = recording.catch(() => {}).then(async () => {
+          const account = await this.getPoolAccount(options.config || context.config, id);
+          const value = options.value ?? account[field];
+          if (!Number.isInteger(value) || value < 0 || value > 10000) throw invalid("账号数值必须为 0–10000 的整数");
+          const previous = entry ? structuredClone(entry) : null;
+          if (!entry) { entry = { override: normalizeFingerprintOverride() }; this.accounts.set(email, entry); }
+          try {
+            const overrides = entry[`${field}Overrides`] ||= {}, owned = overrides[id];
+            const defaults = await this.getPoolNumberDefaults?.(email, id, state.planType);
+            const baseValue = owned?.backend === state.backend ? owned.baseValue : Number.isInteger(defaults?.[field]) ? defaults[field] : account[field];
+            overrides[id] = { planType: state.planType, baseValue, appliedValue: value, previousValue: account[field], backend: state.backend, pending: true };
+            (entry[`${field}ManualEdits`] ||= {})[id] = { ...state, value };
+            delete (entry[`${field}ExternalEdits`] ||= {})[id];
+            entry.poolNumberPlanType = state.planType;
+            entry.poolNumberVerdict ??= state.verdict;
+            await this.persist();
+          } catch (error) {
+            if (previous) { entry = previous; this.accounts.set(email, entry); }
+            else { entry = null; this.accounts.delete(email); }
+            throw error;
+          }
+        });
+        recording = task;
+        return task;
       });
     });
   }
-  poolAccountUpdate(email, id, backend, body, write, { updateBase = false } = {}) {
+  poolAccountUpdate(email, id, backend, body, write, { updateBase = false, planType } = {}) {
     const fields = Object.keys(poolNumberPolicies).filter(field => Object.hasOwn(body, field));
-    if (!fields.length) return write(body);
-    // With the optional policy off and no managed override, profile syncing
-    // retains its existing network concurrency instead of taking the state lock.
-    if (!fields.some(field => this.settings[poolNumberPolicies[field].setting].enabled || this.accounts.get(label(email))?.[`${field}Overrides`]?.[id])) return write(body);
+    const existing = this.accounts.get(label(email));
+    const hasManualEdits = Object.keys(poolNumberPolicies).some(field => Object.values(existing?.[`${field}ManualEdits`] || {}).some(guard => guard.backend === backend));
+    if (!hasManualEdits && !fields.some(field => this.settings[poolNumberPolicies[field].setting].enabled || existing?.[`${field}Overrides`]?.[id]
+      || Object.hasOwn(existing?.[`${field}ExternalEdits`] || {}, id))) return write(body);
     return this.mutate(async () => {
       const entry = this.accounts.get(label(email)), next = { ...body };
+      const state = this.poolNumberState(email, planType, backend);
+      await this.observePlanLocked(email, state.planType, backend);
       let account;
       for (const field of fields) {
+        const manualEdits = entry?.[`${field}ManualEdits`] || {};
+        let manual = manualEdits[id];
+        if (!manual && Object.hasOwn(entry?.[`${field}ExternalEdits`] || {}, id)) {
+          account ||= await this.getPoolAccount(this.getContext().config, id);
+          manual = (entry[`${field}ManualEdits`] ||= {})[id] = { ...state, value: account[field] };
+          entry.poolNumberVerdict ??= state.verdict;
+          delete entry[`${field}ExternalEdits`][id];
+          await this.persist();
+        }
+        if (this.manualPoolEditActive(manual, state)) { delete next[field]; continue; }
+        if (manual && manual.backend === backend) {
+          delete manualEdits[id]; delete (entry[`${field}Overrides`] || {})[id];
+          delete (entry[`${field}ExternalEdits`] || {})[id];
+          await this.persist();
+        }
         const owned = entry?.[`${field}Overrides`]?.[id];
         if (!owned || owned.backend !== backend) continue;
+        if (owned.planType && owned.planType !== state.planType) {
+          delete entry[`${field}Overrides`][id]; await this.persist(); continue;
+        }
         account ||= await this.getAccount(this.getContext().config, id);
         if (account[field] !== owned.appliedValue && !(owned.pending && account[field] === owned.previousValue)) {
-          delete entry[`${field}Overrides`][id];
-          (entry[`${field}ExternalEdits`] ||= {})[id] = entry.result?.id;
-          await this.persist();
-          continue;
+          (entry[`${field}ManualEdits`] ||= {})[id] = { ...state, value: account[field] };
+          entry.poolNumberVerdict ??= state.verdict;
+          owned.appliedValue = account[field]; owned.pending = false;
+          await this.persist(); delete next[field]; continue;
         }
-        // Profile/date edits update the value restored later; OAuth refreshes
-        // retain both the applied policy and the original baseline.
         if (updateBase && Number.isInteger(body[field]) && owned.baseValue !== body[field]) {
-          owned.baseValue = body[field];
-          await this.persist();
+          owned.baseValue = body[field]; await this.persist();
         }
         next[field] = owned.appliedValue;
       }
-      return write(next);
+      return Object.keys(next).length ? write(next) : undefined;
     });
   }
   setTickMs(ms) {

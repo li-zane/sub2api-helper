@@ -565,7 +565,10 @@ async function run() {
         }
       }
     }
-    if (checkpoint && args.webOnly) checkpoint = null;
+    if (checkpoint && (args.webOnly || args.email && checkpoint.email.trim().toLowerCase() !== email.trim().toLowerCase())) {
+      if (!args.webOnly) console.log("[resume] Login email changed; starting a fresh login instead of resuming the old checkpoint.");
+      checkpoint = null;
+    }
 
     if (checkpoint && !args.webOnly) {
       email = checkpoint.email || email;
@@ -904,10 +907,11 @@ async function runSavedWebSecurityTask({
   }
   checkpoint ||= await readCheckpoint();
   let checkpointClient = null;
+  if (checkpoint && checkpoint.email.trim().toLowerCase() !== email.trim().toLowerCase()) {
+    console.log(`[${label}] Login email changed; ignoring the old login checkpoint.`);
+    checkpoint = null;
+  }
   if (checkpoint) {
-    if (checkpoint.email.trim().toLowerCase() !== email.trim().toLowerCase()) {
-      throw new Error("CHECKPOINT_INVALID: checkpoint email does not match the requested account");
-    }
     checkpointClient = new ProtocolClient({ verbose: args.verbose, jar: CookieJar.fromJSON(checkpoint.cookies), transport });
     const login = { client: checkpointClient, web: checkpoint.web || null, email };
     console.log(`[${label}] Reusing verified login checkpoint from ${checkpoint.stage}.`);
@@ -1408,7 +1412,12 @@ async function askSetupTotpOtp(rl) {
 async function reuseSavedWebLogin({ file, email, transport, chatgptBase, verbose = false }) {
   try { await fs.access(file); }
   catch (error) { if (error.code === "ENOENT") return null; throw error; }
-  const saved = await readAccountWebSession({ email, webSessionPath: file });
+  const emailAliases = JSON.parse(process.env.TOSUB2_ACCOUNT_EMAIL_ALIASES || "[]");
+  if (!Array.isArray(emailAliases) || emailAliases.some(value => typeof value !== "string")) throw new Error("Invalid account email aliases");
+  const saved = await readAccountWebSession({ email, emailAliases, webSessionPath: file });
+  // A local email edit preserves the old usable session. A new login uses the
+  // edited address instead of presenting old cookies as proof of the new one.
+  if (saved.email !== email.trim().toLowerCase()) return null;
   const identity = await getAccountBrowserIdentity(email, { root: transport?.accountIdentityRoot });
   if (JSON.stringify(saved.identity) !== JSON.stringify(identity)) throw new Error("WEB_LOGIN_IDENTITY_MISMATCH: 保存的会话与账号固定浏览器身份不匹配");
   const client = new ProtocolClient({ verbose, transport, jar: CookieJar.fromJSON(saved.cookies), browserIdentity: identity });

@@ -90,17 +90,17 @@ try {
   await api('/api/model-fingerprint/settings', { settings: { ...policy, matchedPriority: { enabled: true, value: 0 } } });
   for (let n = 0; n < 5; n++) {
     await api('/api/task-settings', { modelFingerprint: { maxConcurrentAccounts: n % 2 ? 3 : 4 } });
-    await runCheck(job); assert.equal(account.priority, 0, 'policy/cache refresh race lost manual detection');
+    await runCheck(job); assert.equal(account.priority, 4, 'same verdict overwrote manual priority');
   }
   await api(`/api/sub2api/accounts/${job.id}/priority`, { priority: 6 });
   await api('/api/task-settings', { modelFingerprint: { maxConcurrentAccounts: 4 } });
   assert.deepEqual((await api('/api/model-fingerprint/settings')).settings.matchedPriority, { enabled: true, value: 0 });
   assert.equal(account.priority, 6, 'unrelated settings overwrote a successful manual priority edit');
-  await runCheck(job); assert.equal(account.priority, 0);
+  await runCheck(job); assert.equal(account.priority, 6, 'same verdict overwrote later manual edit');
   answer = '最终答案：22'; await runCheck(job);
-  assert.equal(account.priority, 6, 'mismatch did not restore manual baseline'); assert.equal(account.concurrency, 3);
+  assert.equal(account.priority, 7, 'changed verdict did not restore PlanType/date baseline'); assert.equal(account.concurrency, 3);
   const state = (await api('/api/jobs')).jobs.find(j => j.id === job.id);
-  assert.equal(state.sub2apiPriority, 6); assert.equal(state.modelFingerprint.prioritySyncPending, false); assert.equal(state.modelFingerprint.prioritySyncError, null);
+  assert.equal(state.sub2apiPriority, 7); assert.equal(state.modelFingerprint.prioritySyncPending, false); assert.equal(state.modelFingerprint.prioritySyncError, null);
   console.log('FINGERPRINT_PRIORITY_HTTP_PASS settings validation; real sampler to mock pool; date rule precedence/no repeat writes; restart; disable restores date baseline; manual priority ownership; task preservation; zero; mismatch restores; status sync');
 } finally {
   await stop(); pool.closeAllConnections(); await new Promise(resolve => pool.close(resolve)); await fs.rm(output, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

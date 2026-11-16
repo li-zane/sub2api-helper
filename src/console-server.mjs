@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { overloadFilterValue, fingerprintFilterValue } from "../web/src/codex-status-filter.mjs";
 import { createSmsPoolPolicy, restoreSmsPoolPolicy, normalizeSmsPoolRoute, excludedSmsPools, recordSmsPoolFailure, DEFAULT_SMS_POOL_FAILURE_LIMIT } from "./sms-pool-policy.mjs";
 import { generateAccountPassword } from "./account-password.mjs";
 import { beginAccountLogOperation, finishAccountLogOperation, restoreAccountLogOperation, readAccountLogEntries, markAccountLogSms } from "./account-log-entries.mjs";
@@ -13,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { createDirectPublicIpReader } from "./direct-public-ip.mjs";
 import { createStaticFrontend } from "./static-frontend.mjs";
 import { createCredentialStore } from "./credential-store.mjs";
+import { AccountLoginEmails, normalizeLoginEmail } from "./account-login-email.mjs";
 import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, inspectAccountWebSession, publicWebCredentialSync } from "./account-web-session.mjs";
 import { appendTimestampedAccountLog, hydrateAccountLog, readAccountLog, recordCredentialHistory, readCredentialHistory, writePrivateJsonAtomic } from "./account-history.mjs";
 import { recordAcceptedPhone, phoneOrderDetails } from "./credential-events.mjs";
@@ -226,6 +228,12 @@ const proxyQualityService = new ProxyQualityService({
 });
 const consoleToken = crypto.randomBytes(24).toString("base64url");
 const jobs = new Map();
+const accountLoginEmails = new AccountLoginEmails(path.join(OUTPUT_ROOT, "account-login-emails.json"));
+function registerJob(id, job) {
+  Object.defineProperty(job, "loginEmail", { enumerable: true, get: () => accountLoginEmails.email(job.email) });
+  Object.defineProperty(job, "emailAliases", { enumerable: true, get: () => accountLoginEmails.emails(job.email) });
+  jobs.set(id, job);
+}
 const smsCancellations = new SmsCancellations({
   filePath: path.join(OUTPUT_ROOT, "sms-cancellations.json"),
   retryMs: process.env.NODE_ENV === "test" ? Number(process.env.TOSUB2_SMS_CANCEL_RETRY_MS || 30_000) : 30_000,
@@ -471,7 +479,23 @@ const modelFingerprint = new ModelFingerprintService({
     const limited = new Set(listing.accounts.filter(a => accountRateLimit(a).limited || usageRestricted(normalizeSub2ApiUsage(a))).map(sub2ApiAccountEmail));
     return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && (sub2ApiAccountSchedulable(a) === true || manual && a.status === "active" && overloadCooldown.ownsPause(sub2ApiAccountEmail(a), a.id)) && !limited.has(sub2ApiAccountEmail(a))).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
   },
-  getAccount: readFingerprintAccount, sample: fingerprintSampler,
+  getAccount: readFingerprintAccount, getPoolAccount: getSub2ApiAccount, sample: fingerprintSampler,
+  getPoolNumberDefaults: async (email, id, planType) => {
+    const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
+    if (!config) return {};
+    const account = await getSub2ApiAccount(config, id);
+    if (!account) return {};
+    const accountConfig = resolveSub2ApiConfigForAccount(config, { ...account, plan_type: planType,
+      credentials: { ...account.credentials, plan_type: planType }, extra: { ...normalizeSub2ApiExtra(account.extra), plan_type: planType } });
+    const defaults = { priority: accountConfig.priority, concurrency: accountConfig.concurrency };
+    if (accountConfig.importDatePriority?.enabled) {
+      const listing = await listSub2ApiAccounts(config, { withMeta: true });
+      if (!listing.complete) throw Error("号池列表不完整，请稍后重试");
+      const row = listing.accounts.find(item => String(item.id) === String(id));
+      if (row) defaults.priority = importDatePriorities(listing.accounts, config).get(row) ?? defaults.priority;
+    }
+    return defaults;
+  },
   onAccountFailure: recoverFingerprintAuthorization,
   updateGroups: async (config, id, ids) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ group_ids: ids.map(Number) }) }),
   updateConcurrency: async (config, id, concurrency) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ concurrency }) }),
@@ -543,6 +567,7 @@ await loadSub2ApiSettingsConfiguration();
 await loadSub2ApiMonitorConfiguration();
 await usageSnapshots.load().catch(() => console.error("[usage-cache] 用量快照暂不可读，等待上游同步恢复；其他功能继续运行。"));
 await subscriptionHistory.load();
+await accountLoginEmails.load();
 await overloadMonitor.load();
 await overloadCooldown.load();
 await accountSessionResets.load();
@@ -912,6 +937,8 @@ async function handleApi(req, res, requestUrl) {
       planType: requestUrl.searchParams.get("planType"),
       sub2apiPool: requestUrl.searchParams.get("sub2apiPool"),
       sub2apiEnabled: requestUrl.searchParams.get("sub2apiEnabled"),
+      overload: requestUrl.searchParams.get("overload"),
+      fingerprint: requestUrl.searchParams.get("fingerprint"),
       webSession: requestUrl.searchParams.get("webSession"),
       summary: requestUrl.searchParams.get("summary"),
     }));
@@ -1487,13 +1514,17 @@ async function handleApi(req, res, requestUrl) {
     try {
       const write = async (recordEdit = async () => {}) => {
         const results = await Promise.allSettled(accountIds.map(async (accountId) => {
-          await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, { method: "PUT", body: JSON.stringify({ [field]: value }) });
+          // Persist the manual exception before the remote write, including
+          // uncertain responses, so the next poll cannot undo a committed edit.
           await recordEdit(accountId);
+          await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, { method: "PUT", body: JSON.stringify({ [field]: value }) });
         }));
         const failed = results.find(result => result.status === "rejected");
         if (failed) throw failed.reason;
       };
-      await modelFingerprint.manualPoolNumber(job.email, field, write);
+      await modelFingerprint.manualPoolNumber(job.email, field, write, {
+        planType: getJobPlanType(job), backend: monitorBackendIdentity(config), value, config,
+      });
     } finally {
       invalidateSub2ApiAccountStatusCache();
     }
@@ -1650,7 +1681,7 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
-  const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|authorize|retry|regenerate|relogin|session-reset|web-login|web-session-check|setup-2fa|replace-2fa|add-password|replace-password|security-state|credentials|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
+  const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|authorize|retry|regenerate|relogin|session-reset|web-login|web-session-check|setup-2fa|replace-2fa|add-password|replace-password|security-state|credentials|email|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
   if (!match) {
     sendJson(res, 404, { error: "Not found" });
     return;
@@ -1669,11 +1700,12 @@ async function handleApi(req, res, requestUrl) {
   if (req.method === "GET" && action === "logs") {
     if (requestUrl.searchParams.has("view")) {
       if (requestUrl.searchParams.get("view") === "credentials") await reloadMissingJobCredentials(job);
-      sendJson(res, 200, { id: job.id, ...await readAccountLogEntries(job, { view: requestUrl.searchParams.get("view"), entryId: requestUrl.searchParams.get("entry") }) });
+      sendJson(res, 200, { id: job.id, ...await readAccountLogEntries(job, { view: requestUrl.searchParams.get("view"), entryId: requestUrl.searchParams.get("entry"), emailHistory: accountLoginEmails.history(job.email) }) });
       return;
     }
     sendJson(res, 200, { id: job.id, ...await readAccountLog(job, {
       full: requestUrl.searchParams.get("full") === "1", credentials: requestUrl.searchParams.get("credentials") === "1",
+      emailHistory: accountLoginEmails.history(job.email),
     }) });
     return;
   }
@@ -1906,6 +1938,45 @@ async function handleApi(req, res, requestUrl) {
     sendJson(res, 200, { credentials: await publicCredentialDetails(job, persisted), job: publicJob(job) });
     return;
   }
+  if (req.method === "PUT" && action === "email") {
+    const body = await readJson(req);
+    const email = normalizeLoginEmail(body.email);
+    if (typeof body.expectedEmail !== "string") throw httpError(400, "请提供当前登录邮箱后再保存");
+    // Fetch raw pool data before acquiring account locks: the status loader also
+    // imports accounts and must never run inside a login-email mutation lock.
+    const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
+    const listing = config?.baseUrl && config?.adminApiKey ? await listSub2ApiAccounts(config, { withMeta: true }) : null;
+    if (listing && !listing.complete) throw httpError(409, "号池列表不完整，请稍后重试");
+    const poolEmails = new Set((listing?.accounts || []).map(sub2ApiAccountEmail).filter(Boolean));
+    await withEmailJobLock(job.email, async () => {
+      if (job.deleted || jobs.get(job.id) !== job) throw httpError(404, "账号不存在");
+      const related = [...jobs.values()].filter(item => item.email.toLowerCase() === job.email.toLowerCase());
+      if (related.some(item => isActive(item.status) || item.child || item.poolRefreshAction || item.autoRepairOperation
+        || activeSessionReset(item) || webSessionCheckPending(item) || ["pending", "queued", "running"].includes(item.autoTaskStatus)))
+        throw httpError(409, "账号任务正在进行，请完成后再修改登录邮箱");
+      const occupied = findJobByEmail(email);
+      if (occupied && occupied.email.toLowerCase() !== job.email.toLowerCase()) throw httpError(409, "该邮箱已关联其他账号");
+      // New-account imports use the same lock. The store's serialized mutation
+      // checks collisions again just before its atomic email+history commit.
+      const save = async () => accountLoginEmails.update(job.email, email, { expectedEmail: body.expectedEmail,
+        assertAvailable: async (value, key) => {
+          const existing = findJobByEmail(value);
+          if (existing && existing.email.toLowerCase() !== key) throw httpError(409, "该邮箱已关联其他账号");
+          if (poolEmails.has(accountLoginEmails.key(value)) && accountLoginEmails.key(value) !== key) throw httpError(409, "该邮箱已关联其他号池账号");
+        } });
+      const changed = accountLoginEmails.key(email) === job.email.toLowerCase() ? await save() : await withEmailJobLock(email, save);
+      if (changed) {
+        recordJobOperation(job, "credential_update");
+        appendJobLog(job, "[account] Helper 登录邮箱已更新，旧邮箱、新邮箱及修改时间已保存至凭据历史。\n");
+        touch(job);
+        await syncSubscriptionHistory().catch(() => console.error("[subscription-history] 邮箱变更已保存，历史订阅信息稍后重试同步。"));
+        finishAccountLogOperation(job);
+      }
+    });
+    await reloadMissingJobCredentials(job);
+    sendJson(res, 200, { job: publicJob(job), credentials: await publicCredentialDetails(job, true) });
+    return;
+  }
   if (req.method === "POST" && action === "add-password") {
     const body = await readJson(req);
     await withEmailJobLock(job.email, () => startPasswordAdd(job, body));
@@ -1947,7 +2018,7 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
   const statuses = JOB_STATUS_FILTER_VALUES.filter((status) => allJobs.some((job) => job.status === status));
   const emailSet = emailFilter?.length ? new Set(emailFilter) : null;
   const visibleJobs = allJobs.filter((job) => {
-    if (emailSet && !emailSet.has(job.email.toLowerCase())) return false;
+    if (emailSet && !emailSet.has(job.loginEmail.toLowerCase())) return false;
     return matchesJobFilters(job, filters);
   });
   const total = visibleJobs.length;
@@ -1959,7 +2030,7 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
     selection: visibleJobs.map(publicSelectionJob),
     pagination: { page, pageSize: PAGE_SIZE, total, totalPages, totalAll: allJobs.length },
     filter: {
-      active: Boolean(emailSet || filters.search || filters.lockedOnly || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession || filters.summary),
+      active: Boolean(emailSet || filters.search || filters.lockedOnly || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession || filters.summary || filters.overload || filters.fingerprint),
       summary: filters.summary || "",
       search: filters.search || "",
       lockedOnly: Boolean(filters.lockedOnly),
@@ -1971,6 +2042,8 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
       planType: filters.planType || "",
       sub2apiPool: filters.sub2apiPool || "",
       sub2apiEnabled: filters.sub2apiEnabled || "",
+      overload: filters.overload || "",
+      fingerprint: filters.fingerprint || "",
     },
     filterOptions: {
       statuses,
@@ -2013,6 +2086,8 @@ function normalizeJobFilters(value) {
     planType: planTypeValue || null,
     sub2apiPool: allowedPoolValues.has(sub2apiPoolValue) ? sub2apiPoolValue : null,
     sub2apiEnabled: allowedEnabledValues.has(sub2apiEnabledValue) ? sub2apiEnabledValue : null,
+    overload: ["overloaded", "normal"].includes(source.overload) ? source.overload : null,
+    fingerprint: ["match", "mismatch"].includes(source.fingerprint) ? source.fingerprint : null,
   };
 }
 
@@ -2028,7 +2103,7 @@ function matchesJobFilters(job, filters) {
   }
   if (filters.search) {
     const q = filters.search.toLowerCase();
-    const emailMatch = String(job.email || "").toLowerCase().includes(q);
+    const emailMatch = String(job.loginEmail || job.email).toLowerCase().includes(q);
     const remarkMatch = String(job.remark || "").toLowerCase().includes(q);
     const planMatch = String(getJobPlanType(job) || "").toLowerCase().includes(q)
       || String(sub2ApiStatus.planType || "").toLowerCase().includes(q);
@@ -2048,6 +2123,8 @@ function matchesJobFilters(job, filters) {
   if (filters.sub2apiEnabled === "enabled" && sub2ApiStatus.enabled !== true) return false;
   if (filters.sub2apiEnabled === "disabled" && sub2ApiStatus.enabled !== false) return false;
   if (filters.sub2apiEnabled === "unknown" && sub2ApiStatus.enabled !== null) return false;
+  if (filters.overload && overloadFilterValue(overloadMonitor.snapshot(job.email), overloadCooldown.snapshot(job.email)) !== filters.overload) return false;
+  if (filters.fingerprint && fingerprintFilterValue(modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown")) !== filters.fingerprint) return false;
   return true;
 }
 
@@ -2191,7 +2268,7 @@ async function startJob(email, credentials = {}, proxyUrl = null) {
     ...newSmsState(),
   };
   beginAuthorizationAutomationAttempt(job, "initial");
-  jobs.set(id, job);
+  registerJob(id, job);
   if (password) await recordCredentialHistory(outputDir, { type: "password", stage: "imported", email, before: null, after: { password } });
   if (totpSecret) await recordCredentialHistory(outputDir, { type: "2fa", stage: "imported", email,
     before: null, after: { totpSecret } });
@@ -2396,7 +2473,7 @@ function launchJob(job, options = {}) {
   job.runMode = mode;
   job.mailOtpRequestedAt = null;
   const args = mode === "web_login"
-    ? [PROTOCOL_SCRIPT, "--email", job.email, "--web-only", "--output-mode", "web",
+    ? [PROTOCOL_SCRIPT, "--email", job.loginEmail, "--web-only", "--output-mode", "web",
       "--sub2api-out", job.outputPath, "--checkpoint", webLoginCheckpointPath(job), "--verbose"]
     : mode === "refresh"
     ? [
@@ -2411,7 +2488,7 @@ function launchJob(job, options = {}) {
       ? [
           PROTOCOL_SCRIPT,
           "--email",
-          job.email,
+          job.loginEmail,
           job.totpSetupReplaceExisting ? "--replace-totp" : "--setup-totp",
           "--totp-result",
           job.totpResultPath,
@@ -2422,7 +2499,7 @@ function launchJob(job, options = {}) {
       ? [
           PROTOCOL_SCRIPT,
           "--email",
-          job.email,
+          job.loginEmail,
           job.passwordReplaceExisting ? "--replace-password" : "--add-password",
           "--password-add-result",
           job.passwordAddResultPath,
@@ -2432,7 +2509,7 @@ function launchJob(job, options = {}) {
     : [
         PROTOCOL_SCRIPT,
         "--email",
-        job.email,
+        job.loginEmail,
         "--output-mode",
         "sub2api",
         "--sub2api-out",
@@ -2448,6 +2525,7 @@ function launchJob(job, options = {}) {
     env: {
       ...process.env,
       CHATGPT_LOGIN_PASSWORD: job.password || "",
+      TOSUB2_ACCOUNT_EMAIL_ALIASES: JSON.stringify(job.emailAliases),
       TOSUB2_EMAIL_OTP_API_AVAILABLE: job.mailApiUrl && mailApiUrlForJob(job) ? "1" : "0",
       TOSUB2_BROWSER_IDENTITY_ROOT: path.join(OUTPUT_ROOT, "browser-identities"),
       TOSUB2_WEB_SESSION_PATH: mode === "web_login" ? webLoginCandidatePath(job) : webSessionPathForJob(job),
@@ -2902,6 +2980,7 @@ async function reconcilePlanAutomations(job, planType) {
   job.planAutomationPlanType = previousPlan;
   const changed = previousPlan !== plan;
   job.workspacePlanType = plan;
+  await modelFingerprint.observePlan(job.email, plan);
   // Re-evaluate ongoing switches only. One-shot uploads/2FA rotations stay one-shot.
   const actions = taskAutoActionsForPlanType(plan);
   for (const [action, service] of [["enable-overload-detection", overloadMonitor], ["enable-overload-cooldown", overloadCooldown]]) {
@@ -3648,7 +3727,7 @@ async function finishPasswordAdd(job, code, signal) {
 
   if (
     result?.version === 1
-    && String(result.email || "").toLowerCase() === job.email.toLowerCase()
+    && job.emailAliases.includes(String(result.email || "").toLowerCase())
     && typeof result.password === "string"
     && result.password === job.pendingNewPassword
     && result.activation_succeeded !== false
@@ -5451,7 +5530,7 @@ async function syncImportDatePriorities(config, listing, profileState = snapshot
           result.updated += 1;
         }
         account.priority = update.priority;
-      }, { updateBase: true });
+      }, { updateBase: true, planType: extractPlanTypeFromAccount(account, { preferJwt: false }) });
     } catch (error) {
       result.failed += 1;
       result.error ||= String(error?.message || error).slice(0, 500);
@@ -6671,7 +6750,8 @@ async function writePoolAccount(config, account, body, { profile = false } = {})
   const id = normalizeSub2ApiAccountId(account.id);
   return modelFingerprint.poolAccountUpdate(sub2ApiAccountEmail(account), id, monitorBackendIdentity(config), body,
     update => (profile ? requestProfileSync : requestSub2Api)(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(update) }),
-    { updateBase: profile });
+    { updateBase: profile, planType: normalizePlanType(body.plan_type || body.credentials?.plan_type || normalizeSub2ApiExtra(body.extra).plan_type
+      || extractPlanTypeFromAccount(account, { preferJwt: false })) });
 }
 
 async function buildSub2ApiProfileSyncUpdate(remoteAccount, accountConfig, fields) {
@@ -7161,9 +7241,9 @@ function sub2ApiAccountEmail(account) {
   ]
     .map((value) => String(value || "").trim().toLowerCase())
     .find(isEmail);
-  if (direct) return direct;
+  if (direct) return accountLoginEmails.key(direct);
   const match = String(account?.name || "").toLowerCase().match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
-  return match && isEmail(match[0]) ? match[0] : null;
+  return match && isEmail(match[0]) ? accountLoginEmails.key(match[0]) : null;
 }
 
 async function loadSub2ApiAccountStatus({ forceRefresh = false } = {}) {
@@ -7368,7 +7448,7 @@ function syncSubscriptionHistory() {
           }
           if (cached?.json) credentials.sub2apiJson = cached.json;
         } catch { /* Keep the last committed snapshot across temporary file/read failures. */ }
-        return { email, planType, historicalPlanType, firstSubscribedAt: evidence?.at, accountBanned: accountAutomationBlocked(email),
+        return { email, loginEmail: job.loginEmail, planType, historicalPlanType, firstSubscribedAt: evidence?.at, accountBanned: accountAutomationBlocked(email),
           remark: job.remark || "", accountCostCny: job.accountCostCny,
           userCostUsd: getSub2ApiAccountStatusForJob(job).usage?.totals?.userCost, credentials };
       }));
@@ -7475,7 +7555,10 @@ async function importSub2ApiPoolOnlyAccounts(remoteAccounts) {
 
 function publicSub2ApiAccountStatusState(state = sub2ApiAccountStatusCache) {
   const accounts = {};
-  for (const [email, entry] of state.accounts || []) accounts[email] = publicSub2ApiAccountStatusEntry(entry);
+  for (const [, entry] of state.accounts || []) {
+    const status = publicSub2ApiAccountStatusEntry(entry);
+    accounts[status.email.toLowerCase()] = status;
+  }
   return {
     configured: Boolean(state.backend && state.fetchedAt),
     fetchedAt: state.fetchedAt || null,
@@ -7487,7 +7570,7 @@ function publicSub2ApiAccountStatusEntry(entry) {
   const blocked = accountAutomationBlocked(entry.email);
   const job = findJobByEmail(entry.email);
   return {
-    email: entry.email,
+    email: job?.loginEmail || accountLoginEmails.email(entry.email),
     remark: entry.remark ?? null,
     accountId: entry.accountIds?.[0] || null,
     accountIds: [...(entry.accountIds || [])],
@@ -8580,10 +8663,10 @@ async function accountCredentialsForCopy(ids) {
     if (job.hasTotpCredential && !totpSecret) {
       throw httpError(409, `${job.email} 的 2FA 密钥未能从系统安全凭据存储读取，请重新导入该账号资料`);
     }
-    if ([job.email, password, totpSecret].some(value => /[\r\n]|----/.test(value))) {
+    if ([job.loginEmail, password, totpSecret].some(value => /[\r\n]|----/.test(value))) {
       throw httpError(409, `${job.email} 的凭据包含换行或分隔符，请在账号凭据中单独复制`);
     }
-    lines.push([job.email, password, totpSecret].join("----"));
+    lines.push([job.loginEmail, password, totpSecret].join("----"));
   }
   return { text: lines.join("\n"), count: lines.length };
 }
@@ -8610,7 +8693,7 @@ async function exportSourceAccounts(res, ids) {
       totpSecret += `(${job.remark})`;
     }
     if (password) {
-      const parts = [job.email, password];
+      const parts = [job.loginEmail, password];
       if (job.mailRequestBody) parts.push(job.mailRequestBody);
       else if (job.mailApiUrl) parts.push(job.mailApiUrl);
       if (totpSecret) parts.push(totpSecret);
@@ -8619,20 +8702,20 @@ async function exportSourceAccounts(res, ids) {
     }
     if (job.mailRequestBody) {
       lines.push(totpSecret
-        ? `${job.email}----${job.mailRequestBody}----${totpSecret}`
-        : `${job.email}----${job.mailRequestBody}`);
+        ? `${job.loginEmail}----${job.mailRequestBody}----${totpSecret}`
+        : `${job.loginEmail}----${job.mailRequestBody}`);
       continue;
     }
     if (job.mailApiUrl) {
       lines.push(totpSecret
-        ? `${job.email}----${job.mailApiUrl}----${totpSecret}`
-        : `${job.email}----${job.mailApiUrl}`);
+        ? `${job.loginEmail}----${job.mailApiUrl}----${totpSecret}`
+        : `${job.loginEmail}----${job.mailApiUrl}`);
       continue;
     }
     if (job.loginMode === "manual") {
       throw httpError(409, `${job.email} 是旧版本任务，原始登录资料未保存，请重新导入该账号资料后再导出`);
     }
-    lines.push(totpSecret ? `${job.email}--------${totpSecret}` : job.email);
+    lines.push(totpSecret ? `${job.loginEmail}--------${totpSecret}` : job.loginEmail);
   }
   const payload = Buffer.from(`\uFEFF${lines.join("\n")}\n`, "utf8");
   res.writeHead(200, {
@@ -8654,7 +8737,7 @@ function publicJob(job) {
   const fingerprintState = modelFingerprint.snapshot(job.email, getJobPlanType(job) || "unknown");
   return {
     id: job.id,
-    email: job.email,
+    email: job.loginEmail,
     remark: job.remark || "",
     remarkSyncPending: Boolean(job.remarkSyncPending),
     accountCostCny: restoredAccountCost(job.accountCostCny),
@@ -8949,7 +9032,7 @@ async function publicCredentialDetails(job, persisted = null) {
     sub2apiJson = JSON.stringify(JSON.parse(raw), null, 2);
   } catch {}
   return {
-    email: job.email,
+    email: job.loginEmail,
     password: job.password || "",
     totpSecret: job.totpSecret || "",
     hasPassword: Boolean(job.password || job.hasPasswordCredential),
@@ -9012,7 +9095,7 @@ function publicSelectionJob(job) {
   const sub2ApiStatus = getSub2ApiAccountStatusForJob(job);
   return {
     id: job.id,
-    email: job.email,
+    email: job.loginEmail,
     status: job.status,
     planType: getJobPlanType(job),
     sub2apiInPool: sub2ApiStatus.inPool,
@@ -9557,12 +9640,12 @@ function listUniqueJobs() {
 }
 
 function findJobByEmail(email) {
-  const key = String(email || "").toLowerCase();
+  const key = accountLoginEmails.key(email);
   return listUniqueJobs().find((job) => job.email.toLowerCase() === key) || null;
 }
 
 async function withEmailJobLock(email, operation) {
-  const key = String(email || "").trim().toLowerCase();
+  const key = accountLoginEmails.key(email);
   const previous = emailJobLocks.get(key) || Promise.resolve();
   let release;
   const current = new Promise((resolve) => {
@@ -9613,6 +9696,7 @@ async function deleteSub2ApiAccountsByEmail(email) {
 }
 
 async function deleteJobsByEmail(email) {
+  email = accountLoginEmails.key(email);
   await syncSubscriptionHistory();
   const sub2api = await deleteSub2ApiAccountsByEmail(email);
   await usageSnapshots.removeEmail(email).catch(() => console.error("[usage-cache] 账号用量缓存清理待重试，账号删除流程继续。"));
@@ -9645,6 +9729,7 @@ async function deleteJobsByEmail(email) {
   ]);
   await syncSubscriptionHistory();
   for (const job of matching) subscriptionOAuthCache.delete(job.outputPath);
+  await accountLoginEmails.remove(email);
   scheduleQueuedJobs();
   return { email, sub2api };
 }
@@ -9702,7 +9787,7 @@ async function syncCompletedOutputs(force = false) {
         });
         storedCredentials = totpRecovery.credentials;
         const restoredOperation = restoredOutputOperationState(metadata, completedAt, totpRecovery, passwordRecovery);
-        jobs.set(entry.name, {
+        registerJob(entry.name, {
           id: entry.name,
           email,
           status: restoredOperation.status,
@@ -9811,7 +9896,7 @@ async function syncCompletedOutputs(force = false) {
         const restoredStatus = passwordRecovery.recovered || totpRecovery.recovered
           ? "resume_available"
           : isTerminalStatus(savedStatus) ? savedStatus : "resume_available";
-        jobs.set(entry.name, {
+        registerJob(entry.name, {
           id: entry.name,
           email,
           status: restoredStatus,
@@ -9929,7 +10014,7 @@ async function syncCompletedOutputs(force = false) {
           : interrupted || !savedStatus
             ? metadata.last_error || `上次 ${savedStatus || "未知"} 阶段未完成`
             : metadata.last_error || null;
-        jobs.set(entry.name, {
+        registerJob(entry.name, {
           id: entry.name,
           email: metadata.email,
           status: restoredStatus,
@@ -10071,7 +10156,7 @@ async function recoverAddedPasswordCredential({ email, resultPath, credentials, 
   if (result?.activation_succeeded === false || result?.operation && result.activation_succeeded !== true) return { credentials, recovered: false, error: null, addedAt: null };
   if (
     result?.version !== 1
-    || String(result.email || "").toLowerCase() !== email.toLowerCase()
+    || !accountLoginEmails.emails(email).includes(String(result.email || "").toLowerCase())
     || typeof result.password !== "string"
     || result.password.length < 12
   ) {

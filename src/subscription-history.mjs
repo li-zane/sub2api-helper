@@ -91,6 +91,7 @@ export class SubscriptionHistory {
         if (accountBanned && previous?.accountBanned !== true) types.push("banned");
         if (!accountBanned && previous?.accountBanned === true) types.push("recovered");
         const record = { ...previous, id: recordId(email), email,
+          loginEmail: emailKey(observation.loginEmail) || email,
           remark: text(observation.remark), accountCostCny: restoredAccountCost(observation.accountCostCny),
           planType: toPlan,
           accountBanned,
@@ -138,7 +139,7 @@ export class SubscriptionHistory {
   list(multiplier) {
     return [...this.records.values()].sort((a, b) => String(b.firstSubscribedAt).localeCompare(String(a.firstSubscribedAt)) || a.email.localeCompare(b.email)).map(record => {
       const profit = accountProfitCents(record.userCostUsd, multiplier, record.accountCostCny);
-      return { id: record.id, email: record.email, remark: record.remark, accountCostCny: record.accountCostCny,
+      return { id: record.id, email: record.loginEmail || record.email, remark: record.remark, accountCostCny: record.accountCostCny,
         userCostUsd: record.userCostUsd, poolPriceMultiplier: multiplier,
         profitCents: profit === null ? null : profit.toString(), profitDisplay: formatCnyCents(profit),
         planType: record.planType, lastPaidPlanType: record.lastPaidPlanType,
@@ -151,7 +152,7 @@ export class SubscriptionHistory {
   credentials(id) {
     const record = [...this.records.values()].find(record => record.id === id);
     if (!record) return null;
-    return subscriptionCredentialText(record.email, record.credentials);
+    return subscriptionCredentialText(record.loginEmail || record.email, record.credentials);
   }
   flush() { return this.writes; }
 }

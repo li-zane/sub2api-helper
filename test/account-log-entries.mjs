@@ -59,6 +59,14 @@ try {
   job.password = ""; job.totpSecret = "";
   await assert.rejects(readAccountLogEntries(job, { view: "credentials", entryId: "current-password" }), e => e.status === 404);
   assert((await readAccountLogEntries(job, { view: "credentials", entryId: history[0].id })).content.includes("candidate"));
+  const emailHistory = [{ id: "email-fixture", type: "email", stage: "changed", at: "2026-11-17T01:02:03Z",
+    before: { email: "before@example.test" }, after: { email: "after@example.test" } }];
+  const emailList = await readAccountLogEntries(job, { view: "credentials", emailHistory });
+  assert(emailList.entries.some(e => e.type === "email" && e.id === "email-fixture"));
+  assert(!JSON.stringify(emailList.entries).includes("before@example.test"), "menu exposed private history details");
+  const emailDetail = JSON.parse((await readAccountLogEntries(job, { view: "credentials", emailHistory, entryId: "email-fixture" })).content);
+  assert.equal(emailDetail.before.email, "before@example.test"); assert.equal(emailDetail.after.email, "after@example.test");
+  assert.equal(emailDetail.at, "2026-11-17T01:02:03Z");
   const interrupted = beginAccountLogOperation(job, "web_login"); appendAccountLog(job, "BEFORE_RESTART\n");
   job.logOperation = null;
   const resumed = beginAccountLogOperation(job, "automatic_relogin"); appendAccountLog(job, "AFTER_RESTART\n");

@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import http from "node:http";
 import { getAccountBrowserIdentity } from "../src/account-browser-identity.mjs";
-import { writeAccountWebSession } from "../src/account-web-session.mjs";
+import { writeAccountWebSession, readAccountWebSession } from "../src/account-web-session.mjs";
 import { reuseSavedWebLogin } from "../src/protocol-login.mjs";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-web-reuse-"));
@@ -51,6 +51,23 @@ try {
   assert.equal(expired.reused, false, "confirmed expiry must not be undone by a cached session endpoint token");
   assert.equal(calls, beforeExpired, "known-expired sessions go directly to sign-in");
   assert.equal(expired.client.jar.value("session", options.chatgptBase), "original");
+  // Editing Helper's login address must retain the old saved session while
+  // forcing the next new login to use the edited address.
+  await writeAccountWebSession(file, JSON.parse(original));
+  const alias = "edited@example.test", beforeAlias = calls;
+  const previousAliases = process.env.TOSUB2_ACCOUNT_EMAIL_ALIASES;
+  process.env.TOSUB2_ACCOUNT_EMAIL_ALIASES = JSON.stringify([email, alias]);
+  try {
+    assert.equal((await readAccountWebSession({ email: alias, emailAliases: [email], webSessionPath: file })).email, email);
+    const savedBytes = await fs.readFile(file, "utf8");
+    assert.equal(await reuseSavedWebLogin({ ...options, email: alias }), null);
+    assert.equal(calls, beforeAlias, "old-email cookies reached upstream during new-email login");
+    assert.equal(await fs.readFile(file, "utf8"), savedBytes);
+    await assert.rejects(readAccountWebSession({ email: "unrelated@example.test", webSessionPath: file }));
+  } finally {
+    if (previousAliases === undefined) delete process.env.TOSUB2_ACCOUNT_EMAIL_ALIASES;
+    else process.env.TOSUB2_ACCOUNT_EMAIL_ALIASES = previousAliases;
+  }
   const beforeMismatch = calls;
   await writeAccountWebSession(file, { ...JSON.parse(original), identity: { ...identity, deviceId: "11111111-1111-4111-8111-111111111111" } });
   await assert.rejects(reuseSavedWebLogin(options), /IDENTITY_MISMATCH/);
