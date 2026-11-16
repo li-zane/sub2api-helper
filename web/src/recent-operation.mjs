@@ -1,3 +1,5 @@
+import { displayDateTime } from "./display-time.mjs";
+
 const LABELS = {
   initial_web_login: "首次 Web 登录",
   initial_authorization: "首次授权", reauthorize: "重新授权", relogin: "重新开始授权",
@@ -22,7 +24,39 @@ function feedbackText(value) {
   try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
 }
 
+function recentCooldownOperation(job) {
+  const operation = job.overloadAutoCooldown?.operation;
+  if (!operation || !Number.isFinite(Date.parse(operation.startedAt))) return null;
+  const at = operation.finishedAt || operation.startedAt;
+  const reset = job.sessionReset;
+  const relatedReset = !operation.finishedAt && reset?.source === "cooldown" && operation.resetRequestId && reset.id === operation.resetRequestId;
+  if (Date.parse(at) < Date.parse(job.lastOperationAt || job.createdAt) && !relatedReset) return null;
+  const results = { pausing: "暂停中", cooling: "冷却中", refreshing: "重登授权中", resuming: "恢复中",
+    completed: "已恢复", manual_paused: "保持暂停", blocked: "封禁停用" };
+  const error = operation.error;
+  const restoring = ["refreshing", "resuming"].includes(operation.status);
+  const result = error ? restoring ? "恢复待重试" : "暂停待重试" : results[operation.status] || "恢复待确认";
+  const tone = error || operation.status === "blocked" ? "error" : operation.status === "completed" ? "success"
+    : restoring || operation.status === "pausing" ? "running" : "pending";
+  const duration = Number.isFinite(operation.cooldownMinutes) ? `${operation.cooldownMinutes} 分钟` : "时长待确认";
+  const completed = operation.status === "completed";
+  const time = completed ? operation.resumedAt || operation.finishedAt : operation.finishedAt || operation.until;
+  const timeLabel = completed ? "恢复于" : operation.finishedAt ? "结束于" : "至";
+  const details = [`操作类型\noverload_cooldown`, `结果\n${result}`, `冷却开始\n${displayDateTime(operation.startedAt)}`,
+    `冷却时长\n${duration}`, `预计恢复时间\n${displayDateTime(operation.until)}`];
+  if (operation.windowMinutes && operation.windowCount != null) details.push(`${operation.windowMinutes} 分钟窗口过载次数\n${operation.windowCount}${operation.threshold != null ? ` / ${operation.threshold}` : ""}`);
+  if (operation.historyCount != null) details.push(`${operation.historyMinutes || 90} 分钟累计过载次数\n${operation.historyCount}${operation.historyThreshold != null ? ` / ${operation.historyThreshold}` : ""}`);
+  if (operation.triggerReason) details.push(`触发条件\n${{ current: "当前窗口达到阈值", history: "累计次数达到阈值", both: "当前窗口和累计次数均达到阈值" }[operation.triggerReason] || operation.triggerReason}`);
+  if (operation.finishedAt) details.push(`${completed ? "实际恢复时间" : "结束时间"}\n${displayDateTime(time)}`);
+  if (operation.completionReason) details.push(`结束方式\n${{ automatic: "自动恢复", manual: completed ? "手动恢复" : "手动保持暂停", disabled: "关闭冷却后恢复", banned: "账号封禁，停止恢复" }[operation.completionReason] || operation.completionReason}`);
+  if (error) details.push(`错误详情\n${feedbackText(error)}`);
+  return { type: "overload_cooldown", label: "过载冷却", result, tone, at, text: details.join("\n\n"),
+    cooldown: { duration, timeLabel, time } };
+}
+
 export function recentOperation(job, statusLabels = {}) {
+  const cooldown = recentCooldownOperation(job);
+  if (cooldown) return cooldown;
   const type = job.lastOperationType || "initial_authorization";
   let result = statusLabels[job.status] || "状态未知";
   let error = null;

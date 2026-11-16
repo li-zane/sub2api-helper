@@ -6,7 +6,7 @@ import { SmsProviderBalance } from "./sms-provider-balance.jsx";
 import { formatSmsMoney } from "./sms-money.mjs";
 import { AccountLogDialog } from "./account-log-dialog.jsx";
 import { AccountSecurityLights } from "./account-security-lights.jsx";
-import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone, setDisplayTimeZone, compactDateTime, displayTimeParts, displayProtocolLog } from "./display-time.mjs";
+import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone, setDisplayTimeZone, compactDateTime, displayDateTime, displayTimeParts, displayProtocolLog } from "./display-time.mjs";
 import { useDisplayTimeZone } from "./use-display-time.jsx";
 import { usageRestricted } from "./codex-eligibility.mjs";
 import { totpRotationView } from "./totp-rotation-state.mjs";
@@ -707,6 +707,7 @@ function App() {
   const historicalSubscriptionCount = typeof stats.historicalSubscriptions === "number"
     ? stats.historicalSubscriptions
     : (subscriptionHistoryTotal ?? 0);
+  const unreadSubscriptionPlanChanges = stats.historicalSubscriptionUnreadPlanChanges ?? 0;
 
   const selectedJobs = useMemo(
     () => jobSelectionIndex.filter((job) => selectedJobIds.has(job.id)),
@@ -1899,8 +1900,9 @@ function App() {
             <button
               type="button"
               className={`summary-pill telemetry-history-pill ${subscriptionHistoryOpen ? "is-open" : ""}`}
-              title={`查看历史订阅账号（共 ${historicalSubscriptionCount} 条）`}
+              title={`查看历史订阅账号（共 ${historicalSubscriptionCount} 条）${unreadSubscriptionPlanChanges > 0 ? `，${unreadSubscriptionPlanChanges} 个账号有未读的订阅变化` : ""}`}
               aria-label="历史订阅"
+              aria-describedby={unreadSubscriptionPlanChanges > 0 ? "subscription-change-notice" : undefined}
               aria-haspopup="dialog"
               aria-expanded={subscriptionHistoryOpen}
               disabled={!token}
@@ -1909,6 +1911,7 @@ function App() {
               <History size={12} aria-hidden="true" />
               <span>历史订阅</span>
               <strong>{historicalSubscriptionCount}</strong>
+              {unreadSubscriptionPlanChanges > 0 && <span id="subscription-change-notice" className="subscription-change-dot" role="status" aria-label={`${unreadSubscriptionPlanChanges} 个账号有未读的订阅变化`} />}
             </button>
           </div>
 
@@ -4228,6 +4231,10 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
             >
               {operation.label}
             </button>
+            {operation.cooldown && <div className="recent-operation-cooldown" role="status" aria-label="过载冷却进度">
+              <span>{operation.result} · {operation.cooldown.duration}</span>
+              {operation.cooldown.time && <span>{operation.cooldown.timeLabel} <time dateTime={operation.cooldown.time} title={displayDateTime(operation.cooldown.time)}>{compactDateTime(operation.cooldown.time)}</time></span>}
+            </div>}
           </div>
         </div>
         {(() => {

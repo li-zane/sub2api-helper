@@ -14,6 +14,17 @@ async (page) => {
     lastChange: { revision: 1, at: '2026-11-16T01:00:00Z', unread: true, types: ['subscription'], fromPlanType: 'team', toPlanType: 'free' } };
   let records = [structuredClone(fixture), { ...fixture, id: 'b'.repeat(32), email: 'hidden-plan@example.test', remark: '初始无变化', planType: 'plus', lastPaidPlanType: 'plus', lastChange: null }];
   let failAck = false, interleave = false, reads = 0;
+  const planRevisions = new Map(), seenRevisions = new Map();
+  const unreadPlanChanges = () => records.filter(record => {
+    if (record.lastChange?.types.includes('subscription')) planRevisions.set(record.id, record.lastChange.revision);
+    return (planRevisions.get(record.id) || 0) > (seenRevisions.get(record.id) || 0);
+  }).length;
+  await page.route('**/api/jobs**', async route => {
+    if (!['/api/jobs', '/api/jobs/query'].includes(new URL(route.request().url()).pathname)) { await route.continue(); return; }
+    const response = await route.fetch(), data = await response.json();
+    data.stats.historicalSubscriptionUnreadPlanChanges = unreadPlanChanges();
+    await route.fulfill({ response, json: data });
+  });
   await page.route('**/api/subscription-history', async route => {
     reads++;
     check(Boolean(route.request().headers()['x-console-token']), 'list lacks authentication');
@@ -25,6 +36,7 @@ async (page) => {
     const { changes } = route.request().postDataJSON();
     acknowledgements.push(changes);
     if (failAck) { await route.fulfill({ status: 503, json: { error: 'fixture acknowledgement unavailable' } }); return; }
+    unreadPlanChanges();
     if (interleave) {
       interleave = false;
       records[0].lastChange = { ...records[0].lastChange, revision: 5, at: '2026-11-16T05:00:00Z', types: ['banned'] };
@@ -35,12 +47,14 @@ async (page) => {
       const record = records.find(record => record.id === change.id);
       if (record?.lastChange?.unread && record.lastChange.revision === change.revision) {
         record.lastChange.unread = false; acknowledged++;
+        seenRevisions.set(record.id, change.revision);
       }
     }
     await route.fulfill({ json: { acknowledged } });
   });
   await page.reload(); await page.waitForFunction(() => document.querySelectorAll('tr.job-row').length > 0);
   const button = page.getByRole('button', { name: '历史订阅', exact: true });
+  const badge = button.locator('.subscription-change-dot');
   const dialog = page.getByRole('dialog', { name: '历史订阅', exact: true });
   const row = email => dialog.getByRole('listitem').filter({ has: page.getByRole('button', { name: `复制邮箱 ${email}`, exact: true }) });
   const open = async () => { await button.click(); await row(fixture.email).waitFor(); };
@@ -49,6 +63,19 @@ async (page) => {
     const done = page.waitForResponse(response => new URL(response.url()).pathname === '/api/subscription-history' && response.request().method() === 'GET');
     await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await done;
   };
+  await test('unread-plan-dot-appears-before-opening-without-history-polling', async () => {
+    await badge.waitFor();
+    check(reads === 0 && acknowledgements.length === 0, 'badge loads or acknowledges history before opening');
+    check((await button.getAttribute('title')).includes('1 个账号有未读的订阅变化'), 'badge tooltip has no count');
+    check(await badge.getAttribute('role') === 'status', 'badge lacks an accessible status');
+    const bounds = await button.boundingBox(), dotBounds = await badge.boundingBox();
+    check(dotBounds && bounds && dotBounds.x >= bounds.x && dotBounds.x + dotBounds.width <= bounds.x + bounds.width && dotBounds.y >= bounds.y, 'badge is outside the history button');
+    await page.screenshot({ path: evidence + '/subscription-plan-badge.png' });
+    await page.setViewportSize({ width: 375, height: 812 });
+    check(await badge.isVisible(), 'mobile label-hiding styles also hide the badge');
+    await page.screenshot({ path: evidence + '/subscription-plan-badge-mobile.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  });
   await test('first-open-highlights-subscription-change-and-detection-time', async () => {
     await page.setViewportSize({ width: 1440, height: 1000 }); await open();
     await until(() => acknowledgements.length === 1);
@@ -62,6 +89,7 @@ async (page) => {
   });
   await test('poll-keeps-current-visit-highlight-without-new-notice', async () => {
     await until(() => records[0].lastChange.unread === false);
+    await badge.waitFor({ state: 'hidden' });
     records[0].remark = '普通同步更新'; records[0].updatedAt = '2026-11-16T07:00:00Z';
     await refresh(); await row(fixture.email).getByText('普通同步更新', { exact: true }).waitFor();
     check(await row(fixture.email).evaluate(el => el.classList.contains('is-unread')), 'poll erased first-view highlight');
@@ -77,6 +105,8 @@ async (page) => {
   await test('new-ban-highlights-again-with-correct-state-and-time', async () => {
     await close(); records[0].accountBanned = true;
     records[0].lastChange = { ...records[0].lastChange, revision: 2, at: '2026-11-16T02:00:00Z', types: ['banned'], unread: true };
+    await page.waitForResponse(response => new URL(response.url()).pathname === '/api/jobs');
+    check(await badge.count() === 0, 'ban-only notice lights the plan-change badge');
     await open(); await row(fixture.email).getByText('已封禁', { exact: true }).waitFor();
     await until(() => records[0].lastChange.unread === false);
     check(await row(fixture.email).evaluate(el => el.classList.contains('is-unread')), 'new ban did not highlight again');
@@ -90,9 +120,11 @@ async (page) => {
     records[0].remark = '搜索状态同步'; const before = acknowledgements.length;
     await refresh(); await row(fixture.email).getByText('搜索状态同步', { exact: true }).waitFor();
     check(records[1].lastChange.unread, 'search-hidden change was silently consumed');
+    await badge.waitFor();
     check(acknowledgements.length === before, 'hidden row was acknowledged');
     await search.fill(''); await row(records[1].email).waitFor();
     await until(() => records[1].lastChange.unread === false);
+    await badge.waitFor({ state: 'hidden' });
     check(await row(records[1].email).evaluate(el => el.classList.contains('is-unread')), 'newly visible row was not highlighted');
   });
   await test('unread-notices-fit-dark-and-mobile-layout', async () => {
@@ -110,9 +142,12 @@ async (page) => {
     records[0].lastChange = { ...fixture.lastChange, revision: 3, at: '2026-11-16T03:30:00Z', unread: true };
     const before = acknowledgements.length;
     const failed = page.waitForResponse(response => response.url().endsWith('/api/subscription-history/seen') && response.status() === 503);
+    await page.reload(); await badge.waitFor();
     await open(); await failed;
     check(records[0].lastChange.unread, 'failed save marked the notice as read');
+    check(await badge.isVisible(), 'failed acknowledgement cleared the badge');
     failAck = false; await refresh(); await until(() => records[0].lastChange.unread === false);
+    await badge.waitFor({ state: 'hidden' });
     check(acknowledgements.length === before + 2, 'failed save did not retry exactly once');
     check(await row(fixture.email).evaluate(el => el.classList.contains('is-unread')), 'retry removed current-visit highlight');
   });
@@ -122,9 +157,11 @@ async (page) => {
     const done = page.waitForResponse(response => response.url().endsWith('/api/subscription-history/seen'));
     await open(); await done;
     check(records[0].lastChange.revision === 5 && records[0].lastChange.unread, 'stale acknowledgement consumed a new event');
+    await badge.waitFor();
     await close(); await open(); await row(fixture.email).getByText('已封禁', { exact: true }).waitFor();
     check(await row(fixture.email).evaluate(el => el.classList.contains('is-unread')), 'concurrent ban is not red on first view');
     check(await row(fixture.email).locator('time').getAttribute('datetime') === '2026-11-16T05:00:00Z', 'concurrent ban shows stale timestamp');
+    await badge.waitFor({ state: 'hidden' });
   });
   await test('close-stops-history-polling-and-runtime-stays-healthy', async () => {
     await close(); const closedReads = reads; await page.waitForTimeout(5500);

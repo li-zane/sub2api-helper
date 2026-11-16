@@ -15,6 +15,9 @@ const knownPlan = value => {
 };
 const recordId = email => crypto.createHash("sha256").update(email).digest("hex").slice(0, 32);
 const secretKeys = ["password", "totpSecret", "mailApiUrl", "mailRequestBody", "sub2apiJson"];
+// Keep an unread plan change even when a later ban/recovery replaces lastChange.
+const planChangeRevision = record => record?.lastSubscriptionChangeRevision
+  || (record?.lastChange?.types?.includes("subscription") ? record.lastChange.revision : 0);
 
 // Use only recorded workspace/plan evidence, never arbitrary words in logs.
 export function historicalSubscriptionEvidence(events = []) {
@@ -59,6 +62,13 @@ export class SubscriptionHistory {
   }
   has(email) { return this.records.has(emailKey(email)); }
   get size() { return this.records.size; }
+  get unreadPlanChangeCount() {
+    let count = 0;
+    for (const record of this.records.values()) {
+      if (planChangeRevision(record) > (record.lastSeenChangeRevision || 0)) count++;
+    }
+    return count;
+  }
   reconcile(observations, presentEmails) {
     const work = this.writes.catch(() => {}).then(async () => {
       const next = new Map([...this.records].map(([key, value]) => [key, structuredClone(value)]));
@@ -84,6 +94,7 @@ export class SubscriptionHistory {
           remark: text(observation.remark), accountCostCny: restoredAccountCost(observation.accountCostCny),
           planType: toPlan,
           accountBanned,
+          lastSubscriptionChangeRevision: planChangeRevision(previous),
           lastPaidPlanType: isSubscribedPlan(observation.planType) ? observation.planType : previous?.lastPaidPlanType || paidPlan,
           firstSubscribedAt: previous?.firstSubscribedAt || timestamp(observation.firstSubscribedAt) || at,
           userCostUsd: typeof observation.userCostUsd === "number" && Number.isFinite(observation.userCostUsd) && observation.userCostUsd >= 0
@@ -91,6 +102,7 @@ export class SubscriptionHistory {
           present: present.has(email), credentials };
         if (types.length) record.lastChange = { revision: (previous?.lastChange?.revision || 0) + 1,
           at, types, fromPlanType: fromPlan, toPlanType: toPlan };
+        if (types.includes("subscription")) record.lastSubscriptionChangeRevision = record.lastChange.revision;
         if (!previous || JSON.stringify({ ...previous, updatedAt: undefined }) !== JSON.stringify({ ...record, updatedAt: undefined })) record.updatedAt = at;
         next.set(email, record);
       }

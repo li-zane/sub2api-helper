@@ -1,4 +1,5 @@
 async (page) => {
+  const evidence = "__UI_TEST_EVIDENCE_DIR__";
   const results = [], errors = [];
   const check = (value, message) => { if (!value) throw Error(message); };
   page.on("pageerror", error => errors.push(error.message));
@@ -16,13 +17,18 @@ async (page) => {
   if (!results[0].passed) return { passed: 0, total: 1, results };
   const pattern = /\/api\/jobs(?:\?|$)/;
   let mode = "phone";
+  const cooldownOperation = { id: "cooldown-fixture", startedAt: "2026-11-16T03:13:00Z", until: "2026-11-16T09:13:00Z",
+    cooldownMinutes: 360, status: "cooling", windowMinutes: 15, windowCount: 4, threshold: 4,
+    historyCount: 7, historyMinutes: 90, historyThreshold: 12, triggerReason: "current", finishedAt: null };
   const raw = JSON.stringify({ error: { code: "phone_verification_required", message: "完整反馈：" + "详细响应内容。".repeat(50), trace: "fixture-trace-code" } });
   await page.route(pattern, async route => {
     const response = await route.fetch(), data = await response.json();
     data.jobs = data.jobs.map(job => job.email === "review-1@example.test" ? {
-      ...job, status: mode === "phone" ? "phone" : "failed", prompt: "请输入需要绑定的手机号",
+      ...job, status: mode.startsWith("cooldown") ? "completed" : mode === "phone" ? "phone" : "failed", prompt: "请输入需要绑定的手机号",
       createdAt: "2026-11-01T01:02:03Z", lastOperationAt: "2026-11-05T04:05:06Z", lastOperationType: "reauthorize",
       webSessionStatus: "valid", webLoginError: "unrelated old Web failure", lastError: mode === "phone" ? null : raw,
+      ...(mode.startsWith("cooldown") ? { overloadAutoCooldown: { ...job.overloadAutoCooldown, operation: {
+        ...cooldownOperation, ...(mode === "cooldown-completed" ? { status: "completed", finishedAt: "2026-11-16T09:14:00Z", resumedAt: "2026-11-16T09:14:00Z", completionReason: "automatic" } : {}) } } } : {}),
     } : job);
     await route.fulfill({ json: data });
   });
@@ -34,7 +40,12 @@ async (page) => {
     check(await trigger.evaluate(el => el.classList.contains("pending")), "pending operation should use pending tone class");
     check(await row().locator(".recent-operation-result").count() === 0, "separate result text should be removed");
     check(await row().locator(".web-session-state").innerText() === "Web已验", "Web badge moved out of account column");
-    check(await row().getByPlaceholder("+60123456789").isVisible(), "phone entry disappeared during column merge");
+    const phoneTrigger = row().locator("button.sms-compact-trigger");
+    check(await phoneTrigger.isVisible(), "compact phone entry disappeared during column merge");
+    await phoneTrigger.click();
+    const phoneDialog = page.getByRole("dialog", { name: "手机验证详情 · review-1@example.test", exact: true });
+    check(await phoneDialog.getByPlaceholder("+60123456789").isVisible(), "compact phone entry did not reveal the phone input");
+    await phoneDialog.getByRole("button", { name: "关闭手机验证浮层", exact: true }).click();
     const tag = await trigger.boundingBox();
     const opCell = await row().locator(".recent-operation-cell").boundingBox();
     check(Math.abs(tag.x + tag.width / 2 - opCell.x - opCell.width / 2) < 1, "operation label is not centered in its column");
@@ -71,6 +82,35 @@ async (page) => {
     await tag.press("Enter"); await modal.waitFor();
     await modal.getByRole("button", { name: "关闭详情", exact: true }).click();
   });
+  await run("overload-cooldown-duration-deadline-and-original-details", async () => {
+    mode = "cooldown"; await page.reload();
+    const trigger = row().getByRole("button", { name: "查看过载冷却反馈详情", exact: true }); await trigger.waitFor();
+    check(await trigger.evaluate(el => el.classList.contains("pending")), "cooling badge tone is incorrect");
+    const progress = row().getByRole("status", { name: "过载冷却进度", exact: true });
+    check((await progress.innerText()).includes("冷却中 · 360 分钟"), "cooldown duration is not visible in recent operation column");
+    check(await progress.locator("time").getAttribute("datetime") === cooldownOperation.until, "cooldown deadline missing");
+    check((await progress.locator("time").innerText()).includes("17:13:00"), "deadline ignored display timezone");
+    check((await row().locator(".recent-operation-time").innerText()).includes("11:13:00"), "operation time is not cooldown start");
+    await trigger.click(); const modal = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
+    const text = await modal.locator("pre").innerText();
+    check(text.includes("4 / 4") && text.includes("7 / 12") && text.includes("预计恢复时间") && text.includes("17:13:00"), "cooldown trigger or original timing details lost");
+    check(!text.includes("phone_verification_required") && !text.includes("unrelated old Web failure"), "cooldown reused unrelated previous failure");
+    await page.keyboard.press("Escape");
+    await row().locator(".recent-operation-cell").screenshot({ path: evidence + "/cooldown-active.png" });
+  });
+  await run("cooldown-recovery-remains-visible-after-refresh", async () => {
+    mode = "cooldown-completed"; await page.reload();
+    const trigger = row().getByRole("button", { name: "查看过载冷却反馈详情", exact: true }); await trigger.waitFor();
+    check(await trigger.evaluate(el => el.classList.contains("success")), "recovered badge is not successful");
+    const progress = row().getByRole("status", { name: "过载冷却进度", exact: true });
+    check((await progress.innerText()).includes("已恢复 · 360 分钟"), "completed cooldown no longer appears");
+    check((await progress.innerText()).includes("恢复于") && (await progress.locator("time").innerText()).includes("17:14:00"), "actual recovery time missing");
+    check((await row().locator(".recent-operation-time").innerText()).includes("17:14:00"), "latest operation time was not updated on recovery");
+    await trigger.click(); const modal = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
+    const text = await modal.locator("pre").innerText(); check(text.includes("实际恢复时间") && text.includes("11:13:00") && text.includes("17:13:00"), "recovery lost original cooling interval");
+    await page.keyboard.press("Escape");
+    await row().locator(".recent-operation-cell").screenshot({ path: evidence + "/cooldown-recovered.png" });
+  });
   await run("recent-operation-mobile-and-empty-state", async () => {
     await page.setViewportSize({ width: 375, height: 812 });
     await row().locator(".operation-feedback-trigger").scrollIntoViewIfNeeded();
@@ -79,6 +119,7 @@ async (page) => {
     const modal = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
     const bounds = await modal.boundingBox();
     check(bounds.x >= 0 && bounds.x + bounds.width <= 375, "feedback dialog overflows mobile viewport");
+    await modal.screenshot({ path: evidence + "/cooldown-mobile-details.png" });
     await page.keyboard.press("Escape");
     await page.getByRole("textbox", { name: "搜索账号", exact: true }).fill("no-match-recent-operation");
     await page.waitForFunction(() => !document.querySelector("tr.job-row"));

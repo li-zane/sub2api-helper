@@ -7,6 +7,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { OVERLOAD_MESSAGE } from "../src/overload-monitor.mjs";
+import { recentOperation } from "../web/src/recent-operation.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-cooldown-http-"));
@@ -82,6 +83,10 @@ try {
   assert.equal(records[0].schedulable, false);
   assert.deepEqual(changes, [{ id: 7, enabled: false }]);
   const cooling = await job();
+  const coolingOperation = cooling.overloadAutoCooldown.operation;
+  assert.equal(coolingOperation.status, "cooling"); assert.equal(coolingOperation.until, cooling.overloadAutoCooldown.coolingUntil);
+  assert.equal(coolingOperation.threshold, rule.threshold); assert.equal(coolingOperation.cooldownMinutes, rule.cooldownMinutes);
+  assert.equal(recentOperation(cooling).label, "过载冷却"); assert.equal(recentOperation(cooling).result, "冷却中");
   assert.equal(cooling.overloadAutoCooldown.windowCount, 3);
   assert.equal(cooling.assignedProxyId, before.assignedProxyId);
   assert.equal(cooling.status, before.status, "pool pause does not restart account login");
@@ -103,6 +108,7 @@ try {
   assert.equal((await job()).overloadAutoCooldown.enabled, false, "pool is cooling: effective control stays off while durable resume remains armed");
   assert.deepEqual((await get("/api/task-settings")).settings.overloadAutoCooldown, rule);
   assert.equal((await job()).overloadAutoCooldown.coolingUntil, cooling.overloadAutoCooldown.coolingUntil);
+  assert.equal((await job()).overloadAutoCooldown.operation.id, coolingOperation.id);
   await stop();
   const disk = JSON.parse(await fs.readFile(statePath, "utf8"));
   disk.accounts[email].coolingUntil = new Date(Date.now() - 1000).toISOString();
@@ -111,8 +117,14 @@ try {
   await waitFor(async () => (await job()).overloadAutoCooldown.phase === "idle");
   assert.equal(records[0].schedulable, true, "expired cooldown restores after service restart");
   assert.equal(records[1].schedulable, false, "manual disabled account stays disabled");
+  const resumed = await job();
+  assert.equal(resumed.overloadAutoCooldown.operation.status, "completed"); assert.equal(resumed.overloadAutoCooldown.operation.id, coolingOperation.id);
+  assert.equal(resumed.overloadAutoCooldown.operation.until, coolingOperation.until);
+  assert.equal(recentOperation(resumed).result, "已恢复"); assert.equal(recentOperation(resumed).at, resumed.overloadAutoCooldown.operation.resumedAt);
   assert.equal((await post(`/api/jobs/${jobId}/overload-auto-cooldown`, { enabled: false })).status, 200);
   assert.equal((await job()).overloadAutoCooldown.enabled, false);
+  await stop(); await start();
+  assert.deepEqual((await job()).overloadAutoCooldown.operation, resumed.overloadAutoCooldown.operation, "recovery operation was lost on restart");
   console.log("PASS: auto-cooldown HTTP auth/validation, saved task rule, per-account switch, threshold pool pause, unchanged login/binding, persisted restart deadline, overdue resume and originally-disabled preservation");
   if (process.argv.includes("--serve")) {
     logRows = makeRows();
@@ -127,7 +139,7 @@ try {
     await new Promise(resolve => { process.once("SIGINT", resolve); process.once("SIGTERM", resolve); });
   }
 } catch (error) { error.message += `\n${logs}`; throw error; }
-finally { releaseSample(); await stop(); remote.closeAllConnections(); await new Promise(resolve => remote.close(resolve)); await fs.rm(temp, { recursive: true, force: true }); }
+finally { releaseSample(); await stop(); remote.closeAllConnections(); await new Promise(resolve => remote.close(resolve)); await fs.rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 
 function makeRows() { return [1, 2, 3].map(id => ({ id, account_id: 7, status_code: 503, message: OVERLOAD_MESSAGE, created_at: new Date(Date.now() - 10_000 - id).toISOString() })); }
 async function job() { return (await get("/api/jobs")).jobs.find(job => job.id === jobId); }

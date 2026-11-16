@@ -364,7 +364,21 @@ select {
 }
 
 .telemetry-history-pill {
+  position: relative;
   color: #475569;
+}
+
+.telemetry-history-pill .subscription-change-dot {
+  display: block;
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--surface);
+  pointer-events: none;
 }
 
 .telemetry-history-pill svg {
@@ -3303,6 +3317,17 @@ select {
 }
 
 .recent-operation-summary .operation-type-badge { margin-top: 0; }
+
+.recent-operation-cooldown {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 
 .operation-type-badge {
   display: inline-flex;

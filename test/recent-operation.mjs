@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { recentOperation } from "../web/src/recent-operation.mjs";
+import { setDisplayTimeZone } from "../web/src/display-time.mjs";
 
 const labels = { completed: "已完成", canceled: "授权已取消", phone: "待手机号", working: "处理中", failed: "失败" };
 const base = { createdAt: "2026-11-01T01:00:00Z", lastOperationAt: "2026-11-05T01:00:00Z", lastOperationType: "reauthorize", status: "phone", prompt: "请输入需要绑定的手机号" };
@@ -27,4 +28,30 @@ assert.equal(recentOperation({ ...base, lastOperationType: "add_password", statu
 const diagnostics = recentOperation({ ...base, webSessionMaintenancePause: { reason: "logout" }, webSessionRepairRetryAt: "2026-11-05T02:00:00Z", webSessionCheckError: "HTTP 503" }, labels);
 assert.equal(recentOperation({ ...base, lastOperationType: "session_reset", status: "queued", sessionReset: { status: "cooling" } }, labels).result, "冷却中");
 assert(diagnostics.text.includes("已主动登出")); assert(diagnostics.text.includes("Web 自动重登冷却中")); assert(diagnostics.text.includes("HTTP 503"));
+const cooldown = { id: "cooldown-fixture", startedAt: "2026-11-16T03:13:00Z", until: "2026-11-16T09:13:00Z",
+  cooldownMinutes: 360, status: "cooling", windowMinutes: 15, windowCount: 4, threshold: 4,
+  historyCount: 7, historyMinutes: 90, historyThreshold: 12, triggerReason: "current", finishedAt: null };
+const coolingJob = { ...base, status: "completed", lastError: "old unrelated login failure", overloadAutoCooldown: { operation: cooldown } };
+let op = recentOperation(coolingJob, labels);
+assert.equal(op.label, "过载冷却", "automatic overload cooling must appear as the recent operation");
+assert.equal(op.result, "冷却中"); assert.equal(op.at, cooldown.startedAt); assert.equal(op.tone, "pending");
+assert.equal(op.cooldown.duration, "360 分钟"); assert.equal(op.cooldown.timeLabel, "至"); assert.equal(op.cooldown.time, cooldown.until);
+assert(op.text.includes("11:13:00") && op.text.includes("17:13:00") && op.text.includes("4 / 4"));
+assert(!op.text.includes("old unrelated login failure"));
+setDisplayTimeZone("UTC");
+assert(recentOperation(coolingJob, labels).text.includes("03:13:00"), "cooldown detail ignored display time zone");
+setDisplayTimeZone("Asia/Shanghai");
+const completed = { ...cooldown, status: "completed", finishedAt: "2026-11-16T09:14:00Z", resumedAt: "2026-11-16T09:14:00Z", completionReason: "automatic" };
+op = recentOperation({ ...coolingJob, overloadAutoCooldown: { operation: completed } }, labels);
+assert.equal(op.result, "已恢复"); assert.equal(op.at, completed.resumedAt); assert.equal(op.tone, "success");
+assert.equal(op.cooldown.timeLabel, "恢复于"); assert(op.text.includes("17:14:00"));
+assert.equal(recentOperation({ ...coolingJob, lastOperationType: "credential_update", lastOperationAt: "2026-11-16T04:00:00Z" }, labels).type, "credential_update", "cooldown masked a newer unrelated operation");
+const refreshing = { ...cooldown, status: "refreshing", resetRequestId: "reset-fixture", error: "CODEX_AUTH_FAILED" };
+op = recentOperation({ ...coolingJob, lastOperationType: "automatic_relogin", lastOperationAt: "2026-11-16T09:13:01Z",
+  sessionReset: { source: "cooldown", id: "reset-fixture" }, overloadAutoCooldown: { operation: refreshing } }, labels);
+assert.equal(op.label, "过载冷却"); assert.equal(op.result, "恢复待重试"); assert.equal(op.tone, "error"); assert(op.text.includes("CODEX_AUTH_FAILED"));
+assert.equal(recentOperation({ ...coolingJob, overloadAutoCooldown: { operation: { ...cooldown, status: "resuming" } } }, labels).result, "恢复中");
+assert.equal(recentOperation({ ...coolingJob, overloadAutoCooldown: { operation: { ...completed, status: "manual_paused" } } }, labels).result, "保持暂停");
+assert.equal(recentOperation({ ...coolingJob, overloadAutoCooldown: { operation: { ...completed, status: "blocked" } } }, labels).result, "封禁停用");
 console.log("RECENT_OPERATION_PASS scoped Web/auth/security/update results; original response codes and JSON; stale-feedback isolation; diagnostics preserved");
+console.log("COOLDOWN_OPERATION_UI_PASS cooling/duration/deadline; completed/resume time; original thresholds; display timezone; unrelated newer operation; linked reauthorization; failure and manual/ban outcomes");

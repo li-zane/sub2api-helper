@@ -1981,6 +1981,7 @@ async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}
     stats: {
       ...healthCounts,
       historicalSubscriptions: subscriptionHistory.size,
+      historicalSubscriptionUnreadPlanChanges: subscriptionHistory.unreadPlanChangeCount,
       active: allJobs.filter(occupiesActiveSlot).length + activeWebSessionChecks,
       webSessionChecks: activeWebSessionChecks,
       queued: allJobs.filter((job) => job.status === "queued").length,

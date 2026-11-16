@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 import { DEFAULT_POOL_SYNC_CONCURRENCY, limitPoolRequests } from "./pool-network.mjs";
 import { overloadGrid } from "../web/src/overload-grid.mjs";
 
@@ -38,11 +39,26 @@ export class OverloadCooldown {
     try {
       const data = JSON.parse(await fs.readFile(this.filePath, "utf8"));
       if (data.version !== 1 || !data.accounts || typeof data.accounts !== "object") throw new Error("自动冷却配置格式无效");
+      let migrated = false;
       for (const [email, raw] of Object.entries(data.accounts)) {
         if (!raw || typeof raw.enabled !== "boolean") continue;
         const resumeAccountIds = Array.isArray(raw.resumeAccountIds) ? [...new Set(raw.resumeAccountIds.map(String).filter(id => /^\d+$/.test(id)))] : [];
         this.accounts.set(email.toLowerCase(), { ...raw, resumeAccountIds, revision: Number.isSafeInteger(raw.revision) ? raw.revision : 0 });
+        // Recover an already-running cooldown from its recorded observation and
+        // deadline. Do not invent a past completed operation or trigger threshold.
+        if (!raw.operation && resumeAccountIds.length && Number.isFinite(Date.parse(raw.lastCheckedAt))
+          && Date.parse(raw.coolingUntil) > Date.parse(raw.lastCheckedAt)) {
+          this.accounts.get(email.toLowerCase()).operation = {
+            id: crypto.randomUUID(), startedAt: raw.lastCheckedAt, until: raw.coolingUntil,
+            cooldownMinutes: Math.round((Date.parse(raw.coolingUntil) - Date.parse(raw.lastCheckedAt)) / 60_000),
+            windowMinutes: raw.windowCountMinutes, windowCount: raw.windowCount,
+            historyCount: raw.historyCount, historyMinutes: overloadGrid(raw.windowCountMinutes).historyMinutes,
+            threshold: null, historyThreshold: null, triggerReason: raw.triggerReason, finishedAt: null,
+          };
+          migrated = true;
+        }
       }
+      if (migrated) await this.persist();
     } catch (error) { if (error.code !== "ENOENT") throw new Error(`自动冷却状态读取失败：${error.message}`); }
   }
 
@@ -61,6 +77,10 @@ export class OverloadCooldown {
       windowCountMinutes: entry?.windowCountMinutes ?? null, lastCheckedAt: entry?.lastCheckedAt || null, lastError: entry?.lastError || null,
       windowStart: entry?.windowStart || null, windowEnd: entry?.windowEnd || null,
       settings: { ...settings },
+      operation: entry?.operation ? { ...entry.operation,
+        status: entry.operation.finishedAt ? entry.operation.status : entry.phase,
+        error: entry.operation.finishedAt ? entry.operation.error || null : entry.lastError || null,
+        resetRequestId: entry.resetRequestId || null } : null,
     };
   }
 
@@ -136,7 +156,8 @@ export class OverloadCooldown {
   // Unlike a normal disable, a permanent block must never resume the pool row.
   async blockAccount(email) {
     email = email.toLowerCase();
-    await this.lock(email, () => this.update(email, { enabled: false, phase: "idle", resumeAccountIds: [], coolingUntil: null, lastError: null }));
+    await this.lock(email, () => this.update(email, { enabled: false, phase: "idle", resumeAccountIds: [], coolingUntil: null, lastError: null,
+      operation: this.finishOperation(this.accounts.get(email)?.operation, "blocked", "banned") }));
   }
 
   // A manual pool switch takes ownership away from the automatic cooldown.
@@ -155,7 +176,12 @@ export class OverloadCooldown {
         const remaining = (entry.resumeAccountIds || []).filter(id => !removed.has(id));
         await this.update(email, { resumeAccountIds: remaining, ...(remaining.length ? {} : { phase: "idle", coolingUntil: null }), lastResumedAt: new Date(this.now()).toISOString(), lastError: null });
       }
-      return action();
+      const result = await action();
+      const current = this.accounts.get(email);
+      if (current?.operation && current.operation.id === entry?.operation?.id && !current.resumeAccountIds?.length) {
+        await this.update(email, { operation: this.finishOperation(current.operation, enabled === false ? "manual_paused" : "completed", "manual") });
+      }
+      return result;
     });
   }
 
@@ -279,8 +305,13 @@ export class OverloadCooldown {
         const targets = [...new Set(accountIds.map(String))].filter(id => /^\d+$/.test(id) && !this.isManuallyDisabled(email, id, config));
         if (!targets.length) return;
         // Commit ownership before changing remote scheduling, as in restart recovery.
-      await this.update(email, { backend, phase: "pausing", resumeAccountIds: targets, resetRequestId: null,
-          coolingUntil: new Date(this.now() + settings.cooldownMinutes * 60_000).toISOString() });
+        const startedAt = new Date(this.now()).toISOString();
+        const coolingUntil = new Date(this.now() + settings.cooldownMinutes * 60_000).toISOString();
+        await this.update(email, { backend, phase: "pausing", resumeAccountIds: targets, resetRequestId: null, coolingUntil,
+          operation: { id: crypto.randomUUID(), startedAt, until: coolingUntil, cooldownMinutes: settings.cooldownMinutes,
+            windowMinutes, windowCount: point.count, threshold: settings.threshold,
+            historyCount: history, historyMinutes: grid.historyMinutes, historyThreshold: settings.threshold * 3,
+            windowStart: point.start, windowEnd: point.end, triggerReason, finishedAt: null } });
         await this.pause(email, config, targets.map(id => ({ id, enabled: true })));
       });
     } catch (error) {
@@ -319,12 +350,20 @@ export class OverloadCooldown {
       const record = records.find(record => String(record.id) === id);
       if (record && record.enabled !== true) await this.setSchedulable(config, id, true);
       const remaining = entry.resumeAccountIds.filter(item => item !== id);
-      entry = await this.update(email, { resumeAccountIds: remaining, ...(remaining.length ? {} : { phase: "idle", coolingUntil: null, lastResumedAt: new Date(this.now()).toISOString(), windowCount: 0, lastError: null }) });
+      entry = await this.update(email, { resumeAccountIds: remaining, ...(remaining.length ? {} : { phase: "idle", coolingUntil: null, lastResumedAt: new Date(this.now()).toISOString(), windowCount: 0, lastError: null,
+        operation: this.finishOperation(entry.operation, "completed", previous.enabled ? "automatic" : "disabled") }) });
     }
-    await this.update(email, { phase: "idle", coolingUntil: null, lastResumedAt: new Date(this.now()).toISOString(), windowCount: 0, lastError: null });
+    await this.update(email, { phase: "idle", coolingUntil: null, lastResumedAt: new Date(this.now()).toISOString(), windowCount: 0, lastError: null,
+      operation: this.finishOperation(entry.operation, "completed", previous.enabled ? "automatic" : "disabled") });
     // The pause intent is cleared first, so shared statistics can fill the
     // missed fixed buckets without immediately re-cooling from old errors.
     this.onNeedCounts();
+  }
+
+  finishOperation(operation, status, completionReason) {
+    if (!operation || operation.finishedAt) return operation || null;
+    const at = new Date(this.now()).toISOString();
+    return { ...operation, status, completionReason, finishedAt: at, resumedAt: status === "completed" ? at : null };
   }
 
   async setSchedulable(config, id, enabled) {
