@@ -6,7 +6,8 @@
 
 - 个人仓库 `https://github.com/li-zane/sub2api-helper.git`，`origin/main`；不拉取原作者上游、不强推。
 - 英语 `type(scope): description` 提交，只包含本次相关改动及非敏感 `.agents` 配置；保留其他工作、运行数据和凭据。
-- `.github/workflows/check.yml` 在 Linux/Windows 执行生产构建、发布工具测试、`npm run check` 和依赖审计。任一检查失败，不发布运行包。
+- `.github/workflows/check.yml` 在 Linux/Windows 各分 4 组，通过 `npm run check:ci -- --shard N/4` 执行完整检查；清单自动展开自 `npm run check`，每组内部保留原执行顺序，各组均构建生产前端。全部 8 组通过后才发布运行包。
+- 每个平台第 1 组执行发布工具测试和依赖审计；Linux 第 1 组生成唯一运行包。每组将逐项测试耗时保存为 Actions artifact，并在运行摘要中列出最慢的测试。新推送取消同一分支尚在执行的旧测试组，发布运行包的任务仍排队执行。
 - `main` 推送或手动运行该流水线，检查全部通过后发布不可覆盖的 GitHub Release `helper-<40位提交SHA>`。包版本以提交 SHA 为准，不自动修改 `package.json` 版本。
 - 构建环境 Linux x64 / Node 22；产物 `helper-linux-x64-node22.tar.gz` 含源码、生产前端及 Node 依赖，另附 `SHA256SUMS`。包内 `release.json` 记录每个文件的哈希和链接目标；禁止打包运行数据、密钥、`.env`、`tmp/`、测试输出或 `.git/`。
 
