@@ -5,6 +5,15 @@ async (page) => {
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   page.setDefaultTimeout(5000);
+  await page.evaluate(() => {
+    window.__taskSettingsBodies = [];
+    const originalFetch = window.fetch;
+    window.fetch = async (input, init) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      if (req.method === 'POST' && new URL(req.url).pathname === '/api/task-settings') window.__taskSettingsBodies.push(await req.clone().text());
+      return originalFetch.call(window, input, init);
+    };
+  });
   const initialUrl = page.url();
   const open = async () => {
     await page.getByRole('button', { name: '任务设置', exact: true }).click();
@@ -83,7 +92,7 @@ async (page) => {
     const response = page.waitForResponse(r => r.url().endsWith('/api/task-settings') && r.request().method() === 'POST');
     await dialog.getByRole('button', { name: '保存设置', exact: true }).click();
     const saved = await response; check(saved.ok(), 'mobile save failed');
-    check(saved.request().postDataJSON().loginTimeoutMinutes === 5, 'changed setting was not submitted');
+    check(JSON.parse(await page.evaluate(() => window.__taskSettingsBodies.at(-1) || "{}")).loginTimeoutMinutes === 5, 'changed setting was not submitted');
     await dialog.waitFor({ state: 'hidden' }); dialog = await open();
     check(await dialog.locator('#task-login-timeout').inputValue() === '5', 'saved setting did not survive reopening');
     await visibleFooter(dialog); await dialog.getByRole('button', { name: '取消', exact: true }).click();

@@ -9,6 +9,14 @@ node test/console-oauth-proxy-counts-smoke.mjs
 
 `test:ui:filters` 使用临时数据和本地 HTTP 服务，已纳入 `npm run check`。
 
+### 列表轮询：性能与回归
+
+- `npm run test:frontend:poll` 检查筛选参数、请求取消、延迟返回、顺序变化和引用复用。更新列表时，按 ID 合并账号成本；过期快照不会覆盖已确认的新成本。
+- `npm run bench:frontend:poll` 单独计时浏览器端的数据合并算法：每轮 20 行详情、1,000 条跨页索引，分别测量无变化、单行更新和倒序。输出为预热后 9 组的中位数（毫秒/轮）；不包括 HTTP、JSON 解析或 React 渲染，不作为 CI 时间门槛。
+- `node test/run-ui-regressions.mjs --frontend-performance` 用真实浏览器检查：连续三轮无变化时没有列表行重渲染，单行更新只重渲染该行。
+
+列表的职责分为四层：`main.jsx` 负责 React 状态与界面；`job-list-filters.mjs` 负责筛选项和 GET/POST 参数；`job-list-poll.mjs` 负责启动、取消和接收轮询，以及按 ID 合并业务字段；`polling-snapshot.mjs` 只处理 JSON 结构共享，不依赖 React 或业务字段。
+
 `test:ui:browser` 使用 Playwright CLI 和独立浏览器会话，检查十一项契约：Web 登录态、精确邮箱集合、有效方案搜索、键盘帮助、代理弹窗（初始焦点不弹帮助、键盘帮助仍可用）、日志弹窗、批量互斥、移动端操作列、无结果提示、代理分配统计口径和 WebSession 巡检设置。需预先备好 `@playwright/cli` 及其浏览器；运行使用 `npx --no-install`，不会自动安装依赖。任何失败都会返回非零退出码。
 
 所有账号均为 `example.test` 测试数据；批量重新授权接口由浏览器模拟响应，不运行真实登录或账号操作。

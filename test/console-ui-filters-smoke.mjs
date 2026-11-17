@@ -43,6 +43,11 @@ try {
   }
   assert(boot?.token, logs);
   const headers = { "x-console-token": boot.token, "content-type": "application/json" };
+  for (const token of [undefined, "wrong-token"]) {
+    const unauthHeaders = token ? { "x-console-token": token } : {};
+    assert.equal((await fetch(base + "/api/jobs", { headers: unauthHeaders })).status, 403, "GET jobs must require the console token");
+    assert.equal((await fetch(base + "/api/jobs/query", { method: "POST", headers: { ...unauthHeaders, "content-type": "application/json" }, body: "{}" })).status, 403, "POST jobs query must require the console token");
+  }
   const get = async suffix => {
     const response = await fetch(base + "/api/jobs" + suffix, { headers });
     assert.equal(response.status, 200);

@@ -19,7 +19,7 @@ class BundleTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.source = self.root / "source"
-        for name in ("src/console-server.mjs", "web/dist/index.html", "node_modules/jsdom/package.json",
+        for name in ("src/console-server.mjs", "shared/account-pricing.mjs", "shared/currency-text.mjs", "web/dist/index.html", "node_modules/jsdom/package.json",
                      "package.json", "package-lock.json", "requirements.txt"):
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,6 +43,10 @@ class BundleTests(unittest.TestCase):
         actual = bundle.extract(self.archive, target, REVISION)
         self.assertEqual(actual["revision"], REVISION)
         self.assertEqual(bundle.inventory(target), bundle.inventory(self.source))
+        self.assertIn("shared", bundle.ROOTS)
+        for name in ("shared/account-pricing.mjs", "shared/currency-text.mjs"):
+            self.assertIn(name, actual["files"])
+            self.assertTrue((target / name).is_file())
 
     def test_rejects_changed_runtime_file(self):
         (self.source / "src/console-server.mjs").write_text("changed")

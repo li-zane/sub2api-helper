@@ -70,10 +70,10 @@ try {
   await fs.writeFile(loaderPath, `export async function load(url, context, nextLoad) {
     const loaded = await nextLoad(url, context);
     if (url !== ${JSON.stringify(pathToFileURL(server).href)}) return loaded;
-    const anchor = "await Promise.all(allJobs.map(inspectAccountWebSession));";
+    const anchor = "inspectWebSession: inspectAccountWebSession,";
     const source = String(loaded.source);
     if (!source.includes(anchor)) throw Error("List snapshot test anchor missing");
-    return { ...loaded, source: source.replace(anchor, anchor + "\\n  invalidateSub2ApiAccountStatusCache();") };
+    return { ...loaded, source: source.replace(anchor, "inspectWebSession: async job => { await inspectAccountWebSession(job); invalidateSub2ApiAccountStatusCache(); },") };
   }`);
   await fs.writeFile(registerPath, `import { register } from "node:module"; register(${JSON.stringify(pathToFileURL(loaderPath).href)});`);
   const loaderArgs = process.env.CODEX_FILTER_BASELINE === "1" ? [] : ["--import", pathToFileURL(registerPath).href];

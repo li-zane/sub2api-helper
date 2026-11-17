@@ -12,7 +12,7 @@ import subprocess
 import tarfile
 
 ASSET = "helper-linux-x64-node22.tar.gz"
-ROOTS = ("src", "web/src", "web/dist", "node_modules", "package.json", "package-lock.json", "requirements.txt")
+ROOTS = ("src", "shared", "web/src", "web/dist", "node_modules", "package.json", "package-lock.json", "requirements.txt")
 
 
 def digest(path):
@@ -39,7 +39,7 @@ def verify(root, revision):
         raise ValueError("Bundle revision/platform mismatch")
     if inventory(root) != metadata["files"]:
         raise ValueError("Bundle file inventory/hash mismatch")
-    for name in ("src/console-server.mjs", "web/dist/index.html", "node_modules/jsdom/package.json",
+    for name in ("src/console-server.mjs", "shared/account-pricing.mjs", "shared/currency-text.mjs", "web/dist/index.html", "node_modules/jsdom/package.json",
                  "package.json", "package-lock.json", "requirements.txt"):
         if not (root / name).is_file():
             raise ValueError("Required runtime file missing: " + name)

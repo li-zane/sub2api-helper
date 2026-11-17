@@ -114,6 +114,7 @@ npm run dev
 
 ## 文档导航
 
+- [控制台架构](docs/architecture.md)：列表查询、共享规则、前端弹窗的职责与验证入口。
 - [使用与配置指南](docs/usage-guide.md)：安装、部署、代理、登录资料、接码、上传与输出文件。
 - [自动化与任务设置](docs/automation.md)：触发条件、恢复规则、并发与检测间隔。
 - [Web 会话巡检](docs/web-session-monitor.md)：测活、补登、空间变化及主动暂停。

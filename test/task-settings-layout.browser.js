@@ -4,6 +4,15 @@ async (page) => {
   const test = async (name, run) => { try { await run(); results.push({ name, passed: true }); } catch (error) { results.push({ name, passed: false, error: error.message }); } };
   page.on('pageerror', error => errors.push(error.message));
   page.setDefaultTimeout(5000);
+  await page.evaluate(() => {
+    window.__taskSettingsBodies = [];
+    const originalFetch = window.fetch;
+    window.fetch = async (input, init) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      if (req.method === 'POST' && new URL(req.url).pathname === '/api/task-settings') window.__taskSettingsBodies.push(await req.clone().text());
+      return originalFetch.call(window, input, init);
+    };
+  });
   await page.setViewportSize({ width: 2562, height: 1200 });
   await page.getByRole('button', { name: '任务设置', exact: true }).click();
   const modal = page.getByRole('dialog', { name: '任务设置', exact: true });
@@ -75,7 +84,7 @@ async (page) => {
     await modal.locator('.task-auto-rule').nth(1).getByRole('checkbox', { name: '上传到 Sub2API', exact: true }).check();
     const reply = page.waitForResponse(r => r.url().endsWith('/api/task-settings') && r.request().method() === 'POST');
     await modal.getByRole('button', { name: '保存设置', exact: true }).click();
-    const response = await reply, body = response.request().postDataJSON();
+    const response = await reply, body = JSON.parse(await page.evaluate(() => window.__taskSettingsBodies.at(-1) || "{}"));
     check(response.ok(), 'save failed: ' + await response.text());
     check(body.autoActions.team.includes('rotate-logout-reauthorize-upload') && !body.autoActions.team.includes('upload'), 'duplicate upload in request');
     check(body.autoActions.free.length === 2 && body.autoActions.free.includes('authorize-codex') && body.autoActions.free.includes('upload'), 'plain upload lost its OAuth prerequisite');

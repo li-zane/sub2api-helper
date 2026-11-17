@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { normalizeAccountCost, normalizePoolPriceMultiplier, restoredAccountCost, accountProfitCents, formatCnyCents, formatAccountCost, preserveNewerAccountCosts } from "../web/src/account-pricing.mjs";
+import { normalizeAccountCost, normalizePoolPriceMultiplier, restoredAccountCost, accountProfitCents, formatCnyCents, formatAccountCost, preserveNewerAccountCost } from "../web/src/account-pricing.mjs";
 
 assert.equal(normalizePoolPriceMultiplier(undefined),1); assert.equal(restoredAccountCost(undefined),0);
 assert.equal(normalizeAccountCost("12.3400"),12.34);assert.equal(normalizePoolPriceMultiplier("0.000001"),0.000001);
@@ -13,8 +13,10 @@ assert.equal(accountProfitCents(117.005,1,0),11701n,"currency rounding is decima
 for(const value of [undefined,null,NaN,Infinity,-1,"2"])assert.equal(accountProfitCents(value,7,12.34),null,"unknown U must not become a fake loss");
 assert.equal(formatCnyCents(166n),"￥1.66");assert.equal(formatCnyCents(-600n),"-￥6.00");assert.equal(formatCnyCents(null),"—");
 assert.equal(formatAccountCost(0),"￥0");assert.equal(formatAccountCost(12.34),"￥12.34");
-const before=[{id:"a",accountCostCny:12.34,accountCostUpdatedAt:"2026-11-07T02:00:00Z"}];
-assert.equal(preserveNewerAccountCosts(before,[{id:"a",accountCostCny:0,accountCostUpdatedAt:null}])[0].accountCostCny,12.34);
-assert.equal(preserveNewerAccountCosts(before,[{id:"b",accountCostCny:0,accountCostUpdatedAt:null}])[0].accountCostCny,0);
-assert.equal(preserveNewerAccountCosts(before,[{id:"a",accountCostCny:20,accountCostUpdatedAt:"2026-11-07T03:00:00Z"}])[0].accountCostCny,20);
-console.log("ACCOUNT_PRICING_PASS strict decimal limits/defaults; U-only profit; exact cents/rounding; positive/negative/zero/unknown; CNY labels; late-poll and row-ID isolation");
+const before = { id: "a", accountCostCny: 12.34, accountCostUpdatedAt: "2026-11-07T02:00:00Z" };
+const stale = { id: "a", accountCostCny: 0, accountCostUpdatedAt: null };
+assert.equal(preserveNewerAccountCost(before, stale).accountCostCny, 12.34);
+assert.equal(preserveNewerAccountCost(undefined, stale), stale);
+const recent = { ...stale, accountCostCny: 20, accountCostUpdatedAt: "2026-11-07T03:00:00Z" };
+assert.equal(preserveNewerAccountCost(before, recent), recent);
+console.log("ACCOUNT_PRICING_PASS strict decimal limits/defaults; U-only profit; exact cents/rounding; positive/negative/zero/unknown; CNY labels; late-poll cost protection");

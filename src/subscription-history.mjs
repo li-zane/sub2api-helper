@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { writePrivateJsonAtomic } from "./account-history.mjs";
-import { accountProfitCents, formatCnyCents, restoredAccountCost } from "../web/src/account-pricing.mjs";
+import { accountProfitCents, restoredAccountCost } from "../shared/account-pricing.mjs";
+import { formatCnyCents } from "../shared/currency-text.mjs";
 
 const text = value => typeof value === "string" ? value : "";
 const emailKey = value => text(value).trim().toLowerCase();

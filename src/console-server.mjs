@@ -63,11 +63,14 @@ import { limitPoolRequests } from "./pool-network.mjs";
 import { createUsageTotalsReader, combineUsageTotals, mergeUsageTotals } from "./sub2api-usage-totals.mjs";
 import { UsageSnapshots, usageSnapshotKey } from "./usage-snapshots.mjs";
 import { SubscriptionHistory, isSubscribedPlan, historicalSubscriptionEvidence } from "./subscription-history.mjs";
-import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier, normalizeAccountCost, restoredAccountCost } from "../web/src/account-pricing.mjs";
+import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier, normalizeAccountCost, restoredAccountCost } from "../shared/account-pricing.mjs";
 import { OverloadCooldown, DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService, normalizeFingerprintSettings } from "./model-fingerprint.mjs";
 import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
 import { WebSessionMonitor, normalizeWebSessionMonitor, DEFAULT_WEB_SESSION_MONITOR } from "./web-session-monitor.mjs";
+import { JobStore } from "./job-store.mjs";
+import { normalizeJobFilters } from "./job-list-query.mjs";
+import { createJobListService } from "./job-list-service.mjs";
 import { accountHealth } from "./account-health.mjs";
 import { AccountSessionResets, sessionResetPending, sessionResetBlocksAutomation, resetCredentialUpdate, normalizeSessionResetDelay } from "./account-session-reset.mjs";
 import { createProxyImporter } from "./sub2api-proxy-create.mjs";
@@ -98,28 +101,6 @@ const PROXY_CONNECTION_RETRY_MAX_MS = 15_000;
 const PAGE_SIZE = 20;
 const importSub2ApiProxies = createProxyImporter({ request: requestSub2Api });
 const sub2ApiProxyEditor = createProxyEditor({ request: requestSub2Api });
-const JOB_STATUS_FILTER_VALUES = [
-  "queued",
-  "starting",
-  "working",
-  "password",
-  "mfa_otp",
-  "totp_starting",
-  "password_add_starting",
-  "totp_setup_otp",
-  "email_otp",
-  "phone",
-  "phone_otp",
-  "finalizing",
-  "refreshing",
-  "completed",
-  "failed",
-  "mfa_failed",
-  "banned",
-  "canceled",
-  "reauth_required",
-  "resume_available",
-];
 const SUB2API_ACCOUNT_STATUS_CACHE_TTL_MS = readDurationEnv("SUB2API_ACCOUNT_STATUS_CACHE_TTL_MS", 15_000, 1_000);
 const JOB_META_FILENAME = "job-meta.json";
 const LOGIN_CHECKPOINT_FILENAME = "login-checkpoint.json";
@@ -229,7 +210,7 @@ const proxyQualityService = new ProxyQualityService({
   timeoutMs: process.env.NODE_ENV === "test" ? process.env.TOSUB2_PROXY_CHECK_TIMEOUT_MS : undefined,
 });
 const consoleToken = crypto.randomBytes(24).toString("base64url");
-const jobs = new Map();
+const jobs = new JobStore();
 const accountLoginEmails = new AccountLoginEmails(path.join(OUTPUT_ROOT, "account-login-emails.json"));
 function registerJob(id, job) {
   Object.defineProperty(job, "loginEmail", { enumerable: true, get: () => accountLoginEmails.email(job.email) });
@@ -931,7 +912,7 @@ async function handleApi(req, res, requestUrl) {
 
   if (req.method === "GET" && requestUrl.pathname === "/api/jobs") {
     const requestedPage = Math.max(1, Number.parseInt(requestUrl.searchParams.get("page") || "1", 10) || 1);
-    await sendJobsPage(res, requestedPage, null, normalizeJobFilters({
+    const filters = normalizeJobFilters({
       search: requestUrl.searchParams.get("search"),
       lockedOnly: requestUrl.searchParams.get("lockedOnly"),
       accountType: requestUrl.searchParams.get("accountType"),
@@ -943,14 +924,15 @@ async function handleApi(req, res, requestUrl) {
       fingerprint: requestUrl.searchParams.get("fingerprint"),
       webSession: requestUrl.searchParams.get("webSession"),
       summary: requestUrl.searchParams.get("summary"),
-    }));
+    });
+    sendJson(res, 200, await queryJobs({ requestedPage, filters }));
     return;
   }
 
   if (req.method === "POST" && requestUrl.pathname === "/api/jobs/query") {
     const body = await readJson(req);
     const requestedPage = Math.max(1, Number.parseInt(body.page || "1", 10) || 1);
-    await sendJobsPage(res, requestedPage, normalizeEmailFilter(body.emails), normalizeJobFilters(body));
+    sendJson(res, 200, await queryJobs({ requestedPage, emails: normalizeEmailFilter(body.emails), filters: normalizeJobFilters(body) }));
     return;
   }
 
@@ -2016,159 +1998,39 @@ async function handleApi(req, res, requestUrl) {
   sendJson(res, 405, { error: "Method not allowed" });
 }
 
-async function sendJobsPage(res, requestedPage, emailFilter = null, filters = {}) {
-  await syncCompletedOutputs();
-  let poolState = sub2ApiAccountStatusCache;
-  try {
-    poolState = await loadSub2ApiAccountStatus();
-  } catch (error) {
-    if (filters.sub2apiPool || filters.sub2apiEnabled) throw error;
-  }
-  const allJobs = listUniqueJobs();
-  await syncSubscriptionHistory();
-  await Promise.all(allJobs.map(inspectAccountWebSession));
-  const healthCounts = { normal: 0, abnormal: 0, pending: 0 };
-  for (const job of allJobs) healthCounts[accountHealth(job, getSub2ApiAccountStatusForJob(job, poolState), accountAutomationBlocked(job.email), accountSessionResets.get(job.email))]++;
-  const planTypes = [...new Set(allJobs.map((job) => getJobPlanType(job, poolState)).filter(Boolean))].sort();
-  const planTypeUnknown = allJobs.some((job) => !getJobPlanType(job, poolState));
-  const sub2apiPools = [...new Set(allJobs.map((job) => getSub2ApiPoolFilterValue(job, getSub2ApiAccountStatusForJob(job, poolState))))];
-  const sub2apiEnabled = [...new Set(allJobs.map((job) => getSub2ApiEnabledFilterValue(job, poolState)))];
-  const statuses = JOB_STATUS_FILTER_VALUES.filter((status) => allJobs.some((job) => job.status === status));
-  const emailSet = emailFilter?.length ? new Set(emailFilter) : null;
-  const visibleJobs = allJobs.filter((job) => {
-    if (emailSet && !emailSet.has(job.loginEmail.toLowerCase())) return false;
-    return matchesJobFilters(job, filters, poolState);
-  });
-  const total = visibleJobs.length;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const page = Math.min(requestedPage, totalPages);
-  const start = (page - 1) * PAGE_SIZE;
-  sendJson(res, 200, {
-    // Background policy writes may invalidate the shared cache while the
-    // awaited inspections run. Filter and serialize the same loaded snapshot.
-    jobs: visibleJobs.slice(start, start + PAGE_SIZE).map(job => publicJobWithPoolState(job, poolState)),
-    selection: visibleJobs.map(job => publicSelectionJob(job, poolState)),
-    pagination: { page, pageSize: PAGE_SIZE, total, totalPages, totalAll: allJobs.length },
-    filter: {
-      active: Boolean(emailSet || filters.search || filters.lockedOnly || filters.accountType || filters.status || filters.planType || filters.sub2apiPool || filters.sub2apiEnabled || filters.webSession || filters.summary || filters.overload || filters.fingerprint),
-      summary: filters.summary || "",
-      search: filters.search || "",
-      lockedOnly: Boolean(filters.lockedOnly),
-      webSession: filters.webSession || "",
-      accountType: filters.accountType || "",
-      requested: emailFilter?.length || 0,
-      matched: total,
-      status: filters.status || "",
-      planType: filters.planType || "",
-      sub2apiPool: filters.sub2apiPool || "",
-      sub2apiEnabled: filters.sub2apiEnabled || "",
-      overload: filters.overload || "",
-      fingerprint: filters.fingerprint || "",
-    },
-    filterOptions: {
-      statuses,
-      planTypes,
-      planTypeUnknown,
-      sub2apiPools,
-      sub2apiEnabled,
-    },
-    stats: {
-      ...healthCounts,
-      historicalSubscriptions: subscriptionHistory.size,
-      historicalSubscriptionUnreadPlanChanges: subscriptionHistory.unreadPlanChangeCount,
-      active: allJobs.filter(occupiesActiveSlot).length + activeWebSessionChecks,
-      webSessionChecks: activeWebSessionChecks,
-      queued: allJobs.filter((job) => job.status === "queued").length,
-      completed: allJobs.filter((job) => job.status === "completed").length,
-    },
-    taskSettings: publicTaskSettings(),
-  });
+const queryJobs = createJobListService({
+  syncCompletedOutputs, getCachedPoolState: () => sub2ApiAccountStatusCache,
+  loadPoolState: loadSub2ApiAccountStatus, listJobs: listUniqueJobs, syncSubscriptionHistory,
+  inspectWebSession: inspectAccountWebSession, pageSize: PAGE_SIZE, webSessionChecks: () => activeWebSessionChecks,
+  readRow: readJobListRow, isCheckingSession: job => activeWebSessionCheckAccounts.has(job.email.toLowerCase()),
+  matchesMonitoring: matchesMonitoringFilters, toSelection: publicSelectionJob, toDetail: publicJobDetails,
+  historyStats: () => ({ historicalSubscriptions: subscriptionHistory.size,
+    historicalSubscriptionUnreadPlanChanges: subscriptionHistory.unreadPlanChangeCount }),
+  taskSettings: publicTaskSettings,
+});
+
+function readJobListRow(job, poolState) {
+  const pool = getSub2ApiAccountStatusForJob(job, poolState), blocked = accountAutomationBlocked(job.email);
+  return { job, pool, blocked, planType: getJobPlanType(job, poolState, pool), active: occupiesActiveSlot(job),
+    health: accountHealth(job, pool, blocked, accountSessionResets.get(job.email)) };
 }
 
-function normalizeJobFilters(value) {
-  const source = value && typeof value === "object" ? value : {};
-  const search = String(source.search || "").trim();
-  const lockedOnly = source.lockedOnly === true || source.lockedOnly === "true";
-  const accountTypeValue = String(source.accountType || "").trim().toLowerCase();
-  const statusValue = String(source.status || "").trim().toLowerCase();
-  const planTypeValue = String(source.planType || "").trim();
-  const sub2apiPoolValue = String(source.sub2apiPool || "").trim().toLowerCase();
-  const sub2apiEnabledValue = String(source.sub2apiEnabled || "").trim().toLowerCase();
-  const allowedPoolValues = new Set(["added", "error", "not_added", "unknown"]);
-  const allowedEnabledValues = new Set(["enabled", "disabled", "unknown"]);
-  return {
-    search: search || null,
-    lockedOnly,
-    webSession: ["absent", "saved", "valid", "expired", "unavailable", "banned"].includes(source.webSession) ? source.webSession : null,
-    summary: ["active", "queued", "normal", "abnormal"].includes(source.summary) ? source.summary : null,
-    accountType: ["password_totp", "pool_only"].includes(accountTypeValue) ? accountTypeValue : null,
-    status: JOB_STATUS_FILTER_VALUES.includes(statusValue) ? statusValue : null,
-    planType: planTypeValue || null,
-    sub2apiPool: allowedPoolValues.has(sub2apiPoolValue) ? sub2apiPoolValue : null,
-    sub2apiEnabled: allowedEnabledValues.has(sub2apiEnabledValue) ? sub2apiEnabledValue : null,
-    overload: ["overloaded", "normal"].includes(source.overload) ? source.overload : null,
-    fingerprint: ["match", "mismatch"].includes(source.fingerprint) ? source.fingerprint : null,
-  };
-}
-
-function matchesJobFilters(job, filters, poolState = sub2ApiAccountStatusCache) {
-  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job, poolState);
-  if (filters.summary === "active" && !occupiesActiveSlot(job) && !activeWebSessionCheckAccounts.has(job.email.toLowerCase())) return false;
-  if (filters.summary === "queued" && job.status !== "queued") return false;
-  if (["normal", "abnormal"].includes(filters.summary)
-    && accountHealth(job, sub2ApiStatus, accountAutomationBlocked(job.email), accountSessionResets.get(job.email)) !== filters.summary) return false;
-  if (filters.lockedOnly) {
-    const isLocked = job.status === "banned" || Boolean(job.autoRepairBlocked);
-    if (!isLocked) return false;
-  }
-  if (filters.search) {
-    const q = filters.search.toLowerCase();
-    const emailMatch = String(job.loginEmail || job.email).toLowerCase().includes(q);
-    const remarkMatch = String(job.remark || "").toLowerCase().includes(q);
-    const planMatch = String(getJobPlanType(job, poolState) || "").toLowerCase().includes(q)
-      || String(sub2ApiStatus.planType || "").toLowerCase().includes(q);
-    const proxyMatch = job.assignedProxyId ? String(job.assignedProxyId).includes(q) : false;
-    if (!emailMatch && !remarkMatch && !planMatch && !proxyMatch) return false;
-  }
-  if (filters.webSession && (accountAutomationBlocked(job.email) ? "banned" : job.webSessionStatus || "absent") !== filters.webSession) return false;
-  if (filters.accountType === "pool_only" && !job.poolOnly) return false;
-  if (filters.accountType === "password_totp"
-    && (job.poolOnly || job.loginMode !== "password" || !hasJobTotpKey(job))) return false;
-  if (filters.status && job.status !== filters.status) return false;
-  if (filters.planType) {
-    const actualPlanType = getJobPlanType(job, poolState) || "__unknown__";
-    if (actualPlanType !== filters.planType) return false;
-  }
-  if (filters.sub2apiPool && getSub2ApiPoolFilterValue(job, sub2ApiStatus) !== filters.sub2apiPool) return false;
-  if (filters.sub2apiEnabled === "enabled" && sub2ApiStatus.enabled !== true) return false;
-  if (filters.sub2apiEnabled === "disabled" && sub2ApiStatus.enabled !== false) return false;
-  if (filters.sub2apiEnabled === "unknown" && sub2ApiStatus.enabled !== null) return false;
+function matchesMonitoringFilters({ job, pool: sub2ApiStatus, blocked, planType }, filters, poolState) {
+  const eligible = codexMonitoringAllowed(job, poolState);
   if (filters.overload) {
-    const eligible = codexMonitoringAllowed(job, poolState);
     const detection = overloadMonitor.snapshot(job.email), cooldown = overloadCooldown.snapshot(job.email);
     // An overload-owned pause temporarily disables pool scheduling. Keep that
     // active cooldown searchable, without admitting other disabled accounts.
-    const ownsCooldown = cooldown.enabled && !pendingCodexBlocks.has(job.email.toLowerCase()) && !accountAutomationBlocked(job.email)
+    const ownsCooldown = cooldown.enabled && !pendingCodexBlocks.has(job.email.toLowerCase()) && !blocked
       && sub2ApiStatus.inPool === true && sub2ApiStatus.remoteStatus === "active"
       && !sub2ApiStatus.rateLimited && !sub2ApiStatus.quotaRestricted && !usageRestricted(sub2ApiStatus.usage)
       && sub2ApiStatus.accountIds.some(id => overloadCooldown.ownsPause(job.email, id));
     if (overloadFilterValue({ ...detection, enabled: eligible && detection.enabled },
       { ...cooldown, enabled: Boolean(eligible || ownsCooldown) && cooldown.enabled }) !== filters.overload) return false;
   }
-  if (filters.fingerprint && (!codexMonitoringAllowed(job, poolState)
-    || fingerprintFilterValue(modelFingerprint.snapshot(job.email, getJobPlanType(job, poolState) || "unknown")) !== filters.fingerprint)) return false;
+  if (filters.fingerprint && (!eligible
+    || fingerprintFilterValue(modelFingerprint.snapshot(job.email, planType || "unknown")) !== filters.fingerprint)) return false;
   return true;
-}
-
-function getSub2ApiPoolFilterValue(job, status = getSub2ApiAccountStatusForJob(job)) {
-  const value = status.inPool;
-  if (value === true && status.remoteStatus === "error") return "error";
-  return value === true ? "added" : value === false ? "not_added" : "unknown";
-}
-
-function getSub2ApiEnabledFilterValue(job, poolState = sub2ApiAccountStatusCache) {
-  const value = getSub2ApiAccountStatusForJob(job, poolState).enabled;
-  return value === true ? "enabled" : value === false ? "disabled" : "unknown";
 }
 
 function normalizeEmailFilter(value) {
@@ -7862,8 +7724,8 @@ function getSub2ApiAccountStatusForJob(job, state = sub2ApiAccountStatusCache) {
   };
 }
 
-function getJobPlanType(job, state = sub2ApiAccountStatusCache) {
-  return job.workspacePlanType || job.planType || getSub2ApiAccountStatusForJob(job, state).planType || null;
+function getJobPlanType(job, state = sub2ApiAccountStatusCache, pool = null) {
+  return job.workspacePlanType || job.planType || (pool || getSub2ApiAccountStatusForJob(job, state)).planType || null;
 }
 
 function normalizeSub2ApiAccountId(value) {
@@ -8523,7 +8385,7 @@ async function assertCodexMonitoringAllowed(job) {
 }
 
 function accountLoginPause(job) {
-  const entries = [...jobs.values()].filter(j => !j.deleted && j.email.toLowerCase() === job.email.toLowerCase());
+  const entries = [...jobs.forAccount(job.email)].filter(j => !j.deleted);
   return entries.map(j => normalizeLoginAutomationPause(j.loginAutomationPause)).find(p => p?.reason === "mfa_failed")
     || entries.map(j => normalizeLoginAutomationPause(j.loginAutomationPause)).find(Boolean) || null;
 }
@@ -8761,27 +8623,26 @@ async function exportSourceAccounts(res, ids) {
 }
 
 function publicJob(job) {
-  return publicJobWithPoolState(job, sub2ApiAccountStatusCache);
+  const poolState = sub2ApiAccountStatusCache;
+  const row = readJobListRow(job, poolState);
+  return publicJobDetails(row, publicSelectionJob(row), poolState);
 }
 
-function publicJobWithPoolState(job, poolState) {
+function publicJobDetails({ job, pool: sub2ApiStatus, planType, blocked }, selection, poolState) {
   const autoRepair = getAutoRepairEligibility(job);
-  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job, poolState);
-  const blocked = accountAutomationBlocked(job.email);
+  const queuePosition = job.status === "queued" ? getQueuePosition(job) : 0;
   const codexEligible = codexMonitoringAllowed(job, poolState);
   const overloadState = overloadMonitor.snapshot(job.email), cooldownState = overloadCooldown.snapshot(job.email);
-  const fingerprintState = modelFingerprint.snapshot(job.email, getJobPlanType(job, poolState) || "unknown");
+  const fingerprintState = modelFingerprint.snapshot(job.email, planType || "unknown");
   return {
-    id: job.id,
-    email: job.loginEmail,
+    ...selection,
     remark: job.remark || "",
     remarkSyncPending: Boolean(job.remarkSyncPending),
     accountCostCny: restoredAccountCost(job.accountCostCny),
     accountCostUpdatedAt: job.accountCostUpdatedAt || null,
-    status: job.status,
     prompt: activeSessionReset(job)?.status === "cooling" ? "设备已登出，等待冷却结束后重新登录"
       : job.status === "queued"
-      ? `排队中，前方还有 ${Math.max(0, getQueuePosition(job) - 1)} 条任务`
+      ? `排队中，前方还有 ${Math.max(0, queuePosition - 1)} 条任务`
       : job.status === "failed" && /^CODEX_AUTH_/.test(job.lastError || "") ? "Codex 授权未完成，原 Web 会话状态独立保留" : job.prompt,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
@@ -8790,17 +8651,9 @@ function publicJobWithPoolState(job, poolState) {
     completedAt: job.completedAt,
     startedAt: job.startedAt,
     durationMs: getJobDurationMs(job),
-    planType: job.workspacePlanType || getJobPlanType(job, poolState),
-    sub2apiInPool: sub2ApiStatus.inPool,
-    sub2apiEnabled: sub2ApiStatus.enabled,
-    sub2apiPriority: sub2ApiStatus.priority,
-    sub2apiConcurrency: sub2ApiStatus.concurrency,
-    sub2apiAccountId: sub2ApiStatus.accountId,
-    sub2apiAccountIds: sub2ApiStatus.accountIds,
     sub2apiGroupIds: sub2ApiStatus.groupIds,
     sub2apiRemoteStatus: sub2ApiStatus.remoteStatus,
     sub2apiRemoteErrors: sub2ApiStatus.remoteErrors || [],
-    sub2apiPlanType: sub2ApiStatus.planType,
     sub2apiUsage: publicSub2ApiUsage(sub2ApiStatus.usage, sub2ApiStatus.quotaRestricted),
     codexStatusEligible: codexEligible,
     canCheckModelFingerprint: manualFingerprintAllowed(job, poolState),
@@ -8810,7 +8663,6 @@ function publicJobWithPoolState(job, poolState) {
     overloadAutoCooldown: { ...cooldownState, enabled: codexEligible && cooldownState.enabled },
     modelFingerprint: { ...fingerprintState, enabled: codexEligible && fingerprintState.enabled },
     lastError: oauthErrorMessage(job.lastError),
-    canDownload: Boolean(job.resultSaved),
     poolOnly: Boolean(job.poolOnly),
     loginMode: job.loginMode || (job.mailApiUrl ? "email_otp" : "manual"),
     hasTotpKey: hasJobTotpKey(job),
@@ -8838,33 +8690,15 @@ function publicJobWithPoolState(job, poolState) {
     smsPendingCancellationCount: smsCancellations.count(job.id),
     smsError: job.smsError,
     securityCheckRequired: Boolean(job.securityCheckRequired),
-    canRetry: !accountAutomationBlocked(job.email) && ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
-    canResume: canResumeAuthorization(job),
-    canRegenerate: !accountAutomationBlocked(job.email) && job.status === "completed" && job.resultSaved,
-    canForceRelogin: canForceRelogin(job) && !activeSessionReset(job),
-    canResetSessions: canResetAccountSessions(job),
-    sessionReset: accountSessionResets.publicState(job.email),
-    canLoginWeb: canLoginWeb(job),
-    webSessionCheckAttemptId: manualWebSessionChecks.get(job.id)?.attemptId || null,
-    webSessionCheckPending: webSessionCheckPending(job),
-    webSessionMaintenancePause: job.webSessionMaintenancePause || null,
-    webSessionCheckStatus: manualWebSessionChecks.get(job.id)?.phase || null,
-    webSessionCheckError: manualWebSessionChecks.get(job.id)?.error || null,
     webSessionAvailable: Boolean(job.webSessionAvailable),
-    webSessionStatus: blocked ? "banned" : job.webSessionStatus || "absent",
     webSessionVerifiedAt: job.webSessionVerifiedAt || null,
-    webCredentialSync: publicWebCredentialSync(job, getJobPlanType(job, poolState), { blocked }),
+    webCredentialSync: publicWebCredentialSync(job, planType, { blocked }),
     webSessionReadError: job.webSessionReadError || null,
     webLoginAttemptId: job.webLoginAttemptId || null,
     webLoginPending: Boolean(job.webLoginPreviousState),
     webLoginCompletedAt: job.webLoginCompletedAt || null,
     webLoginError: job.webLoginError || null,
     webSessionRepairRetryAt: webSessionRepairRetryAt(job),
-    canLogoutAllSessions: canLogoutAllSessions(job),
-    canSetupTotp: canSetupTotp(job),
-    canReplaceTotp: canReplaceTotp(job),
-    canAddPassword: canAddPassword(job),
-    canReplacePassword: canReplacePassword(job),
     restartRequired: job.restartRequired,
     proxyConfigured: Boolean(job.proxyUrl),
     assignedProxyId: normalizeStoredProxyId(job.assignedProxyId),
@@ -8872,7 +8706,6 @@ function publicJobWithPoolState(job, poolState) {
     boundProxies: publicBoundProxies(sub2ApiStatus.inPool === true ? sub2ApiStatus.proxyIds || [] : [job.assignedProxyId].filter(Boolean), job),
     boundProxyStatus: blocked && !job.banProxyReleasePending ? "unbound" : sub2ApiStatus.inPool === true ? (sub2ApiStatus.proxyIds?.length ? "bound" : "direct")
       : job.assignedProxyId ? "bound" : job.authorizationProxySelected ? "direct" : "unbound",
-    canSwitchProxy: jobCanSwitchProxy(job),
     poolRefreshReady: Boolean(job.poolRefreshReady),
     poolRefreshAction: normalizePoolRefreshAction(job.poolRefreshAction),
     poolRefreshDueAt: job.poolRefreshDueAt || null,
@@ -8893,7 +8726,7 @@ function publicJobWithPoolState(job, poolState) {
     autoTaskError: job.autoTaskError || null,
     autoTaskEligible: job.autoTaskEligible === true,
     attempt: job.attempt,
-    queuePosition: job.status === "queued" ? getQueuePosition(job) : 0,
+    queuePosition,
   };
 }
 
@@ -9127,13 +8960,12 @@ async function readPlanTypeFromOutput(outputPath) {
   }
 }
 
-function publicSelectionJob(job, poolState = sub2ApiAccountStatusCache) {
-  const sub2ApiStatus = getSub2ApiAccountStatusForJob(job, poolState);
+function publicSelectionJob({ job, pool: sub2ApiStatus, planType, blocked }) {
   return {
     id: job.id,
     email: job.loginEmail,
     status: job.status,
-    planType: getJobPlanType(job, poolState),
+    planType,
     sub2apiInPool: sub2ApiStatus.inPool,
     sub2apiEnabled: sub2ApiStatus.enabled,
     sub2apiPriority: sub2ApiStatus.priority,
@@ -9142,9 +8974,9 @@ function publicSelectionJob(job, poolState = sub2ApiAccountStatusCache) {
     sub2apiAccountIds: sub2ApiStatus.accountIds,
     canDownload: Boolean(job.resultSaved),
     sub2apiPlanType: sub2ApiStatus.planType,
-    canRetry: !accountAutomationBlocked(job.email) && ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
+    canRetry: !blocked && ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
     canResume: canResumeAuthorization(job),
-    canRegenerate: !accountAutomationBlocked(job.email) && job.status === "completed" && job.resultSaved,
+    canRegenerate: !blocked && job.status === "completed" && job.resultSaved,
     canForceRelogin: canForceRelogin(job) && !activeSessionReset(job),
     canResetSessions: canResetAccountSessions(job),
     sessionReset: accountSessionResets.publicState(job.email),
@@ -9154,7 +8986,7 @@ function publicSelectionJob(job, poolState = sub2ApiAccountStatusCache) {
     webSessionMaintenancePause: job.webSessionMaintenancePause || null,
     webSessionCheckStatus: manualWebSessionChecks.get(job.id)?.phase || null,
     webSessionCheckError: manualWebSessionChecks.get(job.id)?.error || null,
-    webSessionStatus: accountAutomationBlocked(job.email) ? "banned" : job.webSessionStatus || "absent",
+    webSessionStatus: blocked ? "banned" : job.webSessionStatus || "absent",
     canLogoutAllSessions: canLogoutAllSessions(job),
     canSwitchProxy: jobCanSwitchProxy(job),
     canSetupTotp: canSetupTotp(job),
@@ -9457,8 +9289,10 @@ function webSessionRepairRetryAt(job) {
 }
 
 function accountAutomationBlocked(email) {
-  const normalized = String(email || "").trim().toLowerCase();
-  return [...jobs.values()].some(job => !job.deleted && job.email.toLowerCase() === normalized && (job.status === "banned" || job.autoRepairBlocked));
+  for (const job of jobs.forAccount(email)) {
+    if (!job.deleted && (job.status === "banned" || job.autoRepairBlocked)) return true;
+  }
+  return false;
 }
 
 function isPermanentAccountFailure(message) {
