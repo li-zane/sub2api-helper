@@ -36,6 +36,19 @@ async (page) => {
     check(await dialog.getByText('￥57.66', { exact: true }).count() === 1, 'profit is missing');
     await page.screenshot({ path: evidence + '/subscription-history-desktop.png' });
   });
+  await test('compact-header-is-top-left-without-explanatory-copy', async () => {
+    const text = await dialog.innerText();
+    check(!text.includes('保留所有曾开通非 Free 订阅的账号'), 'retention subtitle is still shown');
+    check(!text.includes('账号资料变更后自动更新'), 'footer explanation is still shown');
+    const header = await dialog.locator('.sub-history-header').boundingBox();
+    const heading = await dialog.locator('.sub-history-heading').boundingBox();
+    const title = await dialog.getByRole('heading', { name: '历史订阅', exact: true }).boundingBox();
+    check(header && heading && title && Math.abs(heading.x - header.x) <= 1 && Math.abs(heading.y - header.y) <= 1
+      && title.x - heading.x < 40 && title.y - heading.y < 8, 'history title is not at the top left');
+    const footer = await dialog.locator('.sub-history-footer').boundingBox();
+    const close = await dialog.getByRole('button', { name: '关闭', exact: true }).boundingBox();
+    check(footer && close && Math.abs(footer.x + footer.width - close.x - close.width) <= 1, 'footer close button is not right aligned');
+  });
   await test('copy-email-and-latest-credentials-on-demand', async () => {
     await dialog.getByRole('button', { name: `复制邮箱 ${fixture.email}`, exact: true }).click();
     check(await page.evaluate(() => window.historyCopied) === fixture.email, 'email copy failed');
@@ -63,6 +76,37 @@ async (page) => {
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await dialog.getByText('已删除', { exact: true }).waitFor();
     check(await dialog.getByText('￥57.66', { exact: true }).count() === 1, 'recovery did not update record');
+  });
+  await test('deleted-status-coexists-with-ban-and-free-and-updates-on-refresh', async () => {
+    records = [
+      { ...fixture, id: 'a'.repeat(32), email: 'deleted-banned@example.test', accountBanned: true, present: false },
+      { ...fixture, id: 'b'.repeat(32), email: 'deleted-free@example.test', planType: 'free', present: false },
+      { ...fixture, id: 'c'.repeat(32), email: 'deleted-paid@example.test', present: false },
+      { ...fixture, id: 'd'.repeat(32), email: 'present-banned@example.test', accountBanned: true },
+      { ...fixture, id: 'e'.repeat(32), email: 'present-free@example.test', planType: 'free' },
+    ];
+    const row = email => dialog.getByRole('listitem').filter({ has: page.getByRole('button', { name: `复制邮箱 ${email}`, exact: true }) });
+    const refresh = async () => {
+      const done = page.waitForResponse(response => new URL(response.url()).pathname === '/api/subscription-history');
+      await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await done;
+    };
+    await refresh(); await row(records[4].email).waitFor();
+    const banned = row(records[0].email), free = row(records[1].email), paid = row(records[2].email);
+    check(await banned.getByText('已封禁', { exact: true }).count() === 1, 'deleted account lost its ban status');
+    check(await banned.getByText('已删除', { exact: true }).count() === 1, 'deleted banned account lacks deletion status');
+    check(await free.getByText('已降为 Free', { exact: true }).count() === 1, 'deleted free account lost its downgrade status');
+    check(await free.getByText('已删除', { exact: true }).count() === 1, 'deleted free account lacks deletion status');
+    check(await paid.getByText('已删除', { exact: true }).count() === 1, 'ordinary deletion status is missing or duplicated');
+    check(await paid.getByText('当前订阅', { exact: true }).count() === 0, 'deleted paid account still appears currently subscribed');
+    for (const record of records.slice(3)) check(await row(record.email).getByText('已删除', { exact: true }).count() === 0, 'present account is marked deleted');
+    await page.screenshot({ path: evidence + '/subscription-history-combined-statuses.png' });
+    records[0] = { ...records[0], present: true, remark: '已恢复到主列表' };
+    await refresh(); await banned.getByText('已恢复到主列表', { exact: true }).waitFor();
+    check(await banned.getByText('已删除', { exact: true }).count() === 0, 'refresh retained a stale deletion status');
+    check(await banned.getByText('已封禁', { exact: true }).count() === 1, 'refresh cleared the ban status');
+    records[0] = { ...records[0], present: false, remark: '已从主列表删除' };
+    await refresh(); await banned.getByText('已从主列表删除', { exact: true }).waitFor();
+    check(await banned.getByText('已删除', { exact: true }).count() === 1, 'refresh did not add deletion status');
   });
   await test('desktop-dark-and-mobile-no-clipping', async () => {
     await page.emulateMedia({ colorScheme: 'dark' });

@@ -89,7 +89,7 @@ export function subscriptionStatusInfo(record, formatPlanType = defaultFormatPla
     return { kind: "banned", badgeText: "已封禁", planLabel: paidLabel,
       rawPlan: paidRaw || currentRaw, detail: `账号已封禁，原订阅 ${paidLabel}` };
   }
-  if (!record?.present) {
+  if (!record?.present && !FREE_PLAN_VALUES.has(normalizedCurrent)) {
     return {
       kind: "removed",
       badgeText: "已删除",
@@ -485,9 +485,6 @@ export function SubscriptionHistoryDialog({
               {hasLoaded ? totalCount : "—"}
             </span>
           </div>
-          <p className="sub-history-subtitle">
-            保留所有曾开通非 Free 订阅的账号；降为 Free 或从列表删除后仍保留。
-          </p>
         </div>
         <div className="dialog-header-actions">
           <span
@@ -675,6 +672,12 @@ export function SubscriptionHistoryDialog({
                         <i className="sub-history-status-dot" aria-hidden="true" />
                         <span>{status.badgeText}</span>
                       </span>
+                      {!record.present && status.kind !== "removed" && (
+                        <span className="sub-history-status status-removed" title="已从主列表删除">
+                          <i className="sub-history-status-dot" aria-hidden="true" />
+                          <span>已删除</span>
+                        </span>
+                      )}
                     </div>
 
                     <div className="sub-history-col-cost">
@@ -730,9 +733,6 @@ export function SubscriptionHistoryDialog({
       </div>
 
       <div className="dialog-footer sub-history-footer">
-        <span className="sub-history-footer-note">
-          账号资料变更后自动更新
-        </span>
         <button type="button" className="cancel-button" onClick={onClose}>
           关闭
         </button>
