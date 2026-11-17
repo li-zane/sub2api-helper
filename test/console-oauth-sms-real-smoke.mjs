@@ -71,7 +71,12 @@ try {
   assert.equal(completed.smsStatus, "completed"); assert.equal(smsCount, 2);
   assert.equal(completed.securityState.passwordEnabled, true, "successful password login evidence was not recorded");
   assert.equal(completed.securityState.totpEnabled, true, "successful MFA evidence was not recorded");
-  const monitor = JSON.parse(await fs.readFile(path.join(root, "web-session-monitor.json"), "utf8"));
+  // Completion is observable while the background monitor is still persisting
+  // its follow-up. Wait for the durable condition, not a slower list response.
+  const monitor = await wait(async () => {
+    const value = JSON.parse(await fs.readFile(path.join(root, "web-session-monitor.json"), "utf8"));
+    return value.accounts?.[email]?.status === "pending_check" && value;
+  });
   assert.equal(monitor.accounts[email].status, "pending_check", "post-OAuth inspection was not made due");
   assert.equal(calls.filter(p => p === "/oauth/authorize").length, 1); assert(!calls.includes("/api/auth/signin/openai"));
   for (const route of ["/api/accounts/authorize/continue", "/api/accounts/password/verify", "/api/accounts/mfa/verify", "/api/accounts/add-phone/send", "/api/accounts/phone-otp/validate", "/oauth/token"]) assert(calls.includes(route), route);
