@@ -71,6 +71,7 @@ import { WebSessionMonitor, normalizeWebSessionMonitor, DEFAULT_WEB_SESSION_MONI
 import { accountHealth } from "./account-health.mjs";
 import { AccountSessionResets, sessionResetPending, sessionResetBlocksAutomation, resetCredentialUpdate, normalizeSessionResetDelay } from "./account-session-reset.mjs";
 import { createProxyImporter } from "./sub2api-proxy-create.mjs";
+import { createProxyEditor } from "./sub2api-proxy-edit.mjs";
 import { poolAccountError } from "../web/src/pool-account-error.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -96,6 +97,7 @@ const PROXY_CONNECTION_RETRY_BASE_MS = Math.max(1, Number(process.env.PROXY_CONN
 const PROXY_CONNECTION_RETRY_MAX_MS = 15_000;
 const PAGE_SIZE = 20;
 const importSub2ApiProxies = createProxyImporter({ request: requestSub2Api });
+const sub2ApiProxyEditor = createProxyEditor({ request: requestSub2Api });
 const JOB_STATUS_FILTER_VALUES = [
   "queued",
   "starting",
@@ -1313,6 +1315,21 @@ async function handleApi(req, res, requestUrl) {
     // Refresh cached choices independently; creation results must survive a read failure.
     try { await listSub2ApiProxies(); } catch {}
     sendJson(res, 200, result);
+    return;
+  }
+
+  const proxyEditMatch = /^\/api\/sub2api\/proxies\/(\d+)$/.exec(requestUrl.pathname);
+  if (proxyEditMatch && ["GET", "PUT"].includes(req.method)) {
+    const config = sub2ApiSettingsConfig;
+    const proxyId = Number(proxyEditMatch[1]);
+    if (req.method === "GET") sendJson(res, 200, await sub2ApiProxyEditor.get(config, proxyId));
+    else {
+      const result = await sub2ApiProxyEditor.update(config, proxyId, await readJson(req));
+      sub2ApiProxyStateCache.delete(`${monitorBackendIdentity(config)}:${proxyId}`);
+      invalidateSub2ApiAccountStatusCache();
+      try { await listSub2ApiProxies(config); } catch {}
+      sendJson(res, 200, result);
+    }
     return;
   }
 

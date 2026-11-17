@@ -4606,6 +4606,11 @@ dialog.batch-dialog::backdrop {
   font-weight: 600;
 }
 
+.proxy-edit-trigger { cursor: pointer; }
+.proxy-edit-trigger:hover:not(:disabled),
+.proxy-edit-trigger:focus-visible { color: var(--accent); border-color: var(--accent); }
+.proxy-edit-trigger:disabled { cursor: default; opacity: 0.5; }
+
 /* Segment 3: Count */
 .proxy-segment-col.segment-count {
   display: flex;

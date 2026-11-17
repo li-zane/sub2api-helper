@@ -2,6 +2,7 @@ import { consoleFetch as fetch, getConsoleBootstrap } from "./console-api.mjs";
 import { OVERLOAD_FILTER_LABELS, FINGERPRINT_FILTER_LABELS } from "./codex-status-filter.mjs";
 import { SmsNumberEstimate } from "./sms-number-estimate.jsx";
 import { ProxyCreateDialog } from "./proxy-create-dialog.jsx";
+import { ProxyEditDialog } from "./proxy-edit-dialog.jsx";
 import { SubscriptionHistoryDialog } from "./subscription-history.jsx";
 import { Sub2ApiPoolBadge } from "./pool-status-badge.jsx";
 import { SmsProviderBalance } from "./sms-provider-balance.jsx";
@@ -355,6 +356,8 @@ function App() {
   const [proxySettingsError, setProxySettingsError] = useState("");
   const [proxySettingsOpen, setProxySettingsOpen] = useState(false);
   const [proxyCreateOpen, setProxyCreateOpen] = useState(false);
+  const [editingProxies, setEditingProxies] = useState(null);
+  const proxyDialogRequest = useCallback((url, options) => apiFetch(token, url, options), [token]);
   const [planTypeMapping, setPlanTypeMapping] = useState(readPlanTypeMapping);
   const [planTypeMappingOpen, setPlanTypeMappingOpen] = useState(false);
   const [planTypeMappingDraft, setPlanTypeMappingDraft] = useState(() => planTypeMappingRows(readPlanTypeMapping()));
@@ -2714,7 +2717,9 @@ function App() {
                               <span className="segment-name-label">{proxy.names.join("、")}</span>
                             </div>
                             <div className="proxy-segment-col segment-ip" title={proxy.ipAddress}>
-                              <span className="segment-ip-code">{proxy.ipAddress}</span>
+                              <button type="button" className="segment-ip-code proxy-edit-trigger"
+                                disabled={proxySettingsSaving} title="编辑代理连接与名称" aria-label={`编辑代理 ${proxy.ipAddress}`}
+                                onClick={() => setEditingProxies(proxy.nodes)}>{proxy.ipAddress}</button>
                             </div>
                             <div className="proxy-segment-col segment-count">
                               <span className={`segment-count-pill ${proxy.accountCount > 0 ? "has-count" : "zero-count"}`}>
@@ -2815,6 +2820,11 @@ function App() {
         </AccessibleDialog>
       )}
       {proxyCreateOpen && <ProxyCreateDialog request={(url, options) => apiFetch(token, url, options)} onClose={() => setProxyCreateOpen(false)} onCreated={() => {
+        void refreshAccountProxyDistribution().catch(error => notify(`代理已保存，刷新列表失败：${error.message}`, { tone: "error" }));
+      }} />}
+      {editingProxies && <ProxyEditDialog proxies={editingProxies} request={proxyDialogRequest} onClose={() => setEditingProxies(null)} onSaved={proxy => {
+        setAccountProxyDistribution(current => current.map(node => node.id === proxy.id ? { ...node, name: proxy.name, protocol: proxy.protocol, host: proxy.host, port: proxy.port } : node));
+        notify("代理配置已保存");
         void refreshAccountProxyDistribution().catch(error => notify(`代理已保存，刷新列表失败：${error.message}`, { tone: "error" }));
       }} />}
       {subscriptionHistoryOpen && (
@@ -7230,7 +7240,8 @@ function proxyDistributionByIp(proxies) {
   for (const proxy of proxies) {
     const ipAddress = proxy.ipAddress || `${proxy.host}:${proxy.port}`;
     let group = groups.get(ipAddress);
-    if (!group) { group = { ipAddress, names: [], accountCount: 0 }; groups.set(ipAddress, group); }
+    if (!group) { group = { ipAddress, names: [], nodes: [], accountCount: 0 }; groups.set(ipAddress, group); }
+    group.nodes.push(proxy);
     if (!group.names.includes(proxy.name)) group.names.push(proxy.name);
     // The API already aggregates accounts across all nodes sharing this exit IP.
     group.accountCount = Math.max(group.accountCount, proxy.accountCount || 0);
