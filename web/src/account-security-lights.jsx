@@ -1,3 +1,4 @@
+import { consoleFetch as fetch } from "./console-api.mjs";
 import React, { useEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { readJsonResponse } from "./response-errors.js";

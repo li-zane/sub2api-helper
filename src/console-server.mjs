@@ -772,7 +772,7 @@ async function handleApi(req, res, requestUrl) {
   }
 
   if (req.headers["x-console-token"] !== consoleToken) {
-    sendJson(res, 403, { error: "Invalid console token" });
+    sendJson(res, 403, { error: "Invalid console token", code: "INVALID_CONSOLE_TOKEN" });
     return;
   }
 

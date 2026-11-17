@@ -1,3 +1,4 @@
+import { consoleFetch as fetch } from "./console-api.mjs";
 import { CopyableAccount } from "./copyable-account.jsx";
 import React, { useEffect, useState } from "react";
 

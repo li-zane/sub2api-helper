@@ -1,3 +1,4 @@
+import { consoleFetch as fetch } from "./console-api.mjs";
 import { AccountText } from "./copyable-account.jsx";
 import { codexStatusEligible, codexStatusBlockReason, usageRestricted } from "./codex-eligibility.mjs";
 import { CustomSelect } from "./custom-select.jsx";

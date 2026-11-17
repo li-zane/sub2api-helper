@@ -1,3 +1,4 @@
+import { consoleFetch as fetch } from './console-api.mjs';
 import React, { useEffect, useRef, useState } from 'react';
 import { RefreshCw, Wallet } from 'lucide-react';
 import { formatSmsMoney } from './sms-money.mjs';

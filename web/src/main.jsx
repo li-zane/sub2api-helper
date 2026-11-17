@@ -1,3 +1,4 @@
+import { consoleFetch as fetch, getConsoleBootstrap } from "./console-api.mjs";
 import { OVERLOAD_FILTER_LABELS, FINGERPRINT_FILTER_LABELS } from "./codex-status-filter.mjs";
 import { SmsNumberEstimate } from "./sms-number-estimate.jsx";
 import { ProxyCreateDialog } from "./proxy-create-dialog.jsx";
@@ -405,8 +406,7 @@ function App() {
 
   useEffect(() => {
     let stopped = false;
-    fetch("/api/bootstrap")
-      .then(readResponse)
+    getConsoleBootstrap()
       .then((data) => {
         if (!stopped) {
           setToken(data.token);

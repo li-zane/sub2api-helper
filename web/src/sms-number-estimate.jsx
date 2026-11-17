@@ -1,3 +1,4 @@
+import { consoleFetch as fetch } from "./console-api.mjs";
 import React, { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { displayDateTime } from "./display-time.mjs";

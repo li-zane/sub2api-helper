@@ -1,3 +1,4 @@
+import { consoleFetch as fetch } from "./console-api.mjs";
 import React, { useEffect, useRef, useState } from "react";
 import { ChevronDown, LoaderCircle, ShieldCheck } from "lucide-react";
 import { HelpTip } from "./help-tip.jsx";

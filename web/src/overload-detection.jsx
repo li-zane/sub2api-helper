@@ -1,3 +1,4 @@
+import { consoleFetch as fetch } from "./console-api.mjs";
 import React, { useEffect, useLayoutEffect, useState, useRef, useMemo } from "react";
 import { buildOverloadChart } from "./overload-chart.mjs";
 import { overloadGrid } from "./overload-grid.mjs";
