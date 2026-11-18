@@ -9,9 +9,9 @@ export async function seedWebSession(outputPath, options = {}) {
   const identity = await getAccountBrowserIdentity(email, { root: path.join(path.dirname(outputPath), "browser-identities") });
   const accessToken = options.accessToken || `web.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
   const session = { email: identity.email, identity,
-    cookies: [{ name: "__Secure-next-auth.session-token", value: "fixture-web-cookie", domain: "127.0.0.1", path: "/", hostOnly: true }],
+    cookies: [{ name: "__Secure-next-auth.session-token", value: options.cookieValue || "fixture-web-cookie", domain: "127.0.0.1", path: "/", hostOnly: true }],
     web: { workspaceId: account.credentials.chatgpt_account_id }, accessToken,
   };
-  await writeAccountWebSession(path.join(path.dirname(outputPath), "web-session.json"), session);
+  await writeAccountWebSession(options.filePath || path.join(path.dirname(outputPath), "web-session.json"), session);
   return session;
 }

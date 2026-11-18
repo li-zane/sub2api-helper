@@ -326,7 +326,7 @@ export function createConsoleApp(options = {}) {
       await loadSub2ApiAccountStatus();
       return listUniqueJobs();
     },
-    isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || accountAutomationBlocked(job.email) || sessionResetAutomationPaused(job.email) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
+    isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
     hasSession: async job => {
       try { await fs.access(webSessionPathForJob(job)); return true; }
       catch (error) { return error.code !== "ENOENT"; } // Permissions/I/O errors must reach the probe, not trigger a login.
@@ -351,6 +351,12 @@ export function createConsoleApp(options = {}) {
         if (snapshot.repairReason === "plan_changed") snapshot.repairReason = null;
         await saveJobMetadata(job);
       }
+      if (sessionResetAutomationPaused(job.email)) {
+        // The pool pause survives a failed reset. Only Web failures can trigger
+        // repair while it is held, so OAuth drift does not start a Web cooldown.
+        if (!webSessionNeedsLogin(snapshot.repairReason)) snapshot.repairReason = null;
+        return snapshot;
+      }
       if (job.resultSaved && !snapshot.repairReason && consoleSettings.current.accountProxyMode === "plan" && snapshot.planType) {
         const target = jobSub2ApiProxyConfig(job, snapshot.planType)?.proxyId;
         const fixedId = normalizeStoredProxyId(target);
@@ -365,7 +371,8 @@ export function createConsoleApp(options = {}) {
     },
     lock: (job, fn) => withEmailJobLock(job.email, fn),
     repair: async (job, { reason }) => {
-      const webOnly = !job.resultSaved || ["expired", "web_workspace_unavailable", "missing"].includes(reason);
+      const webOnly = !job.resultSaved || webSessionNeedsLogin(reason);
+      if (!webOnly && sessionResetAutomationPaused(job.email)) return false;
       if (automaticLoginBlocked(job, webOnly ? "web" : "oauth")) return false;
       if (webOnly) {
         job.webSessionMonitorRepair = true;
@@ -1994,10 +2001,14 @@ export function createConsoleApp(options = {}) {
         return;
       }
       const bannedWeb = mode === "web_login" && job.manualBannedWebLogin;
-      if (bannedWeb) {
-        job.proxyUrl = consoleSettings.current.globalProxyUrl;
+      const webOnlyDuringPoolPause = mode === "web_login" && sessionResetAutomationPaused(job.email);
+      if (bannedWeb || webOnlyDuringPoolPause) {
+        // Do not run the phased PlanType binding step during an independent
+        // Web login. The existing route and the pending Codex reset stay intact.
+        if (bannedWeb) job.proxyUrl = consoleSettings.current.globalProxyUrl;
+        else if (hasPlanProxyBinding(job)) await restorePlanProxyBinding(job);
         if (job.mailApiUrl) await loadMailboxBaseline(job);
-        if (current()) launchJob(job, { mode, codexAuthMode: "local", loginProxyUrl: consoleSettings.current.globalProxyUrl, loginProxyFixed: false });
+        if (current()) launchJob(job, { mode, codexAuthMode: "local", loginProxyUrl: job.proxyUrl, loginProxyFixed: !bannedWeb && hasPlanProxyBinding(job) });
         return;
       }
       let hasBinding = consoleSettings.current.accountProxyMode === "plan" && hasPlanProxyBinding(job);
@@ -2028,6 +2039,7 @@ export function createConsoleApp(options = {}) {
       if (activeSessionReset(job)) await accountSessionResets.fail(job.email, error);
       if (mode === "web_login") {
         await finishWebLogin(job, 1, null, `准备 Web 登录失败：${error.message}`);
+        return;
       } else if (mode === "totp_setup") {
         await restoreTotpSetupFailure(job, `准备 2FA 设置失败：${error.message}`);
       } else if (mode === "password_add") {
@@ -2331,6 +2343,9 @@ export function createConsoleApp(options = {}) {
       scheduleQueuedJobs();
       return;
     }
+    // The protocol saves Web cookies before starting Codex OAuth. Read that
+    // independent result even if the process failed before its success marker.
+    if (mode === "full") await inspectAccountWebSession(job);
     if (!isTerminalStatus(job.status)) {
       if (job.status === "mfa_otp") {
         markMfaFailed(job, signal ? `2FA 验证阶段被 ${signal} 终止` : `2FA 验证阶段退出，代码 ${code ?? "未知"}`);
@@ -2641,8 +2656,11 @@ export function createConsoleApp(options = {}) {
     await saveJobMetadata(job);
   }
 
+  function webSessionNeedsLogin(reason) {
+    return ["expired", "web_workspace_unavailable", "missing"].includes(reason);
+  }
+
   async function startWebLogin(job, { maintenance = false, checkTask = null, initialImport = false } = {}) {
-    if (maintenance && sessionResetAutomationPaused(job.email)) throw httpError(409, "一键重登尚未成功，自动登录已暂停");
     if (maintenance && automaticLoginBlocked(job, "web")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
     const checking = Boolean(checkTask && manualWebSessionChecks.get(job.id) === checkTask);
     await automationBlockWrites.get(job.email.toLowerCase());
@@ -2719,6 +2737,7 @@ export function createConsoleApp(options = {}) {
     }
     const failure = message || job.lastError || (signal ? `Web 登录被 ${signal} 中断` : `Web 登录未完成，退出代码 ${code ?? "未知"}`);
     const initialImport = job.initialWebImport === true;
+    const poolPaused = sessionResetAutomationPaused(job.email);
     const previous = job.webLoginPreviousState;
     if (previous && !initialImport) Object.assign(job, previous);
     await recordCredentialHistory(path.dirname(job.outputPath), { type: "web_login", stage: success ? "committed" : "failed_preserved",
@@ -2735,7 +2754,7 @@ export function createConsoleApp(options = {}) {
       job.webSessionAvailable = true;
       const plan = webSession?.web?.planType || job.webLoginPlanType;
       await reconcilePlanAutomations(job, plan);
-      if (plan && consoleSettings.current.accountProxyMode === "plan" && !accountAutomationBlocked(job.email)) {
+      if (plan && consoleSettings.current.accountProxyMode === "plan" && !accountAutomationBlocked(job.email) && !poolPaused) {
         try { await synchronizeWebLoginProxy(job); }
         catch (error) { appendJobLog(job, `[web-login] IP 绑定同步待号池巡检重试：${error.message}\n`); }
       }
@@ -2764,7 +2783,9 @@ export function createConsoleApp(options = {}) {
     job.child = null;
     await removePrivateFile(webLoginCheckpointPath(job));
     await removePrivateFile(webLoginCandidatePath(job));
-    appendJobLog(job, success ? "[web-login] Web 登录态已保存，已核对套餐、IP 绑定及自动开关；未重签 Codex 凭据。\n" : `[web-login] ${failure}\n`);
+    appendJobLog(job, !success ? `[web-login] ${failure}\n` : poolPaused
+      ? "[web-login] Web 登录态已保存，Codex 授权结果与号池暂停状态已保留。\n"
+      : "[web-login] Web 登录态已保存，已核对套餐、IP 绑定及自动开关；未重签 Codex 凭据。\n");
     const check = manualWebSessionChecks.get(job.id);
     if (check?.phase === "relogin" && check.loginAttemptId === job.webLoginAttemptId) {
       check.phase = success ? check.bannedWebOnly ? "success" : "queued" : "failed";
@@ -2773,7 +2794,7 @@ export function createConsoleApp(options = {}) {
     job.initialWebImport = false;
     touch(job);
     await saveJobMetadata(job);
-    if (success && (initialImport || job.autoTaskEligible) && !accountAutomationBlocked(job.email)) await queueConfiguredTaskActions(job);
+    if (success && (initialImport || job.autoTaskEligible) && !accountAutomationBlocked(job.email) && !poolPaused) await queueConfiguredTaskActions(job);
     scheduleQueuedJobs();
   }
 
@@ -8470,7 +8491,10 @@ export function createConsoleApp(options = {}) {
     // unchanged, but let maintenance re-check it under the existing retry cooldown.
     const failedRefresh = maintenance && !job.child && !job.poolRefreshReady && Boolean(job.poolRefreshError)
       && ["failed", "mfa_failed", "reauth_required", "resume_available"].includes(job.status);
-    return !activeSessionReset(job) && (checking || !webSessionCheckPending(job)) && (!maintenance || !accountAutomationBlocked(job.email)) && canStartAccountTask(job) && (!job.poolRefreshAction || failedRefresh || accountAutomationBlocked(job.email)) && !job.autoRepairOperation
+    const failedReset = job.poolRefreshAction === "session-reset" && !job.child && !job.poolRefreshReady
+      && accountSessionResets.get(job.email)?.status === "failed";
+    const poolOperationIdle = !job.poolRefreshAction || failedRefresh || failedReset || accountAutomationBlocked(job.email);
+    return !activeSessionReset(job) && (checking || !webSessionCheckPending(job)) && (!maintenance || !accountAutomationBlocked(job.email)) && canStartAccountTask(job) && poolOperationIdle && !job.autoRepairOperation
       && !["pending", "queued", "running"].includes(job.autoTaskStatus);
   }
 

@@ -16,6 +16,8 @@ for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSIO
   const multi = scenario.startsWith("multi-"), disabled = ["manual-disabled", "manual-disable-during-reset"].includes(scenario);
   let failPause = scenario === "pause-failure", failRestore = ["restore-failure", "multi-restore-failure"].includes(scenario);
   let child, headers, logs = "", logouts = 0, updates = 0, creates = 0, failSync = scenario === "sync-retry";
+  let webExpired = false, webProbes = 0;
+  const webAccessToken = `web.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
   const mutations = [], row = { id: 7, platform: "openai", type: "oauth", name: email, status: "active", schedulable: !automatic && scenario !== "manual-disabled",
     proxy_id: direct ? 0 : 3, group_ids: [91], priority: 17, credentials: { email, access_token: "old", refresh_token: "old-refresh", plan_type: "plus", custom: "retain" } };
   const proxy = { id: 3, name: "Original", protocol: "http", host: "fixed.fixture", port: 8080, ip_address: "198.51.100.3", status: "active" };
@@ -29,6 +31,16 @@ for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSIO
     if (req.url === "/mail") {
       await append({ phase: "mail-baseline" });
       return json(res, []);
+    }
+    if (scenario === "oauth-failure" && req.url === "/api/auth/session") {
+      webProbes++;
+      if (webExpired && !req.headers.cookie?.includes("fixture-web-renewed")) return json(res, {}, 401);
+      return json(res, { user: { email }, accessToken: webAccessToken });
+    }
+    if (scenario === "oauth-failure" && req.url === "/backend-api/accounts/check/v4-2023-04-27") {
+      return json(res, { current_account_id: "personal", accounts: { personal: {
+        account: { account_id: "personal", structure: "personal", plan_type: "free", can_access_with_session: true },
+      } } });
     }
     if (req.url === "/backend-api/accounts/logout_all") {
       assert(rows.every(a => a.schedulable === false), "logout ran while pool scheduling was still enabled");
@@ -90,7 +102,7 @@ import {WebSessionMonitor} from ${JSON.stringify(pathToFileURL(path.resolve('src
 import {OverloadMonitor} from ${JSON.stringify(pathToFileURL(path.resolve('src/overload-monitor.mjs')).href)};
 import {OverloadCooldown} from ${JSON.stringify(pathToFileURL(path.resolve('src/overload-cooldown.mjs')).href)};
 import {ModelFingerprintService} from ${JSON.stringify(pathToFileURL(path.resolve('src/model-fingerprint.mjs')).href)};
-import {AccountSessionResets} from ${JSON.stringify(pathToFileURL(path.resolve('src/account-session-reset.mjs')).href)};
+import {AccountSessionResets,sessionResetPending} from ${JSON.stringify(pathToFileURL(path.resolve('src/account-session-reset.mjs')).href)};
 let resets;
 const loadResets=AccountSessionResets.prototype.load;
 AccountSessionResets.prototype.load=async function(...args){await loadResets.apply(this,args);resets=this;};
@@ -103,7 +115,11 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
   const state=resets?.get(${JSON.stringify(email)});
   if(state?.poolPauseActive){
    const blocked=Klass===WebSessionMonitor?this.isBusy(job):this.isBlocked(${JSON.stringify(email)});
-   assert.equal(blocked,true,Klass.name+' automation ignored the reset pause');
+   if(Klass!==WebSessionMonitor || sessionResetPending(state)){
+    assert.equal(blocked,true,Klass.name+' ignored the active reset or pool pause');
+   } else if(${JSON.stringify(scenario)}==='oauth-failure'){
+    assert.equal(blocked,false,'Web monitor still blocked by a finished OAuth failure after restart');
+   }
    if(Klass===ModelFingerprintService){assert(this.isBlocked(${JSON.stringify(email)},{manual:true}));assert(!this.getContext().jobs.some(j=>j.email===${JSON.stringify(email)}));}
    fsSync.appendFileSync(${JSON.stringify(trace)},JSON.stringify({phase:'automation-gate',service:Klass.name,blocked})+'\\n');
   }
@@ -254,6 +270,11 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
       assert.equal((await api(`/api/sub2api/accounts/${id}/schedulable`, { enabled: true })).status, 409, "pool enabled before reset completed");
       if (scenario === "manual-disable-during-reset") assert.equal((await api(`/api/sub2api/accounts/${id}/schedulable`, { enabled: false })).status, 200);
       if (automatic) assert.equal(row.schedulable, false, "pool resumed before credentials updated");
+      if (scenario === "oauth-failure") {
+        await api("/api/task-settings", { webSessionMonitor: { enabled: true, autoRelogin: true } });
+        assert.equal((await api("/api/web-session-monitor/check", {})).data.accounts[email], undefined, "Web probe overlapped the active reset");
+        assert.equal(webProbes, 0);
+      }
       const events = (await fs.readFile(trace, "utf8")).trim().split("\n").map(JSON.parse), web = events.find(e => e.phase === "web"), transport = events.find(e => e.phase === "logout-route");
       assert(events.findIndex(e => e.phase === "mail-baseline") >= 0
         && events.findIndex(e => e.phase === "mail-baseline") < events.findIndex(e => e.phase === "logout"), "old mailbox OTPs were not excluded before logout and fresh login");
@@ -264,6 +285,45 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
       if (["oauth-failure", "oauth-retry"].includes(scenario)) {
         await wait(async () => (await job()).sessionReset?.status === "failed", "OAuth failure state"); assert.equal(updates, 0); assert.equal(row.credentials.access_token, "old");
         assert.equal(row.schedulable, false); assert.equal((await job()).sessionReset.poolPaused, true);
+        if (scenario === "oauth-failure") {
+          const failed = await job();
+          assert.equal(failed.canLoginWeb, true, "a finished Codex failure blocked Web actions");
+          assert.equal(failed.webSessionAvailable, true, "Web session saved before OAuth was not recognized");
+          assert.equal(failed.webLoginError, null);
+          const healthy = (await api("/api/web-session-monitor/check", {})).data.accounts[email];
+          assert.equal(healthy?.status, "valid");
+          assert.equal(healthy.lastRepairAt, undefined, "Codex drift consumed the Web recovery cooldown");
+          assert.equal((await api(`/api/jobs/${id}/web-session-check`, {})).status, 200);
+          await wait(async () => (await job()).canLoginWeb, "manual Web check did not finish");
+          assert.equal((await job()).webSessionCheckStatus, "success");
+          const credentialsBefore = await fs.readFile(output, "utf8");
+          await stop();
+          webExpired = true;
+          await start();
+          const expired = (await api("/api/web-session-monitor/check", {})).data.accounts[email];
+          assert.equal(expired.repairReason, "expired");
+          assert(expired.lastRepairAt, "Web expiry didn't enqueue an independent login after restart");
+          await wait(async () => {
+            const current = await job();
+            return current.canLoginWeb && Boolean(current.webLoginCompletedAt);
+          }, "independent Web login did not finish");
+          const recovered = (await api("/api/web-session-monitor/check", {})).data.accounts[email];
+          assert.equal(recovered.status, "valid");
+          assert.equal((await job()).webSessionStatus, "valid");
+          assert.deepEqual((await job()).sessionReset, failed.sessionReset);
+          assert.equal((await job()).poolRefreshError, failed.poolRefreshError);
+          assert.equal(await fs.readFile(output, "utf8"), credentialsBefore);
+          assert.equal(logouts, 1);
+          assert.equal(updates, 0);
+          assert.deepEqual(mutations, [false]);
+          const phases = (await fs.readFile(trace, "utf8")).trim().split("\n").map(JSON.parse);
+          assert.equal(phases.filter(e => e.phase === "oauth").length, 1);
+          assert.equal(phases.filter(e => e.phase === "web-only").length, 1);
+          const webOnly = phases.find(e => e.phase === "web-only");
+          assert.equal(webOnly.proxy, "http://fixed.fixture:8080/");
+          assert.equal(webOnly.phased, "0", "Web recovery invoked the Codex binding step");
+          assert.equal(row.proxy_id, 3);
+        }
         if (scenario === "oauth-retry") {
           await stop(); await fs.writeFile(gate+".retry", "retry"); await start();
           const retried = await api(`/api/jobs/${id}/session-reset`, {}); assert.equal(retried.status, 202, JSON.stringify({response:retried.data,job:await job()}));
