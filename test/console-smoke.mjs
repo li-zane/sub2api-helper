@@ -798,7 +798,7 @@ try {
       { id: 7, name: "测试号池", platform: "openai", status: "active" },
       { id: 8, name: "备用号池", platform: "openai", status: "active" },
     ],
-    proxies: [{ id: 3, name: "测试代理", protocol: "http", host: "proxy.example", port: 8080, ipAddress: "203.0.113.10", status: "active", accountCount: 0 }],
+    proxies: [{ id: 3, name: "测试代理", protocol: "http", host: "proxy.example", port: 8080, ipAddress: "203.0.113.10", status: "active", accountCount: 0, availableForBinding: true }],
     directAccountCount: 0,
     directIp: null,
   });
