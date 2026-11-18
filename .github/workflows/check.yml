@@ -59,7 +59,7 @@ jobs:
           retention-days: 14
       - name: Audit dependencies
         if: matrix.shard == 1
-        run: npm audit --audit-level=high
+        run: npm run audit:dependencies
       - name: Package Linux runtime
         if: runner.os == 'Linux' && matrix.shard == 1 && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         run: python .agents/release/bundle.py --output release-dist --revision "$GITHUB_SHA"
