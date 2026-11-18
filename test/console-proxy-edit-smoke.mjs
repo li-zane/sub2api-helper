@@ -49,7 +49,7 @@ const remote = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ data: { items, total: failPagedList ? items.length + 1 : items.length } }));
   }
   if (url.pathname.endsWith('/proxies/all') && failList) { res.writeHead(503); return res.end('{}'); }
-  const data = url.pathname.endsWith('/proxies/all') ? proxies : url.pathname.endsWith('/groups/all') ? []
+  const data = url.pathname.endsWith('/proxies/all') ? proxies.filter(proxy => proxy.status === 'active') : url.pathname.endsWith('/groups/all') ? []
     : url.pathname.endsWith('/accounts') ? { items: [], total: 0, pages: 1 } : {};
   res.end(JSON.stringify({ data }));
 });
@@ -134,6 +134,47 @@ try {
   assert(!JSON.stringify(list.data).includes('private-')); assert.equal(proxies.length, 1);
   console.log('PROXY_EDIT_API_PASS auth=true validation=true name_and_connection=true preserve_password=true explicit_clear=true metadata_unchanged=true stale_conflict=true concurrent_conflict=true no_blind_retry=true cache_refreshed=true');
 
+  current = (await api('/api/sub2api/proxies/7')).data;
+  assert.equal(current.proxy.status, 'active');
+  assert.equal((await api('/api/sub2api/proxies/7', 'PATCH', {}, false)).status, 403);
+  const setStatus = (status, revision = current.revision) => api('/api/sub2api/proxies/7', 'PATCH', { status, revision });
+  const originalNode = { ...proxies[0] };
+  const writeCountBeforeStatus = writes.length;
+  assert.equal((await setStatus('expired')).status, 400);
+  assert.equal((await setStatus('inactive', '')).status, 400);
+  assert.equal((await setStatus('active')).status, 200);
+  assert.equal(writes.length, writeCountBeforeStatus, 'invalid or no-op status reached the pool');
+  rejectWrite = true;
+  const rejectedStatus = await setStatus('inactive');
+  assert.equal(rejectedStatus.status, 502);
+  assert(!JSON.stringify(rejectedStatus.data).includes('private-'));
+  assert.equal(proxies[0].status, 'active');
+  rejectWrite = false;
+
+  const disabled = await setStatus('inactive');
+  assert.equal(disabled.status, 200, JSON.stringify(disabled.data));
+  assert.equal(disabled.data.proxy.status, 'inactive');
+  assert.deepEqual(writes.at(-1), { status: 'inactive' });
+  assert.deepEqual(proxies[0], { ...originalNode, status: 'inactive' });
+  assert.equal((await setStatus('active')).status, 409, 'stale revision overwrote status');
+  assert.deepEqual((await api('/api/sub2api/options', 'POST', {})).data.proxies, []);
+  const managed = (await api('/api/sub2api/options', 'POST', { includeInactiveProxies: true })).data.proxies[0];
+  assert.equal(managed.id, 7); assert.equal(managed.status, 'inactive');
+  assert.equal(managed.ipAddress, originalNode.ip_address);
+  assert.equal(managed.availableForBinding, false);
+
+  uncertainWrite = true;
+  const enabled = await setStatus('active', disabled.data.revision);
+  uncertainWrite = false;
+  assert.equal(enabled.status, 200, 'already committed status was not confirmed with a read');
+  assert.deepEqual(proxies[0], originalNode);
+  assert.equal(writes.length, writeCountBeforeStatus + 3, 'status update was replayed');
+  assert.equal((await api('/api/sub2api/options', 'POST', {})).data.proxies[0].availableForBinding, false, 'enable bypassed expiry');
+  delete proxies[0].expires_at; // Simulate the operator renewing the node at the provider.
+  assert.equal((await api('/api/sub2api/options', 'POST', {})).data.proxies[0].availableForBinding, true);
+  console.log('PROXY_STATUS_API_PASS auth status-only invalid/no-op inputs stale revision inactive visible expiry preserved confirmed by read');
+
+  await setStatus('inactive', enabled.data.revision);
   assert.equal((await api('/api/sub2api/proxies/7', 'DELETE', {}, false)).status, 403);
   const remove = (revision = current.revision) => api('/api/sub2api/proxies/7', 'DELETE', { revision });
   const missingRevision = await remove('');

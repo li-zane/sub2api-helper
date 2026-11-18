@@ -294,7 +294,7 @@ function App() {
       const version = proxyDistributionVersion.current;
       try {
         const data = await apiFetch(token, "/api/sub2api/options", {
-          method: "POST", body: JSON.stringify({ config: sub2apiSettings }),
+          method: "POST", body: JSON.stringify({ config: sub2apiSettings, includeInactiveProxies: true }),
         });
         if (stopped || version !== proxyDistributionVersion.current) return;
         setAccountProxyDistribution(Array.isArray(data.proxies) ? data.proxies : []);
@@ -544,7 +544,7 @@ function App() {
     try {
       const data = await apiFetch(token, "/api/sub2api/options", {
         method: "POST",
-        body: JSON.stringify({ config: sub2apiSettings }),
+        body: JSON.stringify({ config: sub2apiSettings, includeInactiveProxies: true }),
       });
       const proxies = Array.isArray(data.proxies) ? data.proxies : [];
       if (version !== proxyDistributionVersion.current) return proxies;
@@ -2254,12 +2254,16 @@ function App() {
                       <div className="proxy-distribution-grid">
                         {proxyDistributionByIp(accountProxyDistribution).map((proxy) => (
                           <div key={proxy.ipAddress} className={`proxy-segment-bar ${proxy.accountCount > 0 ? "has-accounts" : "zero-accounts"}`}>
-                            <div className="proxy-segment-col segment-name" title={proxy.names.join("、")}>
+                            <div className="proxy-segment-col segment-name with-status" title={proxy.names.join("、")}>
                               <span className="segment-name-label">{proxy.names.join("、")}</span>
+                              <span className="segment-node-status">
+                                {proxy.activeNodeCount === proxy.nodes.length ? "已启用" : proxy.inactiveNodeCount === proxy.nodes.length
+                                  ? "已停用" : `${proxy.activeNodeCount}/${proxy.nodes.length} 启用`}
+                              </span>
                             </div>
                             <div className="proxy-segment-col segment-ip" title={proxy.ipAddress}>
                               <button type="button" className="segment-ip-code proxy-edit-trigger"
-                                disabled={proxySettingsSaving} title="编辑代理连接与名称" aria-label={`编辑代理 ${proxy.ipAddress}`}
+                                disabled={proxySettingsSaving} title="编辑代理配置与状态" aria-label={`编辑代理 ${proxy.ipAddress}`}
                                 onClick={() => setEditingProxies(proxy.nodes)}>{proxy.ipAddress}</button>
                             </div>
                             <div className="proxy-segment-col segment-count">
@@ -2364,9 +2368,15 @@ function App() {
         void refreshAccountProxyDistribution().catch(error => notify(`代理已保存，刷新列表失败：${error.message}`, { tone: "error" }));
       }} />}
       {editingProxies && <ProxyEditDialog proxies={editingProxies} request={proxyDialogRequest} onClose={() => setEditingProxies(null)} onSaved={proxy => {
+        proxyDistributionVersion.current += 1;
         setAccountProxyDistribution(current => current.map(node => node.id === proxy.id ? { ...node, name: proxy.name, protocol: proxy.protocol, host: proxy.host, port: proxy.port } : node));
         notify("代理配置已保存");
         void refreshAccountProxyDistribution().catch(error => notify(`代理已保存，刷新列表失败：${error.message}`, { tone: "error" }));
+      }} onStatusChanged={proxy => {
+        proxyDistributionVersion.current += 1;
+        setAccountProxyDistribution(current => current.map(node => node.id === proxy.id ? { ...node, status: proxy.status } : node));
+        const message = proxy.status === "active" ? "代理已启用" : "代理已停用";
+        void refreshAccountProxyDistribution().catch(error => notify(`${message}，刷新列表失败：${error.message}`, { tone: "error" }));
       }} onDeleted={id => {
         proxyDistributionVersion.current += 1;
         setAccountProxyDistribution(current => current.filter(node => node.id !== id));
@@ -6299,8 +6309,13 @@ function proxyDistributionByIp(proxies) {
   for (const proxy of proxies) {
     const ipAddress = proxy.ipAddress || `${proxy.host}:${proxy.port}`;
     let group = groups.get(ipAddress);
-    if (!group) { group = { ipAddress, names: [], nodes: [], accountCount: 0 }; groups.set(ipAddress, group); }
+    if (!group) {
+      group = { ipAddress, names: [], nodes: [], accountCount: 0, activeNodeCount: 0, inactiveNodeCount: 0 };
+      groups.set(ipAddress, group);
+    }
     group.nodes.push(proxy);
+    if (proxy.status === "active") group.activeNodeCount += 1;
+    if (["inactive", "disabled"].includes(proxy.status)) group.inactiveNodeCount += 1;
     if (!group.names.includes(proxy.name)) group.names.push(proxy.name);
     // The API already aggregates accounts across all nodes sharing this exit IP.
     group.accountCount = Math.max(group.accountCount, proxy.accountCount || 0);

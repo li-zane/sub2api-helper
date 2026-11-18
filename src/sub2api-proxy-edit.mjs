@@ -8,10 +8,13 @@ const connection = proxy => ({
   port: Number(proxy.port), username: String(proxy.username ?? ''), password: String(proxy.password ?? ''),
 });
 const backendKey = config => digest([config.baseUrl, config.adminApiKey]);
-const revision = (config, proxy) => digest([backendKey(config), Number(proxy.id), connection(proxy)]);
+const revision = (config, proxy) => digest([backendKey(config), Number(proxy.id), connection(proxy), proxy.status ?? null]);
 const publicEdit = (config, proxy) => {
   const { password, ...fields } = connection(proxy);
-  return { proxy: { id: Number(proxy.id), ...fields, hasPassword: Boolean(password) }, revision: revision(config, proxy) };
+  return {
+    proxy: { id: Number(proxy.id), ...fields, status: String(proxy.status ?? ''), hasPassword: Boolean(password) },
+    revision: revision(config, proxy),
+  };
 };
 
 export function createProxyEditor({ request }) {
@@ -69,6 +72,31 @@ export function createProxyEditor({ request }) {
         const saved = payload?.data ?? payload;
         if (Number(saved?.id) !== id) throw error(502, '保存结果待确认，请重新读取代理配置后确认');
         return publicEdit(config, { ...current, ...fields, ...saved });
+      });
+    },
+    async setStatus(config, id, body) {
+      const status = body?.status;
+      if (status !== 'active' && status !== 'inactive') throw error(400, '请选择启用或停用');
+      return mutate(config, id, body, '切换状态', async current => {
+        if (current.status === status) return publicEdit(config, current);
+        let saved;
+        try {
+          const payload = await request(config, `/api/v1/admin/proxies/${id}`, {
+            method: 'PUT', timeoutMs: 30_000, body: JSON.stringify({ status }),
+          });
+          saved = payload?.data ?? payload;
+        } catch (e) {
+          if (e.remoteStatus >= 400 && e.remoteStatus < 500) {
+            throw error(502, `号池拒绝切换状态（HTTP ${e.remoteStatus}）`);
+          }
+        }
+        if (Number(saved?.id) === id && saved.status === status) {
+          return publicEdit(config, { ...current, ...saved });
+        }
+        // A timeout or incomplete response may follow a committed write. Verify by reading, never by replaying it.
+        const actual = await read(config, id).catch(() => null);
+        if (actual?.status === status) return publicEdit(config, actual);
+        throw error(502, '代理状态待确认，请重新读取后再试');
       });
     },
     async remove(config, id, body, assertUnused) {

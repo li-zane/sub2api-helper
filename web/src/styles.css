@@ -4576,6 +4576,23 @@ dialog.batch-dialog::backdrop {
   overflow: hidden;
 }
 
+.proxy-segment-col.segment-name.with-status {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.15;
+}
+
+.segment-name.with-status .segment-name-label {
+  max-width: 100%;
+}
+
+.segment-node-status {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .segment-name-label {
   font-size: 12.5px;
   font-weight: 700;

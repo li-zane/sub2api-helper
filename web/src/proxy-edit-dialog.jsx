@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { AlertCircle, Globe2, LoaderCircle, RefreshCw, Save, Trash2, X } from 'lucide-react';
+import { AlertCircle, Globe2, LoaderCircle, Power, RefreshCw, Save, Trash2, X } from 'lucide-react';
 import { AccessibleDialog } from './accessible-dialog.jsx';
 import { CustomSelect } from './custom-select.jsx';
 import { normalizeProxyInput } from './proxy-input.mjs';
@@ -8,7 +8,7 @@ import './proxy-edit-dialog.css';
 
 const protocols = ['http', 'https', 'socks5', 'socks5h'].map(value => ({ value, label: value.toUpperCase() }));
 
-export function ProxyEditDialog({ proxies, request, onClose, onSaved, onDeleted }) {
+export function ProxyEditDialog({ proxies, request, onClose, onSaved, onStatusChanged, onDeleted }) {
   const titleId = useId();
   const deleteTitleId = useId();
   const [selectedId, setSelectedId] = useState(proxies[0].id);
@@ -43,7 +43,11 @@ export function ProxyEditDialog({ proxies, request, onClose, onSaved, onDeleted 
   const ready = !loading && loaded?.proxy.id === selectedId && Boolean(loaded.revision);
   const saving = pending === 'save';
   const deleting = pending === 'delete';
+  const changingStatus = pending === 'status';
   const hasPassword = Boolean(loaded?.proxy.hasPassword);
+  const status = loaded?.proxy.status;
+  const active = status === 'active';
+  const inactive = status === 'inactive' || status === 'disabled';
   async function save(event) {
     event.preventDefault();
     if (busyRef.current || !draft || !ready || confirmDelete) return;
@@ -60,6 +64,19 @@ export function ProxyEditDialog({ proxies, request, onClose, onSaved, onDeleted 
       onSaved?.(result.proxy);
       onClose();
     } catch (e) { if (aliveRef.current) setError(e.message || '保存代理失败'); }
+    finally { busyRef.current = false; if (aliveRef.current) setPending(null); }
+  }
+  async function toggleStatus() {
+    if (busyRef.current || !ready || confirmDelete || (!active && !inactive)) return;
+    busyRef.current = true; setPending('status'); setError('');
+    try {
+      const result = await request(`/api/sub2api/proxies/${selectedId}`, {
+        method: 'PATCH', body: JSON.stringify({ status: active ? 'inactive' : 'active', revision: loaded.revision }),
+      });
+      if (!aliveRef.current) return;
+      setLoaded(result);
+      onStatusChanged?.(result.proxy);
+    } catch (e) { if (aliveRef.current) setError(e.message || '切换代理状态失败'); }
     finally { busyRef.current = false; if (aliveRef.current) setPending(null); }
   }
   async function remove() {
@@ -100,6 +117,16 @@ export function ProxyEditDialog({ proxies, request, onClose, onSaved, onDeleted 
           )}
           {loading && <div className="proxy-edit-loading" role="status"><LoaderCircle size={16} className="spin" />读取代理配置…</div>}
           {error && <div className="proxy-error-banner" role="alert"><AlertCircle size={15} /><span>{error}</span></div>}
+          {ready && (active || inactive) && <div className="proxy-edit-state">
+            <div>
+              <span className="proxy-field-title" role="status">{active ? '代理已启用' : '代理已停用'}</span>
+              <p>停用后暂停新绑定，保留现有绑定。重新启用仍受代理有效期限制。</p>
+            </div>
+            <button type="button" className="secondary-button" disabled={disabled} onClick={toggleStatus}>
+              {changingStatus ? <LoaderCircle size={14} className="spin" /> : <Power size={14} />}
+              {active ? '停用代理' : '启用代理'}
+            </button>
+          </div>}
           {draft && <div className="proxy-form-grid">
             <div className="proxy-form-row">
               <label className="proxy-input-group"><span className="proxy-field-title">代理名称 *</span>

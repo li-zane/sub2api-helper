@@ -1058,16 +1058,17 @@ export function createConsoleApp(options = {}) {
     }
 
     const proxyEditMatch = /^\/api\/sub2api\/proxies\/(\d+)$/.exec(requestUrl.pathname);
-    if (proxyEditMatch && ["GET", "PUT", "DELETE"].includes(req.method)) {
+    if (proxyEditMatch && ["GET", "PUT", "PATCH", "DELETE"].includes(req.method)) {
       const config = sub2ApiSettingsConfig;
       const proxyId = Number(proxyEditMatch[1]);
       if (req.method === "GET") sendJson(res, 200, await sub2ApiProxyEditor.get(config, proxyId));
       else {
         const body = await readJson(req);
         const deleting = req.method === "DELETE";
-        const result = deleting
-          ? await deleteUnusedSub2ApiProxy(config, proxyId, body)
-          : await sub2ApiProxyEditor.update(config, proxyId, body);
+        let result;
+        if (deleting) result = await deleteUnusedSub2ApiProxy(config, proxyId, body);
+        else if (req.method === "PATCH") result = await sub2ApiProxyEditor.setStatus(config, proxyId, body);
+        else result = await sub2ApiProxyEditor.update(config, proxyId, body);
         sub2ApiProxyStateCache.delete(`${monitorBackendIdentity(config)}:${proxyId}`);
         invalidateSub2ApiAccountStatusCache();
         if (deleting) {
@@ -1085,7 +1086,9 @@ export function createConsoleApp(options = {}) {
       const config = normalizeSub2ApiConfig(body.config);
       const [groupPayload, proxyPayload] = await Promise.all([
         listSub2ApiTargetGroups(config),
-        requestSub2Api(config, "/api/v1/admin/proxies/all"),
+        body.includeInactiveProxies === true
+          ? listAllSub2ApiProxies(requestSub2Api, config)
+          : requestSub2Api(config, "/api/v1/admin/proxies/all"),
       ]);
       const listing = await listSub2ApiAccounts(config, { withMeta: true });
       const proxyCounts = new Map();

@@ -1,5 +1,5 @@
 async page => {
-  const evidence = "__UI_TEST_EVIDENCE_DIR__", results = [], errors = [], writes = [], reads = [], deletes = [];
+  const evidence = "__UI_TEST_EVIDENCE_DIR__", results = [], errors = [], writes = [], reads = [], deletes = [], statusWrites = [];
   const check = (value, message) => { if (!value) throw Error(message); };
   const test = async (name, run) => { try { await run(); results.push({ name, passed: true }); } catch (e) { results.push({ name, passed: false, error: e.message }); } };
   page.setDefaultTimeout(7000); page.on('pageerror', e => errors.push(e.message));
@@ -8,14 +8,19 @@ async page => {
     { id: 8, name: 'SOCKS node', protocol: 'socks5h', host: 'two.test', port: 1080, ipAddress: '203.0.113.7', username: '', hasPassword: false, accountCount: 3 },
     { id: 9, name: 'Solo node', protocol: 'https', host: 'solo.test', port: 8443, ipAddress: '203.0.113.9', username: '', hasPassword: false, accountCount: 0 },
   ];
+  nodes.forEach(node => { node.status = 'active'; });
   let reject = false, failRead = false, rejectDelete = false;
-  const revision = id => String(id).repeat(64).slice(0, 64);
+  const revision = (id, status = 'active') => String(id).repeat(63).slice(0, 63) + (status === 'active' ? 'a' : 'b');
   await page.route(/\/api\/sub2api\/(?:settings|monitor)$/, route => route.fulfill({ json: {
     configured: true, enabled: false, hasAdminApiKey: true, config: { baseUrl: 'https://pool.example.test' },
     profiles: [{ id: 'default', name: 'Default' }], activeProfileId: 'default',
   } }));
   await page.route('**/api/account-proxy-settings', route => route.fulfill({ json: { settings: { mode: 'sub2api', proxyUrl: '', allowDirectFallback: false } } }));
-  await page.route('**/api/sub2api/options', route => route.fulfill({ json: { proxies: nodes.map(({ username, hasPassword, ...node }) => node), groups: [], directAccountCount: 1 } }));
+  await page.route('**/api/sub2api/options', route => {
+    const { includeInactiveProxies } = route.request().postDataJSON();
+    const proxies = nodes.filter(node => includeInactiveProxies || node.status === 'active');
+    return route.fulfill({ json: { proxies: proxies.map(({ username, hasPassword, ...node }) => node), groups: [], directAccountCount: 1 } });
+  });
   await page.route(/\/api\/sub2api\/proxies\/\d+$/, async route => {
     const request = route.request(), id = Number(new URL(request.url()).pathname.split('/').at(-1));
     check(Boolean(request.headers()['x-console-token']), 'editor request has no console authentication');
@@ -23,7 +28,15 @@ async page => {
     if (request.method() === 'GET') {
       reads.push(id);
       if (failRead) return route.fulfill({ status: 502, json: { error: 'fixture read unavailable' } });
-      return route.fulfill({ json: { proxy: node, revision: revision(id) } });
+      return route.fulfill({ json: { proxy: node, revision: revision(id, node.status) } });
+    }
+    if (request.method() === 'PATCH') {
+      const body = request.postDataJSON();
+      statusWrites.push({ id, body });
+      await new Promise(resolve => setTimeout(resolve, 400));
+      check(body.revision === revision(id, node.status), 'status edit used a stale revision');
+      node.status = body.status;
+      return route.fulfill({ json: { proxy: node, revision: revision(id, node.status) } });
     }
     if (request.method() === 'DELETE') {
       deletes.push({ id, body: request.postDataJSON() });
@@ -98,6 +111,35 @@ async page => {
     await dialog.getByLabel('用户名（可选）', { exact: true }).fill('');
     await dialog.getByRole('button', { name: '保存修改', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
     check(writes.at(-1).id === 7 && writes.at(-1).body.password === '', 'explicit password clear was lost');
+  });
+  await test('selected-node-can-be-disabled-and-enabled-without-saving-its-draft', async () => {
+    await ip.click();
+    await dialog.getByRole('combobox', { name: '选择代理节点' }).click();
+    await page.getByRole('option', { name: /Updated SOCKS/ }).click();
+    const name = dialog.getByLabel('代理名称 *', { exact: true });
+    await name.fill('Unsaved name');
+    const disable = dialog.getByRole('button', { name: '停用代理', exact: true });
+    await disable.click();
+    check(await disable.isDisabled(), 'pending toggle can be repeated');
+    check(await dialog.getByRole('button', { name: '保存修改', exact: true }).isDisabled(), 'can save a draft during status change');
+    await dialog.locator('.proxy-edit-state').getByText('代理已停用', { exact: true }).waitFor();
+    check(await name.inputValue() === 'Unsaved name', 'toggle erased the draft');
+    check(nodes[0].status === 'active' && nodes[1].name === 'Updated SOCKS', 'toggle changed a sibling or saved the draft');
+    await dialog.getByRole('button', { name: '关闭编辑代理' }).click();
+    const card = parent.locator('.proxy-segment-bar').filter({ has: page.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true }) });
+    await card.getByText('1/2 启用', { exact: true }).waitFor();
+    check((await card.locator('.segment-count-pill').innerText()) === '3 个 OAuth 账号', 'toggle changed the binding count');
+    await ip.click();
+    await dialog.getByRole('combobox', { name: '选择代理节点' }).click();
+    await page.getByRole('option', { name: /Updated SOCKS/ }).click();
+    await dialog.getByRole('button', { name: '启用代理', exact: true }).click();
+    await dialog.locator('.proxy-edit-state').getByText('代理已启用', { exact: true }).waitFor();
+    await dialog.getByRole('button', { name: '关闭编辑代理' }).click();
+    await card.getByText('已启用', { exact: true }).waitFor();
+    check(JSON.stringify(statusWrites) === JSON.stringify([
+      { id: 8, body: { status: 'inactive', revision: revision(8) } },
+      { id: 8, body: { status: 'active', revision: revision(8, 'inactive') } },
+    ]), 'status writes were duplicated or included connection fields');
   });
   await test('single-node-mobile-dark-layout-and-keyboard-dismissal', async () => {
     await parent.getByRole('button', { name: '编辑代理 203.0.113.9', exact: true }).click();
