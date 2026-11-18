@@ -290,8 +290,15 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
           assert.equal(failed.canLoginWeb, true, "a finished Codex failure blocked Web actions");
           assert.equal(failed.webSessionAvailable, true, "Web session saved before OAuth was not recognized");
           assert.equal(failed.webLoginError, null);
+          assert.equal(failed.planType, "plus");
           const healthy = (await api("/api/web-session-monitor/check", {})).data.accounts[email];
           assert.equal(healthy?.status, "valid");
+          assert.equal(healthy.planType, "free");
+          const checked = await job();
+          assert.equal(checked.planType, "free", "the account list kept the old Codex plan after a successful Web check");
+          assert.equal(checked.sub2apiPlanType, "plus", "Web inspection changed the pool plan");
+          const metadata = JSON.parse(await fs.readFile(path.join(dir, "job-meta.json"), "utf8"));
+          assert.equal(metadata.plan_automation_plan_type, "plus", "the Web observation advanced the Codex automation plan");
           assert.equal(healthy.lastRepairAt, undefined, "Codex drift consumed the Web recovery cooldown");
           assert.equal((await api(`/api/jobs/${id}/web-session-check`, {})).status, 200);
           await wait(async () => (await job()).canLoginWeb, "manual Web check did not finish");
@@ -300,6 +307,7 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
           await stop();
           webExpired = true;
           await start();
+          assert.equal((await job()).planType, "free", "the Web plan was lost after restart");
           const expired = (await api("/api/web-session-monitor/check", {})).data.accounts[email];
           assert.equal(expired.repairReason, "expired");
           assert(expired.lastRepairAt, "Web expiry didn't enqueue an independent login after restart");

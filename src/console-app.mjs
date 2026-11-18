@@ -343,7 +343,7 @@ export function createConsoleApp(options = {}) {
         }
         throw error;
       }
-      await reconcilePlanAutomations(job, snapshot.planType);
+      await reconcilePlanAutomations(job, snapshot.planType, { observedOnWeb: true });
       if (snapshot.securityState) job.securityState = mergeSecurityState(job.securityState, snapshot.securityState);
       await saveJobMetadata(job);
       if (!job.resultSaved && snapshot.planType) {
@@ -2632,13 +2632,20 @@ export function createConsoleApp(options = {}) {
     } finally { drainingWebSessionChecks = false; }
   }
 
-  async function reconcilePlanAutomations(job, planType) {
+  async function reconcilePlanAutomations(job, planType, { observedOnWeb = false } = {}) {
     const plan = normalizePlanType(planType);
-    if (!plan || accountAutomationBlocked(job.email) || sessionResetAutomationPaused(job.email)) return;
+    if (!plan || accountAutomationBlocked(job.email)) return;
+    const codexPaused = sessionResetAutomationPaused(job.email);
+    if (codexPaused && !observedOnWeb) return;
     const previousPlan = normalizePlanType(job.planAutomationPlanType || getJobPlanType(job));
     job.planAutomationPlanType = previousPlan;
-    const changed = previousPlan !== plan;
     job.workspacePlanType = plan;
+    // A confirmed Web plan can update the list before the pool can use it.
+    if (codexPaused) {
+      await saveJobMetadata(job);
+      return;
+    }
+    const changed = previousPlan !== plan;
     await modelFingerprint.observePlan(job.email, plan);
     // Re-evaluate ongoing switches only. One-shot uploads/2FA rotations stay one-shot.
     const actions = taskAutoActionsForPlanType(plan);
@@ -2753,7 +2760,7 @@ export function createConsoleApp(options = {}) {
       job.webLoginCompletedAt = new Date().toISOString();
       job.webSessionAvailable = true;
       const plan = webSession?.web?.planType || job.webLoginPlanType;
-      await reconcilePlanAutomations(job, plan);
+      await reconcilePlanAutomations(job, plan, { observedOnWeb: true });
       if (plan && consoleSettings.current.accountProxyMode === "plan" && !accountAutomationBlocked(job.email) && !poolPaused) {
         try { await synchronizeWebLoginProxy(job); }
         catch (error) { appendJobLog(job, `[web-login] IP 绑定同步待号池巡检重试：${error.message}\n`); }
