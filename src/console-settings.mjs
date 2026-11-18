@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone } from "../web/src/display-time.mjs";
 import { DEFAULT_LOGIN_TIMEOUT_MINUTES, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, normalizeSmsTimeoutMinutes } from "../web/src/login-settings.mjs";
 import { DEFAULT_MONITORING, normalizeMonitoring, normalizeSavedMonitoring, TASK_SETTINGS_VERSION } from "../web/src/monitor-settings.mjs";
-import { normalizeTaskUploadActions } from "../web/src/task-auto-actions.mjs";
+import { IMPORT_FINGERPRINT_ACTION, normalizeTaskUploadActions } from "../web/src/task-auto-actions.mjs";
 import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier } from "../shared/account-pricing.mjs";
 import { DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload-cooldown.mjs";
 import { DEFAULT_WEB_SESSION_MONITOR, normalizeWebSessionMonitor } from "./web-session-monitor.mjs";
@@ -18,7 +18,9 @@ export const TASK_AUTO_ACTION_LABELS = Object.freeze({
   "rotate-logout-reauthorize-upload": "一键轮换并上传",
   "enable-overload-detection": "自动开启过载检测",
   "enable-overload-cooldown": "自动开启过载冷却",
+  [IMPORT_FINGERPRINT_ACTION]: "导入后检测一次降智",
 });
+const LATE_TASK_AUTO_ACTIONS = ["enable-overload-detection", "enable-overload-cooldown", IMPORT_FINGERPRINT_ACTION];
 export const TASK_AUTO_ACTIONS = new Set(Object.keys(TASK_AUTO_ACTION_LABELS));
 const PROXY_MODES = ["global", "sub2api", "plan"];
 const FINGERPRINT_FIELDS = ["models", "intervalMinutes", "minProbability", "maxConcurrentAccounts", "testSequence"];
@@ -57,8 +59,8 @@ function normalizeAutoActions(value, normalizePlanType) {
     if (actions.includes("upload") && !actions.includes("authorize-codex")) actions.unshift("authorize-codex");
     if (actions.length) normalized[planType] = normalizeTaskUploadActions([
       ...actions.filter(action => action === "authorize-codex"),
-      ...actions.filter(action => !["authorize-codex", "enable-overload-detection", "enable-overload-cooldown"].includes(action)),
-      ...["enable-overload-detection", "enable-overload-cooldown"].filter(action => actions.includes(action)),
+      ...actions.filter(action => action !== "authorize-codex" && !LATE_TASK_AUTO_ACTIONS.includes(action)),
+      ...LATE_TASK_AUTO_ACTIONS.filter(action => actions.includes(action)),
     ]);
   }
   return normalized;

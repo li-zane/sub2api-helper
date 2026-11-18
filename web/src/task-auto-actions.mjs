@@ -1,4 +1,5 @@
 export const ROTATE_UPLOAD_ACTION = "rotate-logout-reauthorize-upload";
+export const IMPORT_FINGERPRINT_ACTION = "check-model-fingerprint";
 
 // Rotation includes Web/OAuth reauthorization and upload. Keep legacy persisted
 // queues' indexes intact; the runner skips redundant steps without rewriting it.

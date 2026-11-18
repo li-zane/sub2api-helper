@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import sync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { hydrateAccountLog, readCredentialHistory } from "./account-history.mjs";
+import { appendTimestampedAccountLog, hydrateAccountLog, readCredentialHistory } from "./account-history.mjs";
 import { compactTotpHistory } from "./totp-history-versions.mjs";
 
 const labels = {
@@ -13,7 +13,7 @@ const labels = {
   account_update: "更新账号", resume: "继续授权", retry: "重试授权", upload: "上传到 Sub2API",
   automatic_relogin: "自动重新登录并授权", cooldown: "账号冷却", workspace_switch: "切换工作空间",
   credential_update: "更新本地凭据", proxy_update: "更新账号代理", logout_all: "登出所有设备",
-  session_reset: "登出设备并重登授权",
+  session_reset: "登出设备并重登授权", pool_refresh: "号池同步",
 };
 const root = job => path.dirname(job.outputPath);
 const indexFile = (job, id) => path.join(root(job), "operation-logs", `${id}.json`);
@@ -39,6 +39,17 @@ export function finishAccountLogOperation(job, entry = job.logOperation, status 
   entry.status = status; entry.finishedAt ||= new Date().toISOString();
   save(job, entry);
   if (job.logOperation?.id === entry.id) job.logOperation = null;
+}
+
+// Index a result within the account log without closing any enclosing operation.
+export function appendAccountLogResult(job, type, status, at, text) {
+  if (job.deleted) return;
+  hydrateAccountLog(job);
+  const logPath = path.join(root(job), "account.log");
+  const start = sync.statSync(logPath).size;
+  appendTimestampedAccountLog(job, `\n${text}`, new Date(at));
+  save(job, { id: crypto.randomUUID(), type, label: labels[type] || type, status, at, finishedAt: at,
+    start, end: sync.statSync(logPath).size, tags: [] });
 }
 
 export function restoreAccountLogOperation(job, entry) {

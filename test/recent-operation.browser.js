@@ -27,6 +27,12 @@ async (page) => {
       ...job, status: mode.startsWith("cooldown") ? "completed" : mode === "phone" ? "phone" : "failed", prompt: "请输入需要绑定的手机号",
       createdAt: "2026-11-01T01:02:03Z", lastOperationAt: "2026-11-05T04:05:06Z", lastOperationType: "reauthorize",
       webSessionStatus: "valid", webLoginError: "unrelated old Web failure", lastError: mode === "phone" ? null : raw,
+      ...(mode.startsWith("pool-") ? {
+        lastOperationType: "web_login", webLoginError: null, webLoginCompletedAt: "2026-11-05T04:06:00Z",
+        poolRefreshAction: "session-reset", poolRefreshReady: mode === "pool-sync",
+        poolRefreshError: mode === "pool-sync" ? "HTTP 503: fixture pool write failed" : "UNEXPECTED_LOGIN_PAGE: /workspace",
+        poolRefreshFailure: mode === "pool-sync" ? { stage: "sync", at: "2026-11-05T04:07:10Z" } : null,
+      } : {}),
       ...(mode.startsWith("cooldown") ? { overloadAutoCooldown: { ...job.overloadAutoCooldown, operation: {
         ...cooldownOperation, ...(mode === "cooldown-completed" ? { status: "completed", finishedAt: "2026-11-16T09:14:00Z", resumedAt: "2026-11-16T09:14:00Z", completionReason: "automatic" } : {}) } } } : {}),
     } : job);
@@ -81,6 +87,25 @@ async (page) => {
     check(await tag.evaluate(element => element === document.activeElement), "focus not restored to operation label");
     await tag.press("Enter"); await modal.waitFor();
     await modal.getByRole("button", { name: "关闭详情", exact: true }).click();
+  });
+  await run("pool-failure-remains-visible-beside-latest-web-login", async () => {
+    for (const [testMode, label, error] of [
+      ["pool-authorization", "号池同步待授权", "UNEXPECTED_LOGIN_PAGE: /workspace"],
+      ["pool-sync", "号池同步失败", "HTTP 503: fixture pool write failed"],
+    ]) {
+      mode = testMode;
+      await page.reload();
+      const trigger = row().getByRole("button", { name: `查看${label}反馈详情`, exact: true });
+      await trigger.waitFor();
+      const web = row().getByRole("button", { name: "查看Web 登录反馈详情", exact: true });
+      check(await web.evaluate(el => el.classList.contains("success")), "pool failure replaced successful Web feedback");
+      await trigger.click();
+      const dialog = page.getByRole("dialog", { name: "最近操作反馈", exact: true });
+      const text = await dialog.locator("pre").innerText();
+      check(text.includes(error), "pool error is missing from the detail");
+      if (testMode === "pool-sync") check(text.includes("12:07:10"), "pool failure time is missing");
+      await page.keyboard.press("Escape");
+    }
   });
   await run("overload-cooldown-duration-deadline-and-original-details", async () => {
     mode = "cooldown"; await page.reload();

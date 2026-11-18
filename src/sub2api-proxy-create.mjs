@@ -4,6 +4,34 @@ const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)
 const identity = proxy => digest([proxy.protocol || 'http', String(proxy.host || '').replace(/^\[|\]$/g, '').toLowerCase(), Number(proxy.port), proxy.username || '', proxy.password || '']);
 const publicProxy = p => ({ id: p.id, name: p.name, protocol: p.protocol, host: p.host, port: p.port });
 function error(status, message) { return Object.assign(new Error(message), { status }); }
+
+export async function listAllSub2ApiProxies(request, config) {
+  // /all returns active nodes only. Read disabled nodes as well.
+  const list = [];
+  const seen = new Set();
+  let expectedTotal;
+  for (let page = 1; page <= 100; page++) {
+    const payload = await request(config, `/api/v1/admin/proxies?page=${page}&page_size=100`, { timeoutMs: 30_000 });
+    const data = payload?.data ?? payload;
+    if (!Array.isArray(data?.items) || !Number.isSafeInteger(data.total) || data.total < 0) {
+      throw error(502, '号池代理列表格式异常，请检查后重试');
+    }
+    expectedTotal ??= data.total;
+    if (data.total !== expectedTotal) break;
+    for (const proxy of data.items) {
+      const id = Number(proxy?.id);
+      if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) {
+        throw error(502, '号池代理列表格式异常，请检查后重试');
+      }
+      seen.add(id);
+    }
+    list.push(...data.items);
+    if (list.length === data.total) return list;
+    if (!data.items.length || list.length > data.total) break;
+  }
+  throw error(502, '号池代理列表不完整，请检查后重试');
+}
+
 export function createProxyImporter({ request, now = Date.now }) {
   const ledger = new Map(), locks = new Map();
   return async (config, body) => {
@@ -21,16 +49,7 @@ export function createProxyImporter({ request, now = Date.now }) {
     if (!entry) { if (ledger.size >= 1000) throw error(429, '代理导入请求过多，请稍后再试'); entry = { hash, at: now(), results: [] }; ledger.set(key, entry); }
     const previous = locks.get(backend) || Promise.resolve();
     const pending = previous.catch(() => {}).then(async () => {
-      // /all returns active nodes only. Read every page to also dedupe disabled nodes.
-      const list = [];
-      for (let page = 1; ; page++) {
-        const payload = await request(config, `/api/v1/admin/proxies?page=${page}&page_size=100`, { timeoutMs: 30_000 });
-        const data = payload?.data ?? payload;
-        if (!Array.isArray(data?.items) || !Number.isSafeInteger(data.total) || data.total < 0) throw error(502, '号池代理列表格式异常，请检查后重试');
-        list.push(...data.items);
-        if (list.length >= data.total) break;
-        if (!data.items.length || page >= 100) throw error(502, '号池代理列表不完整，已停止添加');
-      }
+      const list = await listAllSub2ApiProxies(request, config);
       const existing = new Map(list.map(p => [identity(p), p]));
       for (const [index, proxy] of proxies.entries()) {
         if (['created', 'existing', 'unknown'].includes(entry.results[index]?.status)) continue;

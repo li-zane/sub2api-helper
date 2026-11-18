@@ -21,6 +21,25 @@
   margin-left: auto;
 }
 
+.proxy-edit-secondary-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.proxy-delete-dialog {
+  width: min(420px, calc(100vw - 16px));
+}
+
+.proxy-delete-dialog p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.proxy-delete-dialog .proxy-dialog-footer {
+  gap: 8px;
+}
+
 @media (max-width: 640px) {
   .proxy-edit-dialog { width: calc(100vw - 16px); }
 }

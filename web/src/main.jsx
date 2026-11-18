@@ -22,7 +22,7 @@ import { JOB_STATUS_LABELS } from "./job-list-filters.mjs";
 import { refreshOpenJob } from "./job-list-poll.mjs";
 import { JOB_LIST_POLL_INTERVAL_MS, useJobList } from "./use-job-list.jsx";
 import { JobListTable } from "./job-list-table.jsx";
-import { recentOperation } from "./recent-operation.mjs";
+import { poolRefreshFeedback, recentOperation } from "./recent-operation.mjs";
 import { formatUsageTotal } from "./usage-totals.mjs";
 import { hasUsageSnapshot, mergeUsageSnapshot } from "./usage-snapshot.mjs";
 import { TaskToasts } from "./task-toasts.jsx";
@@ -88,6 +88,7 @@ const TaskSettingsDialog = deferredDialog("任务设置", () => import("./task-s
 const SubscriptionHistoryDialog = deferredDialog("历史订阅", () => import("./subscription-history.jsx").then(m => m.SubscriptionHistoryDialog));
 const ProxyCreateDialog = deferredDialog("新增代理", () => import("./proxy-create-dialog.jsx").then(m => m.ProxyCreateDialog));
 const ProxyEditDialog = deferredDialog("编辑代理", () => import("./proxy-edit-dialog.jsx").then(m => m.ProxyEditDialog));
+const BoundIpDialog = deferredDialog("切换绑定 IP", () => import("./bound-ip-dialog.jsx").then(m => m.BoundIpDialog));
 const AccountLogDialog = deferredDialog("账号日志", () => import("./account-log-dialog.jsx").then(m => m.AccountLogDialog));
 
 const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效", unavailable: "Web 凭据读取失败", banned: "账号已封禁" };
@@ -186,6 +187,7 @@ function App() {
   const uploadNotice = taskNotice.text;
   const setUploadNotice = text => setTaskNotice(current => ({ text, revision: current.revision + 1 }));
   const [accountProxyDistribution, setAccountProxyDistribution] = useState([]);
+  const proxyDistributionVersion = useRef(0);
   const [accountProxyDirectCount, setAccountProxyDirectCount] = useState(0);
   const [directPublicIp, setDirectPublicIp] = useState(null);
   const [directIpLoading, setDirectIpLoading] = useState(false);
@@ -194,7 +196,12 @@ function App() {
   const [proxySettingsOpen, setProxySettingsOpen] = useState(false);
   const [proxyCreateOpen, setProxyCreateOpen] = useState(false);
   const [editingProxies, setEditingProxies] = useState(null);
+  const [boundIpJob, setBoundIpJob] = useState(null);
   const proxyDialogRequest = useCallback((url, options) => apiFetch(token, url, options), [token]);
+  const loadBoundIpOptions = useCallback(async signal => {
+    const data = await proxyDialogRequest("/api/sub2api/options", { method: "POST", body: "{}", signal });
+    return { groups: proxyDistributionByIp(data.proxies || []), directCount: data.directAccountCount };
+  }, [proxyDialogRequest]);
   const [planTypeMapping, setPlanTypeMapping] = useState(readPlanTypeMapping);
   const [planTypeMappingOpen, setPlanTypeMappingOpen] = useState(false);
   const [planTypeMappingDraft, setPlanTypeMappingDraft] = useState(() => planTypeMappingRows(readPlanTypeMapping()));
@@ -283,15 +290,20 @@ function App() {
   useEffect(() => {
     if (!token || !["sub2api", "plan"].includes(accountProxyMode) || !hasUsableSub2ApiSettings(sub2apiSettings)) return undefined;
     let stopped = false;
-    const refresh = () => apiFetch(token, "/api/sub2api/options", {
-      method: "POST", body: JSON.stringify({ config: sub2apiSettings }),
-    }).then((data) => {
-      if (stopped) return;
-      setAccountProxyDistribution(Array.isArray(data.proxies) ? data.proxies : []);
-      setAccountProxyDirectCount(data.directAccountCount || 0);
-      if (data.directIp) setDirectPublicIp(data.directIp);
-    })
-      .catch((error) => { if (!stopped) setProxySettingsError(error.message); });
+    const refresh = async () => {
+      const version = proxyDistributionVersion.current;
+      try {
+        const data = await apiFetch(token, "/api/sub2api/options", {
+          method: "POST", body: JSON.stringify({ config: sub2apiSettings }),
+        });
+        if (stopped || version !== proxyDistributionVersion.current) return;
+        setAccountProxyDistribution(Array.isArray(data.proxies) ? data.proxies : []);
+        setAccountProxyDirectCount(data.directAccountCount || 0);
+        if (data.directIp) setDirectPublicIp(data.directIp);
+      } catch (error) {
+        if (!stopped && version === proxyDistributionVersion.current) setProxySettingsError(error.message);
+      }
+    };
     void refresh();
     const timer = window.setInterval(refresh, 30_000);
     return () => { stopped = true; window.clearInterval(timer); };
@@ -526,6 +538,7 @@ function App() {
       setProxySettingsError(message);
       throw new Error(message);
     }
+    const version = proxyDistributionVersion.current;
     setProxyDistributionLoading(true);
     setProxySettingsError("");
     try {
@@ -534,13 +547,14 @@ function App() {
         body: JSON.stringify({ config: sub2apiSettings }),
       });
       const proxies = Array.isArray(data.proxies) ? data.proxies : [];
+      if (version !== proxyDistributionVersion.current) return proxies;
       setAccountProxyDistribution(proxies);
       setAccountProxyDirectCount(data.directAccountCount || 0);
       if (data.directIp) setDirectPublicIp(data.directIp);
       setProxySettingsError("");
       return proxies;
     } catch (requestError) {
-      setProxySettingsError(requestError.message);
+      if (version === proxyDistributionVersion.current) setProxySettingsError(requestError.message);
       throw requestError;
     } finally {
       setProxyDistributionLoading(false);
@@ -2059,12 +2073,30 @@ function App() {
                   logoutAllBusy={batchAction === `logout-all:${job.id}`}
                   workspacesAvailable={Boolean(features.accountWorkspaces)}
                   onOpenWorkspaces={() => setWorkspaceJob(job)}
+                  onOpenBoundIp={token && ["sub2api", "plan"].includes(accountProxyMode) && hasUsableSub2ApiSettings(sub2apiSettings)
+                    ? () => setBoundIpJob(job) : undefined}
                   onOpenOperationDetail={(detail) => setOperationDetail({ email: job.email, ...detail })}
                 />
             )}
           />
         </ModelFingerprintPolicyContext.Provider>
       </section>
+      {boundIpJob && <BoundIpDialog
+        job={jobs.find(job => job.id === boundIpJob.id) || boundIpJob}
+        loadOptions={loadBoundIpOptions}
+        request={proxyDialogRequest}
+        blockedReason={proxySettingsDirty ? "请先保存代理配置" : accountMutationBlockReason(
+          jobs.find(job => job.id === boundIpJob.id) || boundIpJob, { workflowBusy: Boolean(batchAction) },
+        )}
+        onClose={() => setBoundIpJob(null)}
+        onStarted={next => {
+          const merge = current => current.map(job => job.id === next.id ? shareSnapshot(job, next) : job);
+          setJobs(merge);
+          setJobSelectionIndex(merge);
+          notify("已开始重新登录，完成后会同步绑定 IP");
+          setBoundIpJob(null);
+        }}
+      />}
       {costJob && <AccountCostDialog token={token} job={costJob} onClose={() => setCostJob(null)} onSaved={({ job }) => {
         const merge = current => current.map(item => item.email.toLowerCase() === job.email.toLowerCase()
           ? { ...item, accountCostCny: job.accountCostCny, accountCostUpdatedAt: job.accountCostUpdatedAt } : item);
@@ -2335,6 +2367,11 @@ function App() {
         setAccountProxyDistribution(current => current.map(node => node.id === proxy.id ? { ...node, name: proxy.name, protocol: proxy.protocol, host: proxy.host, port: proxy.port } : node));
         notify("代理配置已保存");
         void refreshAccountProxyDistribution().catch(error => notify(`代理已保存，刷新列表失败：${error.message}`, { tone: "error" }));
+      }} onDeleted={id => {
+        proxyDistributionVersion.current += 1;
+        setAccountProxyDistribution(current => current.filter(node => node.id !== id));
+        notify("代理已删除");
+        void refreshAccountProxyDistribution().catch(error => notify(`代理已删除，刷新列表失败：${error.message}`, { tone: "error" }));
       }} />}
       {subscriptionHistoryOpen && (
         <SubscriptionHistoryDialog
@@ -3189,7 +3226,7 @@ function OperationDetailDialog({ detail, onClose }) {
           <X size={18} />
         </button>
       </div>
-      <pre className="operation-detail-content" tabIndex="0" aria-label="操作反馈代码详情"><AccountText text={displayProtocolLog(detail.operation ? `操作：${detail.operation.label}\n时间：${formatDateTime(detail.operation.at)}\n\n${detail.operation.text}` : detail.text)} /></pre>
+      <pre className="operation-detail-content" tabIndex="0" aria-label="操作反馈代码详情"><AccountText text={displayProtocolLog(detail.operation ? `操作：${detail.operation.label}${detail.operation.at ? `\n时间：${formatDateTime(detail.operation.at)}` : ""}\n\n${detail.operation.text}` : detail.text)} /></pre>
       <div className="dialog-actions">
         <span className="dialog-actions-spacer" />
         <button type="button" className="cancel-button" onClick={onClose}>关闭</button>
@@ -3461,7 +3498,7 @@ function Sub2ApiPoolNumberField({ kind, label, email, inPool, value, available, 
   );
 }
 
-function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail }) {
+function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail, onOpenBoundIp }) {
   useDisplayTimeZone();
   const [value, setValue] = useState("");
   const [smsPopoverOpen, setSmsPopoverOpen] = useState(false);
@@ -3596,6 +3633,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
   }
 
   const operation = recentOperation(job, JOB_STATUS_LABELS);
+  const poolFeedback = poolRefreshFeedback(job);
   const inputConfig = getInputConfig(job.status, job.currentPhone);
   const terminal = ["completed", "failed", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available"].includes(job.status);
 
@@ -3716,6 +3754,17 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
             >
               {operation.label}
             </button>
+            {poolFeedback && (
+              <button
+                type="button"
+                className="operation-type-badge operation-feedback-trigger error"
+                title={poolFeedback.result}
+                aria-label={`查看${poolFeedback.label}反馈详情`}
+                onClick={() => onOpenOperationDetail({ operation: poolFeedback })}
+              >
+                {poolFeedback.label}
+              </button>
+            )}
             {operation.cooldown && <div className="recent-operation-cooldown" role="status" aria-label="过载冷却进度">
               <span>{operation.result} · {operation.cooldown.duration}</span>
               {operation.cooldown.time && <span>{operation.cooldown.timeLabel} <time dateTime={operation.cooldown.time} title={displayDateTime(operation.cooldown.time)}>{compactDateTime(operation.cooldown.time)}</time></span>}
@@ -3826,7 +3875,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
       <td className="time-cell added-time-cell">
         <OperationTime value={job.createdAt} />
       </td>
-      <BoundProxyCell job={job} />
+      <BoundProxyCell job={job} onOpen={onOpenBoundIp} />
       <td className="codex-status-cell"><CodexStatus job={job} token={token} onError={onError} /></td>
       <td className="actions-cell">
         <div className="row-actions">
@@ -6259,15 +6308,17 @@ function proxyDistributionByIp(proxies) {
   return [...groups.values()];
 }
 
-function BoundProxyCell({ job }) {
+function BoundProxyCell({ job, onOpen }) {
   const proxies = Array.isArray(job.boundProxies) ? job.boundProxies : (job.boundIps || []).map((ipAddress) => ({ id: ipAddress, ipAddress, name: "" }));
   const label = job.banProxyReleasePending ? "解绑待重试" : job.boundProxyStatus === "direct" ? "直连" : job.boundProxyStatus === "bound" ? "待获取" : "未绑定";
   const visible = job.boundProxyStatus === "direct" ? [] : proxies;
-  return <td className="bound-ip-cell" title={visible.length ? visible.map((proxy) => `${proxy.name}${proxy.ipAddress ? ` · ${proxy.ipAddress}` : ""}`).join("、") : label}>
-    {visible.length ? visible.map((proxy) => <span className="bound-proxy" key={proxy.id}>
+  const contents = visible.length ? visible.map((proxy) => <span className="bound-proxy" key={proxy.id}>
       {proxy.name && <span className="bound-proxy-name">{proxy.name}</span>}
       <span className="bound-proxy-ip">{proxy.ipAddress || "出口 IP 待获取"}</span>
-    </span>) : <span className={`bound-proxy bound-proxy-state ${job.boundProxyStatus === "direct" ? "is-direct" : "is-unbound"}`}><span className="bound-proxy-name">{label}</span></span>}
+    </span>) : <span className={`bound-proxy bound-proxy-state ${job.boundProxyStatus === "direct" ? "is-direct" : "is-unbound"}`}><span className="bound-proxy-name">{label}</span></span>;
+  return <td className="bound-ip-cell" title={visible.length ? visible.map((proxy) => `${proxy.name}${proxy.ipAddress ? ` · ${proxy.ipAddress}` : ""}`).join("、") : label}>
+    {onOpen ? <button type="button" className="bound-proxy-trigger" onClick={onOpen}
+      aria-haspopup="dialog" aria-label={`切换 ${job.email} 的绑定 IP`}>{contents}</button> : contents}
   </td>;
 }
 

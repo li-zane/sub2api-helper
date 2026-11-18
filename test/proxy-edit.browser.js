@@ -1,5 +1,5 @@
 async page => {
-  const evidence = "__UI_TEST_EVIDENCE_DIR__", results = [], errors = [], writes = [], reads = [];
+  const evidence = "__UI_TEST_EVIDENCE_DIR__", results = [], errors = [], writes = [], reads = [], deletes = [];
   const check = (value, message) => { if (!value) throw Error(message); };
   const test = async (name, run) => { try { await run(); results.push({ name, passed: true }); } catch (e) { results.push({ name, passed: false, error: e.message }); } };
   page.setDefaultTimeout(7000); page.on('pageerror', e => errors.push(e.message));
@@ -8,7 +8,7 @@ async page => {
     { id: 8, name: 'SOCKS node', protocol: 'socks5h', host: 'two.test', port: 1080, ipAddress: '203.0.113.7', username: '', hasPassword: false, accountCount: 3 },
     { id: 9, name: 'Solo node', protocol: 'https', host: 'solo.test', port: 8443, ipAddress: '203.0.113.9', username: '', hasPassword: false, accountCount: 0 },
   ];
-  let reject = false, failRead = false;
+  let reject = false, failRead = false, rejectDelete = false;
   const revision = id => String(id).repeat(64).slice(0, 64);
   await page.route(/\/api\/sub2api\/(?:settings|monitor)$/, route => route.fulfill({ json: {
     configured: true, enabled: false, hasAdminApiKey: true, config: { baseUrl: 'https://pool.example.test' },
@@ -24,6 +24,13 @@ async page => {
       reads.push(id);
       if (failRead) return route.fulfill({ status: 502, json: { error: 'fixture read unavailable' } });
       return route.fulfill({ json: { proxy: node, revision: revision(id) } });
+    }
+    if (request.method() === 'DELETE') {
+      deletes.push({ id, body: request.postDataJSON() });
+      await new Promise(resolve => setTimeout(resolve, 400));
+      if (rejectDelete) return route.fulfill({ status: 409, json: { error: '号池仍有账号使用此代理，请先更换绑定' } });
+      nodes.splice(nodes.indexOf(node), 1);
+      return route.fulfill({ json: { deleted: true, id } });
     }
     check(request.method() === 'PUT', 'editor used an unexpected HTTP method');
     const body = request.postDataJSON(); writes.push({ id, body });
@@ -113,6 +120,43 @@ async page => {
     check(await ip.evaluate(el => el === document.activeElement), 'focus was not restored to clicked IP');
     check((await page.title()).includes('Helper'), 'wrong page identity'); check(await page.locator('tbody .job-row').count() > 0, 'main content is blank');
     check(await page.locator('vite-error-overlay').count() === 0, 'framework error overlay'); check(errors.length === 0, errors.join('; '));
+  });
+  await test('delete-confirms-selected-node-and-preserves-its-ip-siblings', async () => {
+    const confirm = page.getByRole('dialog', { name: '删除代理', exact: true });
+    await ip.click();
+    await dialog.getByRole('combobox', { name: '选择代理节点' }).click();
+    await page.getByRole('option', { name: /Updated SOCKS/ }).click();
+    await page.waitForFunction(() => document.querySelector('.proxy-edit-dialog input')?.value === 'Updated SOCKS');
+    const remove = dialog.getByRole('button', { name: '删除代理', exact: true });
+    await remove.click();
+    await confirm.getByText('Updated SOCKS', { exact: true }).waitFor();
+    const cancel = confirm.getByRole('button', { name: '取消', exact: true });
+    check(await cancel.evaluate(el => el === document.activeElement), 'cancel did not receive initial focus');
+    const bounds = await confirm.boundingBox();
+    check(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 375, 'mobile confirmation exceeds viewport');
+    await page.screenshot({ path: evidence + '/proxy-delete-mobile.png' });
+    await page.keyboard.press('Escape');
+    await confirm.waitFor({ state: 'hidden' });
+    check(deletes.length === 0 && await dialog.isVisible(), 'cancel sent a DELETE or closed the editor');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await remove.click();
+    rejectDelete = true;
+    await confirm.getByRole('button', { name: '确认删除' }).click();
+    await confirm.getByRole('alert').getByText('号池仍有账号使用此代理，请先更换绑定').waitFor();
+    check(nodes.length === 3, 'failed deletion removed an entry');
+    rejectDelete = false;
+    await page.screenshot({ path: evidence + '/proxy-delete-desktop.png' });
+    await confirm.getByRole('button', { name: '确认删除' }).click();
+    await page.keyboard.press('Escape');
+    check(await confirm.getByRole('button', { name: '删除中…' }).isDisabled(), 'pending delete can be repeated');
+    await dialog.waitFor({ state: 'hidden' });
+    await ip.waitFor();
+    await parent.getByText('HTTP node', { exact: true }).first().waitFor();
+    check(!nodes.some(node => node.id === 8), 'selected node remained');
+    check(deletes.length === 2 && deletes.every(({ id, body }) => id === 8 && body.revision === revision(8)),
+      'delete targeted the wrong node or skipped version checking');
+    check(await parent.getByText('Updated SOCKS', { exact: true }).count() === 0, 'deleted node is still rendered');
+    check(errors.length === 0, errors.join('; '));
   });
   return { passed: results.filter(result => result.passed).length, total: results.length, results };
 }

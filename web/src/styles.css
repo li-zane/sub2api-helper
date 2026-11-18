@@ -3202,6 +3202,20 @@ select {
   white-space: nowrap;
 }
 
+.bound-proxy-trigger {
+  display: inline-flex;
+  flex-direction: column;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.bound-proxy-trigger:hover .bound-proxy,
+.bound-proxy-trigger:focus-visible .bound-proxy {
+  border-color: var(--accent);
+}
+
 .bound-proxy {
   width: 116px;
   min-width: 116px;

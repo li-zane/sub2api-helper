@@ -798,7 +798,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
                   )}
                   <span className="node-meta-sep">·</span>
                   <span className="node-source-tag">
-                    {record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "历史结果"}
+                    {record.source === "import" ? "导入后检测" : record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "历史结果"}
                   </span>
                   {record.durationMs != null && <>
                     <span className="node-meta-sep">·</span>

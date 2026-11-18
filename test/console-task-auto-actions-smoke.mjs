@@ -25,6 +25,7 @@ try {
     "rotate-logout-reauthorize-upload",
     "enable-overload-detection",
     "enable-overload-cooldown",
+    "check-model-fingerprint",
   ]);
 
   const saved = await request("/api/task-settings", {
@@ -46,14 +47,14 @@ try {
       maxActiveJobs: 6,
       autoActions: {
         self_serve_business_prolite: ["upload", "rotate-logout-reauthorize-upload"],
-        SELF_SERVE_PRO: ["enable-overload-cooldown", "enable-overload-detection", "upload"],
+        SELF_SERVE_PRO: ["check-model-fingerprint", "enable-overload-cooldown", "enable-overload-detection", "upload"],
       },
     },
   });
   assert.equal(valid.status, 200);
   assert.deepEqual(valid.body.settings.autoActions, {
     self_serve_business_prolite: ["rotate-logout-reauthorize-upload"],
-    SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown"],
+    SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown", "check-model-fingerprint"],
   });
   assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, "utf8")), {
     version: 4,
@@ -72,7 +73,7 @@ try {
     monitoring: DEFAULT_MONITORING,
     autoActions: {
       self_serve_business_prolite: ["rotate-logout-reauthorize-upload"],
-      SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown"],
+      SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown", "check-model-fingerprint"],
     },
   });
   await stop();
@@ -83,7 +84,7 @@ try {
   await start();
   assert.deepEqual((await get("/api/task-settings")).settings.autoActions, {
     self_serve_business_prolite: ["rotate-logout-reauthorize-upload"],
-    SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown"],
+    SELF_SERVE_PRO: ["authorize-codex", "upload", "enable-overload-detection", "enable-overload-cooldown", "check-model-fingerprint"],
   });
   console.log("console task auto-actions smoke passed: validation, file persistence, restart recovery, legacy upload exclusivity");
 } finally {

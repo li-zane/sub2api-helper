@@ -5,7 +5,7 @@ import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone } from "./display-t
 import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier } from "./account-pricing.mjs";
 import { taskSettingsPatch } from "./task-settings-form.mjs";
 import { MONITOR_FIELDS, DEFAULT_MONITORING, normalizeMonitoring } from "./monitor-settings.mjs";
-import { normalizeTaskUploadActions, toggleTaskAutoAction } from "./task-auto-actions.mjs";
+import { IMPORT_FINGERPRINT_ACTION, normalizeTaskUploadActions, toggleTaskAutoAction } from "./task-auto-actions.mjs";
 import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SMS_TIMEOUT_MINUTES, normalizeSmsTimeoutMinutes } from "./login-settings.mjs";
 import { trapModalTab } from "./accessible-dialog.jsx";
 import { HelpTip } from "./help-tip.jsx";
@@ -17,6 +17,7 @@ const DEFAULT_TASK_AUTO_ACTION_OPTIONS = [
   { value: "rotate-logout-reauthorize-upload", label: "一键轮换并上传" },
   { value: "enable-overload-detection", label: "自动开启过载检测" },
   { value: "enable-overload-cooldown", label: "自动开启过载冷却" },
+  { value: IMPORT_FINGERPRINT_ACTION, label: "导入后检测一次降智" },
 ];
 const TASK_SETTINGS_MONITOR_FIELDS = Object.freeze(
   MONITOR_FIELDS.filter(field => field.key !== "fingerprintScanIntervalSeconds")
@@ -379,6 +380,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
                     ))}
                   </div>
                   <small className="task-auto-empty">新账号先登录 Web；一键轮换依次完成 2FA、登出设备、重登 Web、授权与上传，无需额外勾选 Codex 授权。</small>
+                  {row.actions.includes(IMPORT_FINGERPRINT_ACTION) && <small className="task-auto-empty">一次性检测需要号池中已启用的账号和已配置的检测模型。</small>}
                 </div>
                 <button type="button" className="icon-button danger" title="删除自动任务规则" aria-label="删除自动任务规则" onClick={() => setAutoRows((current) => current.filter((_, itemIndex) => itemIndex !== index))} disabled={saving}>
                   <Trash2 size={15} />

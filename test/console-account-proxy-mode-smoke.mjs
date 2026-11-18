@@ -31,6 +31,7 @@ const oauthRequests = [];
 const protocolTrace = path.join(temp, "protocol-trace.jsonl");
 const protocolWrapper = path.join(temp, "protocol-wrapper.mjs");
 const failLogin = path.join(temp, "fail-login");
+const pauseLogin = path.join(temp, "pause-login");
 let rejectCredentialUpdates = false;
 let consoleChild;
 let consoleLogs = "";
@@ -47,8 +48,19 @@ const sub2 = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", sub2Url);
   res.setHeader("content-type", "application/json");
   if (url.pathname === "/api/v1/admin/proxies/all") return send(res, 200, proxies);
+  if (url.pathname === "/api/v1/admin/proxies") return send(res, 200, { data: { items: proxies, total: proxies.length } });
   const proxyMatch = /^\/api\/v1\/admin\/proxies\/(\d+)$/.exec(url.pathname);
-  if (proxyMatch) return send(res, 200, { data: proxies.find((proxy) => proxy.id === Number(proxyMatch[1])) });
+  if (proxyMatch) {
+    const id = Number(proxyMatch[1]);
+    const index = proxies.findIndex(proxy => proxy.id === id);
+    if (index < 0) return send(res, 404, {});
+    if (req.method === "DELETE") {
+      if (accounts.some(account => account.proxy_id === id)) return send(res, 409, { code: "PROXY_IN_USE" });
+      proxies.splice(index, 1);
+      return send(res, 200, { code: 0, data: { message: "Proxy deleted successfully" } });
+    }
+    return send(res, 200, { data: proxies[index] });
+  }
   if (url.pathname.startsWith("/api/v1/admin/groups/all")) return send(res, 200, []);
   if (url.pathname === "/api/v1/admin/accounts" && req.method === "GET") {
     return send(res, 200, { data: { items: accounts, total: accounts.length, page: 1, page_size: 100, pages: 1 } });
@@ -90,6 +102,7 @@ try {
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(protocolWrapper, `import fs from "node:fs/promises";
 await fs.appendFile(${JSON.stringify(protocolTrace)}, JSON.stringify({ args: process.argv.slice(2), proxy: process.env.CHATGPT_PROXY_URL, fixed: process.env.CHATGPT_PROXY_FIXED, authMode: process.env.TOSUB2_CODEX_AUTH_MODE, oauthBase: process.env.TOSUB2_OAUTH_BASE_URL, oauthProxyId: process.env.TOSUB2_OAUTH_PROXY_ID }) + "\\n");
+while (await fs.stat(${JSON.stringify(pauseLogin)}).then(() => true, () => false)) await new Promise(resolve => setTimeout(resolve, 30));
 if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   console.log("[proxy-risk-retry] PROXY_CONNECTION_RETRY: fixture fixed proxy failed");
   await new Promise(resolve => setTimeout(resolve, 300));
@@ -277,6 +290,48 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   assert.equal(setting.accountProxyMode, "sub2api", "proxy distribution mode should persist in global task settings");
   assert.equal(setting.codexAuthMode, "sub2api");
   assert.equal(traces.at(-1).authMode, "sub2api", "authorization source must persist after restart");
+
+  const bound = (await page()).jobs.find(job => job.id === target.id);
+  const bindingRoute = `/api/jobs/${target.id}/proxy-binding`;
+  const invalid = await post(bindingRoute, { proxyId: -1 });
+  assert.equal(invalid.status, 400, `ROW_IP_SWITCH_ROUTE actual=${invalid.status}`);
+  const remoteBefore = accounts.find(account => account.id === accountId).proxy_id;
+  const replacement = { id: 4, name: "Replacement", protocol: "http", host: "replacement.invalid", port: 8080, ip_address: "198.51.100.40", status: "active" };
+  proxies.push(replacement);
+  assert.equal((await post(bindingRoute, { proxyId: bound.assignedProxyId })).status, 409);
+  assert.equal((await post(bindingRoute, { proxyId: 999 })).status, 409);
+  const oldProxyUrl = `${base}/api/sub2api/proxies/${remoteBefore}`;
+  const oldProxy = await (await fetch(oldProxyUrl, { headers })).json();
+  await fs.writeFile(pauseLogin, "hold");
+  try {
+    response = await post(bindingRoute, { proxyId: replacement.id });
+    assert.equal(response.status, 202, JSON.stringify(response.body));
+    assert.equal(accounts.find(account => account.id === accountId).proxy_id, remoteBefore);
+    const blockedDelete = await fetch(oldProxyUrl, { method: "DELETE", headers, body: JSON.stringify({ revision: oldProxy.revision }) });
+    assert.equal(blockedDelete.status, 409);
+    assert.match((await blockedDelete.json()).error, /等待原绑定账号重新登录/);
+  } finally {
+    await fs.unlink(pauseLogin);
+  }
+  await waitFor(async () => {
+    const current = (await page()).jobs.find(job => job.id === target.id);
+    return current?.status === "completed" && !current.poolRefreshAction && current.assignedProxyId === replacement.id;
+  });
+  assert.equal(accounts.find(account => account.id === accountId).proxy_id, replacement.id);
+  const replacementUrl = `${base}/api/sub2api/proxies/${replacement.id}`;
+  const replacementEdit = await (await fetch(replacementUrl, { headers })).json();
+  response = await post(bindingRoute, { proxyId: 0 });
+  assert.equal(response.status, 202, JSON.stringify(response.body));
+  await waitFor(async () => {
+    const current = (await page()).jobs.find(job => job.id === target.id);
+    return current?.status === "completed" && !current.poolRefreshAction && current.assignedProxyId === null;
+  });
+  assert.equal(accounts.find(account => account.id === accountId).proxy_id, 0);
+  assert.equal((await readTrace()).at(-1).proxy, "");
+  const removed = await fetch(replacementUrl, { method: "DELETE", headers, body: JSON.stringify({ revision: replacementEdit.revision }) });
+  assert.equal(removed.status, 200, await removed.text());
+  assert(!proxies.some(proxy => proxy.id === replacement.id));
+  console.log("ROW_IP_SWITCH_PASS exact-node direct-relogin pool-sync delete-blocked-until-relogin");
 
   // Remote OAuth must also pin a matching global proxy, even when direct fallback is enabled.
   await fs.writeFile(failLogin, "1");

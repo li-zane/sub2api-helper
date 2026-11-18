@@ -67,5 +67,16 @@ async page => {
     await page.screenshot({path:evidence+'/task-settings-overload-mobile.png'});await page.keyboard.press('Escape');await d.waitFor({state:'hidden'});
     check(await page.getByRole('button',{name:'任务设置',exact:true}).evaluate(el=>el===document.activeElement),'focus not restored');check(!errors.length,errors.join('; '));
   });
+  await test("saves the one-time import check for the selected PlanType", async () => {
+    d = await open();
+    const option = d.getByRole("checkbox", { name: "导入后检测一次降智", exact: true });
+    check(!await option.isChecked(), "the import check must default to off");
+    await option.check();
+    const payload = await save(d);
+    check(payload.autoActions?.free?.includes("check-model-fingerprint"), "one-time action was not saved");
+    d = await open();
+    check(await d.getByRole("checkbox", { name: "导入后检测一次降智", exact: true }).isChecked(), "saved option was not restored");
+    await page.screenshot({ path: evidence + "/task-settings-import-fingerprint.png" });
+  });
   return{passed:results.filter(r=>r.passed).length,total:results.length,results};
 }

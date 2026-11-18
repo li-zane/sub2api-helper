@@ -115,6 +115,39 @@ try {
     assert.equal((await get('/api/jobs')).jobs.find(j=>j.id===job.id).modelFingerprint.sequence.method,'candy');
     console.log('CONSOLE_CANDY_CYCLE_PASS authenticated_api=true task_settings=true inheritance=true methods=F/C/C/F restart=true validation=true transcripts=true');
   }
+  const fingerprintRoute = `/api/jobs/${job.id}/model-fingerprint`;
+  const batchImport = async () => {
+    const response = await post("/api/jobs/batch", { text: account.email });
+    assert([200, 201].includes(response.status), JSON.stringify(response.data));
+    await waitFor(async () => (await get("/api/jobs")).jobs.find(row => row.id === job.id)?.autoTaskStatus === "completed");
+  };
+  const beforeImport = samples;
+  await batchImport();
+  assert.equal(samples, beforeImport, "default-off import must not sample");
+  const auto = await post("/api/task-settings", { autoActions: { free: ["check-model-fingerprint"] } });
+  assert.equal(auto.status, 200, `IMPORT_FINGERPRINT_SETTING actual=${auto.status}`);
+  await batchImport();
+  assert.equal(samples, beforeImport, "explicit account opt-out must be honored");
+  assert.equal((await post(fingerprintRoute, { enabled: null, models: ["gpt-5.5"], testSequence: { first: "fingerprint", fingerprint: 1, candy: 0 } })).status, 200);
+  account.schedulable = false;
+  await batchImport();
+  assert.equal(samples, beforeImport, "paused pool account must not sample");
+  account.schedulable = true;
+  await batchImport();
+  assert.equal(samples, beforeImport + 3, "one import executes exactly one three-sample round");
+  const afterImport = (await get("/api/jobs")).jobs.find(row => row.id === job.id);
+  assert.equal(afterImport.modelFingerprint.enabled, false, "one-time import rule leaves the periodic schedule off");
+  assert.equal((await get(fingerprintRoute + "/history")).records[0].source, "import");
+  assert.equal(Date.parse(afterImport.modelFingerprint.nextCheckAt) - Date.parse(afterImport.modelFingerprint.lastAttemptAt), 60 * 60_000);
+  await stop();
+  // Simulate stopping after result persistence but before the task index was saved.
+  const metadataPath = path.join(output, job.id, "job-meta.json");
+  const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  await fs.writeFile(metadataPath, JSON.stringify({ ...metadata, auto_task_status: "running", auto_task_index: 0 }));
+  await start();
+  await waitFor(async () => (await get("/api/jobs")).jobs.find(row => row.id === job.id)?.autoTaskStatus === "completed");
+  assert.equal(samples, beforeImport + 3, "restart reuses the completed import round");
+  console.log("IMPORT_FINGERPRINT_PASS default-off account-opt-out pool-pause one-round independent-schedule restart-dedup");
   if (process.argv.includes("--serve")) {
     await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20] }], planTypeBindings: { free: "default" } });
     if (process.env.MODEL_FINGERPRINT_FIXTURE_FILE) await fs.writeFile(process.env.MODEL_FINGERPRINT_FIXTURE_FILE, JSON.stringify({ url: base, output, temp }));

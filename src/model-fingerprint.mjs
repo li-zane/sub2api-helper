@@ -251,16 +251,19 @@ export class ModelFingerprintService {
     const existing = new Set((currentAccount?.group_ids || []).map(String));
     return groups.filter(id => rules[String(id)] !== "verified" || result?.status === "match" || result?.status !== "mismatch" && existing.has(String(id)));
   }
-  assertRunnable(email, planType, { manual = false } = {}) {
+  assertRunnable(email, planType, { manual = false, importRunId } = {}) {
     if (this.isBlocked(email, { manual })) throw Object.assign(new Error("账号已停用或不符合检测条件"), { status: 409 });
     const config = this.effective(email, planType), context = this.getContext();
     if (!config.models.length) throw invalid("请先设置至少一个检测模型");
     if (this.closing) throw Object.assign(new Error("检测服务正在关闭"), { status: 503 });
     if (!context.config?.baseUrl || !context.config?.adminApiKey) throw Object.assign(new Error("请先配置 Sub2API"), { status: 409 });
-    return manual || config.enabled;
+    return manual || config.enabled || Boolean(importRunId && this.accounts.get(label(email))?.override?.enabled !== false);
   }
   run(email, planType, options = {}) {
     email = label(email);
+    if (options.importRunId && this.accounts.get(email)?.lastImportRunId === options.importRunId) {
+      return Promise.resolve(this.snapshot(email, planType));
+    }
     if (this.inFlight.has(email)) return this.inFlight.get(email);
     if (!this.assertRunnable(email, planType, options)) return Promise.resolve(this.snapshot(email, planType));
     let resolve, reject;
@@ -275,7 +278,9 @@ export class ModelFingerprintService {
     while (this.active.size < this.settings.maxConcurrentAccounts && this.queued.size) {
       const [email, task] = this.queued.entries().next().value;
       this.queued.delete(email);
-      if (this.isBlocked(email, task.options) || !task.options.manual && (this.stopped || !this.effective(email, task.planType).enabled)) { this.inFlight.delete(email); task.resolve(this.snapshot(email, task.planType)); continue; }
+      const { manual, importRunId } = task.options;
+      const enabled = importRunId ? this.accounts.get(email)?.override?.enabled !== false : this.effective(email, task.planType).enabled;
+      if (this.isBlocked(email, task.options) || !manual && (this.stopped || !enabled)) { this.inFlight.delete(email); task.resolve(this.snapshot(email, task.planType)); continue; }
       const operation = this.perform(email, task.planType, task.options);
       const settled = () => { this.inFlight.delete(email); this.drain(); this.onChange(); };
       void operation.then(value => { task.resolve(value); settled(); }, error => { task.reject(error); settled(); });
@@ -344,13 +349,15 @@ export class ModelFingerprintService {
       return {...common(),status:'error',error:detail.message,failure:detail,samplingComplete:false,completedSamples:outputs.length,samples:method === 'fingerprint' ? outputs.map(o=>({expected:o.expected_count,count:parseNumbers(o.text).length})) : []};
     }
   }
-  async perform(email, planType, { manual = false } = {}) {
+  async perform(email, planType, { manual = false, importRunId } = {}) {
     email = label(email);
     if (this.isBlocked(email, { manual })) return this.snapshot(email, planType);
     if (this.active.has(email)) return this.snapshot(email, planType);
     const config = this.effective(email, planType);
     if (!config.models.length) throw invalid("请先设置至少一个检测模型");
-    if (!manual && !config.enabled) return this.snapshot(email, planType);
+    const enabled = importRunId ? this.accounts.get(email)?.override?.enabled !== false : config.enabled;
+    if (!manual && !enabled) return this.snapshot(email, planType);
+    const source = importRunId ? "import" : manual ? "manual" : "scheduled";
     const context = this.getContext(), backend = context.backend, signature = this.signature(email, planType), revision = this.revision, startedAt = this.now(), step = this.sequence(email,planType), method = step.method;
     if (!context.config?.baseUrl || !context.config?.adminApiKey) throw Object.assign(new Error("请先配置 Sub2API"), { status: 409 });
     const controller = new AbortController(); this.active.set(email, controller);
@@ -390,7 +397,8 @@ export class ModelFingerprintService {
           if (identities[target.id] !== fingerprintAccountIdentity(await this.getAccount(context.config, target.id))) throw new Error("检测期间账号配置已变更");
           controller.signal.throwIfAborted();
         }
-        this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), identities, routingIdentities, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source: manual ? "manual" : "scheduled", status: aggregateFingerprint(results), models: results });
+        this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), identities, routingIdentities, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: aggregateFingerprint(results), models: results });
+        if (importRunId) entry.lastImportRunId = importRunId;
         // A completed candy answer consumes its one scheduled turn even when
         // unscorable. Transport/auth failures keep the slot for the next check.
         if (results.length && results.every(r=>r.samplingComplete || method === 'candy' && r.responseComplete)) entry.sequenceCursor = {signature:step.signature,index:(step.index+1)%step.total};
@@ -407,7 +415,8 @@ export class ModelFingerprintService {
           if (controller.signal.aborted || revision !== this.revision || this.accounts.get(email) !== entry) return;
           const detail = fingerprintFailure(error);
           entry.lastError = detail.message;
-          this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source: manual ? "manual" : "scheduled", status: "error", models: results, error: entry.lastError, failure: detail });
+          this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: "error", models: results, error: entry.lastError, failure: detail });
+          if (importRunId) entry.lastImportRunId = importRunId;
           await this.persist();
         });
       }
@@ -673,7 +682,7 @@ export class ModelFingerprintService {
         const targets = (await this.listTargets(context.config)).filter(t => label(t.email) === label(job.email));
         await this.reconcile(label(job.email), job.planType, targets);
       }
-      if (!state.enabled || !state.models.length) continue;
+      if (job.importCheckPending || !state.enabled || !state.models.length) continue;
       if (!state.nextCheckAt || Date.parse(state.nextCheckAt) <= this.now()) { const task = this.run(job.email, job.planType); void task.catch(() => {}); scheduled.push(task); }
     }
     await Promise.allSettled(scheduled);

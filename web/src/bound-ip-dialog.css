@@ -1,0 +1,58 @@
+.bound-ip-dialog {
+  width: min(510px, calc(100vw - 24px));
+  max-height: calc(100dvh - 30px);
+}
+
+.bound-ip-dialog-body {
+  display: grid;
+  gap: 12px;
+}
+
+.bound-ip-account,
+.bound-ip-notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.bound-ip-options {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+  max-height: 43dvh;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+}
+
+.bound-ip-option-group {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.bound-ip-option-heading,
+.bound-ip-option {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  overflow-wrap: anywhere;
+}
+
+.bound-ip-option-heading {
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.bound-ip-option {
+  padding: 5px 0;
+}
+
+.bound-ip-option-heading span,
+.bound-ip-option small {
+  color: var(--muted);
+  font-size: 12px;
+}

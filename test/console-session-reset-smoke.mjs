@@ -291,6 +291,13 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
           assert.equal(failed.webSessionAvailable, true, "Web session saved before OAuth was not recognized");
           assert.equal(failed.webLoginError, null);
           assert.equal(failed.planType, "plus");
+          assert.equal(failed.poolRefreshFailure?.stage, "authorization");
+          const logPath = `/api/jobs/${id}/logs?view=protocol`;
+          const blockedSync = (await api(logPath)).data.entries.find(e => e.type === "pool_refresh");
+          assert.equal(blockedSync.status, "failed");
+          assert.equal(blockedSync.at, failed.poolRefreshFailure.at);
+          const failureLog = (await api(`${logPath}&entry=${blockedSync.id}`)).data.content;
+          assert.match(failureLog, /号池同步未执行.*fixture OAuth rejected/);
           const healthy = (await api("/api/web-session-monitor/check", {})).data.accounts[email];
           assert.equal(healthy?.status, "valid");
           assert.equal(healthy.planType, "free");
@@ -308,6 +315,7 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
           webExpired = true;
           await start();
           assert.equal((await job()).planType, "free", "the Web plan was lost after restart");
+          assert.deepEqual((await job()).poolRefreshFailure, failed.poolRefreshFailure);
           const expired = (await api("/api/web-session-monitor/check", {})).data.accounts[email];
           assert.equal(expired.repairReason, "expired");
           assert(expired.lastRepairAt, "Web expiry didn't enqueue an independent login after restart");
@@ -343,9 +351,19 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
         if (["sync-retry", "multi-sync-failure", "restore-failure", "multi-restore-failure"].includes(scenario)) {
           await wait(async () => Boolean((await job()).poolRefreshError), "sync failure was not surfaced");
           assert(rows.every(a => a.schedulable === false), "partial update or uncertain restore left an account enabled");
-          const runningLog = (await api(`/api/jobs/${id}/logs?view=protocol`)).data.entries.find(e => e.type === "session_reset");
+          const logPath = `/api/jobs/${id}/logs?view=protocol`;
+          const logEntries = (await api(logPath)).data.entries;
+          const runningLog = logEntries.find(e => e.type === "session_reset");
           assert.equal(runningLog.status, "running", "sync failure was reported as completed before credential update");
+          const failedSync = logEntries.find(e => e.type === "pool_refresh");
+          assert.equal(failedSync.status, "failed");
+          assert.deepEqual((await job()).poolRefreshFailure, { at: failedSync.at, stage: "sync" });
+          const failureLog = (await api(`${logPath}&entry=${failedSync.id}`)).data.content;
+          assert.match(failureLog, /号池凭据同步失败.*(?:sync failed|restore response lost)/);
           await stop(); failSync = false; failSecondSync = false; failRestore = false; await start();
+          await wait(async () => !(await job()).poolRefreshAction, "success did not clear the pending pool feedback");
+          assert.equal((await job()).poolRefreshFailure, null);
+          assert((await api(logPath)).data.entries.some(e => e.id === failedSync.id && e.status === "failed"), "success erased the failed attempt");
         }
         await wait(async () => (await job()).sessionReset?.status === "completed", "reset did not complete");
         if (automatic) await wait(async () => row.schedulable, "cooldown did not resume after reset");

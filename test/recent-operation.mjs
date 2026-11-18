@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { recentOperation } from "../web/src/recent-operation.mjs";
+import { poolRefreshFeedback, recentOperation } from "../web/src/recent-operation.mjs";
 import { setDisplayTimeZone } from "../web/src/display-time.mjs";
 
 const labels = { completed: "已完成", canceled: "授权已取消", phone: "待手机号", working: "处理中", failed: "失败" };
@@ -19,6 +19,18 @@ assert(!recentOperation(web, labels).text.includes("请输入需要绑定的手�
 assert.equal(recentOperation({ ...web, status: "completed", webLoginError: "HTTP 503: fixture" }, labels).result, "失败");
 assert.equal(recentOperation({ ...web, webLoginCompletedAt: "2026-11-02T01:00:00Z" }, labels).result, "待确认", "old Web success is not this operation's result");
 assert.equal(recentOperation({ ...web, webLoginPending: true, status: "phone" }, labels).result, "待手机号");
+const legacyPoolFailure = { ...web, poolRefreshAction: "session-reset", poolRefreshError: "UNEXPECTED_LOGIN_PAGE: /workspace" };
+assert.equal(recentOperation(legacyPoolFailure, labels).result, "已完成");
+assert.equal(poolRefreshFeedback(legacyPoolFailure).label, "号池同步待授权");
+assert.match(poolRefreshFeedback(legacyPoolFailure).text, /号池同步未执行[\s\S]*UNEXPECTED_LOGIN_PAGE/);
+assert.equal(poolRefreshFeedback(legacyPoolFailure).at, null);
+const syncAt = "2026-11-05T01:04:00Z";
+const syncFailure = { ...legacyPoolFailure, poolRefreshReady: true, poolRefreshError: "HTTP 503: fixture sync rejected",
+  poolRefreshFailure: { at: syncAt, stage: "sync" } };
+assert.equal(poolRefreshFeedback(syncFailure).label, "号池同步失败");
+assert.equal(poolRefreshFeedback(syncFailure).at, syncAt);
+assert.match(poolRefreshFeedback(syncFailure).text, /HTTP 503: fixture sync rejected/);
+assert.equal(poolRefreshFeedback({ ...syncFailure, poolRefreshAction: null }), null);
 for (const type of ["credential_update", "proxy_update", "account_update", "workspace_switch"]) {
   const update = recentOperation({ ...base, lastOperationType: type, status: "failed", lastError: "unrelated prior failure" }, labels);
   assert.equal(update.result, "已更新"); assert(!update.text.includes("unrelated prior failure"));

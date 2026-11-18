@@ -24,6 +24,18 @@ function feedbackText(value) {
   try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
 }
 
+export function poolRefreshFeedback(job) {
+  const failure = job.poolRefreshFailure;
+  const reset = job.sessionReset;
+  const error = job.poolRefreshError || (reset?.status === "failed" && reset.poolPaused ? reset.error : null);
+  if (!job.poolRefreshAction || !error) return null;
+  // Legacy records only have the pending action and the authorization-ready flag.
+  const stage = failure?.stage || (job.poolRefreshReady ? "sync" : "authorization");
+  const label = stage === "sync" ? "号池同步失败" : "号池同步待授权";
+  const result = stage === "sync" ? "号池凭据写入失败，等待重试" : "Codex 授权未完成，号池同步未执行";
+  return { label, result, at: failure?.at || null, text: `结果\n${result}\n\n错误详情\n${feedbackText(error)}` };
+}
+
 function recentCooldownOperation(job) {
   const operation = job.overloadAutoCooldown?.operation;
   if (!operation || !Number.isFinite(Date.parse(operation.startedAt))) return null;
