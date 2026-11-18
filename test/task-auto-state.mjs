@@ -62,7 +62,7 @@ assert.deepEqual(toggleTaskAutoAction([rotate, "upload"], cooldown, true), [rota
 
 // Exercise the real runner with side effects replaced by local counters. Old
 // pending queues must keep their saved cursor, including upload after rotation.
-const source = await fs.readFile(new URL("../src/console-server.mjs", import.meta.url), "utf8");
+const source = await fs.readFile(new URL("../src/console-app.mjs", import.meta.url), "utf8");
 const runnerSource = source.slice(source.indexOf("async function runConfiguredTaskActions(job) {"), source.indexOf("async function runConfiguredUploadAction(job) {"));
 for (const [actions, index, expected] of [
   [["upload", rotate, detection, cooldown], 0, [rotate, detection, cooldown]],

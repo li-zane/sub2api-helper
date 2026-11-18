@@ -7,7 +7,7 @@ let state = cached, expected = loaded, fail = false;
 const service = createJobListService({
   syncCompletedOutputs: async () => events.push("outputs"), getCachedPoolState: () => { events.push("cached"); return state; },
   loadPoolState: async () => { events.push("loaded"); if (fail) throw Error("pool down"); return loaded; }, listJobs: () => { events.push("list"); return jobs; },
-  syncSubscriptionHistory: async () => events.push("history"), inspectWebSession: async () => { events.push("inspect"); state = invalidated; }, pageSize: 10,
+  ensureSubscriptionHistoryFresh: async () => events.push("history"), inspectWebSession: async () => { events.push("inspect"); state = invalidated; }, pageSize: 10,
   webSessionChecks: () => 0, readRow: (job, pool) => { assert.equal(pool, expected); events.push(`read:${pool.marker}`); return { job, pool, planType: "free", health: "normal", active: false, blocked: false }; },
   isCheckingSession: () => false, matchesMonitoring: (row, selected, pool) => { assert.equal(pool, expected); assert.equal(row.pool, expected); events.push(`match:${pool.marker}`); return true; },
   toSelection: ({ job }) => ({ id: job.email }), toDetail: ({ job, pool }, selection, snapshot) => { assert.equal(pool, expected); assert.equal(snapshot, expected); events.push(`detail:${pool.marker}`); return { id: job.email }; }, historyStats: () => ({}), taskSettings: () => ({})

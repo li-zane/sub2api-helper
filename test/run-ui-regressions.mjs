@@ -20,8 +20,10 @@ do {
 } while (port <= 10080);
 const base = `http://127.0.0.1:${port}`;
 const session = `ui-regression-${process.pid}`;
+const productionDialogs = process.argv.includes("--deferred-dialogs");
 const fixture = spawn(process.execPath, ["test/ui-fixture-server.mjs"], {
-  cwd: root, windowsHide: true, env: { ...process.env, UI_TEST_PORT: String(port) }, stdio: ["pipe", "pipe", "pipe"],
+  cwd: root, windowsHide: true, env: { ...process.env, UI_TEST_PORT: String(port),
+    ...(productionDialogs ? { UI_TEST_NODE_ENV: "production" } : {}) }, stdio: ["pipe", "pipe", "pipe"],
 });
 let logs = "";
 fixture.stdout.on("data", chunk => { logs += chunk; });
@@ -50,7 +52,13 @@ try {
   await cli(["snapshot"]);
   const scriptPath = process.env.UI_TEST_SCRIPT || (process.argv.includes("--credential-copy") ? "test/credential-copy.browser.js" : process.argv.includes("--subscriptions") ? "test/subscription-history.browser.js" : process.argv.includes("--popup-audit") ? "test/popup-audit.browser.js" : process.argv.includes("--task-settings-layout") ? "test/task-settings-layout.browser.js" : process.argv.includes("--task-settings-scroll") ? "test/task-settings-scroll.browser.js" : process.argv.includes("--frontend-components") ? "test/frontend-components.browser.js" : process.argv.includes("--frontend-performance") ? "test/frontend-performance.browser.js" : process.argv.includes("--antigravity-review") ? "test/antigravity-review.browser.js" : process.argv.includes("--codex-status") ? "test/codex-status.browser.js" : process.argv.includes("--account-usage") ? "test/account-usage-ui.browser.js" : process.argv.includes("--recent-operation") ? "test/recent-operation.browser.js" : "test/ui-regressions.browser.js");
   // The CLI sandbox has no Node globals; inject the path as a JavaScript literal.
-  const requestedScript = process.argv.includes("--subscription-notices") ? "test/subscription-changes.browser.js" : scriptPath;
+  const requestedScript = process.env.UI_TEST_SCRIPT || new Map([
+    ["--subscription-notices", "test/subscription-changes.browser.js"],
+    ["--task-settings-flow", "test/task-settings-flow.browser.js"],
+    ["--settings-drafts", "test/console-settings-drafts.browser.js"],
+    ["--deferred-dialogs", "test/deferred-dialogs.browser.js"],
+    ["--job-list-selection", "test/job-list-selection.browser.js"],
+  ]).get(process.argv[2]) || scriptPath;
   const script = await fs.readFile(path.resolve(root, process.argv.includes("--session-reset") ? "test/batch-session-reset.browser.js" : requestedScript), "utf8");
   const resolvedScript = path.join(evidenceDir, "browser-test.js");
   await fs.writeFile(resolvedScript, script.replaceAll('"__UI_TEST_EVIDENCE_DIR__"', () => JSON.stringify(evidenceDir)).replaceAll('"__UI_TEST_ROOT__"', () => JSON.stringify(root.replaceAll('\\', '/'))));

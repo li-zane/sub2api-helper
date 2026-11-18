@@ -10,7 +10,7 @@ export function createJobListService(deps) {
       if (filters.sub2apiPool || filters.sub2apiEnabled) throw error;
     }
     const allJobs = deps.listJobs();
-    await deps.syncSubscriptionHistory();
+    await deps.ensureSubscriptionHistoryFresh();
     await Promise.all(allJobs.map(deps.inspectWebSession));
     const result = projectJobList(allJobs, {
       filters, emails, requestedPage, pageSize: deps.pageSize, webSessionChecks: deps.webSessionChecks(),

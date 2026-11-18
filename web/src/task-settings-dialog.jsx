@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Activity, Check, CircleAlert, Database, Globe2, ListPlus, LoaderCircle, Plus, RefreshCw, RotateCcw, Settings2, SlidersHorizontal, Trash2, X } from "lucide-react";
-import { apiFetch } from "./console-request.mjs";
 import { DEFAULT_PLAN_TYPE_MAPPING, formatPlanTypeLabel } from "./plan-type-label.mjs";
 import { DEFAULT_DISPLAY_TIME_ZONE, normalizeDisplayTimeZone } from "./display-time.mjs";
 import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizePoolPriceMultiplier } from "./account-pricing.mjs";
@@ -26,7 +25,7 @@ const OVERLOAD_SETTINGS_FIELDS = TASK_SETTINGS_MONITOR_FIELDS.filter(field => fi
 const WEB_SESSION_SETTINGS_FIELDS = TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === "WebSession 定时巡检");
 const TASK_SETTINGS_MONITOR_GROUPS = [...new Set(TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group !== "过载监控" && field.group !== "WebSession 定时巡检").map(field => field.group))];
 
-export function TaskSettingsDialog({ token, settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSaved }) {
+export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSave }) {
   const dialogRef = useRef(null);
   const initialSettings = useRef(settings);
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
@@ -145,11 +144,7 @@ export function TaskSettingsDialog({ token, settings, availablePlanTypes, planTy
     setSaving(true);
     setError("");
     try {
-      const data = await apiFetch(token, "/api/task-settings", {
-        method: "POST",
-        body: JSON.stringify(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }, initialSettings.current)),
-      });
-      onSaved(data.settings);
+      await onSave(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }, initialSettings.current));
     } catch (requestError) {
       setError(requestError.message);
     } finally {

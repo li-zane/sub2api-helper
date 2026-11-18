@@ -139,9 +139,9 @@ export class ModelFingerprintService {
       await this.persist();
     } catch (error) { if (error.code !== "ENOENT") throw new Error(`模型指纹配置读取失败：${error.message}`); }
   }
-  persist() {
+  persist(settings = this.settings) {
     for (const entry of this.accounts.values()) { entry.recentResults = this.latestRounds(entry); entry.result = roundSummary(entry.result); delete entry.history; delete entry.fingerprintResult; }
-    const text = JSON.stringify({ version: 1, groupPolicyVersion: 2, settings: this.settings, accounts: Object.fromEntries(this.accounts) }, null, 2);
+    const text = JSON.stringify({ version: 1, groupPolicyVersion: 2, settings, accounts: Object.fromEntries(this.accounts) }, null, 2);
     const operation = this.writePromise.catch(() => {}).then(async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const temp = `${this.filePath}.${crypto.randomUUID()}.tmp`;
@@ -210,20 +210,27 @@ export class ModelFingerprintService {
     if (!record) throw Object.assign(new Error("该轮记录已轮换或不存在，请刷新最近 6 轮记录"), { status: 404 });
     return { record };
   }
-  saveSettings(raw) {
+  saveSettings(raw, { applyRuntime = true } = {}) {
     const next = normalizeFingerprintSettings({ ...raw, matchedPriority: Object.hasOwn(raw, "matchedPriority") ? raw.matchedPriority : this.settings.matchedPriority, groupPolicies: Object.hasOwn(raw, "groupPolicies") ? raw.groupPolicies : this.settings.groupPolicies });
     const samplingSettings = settings => [settings.models, settings.minProbability, settings.intervalMinutes, settings.enabledPlanTypes, settings.testSequence];
     const changedSampling = JSON.stringify(samplingSettings(next)) !== JSON.stringify(samplingSettings(this.settings));
     if (changedSampling) this.invalidate();
     return this.mutate(async () => {
       if (changedSampling) this.invalidate();
-      const previous = this.settings, previousAccounts = this.accounts;
-      this.settings = next;
       // Keep active entry identities when only policy/queue limits change.
       for (const entry of this.accounts.values()) { if (changedSampling) entry.nextCheckAt = null; entry.concurrencySyncPending = true; entry.prioritySyncPending = true; entry.groupSyncPending = true; }
-      try { await this.persist(); } catch (error) { this.settings = previous; this.accounts = previousAccounts; throw error; }
-      this.onChange(); this.drain(); this.trigger(); return this.publicSettings();
+      await this.persist(next);
+      this.settings = next;
+      if (applyRuntime) {
+        await this.applySavedSettings();
+        return this.publicSettings();
+      }
     });
+  }
+  async applySavedSettings() {
+    await this.onChange();
+    this.drain();
+    this.trigger();
   }
   saveOverride(email, raw, { notify = true } = {}) {
     email = label(email); const override = normalizeFingerprintOverride(raw); this.invalidateAccount(email);
@@ -410,7 +417,10 @@ export class ModelFingerprintService {
       // Dispatch after releasing sampling/mutation state; recovery may cancel checks.
       if (recoveryFailure && !controller.signal.aborted && revision === this.revision && !this.isBlocked(email)) {
         try { await this.onAccountFailure(email, recoveryFailure); }
-        catch { entry.lastError = "授权修复未能入队，等待下次检测重试"; await this.persist(); }
+        catch {
+          entry.lastError = "授权修复未能入队，等待下次检测重试";
+          await this.mutate(() => this.persist());
+        }
       }
     }
     return this.snapshot(email, planType);

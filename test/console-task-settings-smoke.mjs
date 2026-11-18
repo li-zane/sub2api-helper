@@ -33,6 +33,22 @@ try {
   await Promise.all([saveSettings({monitoring:{profileSyncConcurrency:6}}),saveSettings({monitoring:{overloadCooldownConcurrency:8}})]);
   assert.equal((await readSettings()).monitoring.profileSyncConcurrency,6);
   assert.equal((await readSettings()).monitoring.overloadCooldownConcurrency,8);
+  const [taskWrite, proxyWrite] = await Promise.all([
+    saveSettings({ loginTimeoutMinutes: 6 }),
+    fetch(`${baseUrl}/api/account-proxy-settings`, {
+      method: "POST", headers, body: JSON.stringify({ proxyUrl: "", allowDirectFallback: true }),
+    }),
+  ]);
+  assert.equal(taskWrite.status, 200);
+  assert.equal(proxyWrite.status, 200);
+  assert.equal((await readSettings()).loginTimeoutMinutes, 6);
+  assert.equal((await readSettings()).allowDirectFallback, true);
+  const written = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+  assert.equal(written.loginTimeoutMinutes, 6);
+  assert.equal(written.allowDirectFallback, true);
+  const bootstrap = await fetch(`${baseUrl}/api/bootstrap`).then(response => response.json());
+  assert.equal(Object.hasOwn(bootstrap.taskSettings, "proxyUrl"), false);
+  assert.equal((await saveSettings({ loginTimeoutMinutes: 3 })).status, 200);
   assert.equal((await saveSettings({modelFingerprint:{models:["fixture"],minProbability:0.93}})).status,200);
   assert.equal((await saveSettings({modelFingerprint:{intervalMinutes:9,maxConcurrentAccounts:5}})).status,200);
   const fp=(await readSettings()).modelFingerprint;assert.equal(fp.models[0].model,"fixture");assert.equal(fp.minProbability,0.93);assert.equal(fp.maxConcurrentAccounts,5);

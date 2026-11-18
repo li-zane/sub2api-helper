@@ -64,7 +64,7 @@ async page => {
     await dialog.waitFor({ state: "detached" });
     check(bootstraps === 3, "POST did not recover with one refresh");
     const writes = acceptedPosts.filter(r => r.path === "/api/model-fingerprint/settings");
-    check(writes.length === 1 && Number(writes[0].body.settings.intervalMinutes) === 720, "write duplicated or draft changed");
+    check(writes.length === 1 && Number(writes[0].body.patch.intervalMinutes) === 720, "write duplicated or draft changed");
     check(rejected.some(r => r.path === "/api/model-fingerprint/settings" && r.method === "POST"), "write expiry scenario was not exercised");
   });
   await run("old-props-use-current-token-and-dialog-state-persists", async () => {

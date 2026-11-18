@@ -1,12 +1,23 @@
 async page => {
-  const evidence="__UI_TEST_EVIDENCE_DIR__",results=[],errors=[],writes=[];
+  const evidence="__UI_TEST_EVIDENCE_DIR__",results=[],errors=[];
   page.setDefaultTimeout(7000);page.on('pageerror',e=>errors.push(e.message));
-  page.on('request',r=>{if(r.method()==='POST'&&r.url().endsWith('/api/task-settings'))writes.push(r.postDataJSON());});
+  // Chromium can omit postData for cloned Request bodies. Observe the actual
+  // payload before sending it, without consuming the original request.
+  await page.evaluate(() => {
+    const fetch = window.fetch.bind(window);
+    window.fixtureTaskSettingWrites = [];
+    window.fetch = async (request, ...args) => {
+      if (request instanceof Request && request.method === "POST" && new URL(request.url).pathname === "/api/task-settings") {
+        window.fixtureTaskSettingWrites.push(await request.clone().json());
+      }
+      return fetch(request, ...args);
+    };
+  });
   const check=(value,message)=>{if(!value)throw Error(message);};
   const test=async(name,run)=>{try{await run();results.push({name,passed:true});}catch(error){results.push({name,passed:false,error:error.message});await page.screenshot({path:evidence+'/failure-'+results.length+'.png'}).catch(()=>{});}};
   const api=body=>page.evaluate(async patch=>{const b=await fetch('/api/bootstrap').then(r=>r.json());const r=await fetch('/api/task-settings',{headers:{'x-console-token':b.token,'content-type':'application/json'},...(patch?{method:'POST',body:JSON.stringify(patch)}:{})});if(!r.ok)throw Error(await r.text());return(await r.json()).settings;},body);
   const open=async()=>{await page.getByRole('button',{name:'任务设置',exact:true}).click();const d=page.getByRole('dialog',{name:'任务设置',exact:true});await d.waitFor();return d;};
-  const save=async d=>{const result=page.waitForResponse(r=>r.url().endsWith('/api/task-settings')&&r.request().method()==='POST');await d.getByRole('button',{name:'保存设置',exact:true}).click();const r=await result;check(r.ok(),await r.text());await d.waitFor({state:'hidden'});return r.request().postDataJSON();};
+  const save=async d=>{const result=page.waitForResponse(r=>r.url().endsWith('/api/task-settings')&&r.request().method()==='POST');await d.getByRole('button',{name:'保存设置',exact:true}).click();const r=await result;check(r.ok(),await r.text());await d.waitFor({state:'hidden'});return page.evaluate(()=>window.fixtureTaskSettingWrites.at(-1));};
   await api({smsTimeoutMinutes:25,poolPriceMultiplier:7,webSessionMonitor:{enabled:false,intervalMinutes:37,retryMinutes:73,autoRelogin:false},overloadAutoCooldown:{windowMinutes:21,threshold:17,cooldownMinutes:42},autoActions:{free:['enable-overload-detection']}});
   await page.setViewportSize({width:1440,height:1000});let d=await open();
   await test('count-sync-under-pool-settings-and-independent-cooldown',async()=>{
@@ -37,7 +48,7 @@ async page => {
   });
   await test('folded-concurrency-keeps-edits-and-validates-before-request',async()=>{
     const details=d.locator('.task-overload-advanced'),summary=details.locator('summary');await summary.focus();await page.keyboard.press('Enter');
-    await details.locator('#monitor-overloadCooldownConcurrency').fill('0');const before=writes.length;await d.getByRole('button',{name:'保存设置',exact:true}).click();check(writes.length===before,'invalid value sent');
+    await details.locator('#monitor-overloadCooldownConcurrency').fill('0');const before=await page.evaluate(()=>window.fixtureTaskSettingWrites.length);await d.getByRole('button',{name:'保存设置',exact:true}).click();check(await page.evaluate(()=>window.fixtureTaskSettingWrites.length)===before,'invalid value sent');
     check(await d.getByRole('alert').isVisible(),'validation feedback missing');await details.locator('#monitor-overloadCooldownConcurrency').fill('12');await summary.click();
     const payload=await save(d);check(payload.monitoring?.overloadCooldownConcurrency===12,'collapsed field edit lost');d=await open();
   });

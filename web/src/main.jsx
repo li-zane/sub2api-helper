@@ -1,17 +1,13 @@
 import { apiFetch } from "./console-request.mjs";
 import { DEFAULT_PLAN_TYPE_MAPPING, normalizePlanTypeMapping, formatPlanTypeLabel } from "./plan-type-label.mjs";
 import { RemarkDialog } from "./remark-dialog.jsx";
-import { TaskSettingsDialog } from "./task-settings-dialog.jsx";
+import { deferredDialog } from "./deferred-dialog.jsx";
+import { useConsoleSettings } from "./use-console-settings.jsx";
 import { consoleFetch as fetch, getConsoleBootstrap } from "./console-api.mjs";
-import { OVERLOAD_FILTER_LABELS, FINGERPRINT_FILTER_LABELS } from "./codex-status-filter.mjs";
 import { SmsNumberEstimate } from "./sms-number-estimate.jsx";
-import { ProxyCreateDialog } from "./proxy-create-dialog.jsx";
-import { ProxyEditDialog } from "./proxy-edit-dialog.jsx";
-import { SubscriptionHistoryDialog } from "./subscription-history.jsx";
 import { Sub2ApiPoolBadge } from "./pool-status-badge.jsx";
 import { SmsProviderBalance } from "./sms-provider-balance.jsx";
 import { formatSmsMoney } from "./sms-money.mjs";
-import { AccountLogDialog } from "./account-log-dialog.jsx";
 import { AccountSecurityLights } from "./account-security-lights.jsx";
 import { DEFAULT_DISPLAY_TIME_ZONE, setDisplayTimeZone, compactDateTime, displayDateTime, displayTimeParts, displayProtocolLog } from "./display-time.mjs";
 import { useDisplayTimeZone } from "./use-display-time.jsx";
@@ -22,8 +18,10 @@ import { createRoot } from "react-dom/client";
 import { readJsonResponse, workspaceFailureTooltip } from "./response-errors.js";
 import { accountMutationBlockReason } from "./account-action-state.mjs";
 import { shareSnapshot, shareJobList } from "./polling-snapshot.mjs";
-import { JOB_STATUS_LABELS, SUB2API_POOL_FILTER_LABELS, SUB2API_ENABLED_FILTER_LABELS, jobFilterOptions } from "./job-list-filters.mjs";
-import { reconcilePolledJobs, refreshOpenJob, startJobListPoll } from "./job-list-poll.mjs";
+import { JOB_STATUS_LABELS } from "./job-list-filters.mjs";
+import { refreshOpenJob } from "./job-list-poll.mjs";
+import { JOB_LIST_POLL_INTERVAL_MS, useJobList } from "./use-job-list.jsx";
+import { JobListTable } from "./job-list-table.jsx";
 import { recentOperation } from "./recent-operation.mjs";
 import { formatUsageTotal } from "./usage-totals.mjs";
 import { hasUsageSnapshot, mergeUsageSnapshot } from "./usage-snapshot.mjs";
@@ -34,8 +32,6 @@ import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizeAccountCost, formatAccountCost,
 import {
   Ban,
   Check,
-  ChevronLeft,
-  ChevronRight,
   ChevronDown,
   ChevronUp,
   CircleAlert,
@@ -88,10 +84,15 @@ import { AnchoredPopover } from "./anchored-popover.jsx";
 import { CustomSelect } from "./custom-select.jsx";
 import { GlobalTooltipProvider } from "./tooltip.jsx";
 
+const TaskSettingsDialog = deferredDialog("任务设置", () => import("./task-settings-dialog.jsx").then(m => m.TaskSettingsDialog));
+const SubscriptionHistoryDialog = deferredDialog("历史订阅", () => import("./subscription-history.jsx").then(m => m.SubscriptionHistoryDialog));
+const ProxyCreateDialog = deferredDialog("新增代理", () => import("./proxy-create-dialog.jsx").then(m => m.ProxyCreateDialog));
+const ProxyEditDialog = deferredDialog("编辑代理", () => import("./proxy-edit-dialog.jsx").then(m => m.ProxyEditDialog));
+const AccountLogDialog = deferredDialog("账号日志", () => import("./account-log-dialog.jsx").then(m => m.AccountLogDialog));
+
 const WEB_STATES = { absent: "Web 未登录", saved: "Web 待验证", valid: "Web 已验证", expired: "Web 已失效", unavailable: "Web 凭据读取失败", banned: "账号已封禁" };
 const SUMMARY_FILTER_LABELS = { active: "进行中", queued: "排队中", normal: "正常", abnormal: "异常" };
 const BATCH_KEY = "tosub2.web-session-check-batch";
-const POLL_INTERVAL_MS = 900;
 const SUB2API_PIPELINE_TIMEOUT_MS = 15 * 60_000;
 const LUBAN_API_KEY_STORAGE_KEY = "chatgpt-onboarding.luban-api-key";
 const LUBAN_SERVICE_ID_STORAGE_KEY = "chatgpt-onboarding.luban-service-id";
@@ -121,138 +122,33 @@ const REGION_NAMES = typeof Intl.DisplayNames === "function"
   ? new Intl.DisplayNames(["zh-CN"], { type: "region" })
   : null;
 
-function ColumnHeaderFilter({ title, value, onChange, options, activeLabel, align = "left", buttonLabel }) {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef(null);
-  const active = Boolean(value);
-
-  useEffect(() => {
-    if (!open) return;
-    const handleClickOutside = (event) => {
-      if (containerRef.current && !containerRef.current.contains(event.target)) {
-        setOpen(false);
-      }
-    };
-    const handleKeyDown = (event) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open]);
-
-  const handleSelect = (val) => {
-    onChange(val);
-    setOpen(false);
-  };
-
-  return (
-    <div className={`column-filter-container ${open ? "is-open" : ""}`} ref={containerRef}>
-      <button
-        type="button"
-        className={`column-filter-btn ${active ? "active" : ""} ${open ? "open" : ""}`}
-        onClick={() => setOpen((prev) => !prev)}
-        title={`筛选${title}（当前：${activeLabel}）`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={`筛选${title}，当前：${activeLabel}`}
-      >
-        {buttonLabel && <span>{buttonLabel}</span>}
-        <Filter size={11} className="column-filter-icon" aria-hidden="true" />
-        {active && <span className="column-filter-dot" aria-hidden="true" />}
-      </button>
-
-      {open && (
-        <AnchoredPopover className={`column-filter-dropdown align-${align}`} role="menu" aria-label={`筛选${title}`} anchorRef={containerRef} align={align} onClose={() => setOpen(false)}>
-          <div className="column-filter-dropdown-header">
-            <span>筛选 {title}</span>
-            {active && (
-              <button
-                type="button"
-                className="column-filter-reset-btn"
-                onClick={() => handleSelect("")}
-                title="重置筛选为全部"
-              >
-                重置
-              </button>
-            )}
-          </div>
-          <div className="column-filter-options">
-            {options.map((opt) => {
-              const isSelected = value === opt.value;
-              return (
-                <button
-                  key={opt.value}
-                  type="button"
-                  className={`column-filter-option ${isSelected ? "selected" : ""}`}
-                  role="menuitemradio"
-                  aria-checked={isSelected}
-                  onClick={() => handleSelect(opt.value)}
-                >
-                  <span className="column-filter-option-label">{opt.label}</span>
-                  {isSelected && <Check size={12} className="column-filter-check" aria-hidden="true" />}
-                </button>
-              );
-            })}
-          </div>
-        </AnchoredPopover>
-      )}
-    </div>
-  );
-}
-
 function App() {
   const [token, setToken] = useState("");
   const [features, setFeatures] = useState({});
-  const [jobs, setJobs] = useState([]);
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchText, setBatchText] = useState("");
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchError, setBatchError] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [lockedOnly, setLockedOnly] = useState(false);
-  const [webSessionFilter, setWebSessionFilter] = useState("");
-  const [summaryFilter, setSummaryFilter] = useState("");
   const [webBatch, setWebBatch] = useState(() => { try { const b = JSON.parse(sessionStorage.getItem(BATCH_KEY)); return b && Array.isArray(b.attempts) && Array.isArray(b.failed) && Array.isArray(b.skipped) ? b : null; } catch { return null; } });
   useEffect(() => { if (webBatch) sessionStorage.setItem(BATCH_KEY, JSON.stringify(webBatch)); else sessionStorage.removeItem(BATCH_KEY); }, [webBatch]);
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [filterText, setFilterText] = useState("");
-  const [filterError, setFilterError] = useState("");
-  const [emailFilter, setEmailFilter] = useState([]);
-  const [accountTypeFilter, setAccountTypeFilter] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
-  const [planTypeFilter, setPlanTypeFilter] = useState("");
-  const [sub2apiPoolFilter, setSub2apiPoolFilter] = useState("");
-  const [sub2apiEnabledFilter, setSub2apiEnabledFilter] = useState("");
-  const [overloadFilter, setOverloadFilter] = useState("");
-  const [fingerprintFilter, setFingerprintFilter] = useState("");
-  const [filterOptions, setFilterOptions] = useState(() => jobFilterOptions());
-  const { planTypeOptions, statusOptions, sub2apiPoolOptions, sub2apiEnabledOptions, planTypeUnknown } = filterOptions;
   const [error, setError] = useState("");
-  const [expandedJobId, setExpandedJobId] = useState(null);
-  const [selectedJobIds, setSelectedJobIds] = useState(() => new Set());
-  const [jobSelectionIndex, setJobSelectionIndex] = useState([]);
   const [batchAction, setBatchAction] = useState("");
   const [sessionActionError, setSessionActionError] = useState("");
   const logoutRunningRef = useRef(false);
-  const [page, setPage] = useState(1);
-  const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 1 });
-  const [stats, setStats] = useState({ active: 0, queued: 0, normal: 0, abnormal: 0, historicalSubscriptions: 0 });
   const [subscriptionHistoryOpen, setSubscriptionHistoryOpen] = useState(false);
   const [subscriptionHistoryTotal, setSubscriptionHistoryTotal] = useState(null);
-  const [taskSettings, setTaskSettings] = useState(null);
+  const {
+    taskSettings, taskDialogSettings, taskSettingsOpening, openTaskSettings, closeTaskSettings, saveTaskSettings,
+    stampRead, acceptTaskSettings, saveFingerprintSettings, runtimeApply, runtimeRetrying, retryRuntime,
+    accountProxyUrl, accountProxyMode, allowDirectFallback,
+    proxySettingsLoaded, proxySettingsDirty, proxySettingsSaving: savingProxySettings,
+    proxySettingsError, setProxySettingsError, editProxy, saveAccountProxySettings,
+  } = useConsoleSettings({ token, onError: setError });
   useDisplayTimeZone();
   useLayoutEffect(() => { setDisplayTimeZone(taskSettings?.displayTimeZone || DEFAULT_DISPLAY_TIME_ZONE); }, [taskSettings?.displayTimeZone]);
-  const [taskSettingsOpen, setTaskSettingsOpen] = useState(false);
   const [sessionResetSelection, setSessionResetSelection] = useState(null);
-  const [taskSettingsOpening, setTaskSettingsOpening] = useState(false);
   const taskSettingsButtonRef = useRef(null);
   const [smsSettings, setSmsSettings] = useState(readSmsProviderSettings);
   const [smsSettingsOpen, setSmsSettingsOpen] = useState(false);
@@ -289,17 +185,12 @@ function App() {
   const [taskNotice, setTaskNotice] = useState({ text: "", revision: 0 });
   const uploadNotice = taskNotice.text;
   const setUploadNotice = text => setTaskNotice(current => ({ text, revision: current.revision + 1 }));
-  const [accountProxyUrl, setAccountProxyUrl] = useState("");
-  const [accountProxyMode, setAccountProxyMode] = useState("global");
   const [accountProxyDistribution, setAccountProxyDistribution] = useState([]);
   const [accountProxyDirectCount, setAccountProxyDirectCount] = useState(0);
   const [directPublicIp, setDirectPublicIp] = useState(null);
   const [directIpLoading, setDirectIpLoading] = useState(false);
-  const [allowDirectFallback, setAllowDirectFallback] = useState(false);
-  const [proxySettingsLoaded, setProxySettingsLoaded] = useState(false);
-  const [proxySettingsDirty, setProxySettingsDirty] = useState(false);
-  const [proxySettingsSaving, setProxySettingsSaving] = useState(false);
-  const [proxySettingsError, setProxySettingsError] = useState("");
+  const [proxyDistributionLoading, setProxyDistributionLoading] = useState(false);
+  const proxySettingsSaving = savingProxySettings || proxyDistributionLoading;
   const [proxySettingsOpen, setProxySettingsOpen] = useState(false);
   const [proxyCreateOpen, setProxyCreateOpen] = useState(false);
   const [editingProxies, setEditingProxies] = useState(null);
@@ -321,7 +212,6 @@ function App() {
   const [sub2apiToggleBusy, setSub2apiToggleBusy] = useState(() => new Set());
   const [sub2apiPriorityBusy, setSub2apiPriorityBusy] = useState(() => new Set());
   const [sub2apiConcurrencyBusy, setSub2apiConcurrencyBusy] = useState(() => new Set());
-  const [jobsRefreshKey, setJobsRefreshKey] = useState(0);
   const [accountUsageByJobId, setAccountUsageByJobId] = useState({});
   const fpSettings = taskSettings?.modelFingerprint;
   const fpHasPlanPolicy = Boolean(fpSettings && (Array.isArray(fpSettings.enabledPlanTypes) || fpSettings.planDefaults));
@@ -329,6 +219,27 @@ function App() {
   const enabledFingerprintPlans = useMemo(() => (
     fpPlansSerialized === null ? null : (fpPlansSerialized ? fpPlansSerialized.split("\n") : [])
   ), [fpPlansSerialized]);
+
+  const acceptJobList = useCallback((data, stamp) => {
+    setCredentialJob(current => refreshOpenJob(current, data.jobs));
+    setSessionJob(current => refreshOpenJob(current, data.jobs));
+    setWorkspaceJob(current => refreshOpenJob(current, data.jobs));
+    acceptTaskSettings(data.taskSettings, stamp);
+  }, [acceptTaskSettings]);
+  const jobList = useJobList({ token, onData: acceptJobList, onError: setError, getRequestContext: stampRead });
+  const {
+    jobs, setJobs, page, setPage, stats, pagination, jobSelectionIndex, setJobSelectionIndex,
+    expandedJobId, setExpandedJobId, selectedJobIds, setSelectedJobIds, selectedJobs, displaySelectedIds, selectionReady,
+    searchQuery, summaryFilter, webSessionFilter, lockedOnly, emailFilter, hasJobFilters, applyColumnFilter,
+    filterOpen, setFilterOpen, filterText, setFilterText, filterError, setFilterError,
+    applyEmailFilter, clearEmailFilter, allPageSelected, pageJobIds, toggleAllOnPage,
+    availablePlanTypes, refreshJobs,
+  } = jobList;
+  const currentSessionResetSelection = sessionResetSelection?.every(id => selectedJobIds.has(id))
+    ? sessionResetSelection : null;
+  useEffect(() => {
+    if (sessionResetSelection && !currentSessionResetSelection) setSessionResetSelection(null);
+  }, [sessionResetSelection, currentSessionResetSelection]);
 
   const accountUsageJobKey = jobs
     .filter((job) => job.canDownload || job.sub2apiInPool === true || job.sub2apiUsage)
@@ -360,36 +271,14 @@ function App() {
         if (!stopped) {
           setToken(data.token);
           setFeatures(data.features || {});
-          setTaskSettings(data.taskSettings || null);
+          acceptTaskSettings(data.taskSettings);
         }
       })
       .catch((requestError) => setError(requestError.message));
     return () => {
       stopped = true;
     };
-  }, []);
-
-  useEffect(() => {
-    if (!token) return undefined;
-    let stopped = false;
-    async function refreshProxySettings() {
-      try {
-        const data = await apiFetch(token, "/api/account-proxy-settings");
-        if (stopped) return;
-        if (!proxySettingsDirty) {
-          setAccountProxyUrl(data.settings.proxyUrl || "");
-          setAccountProxyMode(["sub2api", "plan"].includes(data.settings.mode) ? data.settings.mode : "global");
-          setAllowDirectFallback(data.settings.allowDirectFallback === true);
-        }
-        setProxySettingsLoaded(true);
-      } catch (requestError) {
-        if (!stopped) setProxySettingsError(requestError.message);
-      }
-    }
-    void refreshProxySettings();
-    const timer = window.setInterval(refreshProxySettings, 15_000);
-    return () => { stopped = true; window.clearInterval(timer); };
-  }, [token, proxySettingsDirty]);
+  }, [acceptTaskSettings]);
 
   useEffect(() => {
     if (!token || !["sub2api", "plan"].includes(accountProxyMode) || !hasUsableSub2ApiSettings(sub2apiSettings)) return undefined;
@@ -424,27 +313,6 @@ function App() {
       });
     return () => { stopped = true; };
   }, [token, proxySettingsOpen]);
-
-  async function saveAccountProxySettings() {
-    if (proxySettingsSaving) return;
-    setProxySettingsSaving(true);
-    setProxySettingsError("");
-    try {
-      const data = await apiFetch(token, "/api/account-proxy-settings", {
-        method: "POST",
-        body: JSON.stringify({ proxyUrl: String(accountProxyUrl).trim(), allowDirectFallback }),
-      });
-      setAccountProxyUrl(data.settings.proxyUrl || "");
-      setAccountProxyMode(["sub2api", "plan"].includes(data.settings.mode) ? data.settings.mode : "global");
-      setAllowDirectFallback(data.settings.allowDirectFallback === true);
-      setProxySettingsDirty(false);
-      setProxySettingsLoaded(true);
-    } catch (requestError) {
-      setProxySettingsError(requestError.message);
-    } finally {
-      setProxySettingsSaving(false);
-    }
-  }
 
   useEffect(() => {
     if (!token) return undefined;
@@ -485,38 +353,7 @@ function App() {
     }).catch((requestError) => setError(requestError.message));
   }, [token]);
 
-  useEffect(() => {
-    if (!token) return undefined;
-    return startJobListPoll({
-      page, emails: emailFilter, search: searchQuery, lockedOnly, webSession: webSessionFilter,
-      summary: summaryFilter, accountType: accountTypeFilter, status: statusFilter, planType: planTypeFilter,
-      sub2apiPool: sub2apiPoolFilter, sub2apiEnabled: sub2apiEnabledFilter, overload: overloadFilter, fingerprint: fingerprintFilter,
-    }, {
-      intervalMs: POLL_INTERVAL_MS,
-      request: (url, options) => apiFetch(token, url, options),
-      onError: error => setError(error.message),
-      onData(data) {
-        setJobs(current => reconcilePolledJobs(current, data.jobs));
-        setJobSelectionIndex(current => reconcilePolledJobs(current, data.selection || data.jobs));
-        setCredentialJob(current => refreshOpenJob(current, data.jobs));
-        setSessionJob(current => refreshOpenJob(current, data.jobs));
-        setWorkspaceJob(current => refreshOpenJob(current, data.jobs));
-        setPagination(current => shareSnapshot(current, data.pagination || { page, pageSize: 20, total: data.jobs.length, totalPages: 1 }));
-        setStats(current => shareSnapshot(current, data.stats || { active: 0, queued: 0, normal: 0, abnormal: 0, historicalSubscriptions: 0 }));
-        if (data.taskSettings) setTaskSettings(current => shareSnapshot(current, data.taskSettings));
-        const next = jobFilterOptions(data.filterOptions);
-        setFilterOptions(current => shareSnapshot(current, next));
-        if (statusFilter && !next.statusOptions.includes(statusFilter)) setStatusFilter("");
-        if (planTypeFilter && (planTypeFilter === "__unknown__"
-          ? !next.planTypeUnknown
-          : !next.planTypeOptions.includes(planTypeFilter))) setPlanTypeFilter("");
-        if (sub2apiPoolFilter && !next.sub2apiPoolOptions.includes(sub2apiPoolFilter)) setSub2apiPoolFilter("");
-        if (sub2apiEnabledFilter && !next.sub2apiEnabledOptions.includes(sub2apiEnabledFilter)) setSub2apiEnabledFilter("");
-        if (data.pagination?.page && data.pagination.page !== page) setPage(data.pagination.page);
-        setError("");
-      },
-    });
-  }, [token, page, searchQuery, lockedOnly, webSessionFilter, summaryFilter, emailFilter, accountTypeFilter, statusFilter, planTypeFilter, sub2apiPoolFilter, sub2apiEnabledFilter, overloadFilter, fingerprintFilter, jobsRefreshKey]);
+
 
   useEffect(() => {
     if (!token || !features.sub2apiMonitor) return undefined;
@@ -588,7 +425,6 @@ function App() {
     });
   }, [token, features.accountUsage, accountUsageJobKey]);
 
-  const pageJobIds = useMemo(() => jobs.map((job) => job.id), [jobs]);
   const smsProviderDefinitions = Array.isArray(features.smsProviders) ? features.smsProviders : [];
   const activeSmsProvider = useMemo(
     () => resolveSmsProvider(smsProviderDefinitions, smsSettings),
@@ -611,10 +447,6 @@ function App() {
     : (subscriptionHistoryTotal ?? 0);
   const unreadSubscriptionPlanChanges = stats.historicalSubscriptionUnreadPlanChanges ?? 0;
 
-  const selectedJobs = useMemo(
-    () => jobSelectionIndex.filter((job) => selectedJobIds.has(job.id)),
-    [jobSelectionIndex, selectedJobIds],
-  );
   const activeCredentialJob = credentialJob
     ? jobs.find((job) => job.id === credentialJob.id) || credentialJob
     : null;
@@ -628,7 +460,6 @@ function App() {
     ? jobs.find((job) => job.id === expandedJobId) || null
     : null;
   const downloadableSelectedCount = selectedJobs.filter((job) => job.canDownload).length;
-  const allPageSelected = pageJobIds.length > 0 && pageJobIds.every((id) => selectedJobIds.has(id));
   const canCopyCredentialsSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size;
   const canReauthorizeSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && selectedJobs.every((job) => !isBlockedAccount(job) && job.canForceRelogin);
@@ -656,12 +487,6 @@ function App() {
   const passwordAddSelectedCount = selectedJobs.filter((job) => job.canAddPassword).length;
   const canAddPasswordSelected = selectedJobs.length > 0 && selectedJobs.length === selectedJobIds.size
     && passwordAddSelectedCount > 0;
-  const hasJobFilters = Boolean(summaryFilter || searchQuery.trim() || lockedOnly || webSessionFilter || emailFilter.length || accountTypeFilter || statusFilter || planTypeFilter || sub2apiPoolFilter || sub2apiEnabledFilter || overloadFilter || fingerprintFilter);
-  const availablePlanTypes = [...new Set([
-    ...planTypeOptions,
-    ...jobs.map((job) => job.planType).filter(Boolean),
-    ...(planTypeFilter && planTypeFilter !== "__unknown__" ? [planTypeFilter] : []),
-  ])].sort();
   // PlanType bindings are persisted as a global reverse index (PlanType ->
   // profile), but the editor is scoped to the selected profile. Keeping the
   // view scoped prevents a binding from appearing to follow the user when they
@@ -695,26 +520,13 @@ function App() {
     setSmsSettingsOpen(true);
   }
 
-  async function openTaskSettings() {
-    setTaskSettingsOpening(true);
-    try {
-      const data = await apiFetch(token, "/api/task-settings");
-      setTaskSettings(data.settings);
-      setTaskSettingsOpen(true);
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setTaskSettingsOpening(false);
-    }
-  }
-
   async function refreshAccountProxyDistribution() {
     if (!hasUsableSub2ApiSettings(sub2apiSettings)) {
       const message = "请先配置 Sub2API 后端地址和管理员 API Key";
       setProxySettingsError(message);
       throw new Error(message);
     }
-    setProxySettingsSaving(true);
+    setProxyDistributionLoading(true);
     setProxySettingsError("");
     try {
       const data = await apiFetch(token, "/api/sub2api/options", {
@@ -731,7 +543,7 @@ function App() {
       setProxySettingsError(requestError.message);
       throw requestError;
     } finally {
-      setProxySettingsSaving(false);
+      setProxyDistributionLoading(false);
     }
   }
 
@@ -1162,7 +974,7 @@ function App() {
         throw new Error(`${failed.email}：${detail || "任务未完成"}`);
       }
       if (latest.every(predicate)) return latest;
-      await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
+      await new Promise((resolve) => window.setTimeout(resolve, JOB_LIST_POLL_INTERVAL_MS));
     }
     throw new Error(`${label}超时，请查看任务状态后重试`);
   }
@@ -1326,19 +1138,6 @@ function App() {
     finally { setSmsSettingsSaving(false); }
   }
 
-  useEffect(() => {
-    const valid = new Set(jobSelectionIndex.map((job) => job.id));
-    setSelectedJobIds((current) => {
-      const next = new Set([...current].filter((id) => valid.has(id)));
-      if (next.size === current.size && [...next].every((id) => current.has(id))) return current;
-      return next;
-    });
-  }, [jobSelectionIndex]);
-
-  useEffect(() => {
-    setExpandedJobId(null);
-  }, [page]);
-
   function openPlanTypeMapping() {
     setPlanTypeMappingDraft(planTypeMappingRows(planTypeMapping));
     setPlanTypeMappingError("");
@@ -1428,68 +1227,6 @@ function App() {
     } finally {
       setBatchBusy(false);
     }
-  }
-
-  function applyEmailFilter(event) {
-    event.preventDefault();
-    try {
-      const emails = parseEmailFilter(filterText);
-      setEmailFilter(emails);
-      setSelectedJobIds(new Set());
-      setExpandedJobId(null);
-      setPage(1);
-      setFilterError("");
-      setFilterOpen(false);
-    } catch (filterParseError) {
-      setFilterError(filterParseError.message);
-    }
-  }
-
-  function clearEmailFilter() {
-    setEmailFilter([]);
-    setSearchQuery("");
-    setLockedOnly(false);
-    setWebSessionFilter("");
-    setSummaryFilter("");
-    setAccountTypeFilter("");
-    setStatusFilter("");
-    setFilterText("");
-    setPlanTypeFilter("");
-    setSub2apiPoolFilter("");
-    setSub2apiEnabledFilter("");
-    setOverloadFilter("");
-    setFingerprintFilter("");
-    setSelectedJobIds(new Set());
-    setExpandedJobId(null);
-    setPage(1);
-    setFilterError("");
-  }
-
-  function applyColumnFilter(setter, value) {
-    setter(value);
-    setSelectedJobIds(new Set());
-    setExpandedJobId(null);
-    setPage(1);
-  }
-
-  function toggleJobSelection(jobId) {
-    setSelectedJobIds((current) => {
-      const next = new Set(current);
-      if (next.has(jobId)) next.delete(jobId);
-      else next.add(jobId);
-      return next;
-    });
-  }
-
-  function toggleAllOnPage() {
-    setSelectedJobIds((current) => {
-      const next = new Set(current);
-      pageJobIds.forEach((id) => {
-        if (allPageSelected) next.delete(id);
-        else next.add(id);
-      });
-      return next;
-    });
   }
 
   async function copySelectedCredentials() {
@@ -1775,27 +1512,27 @@ function App() {
 
           <div className="telemetry-capsule" aria-label="任务统计">
             <button type="button" className="summary-pill" title="筛选进行中账号；进行中任务数 / 同时运行任务数上限；再次点击清除筛选"
-              aria-label="筛选进行中账号" aria-pressed={summaryFilter === "active"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "active" ? "" : "active")}>
+              aria-label="筛选进行中账号" aria-pressed={summaryFilter === "active"} disabled={!token} onClick={() => applyColumnFilter("summary", summaryFilter === "active" ? "" : "active")}>
               <i className="status-dot active" />
               <span>进行中</span>
               <strong>{stats.active}{taskSettings ? ` / ${taskSettings.maxActiveJobs}` : ""}</strong>
             </button>
             <span className="telemetry-divider" aria-hidden="true" />
             <button type="button" className="summary-pill" title="筛选排队中账号；再次点击清除筛选"
-              aria-label="筛选排队中账号" aria-pressed={summaryFilter === "queued"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "queued" ? "" : "queued")}>
+              aria-label="筛选排队中账号" aria-pressed={summaryFilter === "queued"} disabled={!token} onClick={() => applyColumnFilter("summary", summaryFilter === "queued" ? "" : "queued")}>
               <i className="status-dot queued" />
               <span>排队中</span>
               <strong>{stats.queued || 0}</strong>
             </button>
             <span className="telemetry-divider" aria-hidden="true" />
             <button type="button" className="summary-pill" title="筛选正常账号；再次点击清除筛选"
-              aria-label="筛选正常账号" aria-pressed={summaryFilter === "normal"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "normal" ? "" : "normal")}>
+              aria-label="筛选正常账号" aria-pressed={summaryFilter === "normal"} disabled={!token} onClick={() => applyColumnFilter("summary", summaryFilter === "normal" ? "" : "normal")}>
               <i className="status-dot complete" />
               <span>正常</span>
               <strong>{stats.normal ?? 0}</strong>
             </button>
             <button type="button" className="summary-pill" title="包括封禁、Web 会话失效、号池错误，以及重登失败后仍暂停的账号；再次点击清除筛选"
-              aria-label="筛选异常账号" aria-pressed={summaryFilter === "abnormal"} disabled={!token} onClick={() => applyColumnFilter(setSummaryFilter, summaryFilter === "abnormal" ? "" : "abnormal")}>
+              aria-label="筛选异常账号" aria-pressed={summaryFilter === "abnormal"} disabled={!token} onClick={() => applyColumnFilter("summary", summaryFilter === "abnormal" ? "" : "abnormal")}>
               <i className="status-dot abnormal" />
               <span>异常</span>
               <strong>{stats.abnormal ?? 0}</strong>
@@ -1836,14 +1573,17 @@ function App() {
                 token={token}
                 planTypes={availablePlanTypes}
                 planTypeMapping={planTypeMapping}
-                onSettingsSaved={(saved) => {
-                  setTaskSettings((current) => (current ? { ...current, modelFingerprint: saved } : current));
-                  setJobsRefreshKey((current) => current + 1);
+                onSave={async patch => {
+                  await saveFingerprintSettings(patch);
+                  refreshJobs();
                 }}
               />
             )}
             {features.taskSettings && (
-              <button ref={taskSettingsButtonRef} type="button" className="secondary-button topbar-action-button" onClick={openTaskSettings} disabled={!token || taskSettingsOpening}>
+              <button ref={taskSettingsButtonRef} type="button" className="secondary-button topbar-action-button" onClick={() => {
+                TaskSettingsDialog.preload();
+                void openTaskSettings();
+              }} disabled={!token || taskSettingsOpening}>
                 {taskSettingsOpening ? <LoaderCircle className="spin" size={14} /> : <Settings2 size={14} />}任务设置
               </button>
             )}
@@ -2069,9 +1809,7 @@ function App() {
               <input
                 type="text"
                 value={searchQuery}
-                onChange={(event) => {
-                  applyColumnFilter(setSearchQuery, event.target.value);
-                }}
+                onChange={event => applyColumnFilter("search", event.target.value)}
                 placeholder="搜索账号邮箱、备注、订阅方案..."
                 aria-label="搜索账号"
               />
@@ -2079,7 +1817,7 @@ function App() {
                 <button
                   type="button"
                   className="search-clear-button"
-                  onClick={() => applyColumnFilter(setSearchQuery, "")}
+                  onClick={() => applyColumnFilter("search", "")}
                   title="清空搜索"
                   aria-label="清空搜索"
                 >
@@ -2089,12 +1827,12 @@ function App() {
             </div>
 
             <div className="account-filter-controls" aria-label="账号筛选">
-              {summaryFilter && <button type="button" className="secondary-button filter-chip-button filter-active" onClick={() => applyColumnFilter(setSummaryFilter, "")} aria-label="清除状态统计筛选">
+              {summaryFilter && <button type="button" className="secondary-button filter-chip-button filter-active" onClick={() => applyColumnFilter("summary", "")} aria-label="清除状态统计筛选">
                 仅显示{SUMMARY_FILTER_LABELS[summaryFilter]}账号<X size={12} aria-hidden="true" />
               </button>}
               <div className="filter-select-wrapper">
                 <select className="web-state-filter" data-active={Boolean(webSessionFilter)} aria-label="筛选 Web 登录态" value={webSessionFilter}
-                  onChange={(event) => applyColumnFilter(setWebSessionFilter, event.target.value)}>
+                  onChange={(event) => applyColumnFilter("webSession", event.target.value)}>
                   <option value="">全部 Web 状态</option>
                   {Object.entries(WEB_STATES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
@@ -2105,7 +1843,7 @@ function App() {
                 <Filter size={13} />{emailFilter.length ? `邮箱列表 ${emailFilter.length}` : "邮箱列表筛选"}
               </button>
               <label className={`locked-only-filter ${lockedOnly ? "active" : ""}`}>
-                <input type="checkbox" checked={lockedOnly} onChange={(event) => applyColumnFilter(setLockedOnly, event.target.checked)} />
+                <input type="checkbox" checked={lockedOnly} onChange={(event) => applyColumnFilter("lockedOnly", event.target.checked)} />
                 仅封禁 / 已锁定
               </label>
               {hasJobFilters && (
@@ -2117,22 +1855,30 @@ function App() {
           </div>
         </div>
 
+        {runtimeApply?.status === "pending" && (
+          <div className="proxy-quality-error">
+            <span role="alert">{runtimeApply.message}</span>{" "}
+            <button type="button" className="secondary-button compact-btn" disabled={runtimeRetrying} onClick={retryRuntime}>
+              {runtimeRetrying ? "正在应用…" : "重试应用设置"}
+            </button>
+          </div>
+        )}
         <TaskToasts notice={uploadNotice} revision={taskNotice.revision} busy={Boolean(batchAction)} error={error} sessionError={sessionActionError}
           onDismissNotice={() => setTaskNotice(current => current.revision === taskNotice.revision ? { ...current, text: "" } : current)}
           onDismissError={() => setError("")} onDismissSessionError={() => setSessionActionError("")} />
         {webBatch && <WebLoginBatch token={token} batch={webBatch} onRetry={loginWebSelected} onClose={() => setWebBatch(null)} busy={Boolean(batchAction)} />}
 
         {features.bulkActions && jobs.length > 0 && (
-          <div className={`selection-toolbar ${selectedJobIds.size ? "has-selection" : ""}`}>
+          <div className={`selection-toolbar ${displaySelectedIds.size ? "has-selection" : ""}`}>
             <div className="selection-summary">
-              <span className="selection-count"><strong>{selectedJobIds.size}</strong> 已选</span>
+              <span className="selection-count"><strong>{displaySelectedIds.size}</strong> 已选</span>
               <span className="selection-detail">
                 共 {jobs.length} 项{downloadableSelectedCount > 0 ? ` · 可上传 ${downloadableSelectedCount} 项` : ""}
               </span>
-              <button type="button" className="selection-text-button" onClick={toggleAllOnPage} disabled={allPageSelected || !pageJobIds.length || Boolean(batchAction)}>
+              <button type="button" className="selection-text-button" onClick={toggleAllOnPage} disabled={allPageSelected || !pageJobIds.size || Boolean(batchAction)}>
                 {allPageSelected ? "已全选" : "全选"}
               </button>
-              {selectedJobIds.size > 0 && (
+              {displaySelectedIds.size > 0 && (
                 <button type="button" className="selection-text-button" onClick={() => setSelectedJobIds(new Set())} disabled={Boolean(batchAction)}>
                   清除选择
                 </button>
@@ -2224,6 +1970,7 @@ function App() {
                 <BulkMoreMenu
                   features={features}
                   batchAction={batchAction}
+                  selectionReady={selectionReady}
                   selectedCount={selectedJobIds.size}
                   canSwitchProxySelected={canSwitchProxySelected}
                   proxySwitchSelection={proxySwitchSelection}
@@ -2255,129 +2002,13 @@ function App() {
         )}
 
         <ModelFingerprintPolicyContext.Provider value={enabledFingerprintPlans}>
-          <div className="table-frame">
-            <table>
-            <colgroup>
-              <col className="select-column" />
-              <col className="account-column" />
-              <col className="plan-column" />
-              <col className="usage-column" />
-              <col className="pool-column" />
-              <col className="status-column" />
-              <col className="step-column" />
-              <col className="time-column" />
-              <col className="time-column" />
-              <col className="bound-ip-column" />
-              <col className="codex-status-column" />
-              <col className="actions-column" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th className="select-heading">
-                  <input
-                    type="checkbox"
-                    checked={allPageSelected}
-                    onChange={toggleAllOnPage}
-                    disabled={!features.bulkActions || !pageJobIds.length || Boolean(batchAction)}
-                    aria-label="选择当前页全部任务"
-                  />
-                </th>
-                <th className="account-heading">
-                  <div className="column-filter-heading">
-                    <span>账号</span>
-                    <ColumnHeaderFilter
-                      title="账号"
-                      value={accountTypeFilter}
-                      onChange={(v) => applyColumnFilter(setAccountTypeFilter, v)}
-                      options={[
-                        { value: "", label: "全部" },
-                        { value: "password_totp", label: "密码 + 2FA" },
-                        { value: "pool_only", label: "仅号池" },
-                      ]}
-                      activeLabel={accountTypeFilter === "password_totp" ? "密码+2FA" : accountTypeFilter === "pool_only" ? "仅号池" : "全部"}
-                    />
-                  </div>
-                </th>
-                <th className="plan-heading">
-                  <div className="column-filter-heading">
-                    <span>Plan type</span>
-                    <ColumnHeaderFilter
-                      title="Plan type"
-                      value={planTypeFilter}
-                      onChange={(v) => applyColumnFilter(setPlanTypeFilter, v)}
-                      options={[
-                        { value: "", label: "全部" },
-                        ...(planTypeUnknown ? [{ value: "__unknown__", label: "未知" }] : []),
-                        ...availablePlanTypes.map((value) => ({ value, label: formatPlanTypeLabel(value, planTypeMapping) })),
-                      ]}
-                      activeLabel={planTypeFilter === "__unknown__" ? "未知" : planTypeFilter ? formatPlanTypeLabel(planTypeFilter, planTypeMapping) : "全部"}
-                    />
-                  </div>
-                </th>
-                <th className="usage-heading">用量</th>
-                <th className="pool-heading">
-                  <div className="column-filter-heading">
-                    <span>号池</span>
-                    <ColumnHeaderFilter
-                      title="号池"
-                      value={sub2apiPoolFilter}
-                      onChange={(v) => applyColumnFilter(setSub2apiPoolFilter, v)}
-                      options={[
-                        { value: "", label: "全部" },
-                        ...sub2apiPoolOptions.map((value) => ({ value, label: SUB2API_POOL_FILTER_LABELS[value] })),
-                      ]}
-                      activeLabel={sub2apiPoolFilter ? SUB2API_POOL_FILTER_LABELS[sub2apiPoolFilter] : "全部"}
-                    />
-                    <ColumnHeaderFilter
-                      title="启用"
-                      value={sub2apiEnabledFilter}
-                      onChange={(v) => applyColumnFilter(setSub2apiEnabledFilter, v)}
-                      options={[
-                        { value: "", label: "全部" },
-                        ...sub2apiEnabledOptions.map((value) => ({ value, label: SUB2API_ENABLED_FILTER_LABELS[value] })),
-                      ]}
-                      activeLabel={sub2apiEnabledFilter ? SUB2API_ENABLED_FILTER_LABELS[sub2apiEnabledFilter] : "全部"}
-                    />
-                  </div>
-                </th>
-                <th className="status-heading">
-                  <div className="column-filter-heading">
-                    <span>状态</span>
-                    <ColumnHeaderFilter
-                      title="状态"
-                      value={statusFilter}
-                      onChange={(v) => applyColumnFilter(setStatusFilter, v)}
-                      options={[
-                        { value: "", label: "全部" },
-                        ...statusOptions.map((value) => ({ value, label: JOB_STATUS_LABELS[value] || value })),
-                      ]}
-                      activeLabel={statusFilter ? (JOB_STATUS_LABELS[statusFilter] || statusFilter) : "全部"}
-                    />
-                  </div>
-                </th>
-                <th className="recent-operation-heading">最近操作</th>
-                <th className="recent-operation-time-heading">最近操作时间</th>
-                <th className="added-time-heading">添加时间</th>
-                <th className="bound-ip-heading">绑定 IP</th>
-                <th className="codex-status-heading" aria-label="Codex 状态">
-                  <div className="column-filter-heading codex-status-filters">
-                    <span className="codex-status-title">Codex 状态</span>
-                    <ColumnHeaderFilter title="过载" buttonLabel="过载" value={overloadFilter}
-                      onChange={value => applyColumnFilter(setOverloadFilter, value)}
-                      options={[{ value: "", label: "全部" }, ...Object.entries(OVERLOAD_FILTER_LABELS).map(([value, label]) => ({ value, label }))]}
-                      activeLabel={OVERLOAD_FILTER_LABELS[overloadFilter] || "全部"} align="right" />
-                    <ColumnHeaderFilter title="降智" buttonLabel="降智" value={fingerprintFilter}
-                      onChange={value => applyColumnFilter(setFingerprintFilter, value)}
-                      options={[{ value: "", label: "全部" }, ...Object.entries(FINGERPRINT_FILTER_LABELS).map(([value, label]) => ({ value, label }))]}
-                      activeLabel={FINGERPRINT_FILTER_LABELS[fingerprintFilter] || "全部"} align="right" />
-                  </div>
-                </th>
-                <th className="actions-heading">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {!jobs.length && <EmptyState filtered={hasJobFilters} />}
-              {jobs.map((job) => (
+          <JobListTable
+            list={jobList}
+            selectionEnabled={Boolean(features.bulkActions)}
+            paginationEnabled={Boolean(features.pagination)}
+            operationPending={Boolean(batchAction)}
+            planTypeMapping={planTypeMapping}
+            renderRow={(job, selection) => (
                 <JobRowBoundary
                   key={job.id}
                   job={job}
@@ -2387,13 +2018,13 @@ function App() {
                   onToggleLogs={() => setExpandedJobId((current) => current === job.id ? null : job.id)}
                   onError={setError}
                   onJobUpdate={next => setJobs(current => current.map(item => item.id === next.id ? shareSnapshot(item, next) : item))}
-                  selected={selectedJobIds.has(job.id)}
-                  onToggleSelected={() => toggleJobSelection(job.id)}
+                  selected={selection.selected}
+                  onToggleSelected={selection.onToggleSelected}
                   onDelete={() => deleteAccount(job)}
                   deleteAvailable={Boolean(features.bulkActions)}
                   deleteDisabled={!token || Boolean(batchAction)}
                   deleteBusy={batchAction === `delete:${job.id}`}
-                  selectionSupported={Boolean(features.bulkActions && !batchAction)}
+                  selectionSupported={Boolean(features.bulkActions && selection.canSelect && !batchAction)}
                   smsProviderAvailable={smsProviderDefinitions.length > 0}
                   smsProvider={activeSmsProvider}
                   onUpload={() => uploadSelected([job.id])}
@@ -2430,22 +2061,9 @@ function App() {
                   onOpenWorkspaces={() => setWorkspaceJob(job)}
                   onOpenOperationDetail={(detail) => setOperationDetail({ email: job.email, ...detail })}
                 />
-              ))}
-            </tbody>
-          </table>
-        </div>
+            )}
+          />
         </ModelFingerprintPolicyContext.Provider>
-        {features.pagination && pagination.totalPages > 1 && (
-          <nav className="pagination" aria-label="任务分页">
-            <button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page <= 1} title="上一页">
-              <ChevronLeft size={17} />
-            </button>
-            <span>第 <strong>{pagination.page}</strong> / {pagination.totalPages} 页</span>
-            <button type="button" className="icon-button" onClick={() => setPage((current) => Math.min(pagination.totalPages, current + 1))} disabled={page >= pagination.totalPages} title="下一页">
-              <ChevronRight size={17} />
-            </button>
-          </nav>
-        )}
       </section>
       {costJob && <AccountCostDialog token={token} job={costJob} onClose={() => setCostJob(null)} onSaved={({ job }) => {
         const merge = current => current.map(item => item.email.toLowerCase() === job.email.toLowerCase()
@@ -2662,8 +2280,8 @@ function App() {
                       <Globe2 size={15} aria-hidden="true" />
                       <input
                         value={accountProxyUrl}
-                        onChange={(event) => { setAccountProxyUrl(event.target.value); setProxySettingsDirty(true); }}
-                        disabled={!proxySettingsLoaded || proxySettingsSaving}
+                        onChange={(event) => editProxy("proxyUrl", event.target.value)}
+                        disabled={!proxySettingsLoaded || proxyDistributionLoading}
                         placeholder="socks5h://用户名:密码@主机:端口"
                         spellCheck="false"
                         aria-label="代理 IP 地址"
@@ -2674,8 +2292,8 @@ function App() {
                     <input
                       type="checkbox"
                       checked={allowDirectFallback}
-                      onChange={(event) => { setAllowDirectFallback(event.target.checked); setProxySettingsDirty(true); }}
-                      disabled={!proxySettingsLoaded || proxySettingsSaving}
+                      onChange={(event) => editProxy("allowDirectFallback", event.target.checked)}
+                      disabled={!proxySettingsLoaded || proxyDistributionLoading}
                     />
                     <span className="fallback-text-col">
                       <span className="fallback-title">代理失败时允许回退本地出口 IP</span>
@@ -3323,23 +2941,19 @@ function App() {
           </ModalForm>
         </div>
       )}
-      {sessionResetSelection && <SessionResetDialog count={sessionResetSelection.length}
+      {currentSessionResetSelection && <SessionResetDialog count={currentSessionResetSelection.length}
         onClose={() => setSessionResetSelection(null)}
-        onConfirm={cooldownMinutes => runSelectedPoolAction("session-reset", { ids: sessionResetSelection, cooldownMinutes })} />}
-      {taskSettingsOpen && taskSettings && (
+        onConfirm={cooldownMinutes => runSelectedPoolAction("session-reset", { ids: currentSessionResetSelection, cooldownMinutes })} />}
+      {taskDialogSettings && (
         <TaskSettingsDialog
-          token={token}
-          settings={taskSettings}
+          settings={taskDialogSettings}
           availablePlanTypes={availablePlanTypes}
           planTypeMapping={planTypeMapping}
           returnFocusRef={taskSettingsButtonRef}
-          onClose={() => setTaskSettingsOpen(false)}
-          onSaved={(settings) => {
-            setTaskSettings(settings);
-            setAccountProxyMode(["sub2api", "plan"].includes(settings.accountProxyMode) ? settings.accountProxyMode : "global");
-            setProxySettingsDirty(false);
-            setTaskSettingsOpen(false);
-            setUploadNotice(`任务设置已保存，最多同时运行 ${settings.maxActiveJobs} 条任务`);
+          onClose={closeTaskSettings}
+          onSave={async patch => {
+            const { settings, runtimeApply } = await saveTaskSettings(patch);
+            if (!runtimeApply) setUploadNotice(`任务设置已保存，最多同时运行 ${settings.maxActiveJobs} 条任务`);
           }}
         />
       )}
@@ -3522,20 +3136,6 @@ function App() {
   );
 }
 
-function EmptyState({ filtered = false }) {
-  return (
-    <tr>
-      <td colSpan="12">
-        <div className="empty-state">
-          <div className="empty-state-icon"><Mail size={24} /></div>
-          <h3>{filtered ? "没有匹配账号" : "暂无授权任务"}</h3>
-          <p>{filtered ? "没有符合当前搜索或筛选条件的账号，请调整条件或清除筛选。" : "点击右上方“批量添加”导入一个或多个账号。"}</p>
-        </div>
-      </td>
-    </tr>
-  );
-}
-
 function CredentialSyncNote({ sync, planTypeMapping }) {
   const labels = { pending_update: "Web 凭据待更新", refreshing: "Web 凭据更新中", read_failed: "Web 凭据读取失败", authorization_pending: "Codex 凭据待更新" };
   const label = labels[sync?.status];
@@ -3612,6 +3212,7 @@ function OperationTime({ value, className = "" }) {
 function BulkMoreMenu({
   features,
   batchAction,
+  selectionReady,
   selectedCount,
   canSwitchProxySelected,
   proxySwitchSelection,
@@ -3628,6 +3229,10 @@ function BulkMoreMenu({
 }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!selectionReady) setOpen(false);
+  }, [selectionReady]);
 
   useEffect(() => {
     if (!open) return;
@@ -3663,9 +3268,10 @@ function BulkMoreMenu({
         type="button"
         className={`secondary-button bulk-button bulk-more-trigger ${open ? "active" : ""}`}
         onClick={() => setOpen((prev) => !prev)}
+        disabled={!selectionReady}
         title="展开更多批量操作"
         aria-haspopup="true"
-        aria-expanded={open}
+        aria-expanded={open && selectionReady}
       >
         {moreActionBusy ? (
           <LoaderCircle className="spin" size={14} />
@@ -3676,7 +3282,7 @@ function BulkMoreMenu({
         <ChevronDown size={12} className={`bulk-more-arrow ${open ? "open" : ""}`} />
       </button>
 
-      {open && (
+      {open && selectionReady && (
         <AnchoredPopover className="bulk-dropdown-menu" role="menu" anchorRef={menuRef} align="right" onClose={() => setOpen(false)}>
           {hasSessionItems && (
             <div className="bulk-dropdown-section">
@@ -6199,21 +5805,6 @@ function formatTimeParts(value) {
 
 function countBatchLines(value) {
   return String(value || "").split(/\r?\n/).filter((line) => line.trim()).length;
-}
-
-function parseEmailFilter(value) {
-  const lines = String(value || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim().toLowerCase())
-    .filter(Boolean);
-  if (!lines.length) throw new Error("请至少输入一个筛选邮箱");
-  if (lines.length > 500) throw new Error("一次最多筛选 500 个邮箱");
-  lines.forEach((email, index) => {
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
-      throw new Error(`第 ${index + 1} 行邮箱格式错误`);
-    }
-  });
-  return [...new Set(lines)];
 }
 
 function extractResponseMessage(value) {

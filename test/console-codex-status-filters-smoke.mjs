@@ -64,12 +64,14 @@ try {
   await fs.writeFile(path.join(root, "model-fingerprint.json"), JSON.stringify({ version: 1, settings: { enabledPlanTypes: ["team", "business"] }, accounts: fingerprints }));
   await fs.writeFile(path.join(root, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { baseUrl: poolBase, adminApiKey: "fixture" }, profiles: [] }));
   const server = path.resolve(process.env.CODEX_FILTER_SERVER || "src/console-server.mjs");
+  const app = path.join(path.dirname(server), "console-app.mjs");
+  const implementation = await fs.access(app).then(() => app, () => server);
   const loaderPath = path.join(root, "cache-invalidation-loader.mjs"), registerPath = path.join(root, "register.mjs");
   // Deterministically reproduce a policy update invalidating the shared cache
   // after the list loaded it, before filtering, pagination and row rendering.
   await fs.writeFile(loaderPath, `export async function load(url, context, nextLoad) {
     const loaded = await nextLoad(url, context);
-    if (url !== ${JSON.stringify(pathToFileURL(server).href)}) return loaded;
+    if (url !== ${JSON.stringify(pathToFileURL(implementation).href)}) return loaded;
     const anchor = "inspectWebSession: inspectAccountWebSession,";
     const source = String(loaded.source);
     if (!source.includes(anchor)) throw Error("List snapshot test anchor missing");

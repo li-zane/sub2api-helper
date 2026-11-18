@@ -8,6 +8,7 @@ import { HelpTip } from "./help-tip.jsx";
 import { trapModalTab } from "./accessible-dialog.jsx";
 import { displayDateTime } from "./display-time.mjs";
 import { useDisplayTimeZone } from "./use-display-time.jsx";
+import { fingerprintSettingsPatch } from "./task-settings-form.mjs";
 
 export const ModelFingerprintPolicyContext = createContext(null);
 
@@ -176,7 +177,7 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
   </section>;
 }
 
-export function FingerprintSettingsButton({ token, planTypes = [], planTypeMapping = {}, onSettingsSaved }) {
+export function FingerprintSettingsButton({ token, planTypes = [], planTypeMapping = {}, onSave }) {
   const returnFocusRef = useRef(null);
   const [data, setData] = useState(null), [error, setError] = useState(""), [busy, setBusy] = useState(false), [newPlan, setNewPlan] = useState(""), [reference, setReference] = useState(null);
   async function open(event) {
@@ -188,18 +189,17 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
       const rawSettings = next?.settings || {};
       const matched = rawSettings.matchedConcurrency || {};
       const priority = rawSettings.matchedPriority || {};
-      setData({
-        ...next,
-        settings: {
-          ...rawSettings,
-          enabledPlanTypes: readEnabledPlanTypes(rawSettings),
-          matchedConcurrency: {
-            enabled: matched.enabled === true,
-            value: matched.value ?? 10,
-          },
-          matchedPriority: { enabled: priority.enabled === true, value: priority.value ?? 1 },
-        },
-      });
+      const initialSettings = {
+        models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8,
+        failureRetries: 1, failureRetryDelaySeconds: 5,
+        testSequence: { first: "fingerprint", fingerprint: 1, candy: 0 },
+        groupPolicies: {},
+        ...rawSettings,
+        enabledPlanTypes: readEnabledPlanTypes(rawSettings),
+        matchedConcurrency: { enabled: matched.enabled === true, value: matched.value ?? 10 },
+        matchedPriority: { enabled: priority.enabled === true, value: priority.value ?? 1 },
+      };
+      setData({ ...next, initialSettings, settings: initialSettings });
       setNewPlan("");
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
@@ -279,8 +279,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         matchedPriority: { enabled: mpEnabled, value: Number.isInteger(mpValue) && mpValue >= 0 && mpValue <= 10000 ? mpValue : 1 },
         groupPolicies: data.settings.groupPolicies || {},
       };
-      const saved = await api(token, "/api/model-fingerprint/settings", { settings: payload });
-      onSettingsSaved?.(saved.settings);
+      await onSave(fingerprintSettingsPatch(payload, data.initialSettings));
       setData(null);
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   }

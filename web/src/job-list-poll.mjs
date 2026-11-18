@@ -18,14 +18,15 @@ export function refreshOpenJob(current, rows) {
 
 // The next tick is scheduled only after settlement. Disposing a filter/page
 // generation aborts its request and discards even a late successful response.
-export function startJobListPoll(query, { request, onData, onError, intervalMs }) {
+export function startJobListPoll(query, { request, onData, onError, intervalMs, getRequestContext }) {
   const { url, options } = buildJobListRequest(query);
   const controller = new AbortController();
   let timer;
   async function poll() {
     try {
+      const context = getRequestContext?.();
       const data = await request(url, { ...options, signal: controller.signal });
-      if (!controller.signal.aborted) onData(data);
+      if (!controller.signal.aborted) onData(data, context);
     } catch (error) {
       if (!controller.signal.aborted) onError(error);
     } finally {

@@ -10,6 +10,30 @@ async (page) => {
   const search = page.getByRole("textbox", { name: "搜索账号", exact: true });
   const row = () => page.locator("tr.job-row").filter({ has: page.getByRole("checkbox", { name: "选择 review-1@example.test", exact: true }) });
 
+  await test("cross-page-selection-and-filter-reset", async () => {
+    const selectPage = page.getByRole("checkbox", { name: "选择当前页全部任务", exact: true });
+    const count = page.locator(".selection-count strong");
+    const waitForRows = n => page.waitForFunction(n => document.querySelectorAll("tr.job-row").length === n, n);
+    try {
+      await selectPage.check();
+      check(await count.innerText() === "20", "first page selection incomplete");
+      await page.getByRole("button", { name: "下一页", exact: true }).click();
+      await waitForRows(4);
+      check(!await selectPage.isChecked() && await count.innerText() === "20", "page change lost or reused selection");
+      await selectPage.check();
+      check(await count.innerText() === "24", "second page selection did not accumulate");
+      await page.getByRole("button", { name: "上一页", exact: true }).click();
+      await waitForRows(20);
+      check(await selectPage.isChecked() && await count.innerText() === "24", "return did not restore selected rows");
+      await search.fill("review-1@example.test");
+      await waitForRows(1);
+      check(await count.innerText() === "0", "new filter did not reset selection");
+    } finally {
+      await search.fill("");
+      await waitForRows(20);
+    }
+  });
+
   await test("Web-state-filter", async () => {
     const filter = page.getByRole("combobox", { name: "筛选 Web 登录态", exact: true });
     check(await filter.count() === 1, "Web state control missing");
@@ -17,10 +41,13 @@ async (page) => {
     await filter.selectOption("valid");
     await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 0);
     check(await page.getByRole("heading", { name: "没有匹配账号" }).count() === 1, "filtered empty state missing");
-    const activeColor = await filter.evaluate(element => getComputedStyle(element).color);
+    // The rows may finish updating before the first frame of the color transition.
+    await page.waitForFunction(previous => {
+      const element = document.querySelector(".web-state-filter");
+      return element?.dataset.active === "true" && getComputedStyle(element).color !== previous;
+    }, inactiveColor, { timeout: 3000 });
     await filter.selectOption("");
     await page.waitForFunction(() => document.querySelectorAll("tr.job-row").length === 20);
-    check(activeColor !== inactiveColor, "Web filter active styling does not follow its selected value");
   });
 
   await test("banned-account-Web-state", async () => {

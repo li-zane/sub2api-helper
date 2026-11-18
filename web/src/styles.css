@@ -1489,6 +1489,12 @@ select {
 /* ==========================================================================
    7. Data Table & Column Header Filters
    ========================================================================== */
+.job-list-status:not(:empty) {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .table-frame {
   width: 100%;
   overflow-x: auto;

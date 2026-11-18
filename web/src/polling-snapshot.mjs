@@ -15,21 +15,36 @@ export function shareSnapshot(previous, next) {
   if (previous === null || next === null || typeof previous !== "object" || typeof next !== "object") return next;
   if (Array.isArray(next)) return Array.isArray(previous) ? shareArray(previous, next, shareSnapshot) : next;
   if (Array.isArray(previous)) return next;
-  const keys = Object.keys(next);
-  let result = keys.length !== Object.keys(previous).length ? { ...next } : null;
-  for (let i = 0; i < keys.length; i++) {
-    const key = keys[i], exists = Object.hasOwn(previous, key);
+  // Responses generally keep their field order. A matching key proves own
+  // membership directly, while the fallback handles reordered objects.
+  const previousKeys = Object.keys(previous);
+  let count = 0, result = null;
+  for (const key in next) {
+    if (!Object.hasOwn(next, key)) continue;
+    const exists = previousKeys[count++] === key || Object.hasOwn(previous, key);
     const before = exists ? previous[key] : undefined;
-    const value = shareSnapshot(before, next[key]);
+    const incoming = next[key];
+    if (exists && Object.is(before, incoming)) continue;
+    const value = shareSnapshot(before, incoming);
     if (!result && (!exists || !Object.is(value, before))) {
-      // Spread defines even "__proto__" as an own data property. Start from
-      // next, not previous, so removed keys never survive a shape change.
-      result = { ...next };
-      for (let j = 0; j < i; j++) result[keys[j]] = previous[keys[j]];
+      result = copySharedPrefix(previous, next, key);
     }
     if (result) result[key] = value;
   }
-  return result ?? previous;
+  if (result) return result;
+  // A deletion alone is discovered after visiting all incoming fields.
+  return count === previousKeys.length ? previous : copySharedPrefix(previous, next);
+}
+
+function copySharedPrefix(previous, next, stopKey) {
+  // Spread defines "__proto__" as an own data property. Fields preceding
+  // the first change already compared equal and retain their old references.
+  const result = { ...next };
+  for (const key of Object.keys(next)) {
+    if (key === stopKey) break;
+    result[key] = previous[key];
+  }
+  return result;
 }
 
 // Rows have unique IDs. In-order polls need no index; reorders and page

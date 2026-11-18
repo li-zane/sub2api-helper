@@ -20,4 +20,15 @@ const prefix = [{ n: 1 }, { n: 2 }];
 assert.equal(shareSnapshot(prefix, [{ n: 1 }])[0], prefix[0]);
 assert.equal(shareSnapshot(prefix, [{ n: 1 }, { n: 2 }, 3])[1], prefix[1]);
 assert(Object.is(shareSnapshot([0], [-0])[0], -0));
+
+const first = { value: 1 }, last = { value: 2 };
+const previous = { first, removed: false, last };
+assert.equal(shareSnapshot(previous, { last: { value: 2 }, first: { value: 1 }, removed: false }), previous);
+const deletion = shareSnapshot(previous, { last: { value: 2 }, first: { value: 1 } });
+assert.deepEqual(Object.keys(deletion), ["last", "first"]);
+assert.equal(deletion.first, first);
+assert.equal(deletion.last, last);
+const fromPrototype = Object.assign(Object.create({ inherited: 42 }), { last: { value: 2 } });
+assert.equal(shareSnapshot({ last }, fromPrototype).last, last);
+assert.deepEqual(shareSnapshot({}, fromPrototype), { last });
 console.log("FRONTEND_SNAPSHOT_PASS identical poll reuses all 20 rows; one account update reuses 19/20 rows; nested state/reorder/delete/unknown fields preserved");

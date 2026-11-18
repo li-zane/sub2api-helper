@@ -80,7 +80,7 @@ try {
   assert.match(selection, /identifyWebPlan[\s\S]*?preferTeam: true/, "shared selector prefers available team");
   assert(!/if \(process\.env\.TOSUB2_PHASED_PROXY !== "1"[^\n]*return;\s*const identity/.test(selection), "non-phased logins must select the workspace too");
 
-  const server = await fs.readFile(path.join(root, "src/console-server.mjs"), "utf8");
+  const server = await fs.readFile(path.join(root, "src/console-app.mjs"), "utf8");
   const admission = server.slice(server.indexOf("function canLoginWeb("), server.indexOf("function canSetupTotp("));
   const canLoginWeb = vm.runInNewContext(admission + "\ncanLoginWeb;", { accountAutomationBlocked: () => false,
     activeSessionReset: job => job.sessionResetPending === true,

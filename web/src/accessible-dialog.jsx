@@ -29,10 +29,10 @@ export function ModalForm({ onClose, closeDisabled = false, onKeyDown, children,
 }
 
 // Native modal dialogs provide focus containment and make the background inert.
-export function AccessibleDialog({ children, className = "", labelledBy, onClose, closeDisabled = false }) {
+export function AccessibleDialog({ children, className = "", labelledBy, onClose, closeDisabled = false, returnFocusRef }) {
   const ref = useRef(null);
   useLayoutEffect(() => {
-    const previous = document.activeElement;
+    const previous = returnFocusRef?.current || document.activeElement;
     const dialog = ref.current;
     // React autoFocus runs before showModal(); native dialog focusing would
     // otherwise select the first help trigger and open its focus tooltip.
@@ -43,7 +43,7 @@ export function AccessibleDialog({ children, className = "", labelledBy, onClose
       dialog.close();
       if (previous?.isConnected) previous.focus();
     };
-  }, []);
+  }, [returnFocusRef]);
 
   return (
     <dialog
