@@ -34,12 +34,14 @@ await new Promise(resolve => pool.listen(0, "127.0.0.1", resolve));
 const slot = http.createServer(); await new Promise(resolve => slot.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${slot.address().port}`; await new Promise(resolve => slot.close(resolve));
 async function api(route, body) { const response = await fetch(base + route, { headers, ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }) }); assert.equal(response.status, 200); return response.json(); }
-async function wait(fn) { for (const end = Date.now() + 15_000; Date.now() < end;) { const value = await fn(); if (value) return value; await pause(30); } throw Error("auto-card fixture timeout\n" + logs); }
+async function wait(fn) { for (const end = Date.now() + 15_000; Date.now() < end;) { const value = await fn(); if (value) return value; await pause(30); } throw Error("auto-card fixture timeout\nrequests=" + JSON.stringify(calls) + "\n" + logs); }
 const job = async value => (await api("/api/jobs")).jobs.find(j => j.email === value);
 const cardCalls = () => calls.filter(c => c.path.endsWith("/101/quota/refresh")).length;
 async function start() {
   child = spawn(process.execPath, ["src/console-server.mjs", "--host", "127.0.0.1", "--port", new URL(base).port], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: temp, LOCALAPPDATA: temp, TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(temp, "credentials"), SUB2API_MONITOR_ENABLED: "0" } });
+    // Startup must fill unknown cards before the independent status/usage timers;
+    // do not let their default cadence accidentally satisfy the startup assertion.
+    env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: temp, LOCALAPPDATA: temp, TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(temp, "credentials"), SUB2API_MONITOR_ENABLED: "0", SUB2API_ACCOUNT_STATUS_CACHE_TTL_MS: "60000" } });
   child.stdout.on("data", data => logs += data); child.stderr.on("data", data => logs += data);
   const boot = await wait(async () => { try { const response = await fetch(base + "/api/bootstrap"); return response.ok && response.json(); } catch { return false; } });
   headers = { "x-console-token": boot.token, "content-type": "application/json" };
@@ -49,6 +51,7 @@ try {
   await fs.writeFile(path.join(temp, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { baseUrl: `http://127.0.0.1:${pool.address().port}`, adminApiKey: "fixture-key" }, profiles: [{ id: "default", name: "Default" }], activeProfileId: "default" }));
   await start();
   await wait(async () => cardCalls() === 1);
+  assert.equal((await api("/api/sub2api/monitor")).enabled, false, "initial card sync must not require automatic OAuth repair");
   assert.equal((await job(email)).sub2apiUsage?.resetCredits ?? null, null, "slow provider queries must not block the account list");
   releaseGate(); gate = null;
   let current = await wait(async () => { const j = await job(email); return j?.sub2apiUsage?.resetCredits?.availableCount === 2 && j; });

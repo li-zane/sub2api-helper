@@ -5763,7 +5763,9 @@ export function createConsoleApp(options = {}) {
   }
 
   function requestSub2ApiStatusRefresh() {
-    if (shuttingDown || !sub2ApiMonitorConfig?.enabled) return;
+    // Status and initial usage/card sync run even when automatic OAuth repair is off.
+    // queueSub2ApiRecovery independently checks the repair setting.
+    if (shuttingDown) return;
     void loadSub2ApiAccountStatus({ forceRefresh: true }).catch(error => console.warn('[warn] 号池状态刷新失败：' + error.message));
   }
 
