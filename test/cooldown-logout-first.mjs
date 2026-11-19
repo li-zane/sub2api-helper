@@ -37,5 +37,37 @@ try{
  assert.equal(service.snapshot(email).operation.coolingStartedAt,logoutCompletedAt);
  assert.equal(service.snapshot(email).operation.startedAt,operation.startedAt);
  assert.equal(service.snapshot(email).operation.status,'cooling');
+ rules.reauthorizeAfterCooldown=false;await service.refresh();
+ assert.equal(service.snapshot(email).operation.until,resumeAt,'disabling the option moved a confirmed logout deadline');
+ assert.equal(rows[0].enabled,false);
+ rules.reauthorizeAfterCooldown=true;
  console.log('COOLDOWN_LOGOUT_FIRST_PASS pause precedes logout request; timer awaits confirmed logout; operation deadline starts after logout; duration/request survive restart; no early resume');
+
+ await service.stop();
+ events.length=0;rows[0].enabled=true;
+ const pendingOptions={...options,filePath:path.join(root,'option-off.json'),
+  beforeResume:()=>{events.push('reauthorize');return{status:'completed'};}};
+ service=new OverloadCooldown(pendingOptions);service.stopped=false;
+ await service.setEnabled(email,true);
+ await service.observeCounts(email,{config,accountIds:['7'],windowMinutes:15,sampledAt:now,point:{start:'2026-11-16T14:00:00Z',end:'2026-11-16T14:15:00Z',count:4}});
+ await service.refresh();
+ const pending=service.snapshot(email);
+ assert.equal(pending.phase,'logging_out');assert(pending.operation.resetRequestId);
+ const requests=events.filter(e=>e.phase==='logout-request').length;
+ rules.reauthorizeAfterCooldown=false;await service.refresh();
+ assert.equal(events.filter(e=>e.phase==='logout-request').length,requests,'disabled option still requested logout');
+ const startedAt=new Date(now).toISOString(),until=new Date(now+360*60_000).toISOString();
+ await service.stop();service=new OverloadCooldown(pendingOptions);await service.load();service.stopped=false;await service.refresh();
+ const fallback=service.snapshot(email);
+ assert.equal(fallback.phase,'cooling');assert.equal(fallback.coolingUntil,until);
+ assert.equal(fallback.operation.id,pending.operation.id);
+ assert.equal(fallback.operation.resetRequestId,null);
+ assert.equal(fallback.operation.coolingStartedAt,startedAt);assert.equal(fallback.operation.until,until);
+ assert.equal(lastDelay,360*60_000);
+ now=Date.parse(until)-1;await service.refresh();assert.equal(rows[0].enabled,false);
+ now++;await service.refresh();assert.equal(rows[0].enabled,true);
+ assert.equal(service.snapshot(email).operation.status,'completed');
+ assert.equal(events.filter(e=>e.phase==='logout-request').length,requests);
+ assert(!events.includes('reauthorize'),'ordinary cooldown attempted reauthorization at expiry');
+ console.log('COOLDOWN_OPTION_OFF_PASS canceled pending logout; durable deadline; ordinary resume without reauthorization');
 }finally{await service.stop();await fs.rm(root,{recursive:true,force:true});}

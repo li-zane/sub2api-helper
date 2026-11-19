@@ -333,7 +333,19 @@ export class OverloadCooldown {
       if (!record || record.enabled === false) continue;
       await this.setSchedulable(config, id, false);
     }
+    if (this.stopped || this.isBlocked(email) || this.backendIdentity(this.getConfig()) !== entry.backend) return;
     if (entry.logoutBeforeCooldown && entry.enabled && !entry.restrictionPaused && typeof this.afterPause === "function") {
+      if (this.getSettings().reauthorizeAfterCooldown !== true) {
+        if (!entry.coolingUntil) {
+          // No reset owns this pause yet. Invalidate its pending logout request
+          // and give the ordinary cooldown a real, restart-safe deadline.
+          const now = this.now(), coolingStartedAt = new Date(now).toISOString();
+          const coolingUntil = new Date(now + entry.cooldownMinutes * 60_000).toISOString();
+          await this.update(email, { phase: "cooling", lastError: null, logoutBeforeCooldown: false, resetRequestId: null, coolingUntil,
+            ...(entry.operation ? { operation: { ...entry.operation, until: coolingUntil, coolingStartedAt } } : {}) });
+        }
+        return;
+      }
       const result = this.afterPause(email, { id: entry.resetRequestId, backend: entry.backend,
         cooldownMinutes: entry.cooldownMinutes, logoutBeforeCooldown: true });
       await this.update(email, { phase: result.resumeAt ? "cooling" : "logging_out",
