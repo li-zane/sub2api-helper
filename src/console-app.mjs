@@ -3017,22 +3017,27 @@ export function createConsoleApp(options = {}) {
     const previous = accountSessionResets.get(job.email);
     if (previous?.poolPauseActive && (previous.backend !== backend || previous.proxyId !== proxyId
       || previous.accountIds.some(id => !records.some(a => String(a.id) === id)))) throw httpError(409, "上次一键重登尚未恢复，请保留原号池账号与 IP 绑定后重试");
+    // A zero-delay manual retry of the same paused reset keeps its confirmed logout,
+    // even if the first attempt or an independent Web login saved a new session.
+    const retrySamePausedReset = !automatic && cooldownMinutes === 0 && previous?.poolPauseActive
+      && previous.jobId === job.id && previous.accountIds.length === records.length;
+    const logoutCompletedAt = previous?.status === "failed" && (!job.webSessionAvailable || retrySamePausedReset)
+      ? previous.logoutCompletedAt || null : null;
     const state = await accountSessionResets.begin(job.email, { id: requestId || crypto.randomUUID(), backend,
       jobId: job.id, source: automatic ? "cooldown" : "manual", proxyId, proxyUrl: proxy?.url || null,
       boundIp: proxy?.ipAddress || null, proxyName: proxy?.name || null, codexAuthMode: consoleSettings.current.codexAuthMode,
       accountIds: records.map(a => String(a.id)), cooldownMinutes, resumeAt: null,
       poolPauseActive: previous?.poolPauseActive === true,
       resumeAccountIds: previous?.poolPauseActive ? previous.resumeAccountIds || [] : [],
-      // An explicit retry after confirmed logout continues with login, never logs
-      // out a newly recovered Web session for the same failed operation.
-      logoutCompletedAt: !job.webSessionAvailable && previous?.status === "failed" ? previous.logoutCompletedAt || null : null });
+      logoutCompletedAt });
     try {
       await validateSessionResetRoute(job, state);
       await ensureSessionResetPoolPaused(job);
       await saveStoredLoginCredentials(job.email, job);
       await forceReloginJob(job, {}, { automatic, sessionReset: true, poolRefreshAction: "session-reset" });
       await accountSessionResets.save(job.email, { logOperationId: job.logOperation?.id || null });
-      appendJobLog(job, `[session-reset] 已暂停号池与相关自动化，已加入共享任务队列：登出所有设备 → ${cooldownMinutes ? `冷却 ${cooldownMinutes} 分钟 → ` : ""}重新登录 Web → Codex OAuth → 更新现有号池凭据 → 恢复原启用状态；全程保持原 IP 绑定${state.proxyId ? `（代理 ${state.proxyId}）` : "（直连）"}。\n`);
+      const logoutStep = state.logoutCompletedAt ? "已确认上次登出，跳过重复登出" : "登出所有设备";
+      appendJobLog(job, `[session-reset] 已暂停号池与相关自动化，已加入共享任务队列：${logoutStep} → ${cooldownMinutes ? `冷却 ${cooldownMinutes} 分钟 → ` : ""}重新登录 Web → Codex OAuth → 更新现有号池凭据 → 恢复原启用状态；全程保持原 IP 绑定${state.proxyId ? `（代理 ${state.proxyId}）` : "（直连）"}。\n`);
       await saveJobMetadata(job);
     } catch (error) { await accountSessionResets.fail(job.email, error); throw error; }
   }

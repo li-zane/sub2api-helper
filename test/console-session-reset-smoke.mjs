@@ -341,10 +341,23 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
           assert.equal(row.proxy_id, 3);
         }
         if (scenario === "oauth-retry") {
-          await stop(); await fs.writeFile(gate+".retry", "retry"); await start();
+          const firstReset = JSON.parse(await fs.readFile(path.join(temp, "account-session-resets.json"), "utf8")).accounts[email];
+          assert(firstReset.logoutCompletedAt, "the first logout was not recorded");
+          assert.equal((await job()).webSessionAvailable, true, "the failed OAuth attempt did not leave a Web session");
+          await stop();
+          await fs.writeFile(gate+".retry", "retry");
+          await fs.unlink(gate);
+          await start();
           const retried = await api(`/api/jobs/${id}/session-reset`, {}); assert.equal(retried.status, 202, JSON.stringify({response:retried.data,job:await job()}));
+          await wait(async () => (await fs.readFile(trace, "utf8")).match(/"phase":"oauth"/g)?.length === 2, "OAuth retry never started");
+          assert.equal(logouts, 1, "retry repeated the already confirmed logout");
+          assert.equal(row.schedulable, false, "retry resumed scheduling before OAuth verification");
+          assert.equal(updates, 0, "retry updated pool credentials before OAuth verification");
+          const retryReset = JSON.parse(await fs.readFile(path.join(temp, "account-session-resets.json"), "utf8")).accounts[email];
+          assert.equal(retryReset.logoutCompletedAt, firstReset.logoutCompletedAt);
+          await fs.writeFile(gate, "continue");
           await wait(async () => (await job()).sessionReset?.status === "completed", "manual OAuth retry failed");
-          assert.equal(logouts, 2); assert.equal(updates, 1); assert.equal(row.proxy_id, 3);
+          assert.equal(logouts, 1); assert.equal(updates, 1); assert.equal(row.proxy_id, 3);
           assert.equal(row.schedulable, true, "retry lost ownership of the original pause");
         }
       } else {
