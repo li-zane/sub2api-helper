@@ -56,6 +56,7 @@ import {
   LogOut,
   MonitorSmartphone,
   MoreHorizontal,
+  Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -196,6 +197,8 @@ function App() {
   const [proxySettingsOpen, setProxySettingsOpen] = useState(false);
   const [proxyCreateOpen, setProxyCreateOpen] = useState(false);
   const [editingProxies, setEditingProxies] = useState(null);
+  const pendingProxyStatus = useRef(new Set());
+  const [proxyStatusChanges, setProxyStatusChanges] = useState({});
   const [boundIpJob, setBoundIpJob] = useState(null);
   const proxyDialogRequest = useCallback((url, options) => apiFetch(token, url, options), [token]);
   const loadBoundIpOptions = useCallback(async signal => {
@@ -558,6 +561,30 @@ function App() {
       throw requestError;
     } finally {
       setProxyDistributionLoading(false);
+    }
+  }
+
+  async function setManagedProxyStatus(node, status) {
+    const id = node.id;
+    const pending = pendingProxyStatus.current;
+    if (pending.has(id)) return;
+    pending.add(id);
+    setProxyStatusChanges(current => ({ ...current, [id]: { pending: true } }));
+    let error = "";
+    try {
+      const path = `/api/sub2api/proxies/${id}`;
+      const latest = await proxyDialogRequest(path);
+      const result = latest.proxy.status === status ? latest : await proxyDialogRequest(path, {
+        method: "PATCH",
+        body: JSON.stringify({ status, revision: latest.revision }),
+      });
+      proxyDistributionVersion.current += 1;
+      setAccountProxyDistribution(current => current.map(proxy => proxy.id === id ? { ...proxy, status: result.proxy.status } : proxy));
+    } catch (requestError) {
+      error = requestError.message || "切换代理状态失败";
+    } finally {
+      pending.delete(id);
+      setProxyStatusChanges(current => ({ ...current, [id]: { error } }));
     }
   }
 
@@ -2253,26 +2280,8 @@ function App() {
                     <div className="proxy-distribution-container" aria-label="代理 IP 账号分配">
                       <div className="proxy-distribution-grid">
                         {proxyDistributionByIp(accountProxyDistribution).map((proxy) => (
-                          <div key={proxy.ipAddress} className={`proxy-segment-bar ${proxy.accountCount > 0 ? "has-accounts" : "zero-accounts"}`}>
-                            <div className="proxy-segment-col segment-name with-status" title={proxy.names.join("、")}>
-                              <span className="segment-name-label">{proxy.names.join("、")}</span>
-                              <span className="segment-node-status">
-                                {proxy.activeNodeCount === proxy.nodes.length ? "已启用" : proxy.inactiveNodeCount === proxy.nodes.length
-                                  ? "已停用" : `${proxy.activeNodeCount}/${proxy.nodes.length} 启用`}
-                              </span>
-                            </div>
-                            <div className="proxy-segment-col segment-ip" title={proxy.ipAddress}>
-                              <button type="button" className="segment-ip-code proxy-edit-trigger"
-                                disabled={proxySettingsSaving} title="编辑代理配置与状态" aria-label={`编辑代理 ${proxy.ipAddress}`}
-                                onClick={() => setEditingProxies(proxy.nodes)}>{proxy.ipAddress}</button>
-                            </div>
-                            <div className="proxy-segment-col segment-count">
-                              <span className={`segment-count-pill ${proxy.accountCount > 0 ? "has-count" : "zero-count"}`}>
-                                {proxy.accountCount} 个 OAuth 账号
-                              </span>
-                            </div>
-                            <span className="sr-only">{proxy.names.join("、")} · {proxy.ipAddress} · {proxy.accountCount} 个 OAuth 账号</span>
-                          </div>
+                          <ProxyManagementCard key={proxy.ipAddress} group={proxy} changes={proxyStatusChanges}
+                            editDisabled={proxySettingsSaving} onEdit={setEditingProxies} onToggle={setManagedProxyStatus} />
                         ))}
                         <div className={`proxy-segment-bar unassigned ${accountProxyDirectCount > 0 ? "has-unassigned" : ""}`}>
                           <div className="proxy-segment-col segment-name" title="直连">
@@ -2291,7 +2300,10 @@ function App() {
                           <span className="sr-only">未分配代理 · {accountProxyDirectCount} 个 OAuth 账号</span>
                         </div>
                       </div>
-                      <p className="proxy-distribution-scope">仅统计 OAuth 账号：号池 OpenAI OAuth 账号与本地已授权账号，按邮箱去重；不含 API Key 和未完成授权的任务。未分配代理是配置状态，不代表实时直连流量。</p>
+                      <div className="proxy-distribution-scope">
+                        <p>开关即时保存。停用保留现有绑定，并跳过新分配。</p>
+                        <p>仅统计 OAuth 账号：号池 OpenAI OAuth 账号与本地已授权账号，按邮箱去重；不含 API Key 和未完成授权的任务。未分配代理是配置状态，不代表实时直连流量。</p>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -2372,12 +2384,12 @@ function App() {
         setAccountProxyDistribution(current => current.map(node => node.id === proxy.id ? { ...node, name: proxy.name, protocol: proxy.protocol, host: proxy.host, port: proxy.port } : node));
         notify("代理配置已保存");
         void refreshAccountProxyDistribution().catch(error => notify(`代理已保存，刷新列表失败：${error.message}`, { tone: "error" }));
-      }} onStatusChanged={proxy => {
-        proxyDistributionVersion.current += 1;
-        setAccountProxyDistribution(current => current.map(node => node.id === proxy.id ? { ...node, status: proxy.status } : node));
-        const message = proxy.status === "active" ? "代理已启用" : "代理已停用";
-        void refreshAccountProxyDistribution().catch(error => notify(`${message}，刷新列表失败：${error.message}`, { tone: "error" }));
       }} onDeleted={id => {
+        setProxyStatusChanges(current => {
+          const next = { ...current };
+          delete next[id];
+          return next;
+        });
         proxyDistributionVersion.current += 1;
         setAccountProxyDistribution(current => current.filter(node => node.id !== id));
         notify("代理已删除");
@@ -6321,6 +6333,58 @@ function proxyDistributionByIp(proxies) {
     group.accountCount = Math.max(group.accountCount, proxy.accountCount || 0);
   }
   return [...groups.values()];
+}
+
+function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle }) {
+  const { ipAddress, nodes, names, accountCount, activeNodeCount, inactiveNodeCount } = group;
+  const allActive = activeNodeCount === nodes.length;
+  const allInactive = inactiveNodeCount === nodes.length;
+  const groupStatus = allActive ? "全部启用" : allInactive ? "全部停用" : `${activeNodeCount}/${nodes.length} 启用`;
+  return <div className="proxy-management-card">
+    <div className="proxy-management-card-header">
+      <button type="button" className="segment-ip-code proxy-edit-trigger" disabled={editDisabled || nodes.some(node => changes[node.id]?.pending)}
+        title="编辑代理配置" aria-label={`编辑代理 ${ipAddress}`} onClick={() => onEdit(nodes)}>
+        <span>{ipAddress}</span><Pencil size={12} aria-hidden="true" />
+      </button>
+      <div className="proxy-management-meta">
+        <span className={`proxy-management-group-status ${allActive ? "all-active" : allInactive ? "all-inactive" : "mixed"}`}>{groupStatus}</span>
+        <span className={`segment-count-pill ${accountCount > 0 ? "has-count" : "zero-count"}`}>{accountCount} 个 OAuth 账号</span>
+      </div>
+    </div>
+    <ul className="proxy-management-nodes">
+      {nodes.map(node => {
+        const enabled = node.status === "active";
+        const known = enabled || node.status === "inactive" || node.status === "disabled";
+        const { pending, error } = changes[node.id] || {};
+        const protocol = String(node.protocol || "").toUpperCase();
+        const endpoint = node.host && node.port ? `${node.host}:${node.port}` : "";
+        const description = [node.name, protocol, endpoint, `#${node.id}`].filter(Boolean).join(" · ");
+        const showEndpoint = nodes.some(other => other.id !== node.id && other.name === node.name && other.protocol === node.protocol);
+        const statusText = pending ? "保存中" : !known ? "状态未知" : enabled ? "已启用" : "已停用";
+        return <li className="proxy-management-node" key={node.id}>
+          <div className="proxy-management-node-row">
+            <div className="proxy-management-node-info" title={description}>
+              <span className="proxy-management-node-name">{node.name}</span>
+              {protocol && <span className="proxy-management-protocol">{protocol}</span>}
+              {showEndpoint && <span className="proxy-management-endpoint">{[endpoint, `#${node.id}`].filter(Boolean).join(" · ")}</span>}
+            </div>
+            <button type="button" role="switch" className="proxy-management-switch"
+              aria-label={`代理启用状态 · ${description} · ${ipAddress}`} aria-checked={enabled}
+              aria-busy={Boolean(pending)} aria-disabled={Boolean(pending) || !known}
+              onClick={() => { if (!pending && known) onToggle(node, enabled ? "inactive" : "active"); }}>
+              <span className="proxy-management-switch-text" aria-hidden="true">{statusText}</span>
+              <span className="proxy-management-switch-track" aria-hidden="true">
+                <span className="proxy-management-switch-thumb">{pending && <LoaderCircle size={10} className="spin" />}</span>
+              </span>
+            </button>
+          </div>
+          <span className="sr-only" role="status">{node.name} · {statusText}</span>
+          {error && <p className="proxy-management-node-error" role="alert"><CircleAlert size={14} />{error}</p>}
+        </li>;
+      })}
+    </ul>
+    <span className="sr-only">{names.join("、")} · {ipAddress} · {accountCount} 个 OAuth 账号</span>
+  </div>;
 }
 
 function BoundProxyCell({ job, onOpen }) {

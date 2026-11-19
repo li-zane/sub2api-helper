@@ -9,13 +9,14 @@ async page => {
     { id: 9, name: 'Solo node', protocol: 'https', host: 'solo.test', port: 8443, ipAddress: '203.0.113.9', username: '', hasPassword: false, accountCount: 0 },
   ];
   nodes.forEach(node => { node.status = 'active'; });
-  let reject = false, failRead = false, rejectDelete = false;
+  let reject = false, failRead = false, rejectDelete = false, rejectStatus = false;
   const revision = (id, status = 'active') => String(id).repeat(63).slice(0, 63) + (status === 'active' ? 'a' : 'b');
   await page.route(/\/api\/sub2api\/(?:settings|monitor)$/, route => route.fulfill({ json: {
     configured: true, enabled: false, hasAdminApiKey: true, config: { baseUrl: 'https://pool.example.test' },
     profiles: [{ id: 'default', name: 'Default' }], activeProfileId: 'default',
   } }));
   await page.route('**/api/account-proxy-settings', route => route.fulfill({ json: { settings: { mode: 'sub2api', proxyUrl: '', allowDirectFallback: false } } }));
+  await page.route('**/api/direct-ip', route => route.fulfill({ json: { ip: '198.51.100.1' } }));
   await page.route('**/api/sub2api/options', route => {
     const { includeInactiveProxies } = route.request().postDataJSON();
     const proxies = nodes.filter(node => includeInactiveProxies || node.status === 'active');
@@ -35,6 +36,7 @@ async page => {
       statusWrites.push({ id, body });
       await new Promise(resolve => setTimeout(resolve, 400));
       check(body.revision === revision(id, node.status), 'status edit used a stale revision');
+      if (rejectStatus) return route.fulfill({ status: 502, json: { error: '代理状态保存失败，请重试' } });
       node.status = body.status;
       return route.fulfill({ json: { proxy: node, revision: revision(id, node.status) } });
     }
@@ -101,7 +103,7 @@ async page => {
     check(writes.length === 2 && writes[1].id === 8, 'save was duplicated or wrong node changed');
     check(writes[1].body.name === 'Updated SOCKS' && writes[1].body.host === 'updated.test' && writes[1].body.port === 1082 && writes[1].body.protocol === 'https', 'connection fields lost');
     check(!Object.hasOwn(writes[1].body, 'password'), 'blank password was sent as a reset');
-    await parent.getByText('HTTP node、Updated SOCKS', { exact: true }).first().waitFor();
+    await parent.getByLabel('代理 IP 账号分配').getByText('Updated SOCKS', { exact: true }).waitFor();
     check(nodes[0].name === 'HTTP node', 'editing another node renamed the first node');
   });
   await test('password-can-be-explicitly-cleared', async () => {
@@ -112,31 +114,45 @@ async page => {
     await dialog.getByRole('button', { name: '保存修改', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
     check(writes.at(-1).id === 7 && writes.at(-1).body.password === '', 'explicit password clear was lost');
   });
-  await test('selected-node-can-be-disabled-and-enabled-without-saving-its-draft', async () => {
-    await ip.click();
-    await dialog.getByRole('combobox', { name: '选择代理节点' }).click();
-    await page.getByRole('option', { name: /Updated SOCKS/ }).click();
-    const name = dialog.getByLabel('代理名称 *', { exact: true });
-    await name.fill('Unsaved name');
-    const disable = dialog.getByRole('button', { name: '停用代理', exact: true });
-    await disable.click();
-    check(await disable.isDisabled(), 'pending toggle can be repeated');
-    check(await dialog.getByRole('button', { name: '保存修改', exact: true }).isDisabled(), 'can save a draft during status change');
-    await dialog.locator('.proxy-edit-state').getByText('代理已停用', { exact: true }).waitFor();
-    check(await name.inputValue() === 'Unsaved name', 'toggle erased the draft');
-    check(nodes[0].status === 'active' && nodes[1].name === 'Updated SOCKS', 'toggle changed a sibling or saved the draft');
-    await dialog.getByRole('button', { name: '关闭编辑代理' }).click();
-    const card = parent.locator('.proxy-segment-bar').filter({ has: page.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true }) });
+  await test('list switches one shared-IP node in place and preserves its previous state on failure', async () => {
+    const card = parent.locator('.proxy-management-card').filter({ has: page.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true }) });
+    const toggle = card.getByRole('switch', { name: /Updated SOCKS/ });
+    const sibling = card.getByRole('switch', { name: /HTTP node/ });
+    check(await card.getByRole('switch').count() === 2, 'shared IP does not have independent node switches');
+    await card.getByText('全部启用', { exact: true }).waitFor();
+    check(await toggle.getAttribute('aria-checked') === 'true', 'active node switch starts unchecked');
+    rejectStatus = true;
+    await toggle.press('Space');
+    await card.locator('[role="switch"][aria-busy="true"]').waitFor();
+    await toggle.press('Enter'); // Must not replay while pending.
+    check(await toggle.isDisabled() && await sibling.isEnabled(), 'pending status should lock only the selected switch');
+    await card.getByRole('alert').getByText('代理状态保存失败，请重试').waitFor();
+    check(await toggle.getAttribute('aria-checked') === 'true', 'failed save changed the displayed state');
+    check(statusWrites.length === 1, 'pending switch replayed a write');
+    rejectStatus = false;
+    await toggle.click();
     await card.getByText('1/2 启用', { exact: true }).waitFor();
+    check(await toggle.getAttribute('aria-checked') === 'false', 'confirmed disable did not update the switch');
+    check(await sibling.getAttribute('aria-checked') === 'true', 'switch changed a sibling node');
+    check(await card.getByRole('alert').count() === 0, 'retry did not clear the inline error');
     check((await card.locator('.segment-count-pill').innerText()) === '3 个 OAuth 账号', 'toggle changed the binding count');
-    await ip.click();
-    await dialog.getByRole('combobox', { name: '选择代理节点' }).click();
-    await page.getByRole('option', { name: /Updated SOCKS/ }).click();
-    await dialog.getByRole('button', { name: '启用代理', exact: true }).click();
-    await dialog.locator('.proxy-edit-state').getByText('代理已启用', { exact: true }).waitFor();
-    await dialog.getByRole('button', { name: '关闭编辑代理' }).click();
-    await card.getByText('已启用', { exact: true }).waitFor();
+    check(await dialog.count() === 0, 'toggling from management opened the editor');
+    await page.locator('.toast-dismiss').evaluateAll(buttons => buttons.forEach(button => button.click()));
+    await page.locator('.toast-dismiss').first().waitFor({ state: 'hidden' });
+    await page.screenshot({ path: evidence + '/proxy-management-desktop.png' });
+    await page.setViewportSize({ width: 375, height: 812 });
+    const bounds = await toggle.boundingBox();
+    check(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 375 && bounds.height >= 44, 'mobile switch is clipped or too small');
+    check(await parent.evaluate(el => el.scrollWidth <= el.clientWidth + 1), 'mobile proxy manager overflows horizontally');
+    await toggle.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: evidence + '/proxy-management-mobile.png' });
+    await toggle.press('Enter');
+    await card.getByText('全部启用', { exact: true }).waitFor();
+    check(await toggle.getAttribute('aria-checked') === 'true', 'keyboard re-enable did not restore the node');
+    check(await parent.locator('.proxy-segment-bar.unassigned').getByRole('switch').count() === 0, 'direct connection has an unexpected switch');
+    await page.setViewportSize({ width: 1440, height: 1000 });
     check(JSON.stringify(statusWrites) === JSON.stringify([
+      { id: 8, body: { status: 'inactive', revision: revision(8) } },
       { id: 8, body: { status: 'inactive', revision: revision(8) } },
       { id: 8, body: { status: 'active', revision: revision(8, 'inactive') } },
     ]), 'status writes were duplicated or included connection fields');
@@ -193,7 +209,7 @@ async page => {
     check(await confirm.getByRole('button', { name: '删除中…' }).isDisabled(), 'pending delete can be repeated');
     await dialog.waitFor({ state: 'hidden' });
     await ip.waitFor();
-    await parent.getByText('HTTP node', { exact: true }).first().waitFor();
+    await parent.getByLabel('代理 IP 账号分配').getByText('HTTP node', { exact: true }).waitFor();
     check(!nodes.some(node => node.id === 8), 'selected node remained');
     check(deletes.length === 2 && deletes.every(({ id, body }) => id === 8 && body.revision === revision(8)),
       'delete targeted the wrong node or skipped version checking');

@@ -4533,16 +4533,217 @@ dialog.batch-dialog::backdrop {
 .proxy-distribution-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: 10px;
 }
 
-@media (max-width: 680px) {
+@media (max-width: 767px) {
   .proxy-distribution-grid {
     grid-template-columns: 1fr;
   }
 }
 
-/* Three-segment Bar Card */
+.proxy-management-card {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.proxy-management-card-header,
+.proxy-management-node-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  padding-inline: 12px;
+}
+
+.proxy-management-card-header {
+  flex-wrap: wrap;
+  padding-block: 8px;
+  border-radius: 10px 10px 0 0;
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--line);
+}
+
+.proxy-management-card-header .proxy-edit-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 28px;
+  white-space: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.proxy-management-card-header .proxy-edit-trigger svg {
+  flex: none;
+}
+
+.proxy-management-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 7px;
+}
+
+.proxy-management-group-status {
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.proxy-management-group-status.all-active {
+  background: var(--emerald-soft);
+  color: var(--emerald-strong);
+}
+
+.proxy-management-group-status.mixed {
+  background: var(--amber-soft);
+  color: var(--amber-strong);
+}
+
+.proxy-management-nodes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.proxy-management-node + .proxy-management-node {
+  border-top: 1px solid var(--line);
+}
+
+.proxy-management-node-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: 1px 6px;
+  padding-block: 5px;
+}
+
+.proxy-management-node-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.proxy-management-protocol {
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.proxy-management-endpoint {
+  flex: 0 0 100%;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.proxy-management-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: none;
+  min-height: 44px;
+  min-width: 84px;
+  gap: 6px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.proxy-management-switch[aria-checked="true"] {
+  color: var(--accent-strong);
+}
+
+.proxy-management-switch[aria-disabled="true"] {
+  cursor: default;
+}
+
+.proxy-management-switch[aria-busy="true"] {
+  cursor: wait;
+}
+
+.proxy-management-switch:focus-visible,
+.proxy-management-card-header .proxy-edit-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.proxy-management-switch-track {
+  display: flex;
+  align-items: center;
+  flex: none;
+  width: 34px;
+  height: 18px;
+  padding: 2px;
+  border-radius: 999px;
+  background: #64748b;
+  transition: background-color 150ms ease;
+}
+
+.proxy-management-switch[aria-checked="true"] .proxy-management-switch-track {
+  background: var(--accent);
+}
+
+.proxy-management-switch-thumb {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  color: var(--accent-strong);
+  background: #fff;
+  transition: transform 150ms ease;
+}
+
+.proxy-management-switch[aria-checked="true"] .proxy-management-switch-thumb {
+  transform: translateX(16px);
+}
+
+.proxy-management-node-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 12px 8px;
+  color: var(--danger-strong);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.proxy-management-node-error svg {
+  flex: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .proxy-management-switch-track,
+  .proxy-management-switch-thumb {
+    transition: none;
+  }
+}
+
+/* Direct connection statistics */
 .proxy-segment-bar {
   display: flex;
   align-items: center;
@@ -4574,23 +4775,6 @@ dialog.batch-dialog::backdrop {
   flex: 0 0 auto;
   max-width: 100px;
   overflow: hidden;
-}
-
-.proxy-segment-col.segment-name.with-status {
-  align-items: flex-start;
-  flex-direction: column;
-  gap: 1px;
-  line-height: 1.15;
-}
-
-.segment-name.with-status .segment-name-label {
-  max-width: 100%;
-}
-
-.segment-node-status {
-  color: var(--muted);
-  font-size: 10px;
-  white-space: nowrap;
 }
 
 .segment-name-label {
@@ -4679,6 +4863,12 @@ dialog.batch-dialog::backdrop {
 
 /* Unassigned card accent */
 .proxy-segment-bar.unassigned {
+  grid-column: 1 / -1;
+  height: auto;
+  min-height: 38px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding-block: 5px;
   background: #fffdfa;
   border-color: #fde68a;
 }
@@ -4718,8 +4908,13 @@ dialog.batch-dialog::backdrop {
   font-size: 11.5px;
   line-height: 1.6;
   display: flex;
+  flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
+  gap: 4px;
+}
+
+.proxy-distribution-scope p {
+  margin: 0;
 }
 
 .proxy-scope-icon {
