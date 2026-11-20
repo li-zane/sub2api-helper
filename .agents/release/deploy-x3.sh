@@ -24,7 +24,10 @@ git -C "$app" merge-base --is-ancestor "$release" origin/main
 git -C "$app" merge-base --is-ancestor "$before" "$release"
 backup=$(mktemp -d "/opt/tosub2/backups/artifact-${release:0:12}-$(date -u +%Y%m%dT%H%M%SZ)-XXXX")
 keep_backup=0
+drain_marker=/run/tosub2-release-drain
+owns_drain=0
 cleanup() {
+  if [[ $owns_drain == 1 ]]; then rm -f -- "$drain_marker"; fi
   if [[ $keep_backup == 0 && -d $backup ]]; then rm -rf -- "$backup"; fi
 }
 trap cleanup EXIT
@@ -50,9 +53,18 @@ if [[ $release == "$before" ]]; then
   rm -rf -- "$backup"
   exit 0
 fi
+# Publish only after download/validation; --check and no-op updates never pause dispatch.
+# The shell owns this lease; a SIGKILL cannot strand a live pause. The deployment
+# flock serializes installers and /run itself is root-writable and boot-local.
+owner_ticks=$(awk '{print $22}' "/proc/$$/stat")
+printf '%s %s\n' "$$" "$owner_ticks" >"$backup/drain-owner"
+chmod 644 "$backup/drain-owner"
+owns_drain=1
+install -m 644 "$backup/drain-owner" "$drain_marker"
+printf 'DISPATCH_DRAIN started=true settings=unchanged\n'
 deadline=$((SECONDS + idle_limit))
 while true; do
-  if python3 "$backup/state-check.py" snapshot "$backup"; then break; else
+  if python3 "$backup/state-check.py" snapshot "$backup" --require-drain; then break; else
     code=$?
     [[ $code == 75 ]] || exit "$code"
   fi
@@ -103,9 +115,18 @@ systemctl is-active --quiet "$service"
 [[ $(git -C "$app" rev-parse HEAD) == "$release" && $(git -C "$app" branch --show-current) == main ]]
 [[ -z $(git -C "$app" status --porcelain) ]]
 python3 "$backup/state-check.py" verify "$backup" --app "$app"
+rm -f -- "$drain_marker"
+owns_drain=0
+resumed=0
+for ((attempt=0; attempt<30; attempt++)); do
+  if python3 "$backup/state-check.py" resumed "$backup"; then resumed=1; break; fi
+  sleep 1
+done
+[[ $resumed == 1 ]]
 stopped=0
 keep_backup=0
 trap - ERR INT TERM
 # Recovery copies exist only during an update. Successful updates leave no historical runtime directories.
 rm -rf -- "$backup"
+printf 'DISPATCH_DRAIN released=true settings=unchanged\n'
 printf 'DEPLOY_PASS branch=main revision=%s service=active build_on_x3=false history=removed\n' "$release"

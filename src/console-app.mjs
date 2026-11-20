@@ -53,6 +53,7 @@ import { accountRateLimit } from "./account-rate-limit.mjs";
 import { usageRestricted } from "../web/src/codex-eligibility.mjs";
 import { smsOrderLog } from "./sms-order-cost.mjs";
 import { SmsCancellations } from "./sms-cancellations.mjs";
+import { releaseDispatchPaused, drainRequestKind } from "./release-drain.mjs";
 import { legacyCodexEmailGate } from "./codex-email-gate.mjs";
 import { displayLoginStatus, normalizeLoginAutomationPause, loginAutomationBlocked, loginAutomationPauseMessage } from "./login-automation-pause.mjs";
 import { limitPoolRequests } from "./pool-network.mjs";
@@ -239,6 +240,8 @@ export function createConsoleApp(options = {}) {
   const emailJobLocks = new Map();
   let outputSyncPromise = null;
   let lastOutputSyncAt = 0;
+  const dispatchPaused = options.releaseDispatchPaused || releaseDispatchPaused;
+  let admittedWrites = 0, startupDispatchTimer, dispatchStarted = false;
   let shuttingDown = false;
   let queueSchedulingPaused = true;
   let activeWebSessionChecks = 0;
@@ -321,6 +324,7 @@ export function createConsoleApp(options = {}) {
   const importDayFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" });
 
   const webSessionMonitor = new WebSessionMonitor({
+    dispatchPaused,
     filePath: path.join(OUTPUT_ROOT, "web-session-monitor.json"),
     getSettings: () => consoleSettings.current.webSessionMonitorSettings,
     listJobs: async () => {
@@ -373,6 +377,7 @@ export function createConsoleApp(options = {}) {
     },
     lock: (job, fn) => withEmailJobLock(job.email, fn),
     repair: async (job, { reason }) => {
+      if (dispatchPaused()) return false;
       const webOnly = !job.resultSaved || webSessionNeedsLogin(reason);
       if (!webOnly && sessionResetAutomationPaused(job.email)) return false;
       if (automaticLoginBlocked(job, webOnly ? "web" : "oauth")) return false;
@@ -388,6 +393,7 @@ export function createConsoleApp(options = {}) {
   });
 
   const overloadMonitor = new OverloadMonitor({
+    dispatchPaused,
     getWindowMinutes: () => consoleSettings.current.overloadAutoCooldownSettings.windowMinutes,
     getAdditionalTargets: () => overloadCooldown.countTargets(),
     onOverloadCounts: (email, sample) => overloadCooldown.observeCounts(email, sample),
@@ -413,6 +419,7 @@ export function createConsoleApp(options = {}) {
   });
 
   const overloadCooldown = new OverloadCooldown({
+    dispatchPaused,
     getMonitoringSettings: () => ({ intervalMs: consoleSettings.current.monitoringSettings.overloadIntervalSeconds * 1000, concurrency: consoleSettings.current.monitoringSettings.overloadCooldownConcurrency }),
     isBlocked: email => accountAutomationBlocked(email) || sessionResetAutomationPaused(email),
     isCountBlocked: codexChecksBlocked,
@@ -455,6 +462,7 @@ export function createConsoleApp(options = {}) {
   const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprintAccount, getProxies: listSub2ApiProxies,
     testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
   const modelFingerprint = new ModelFingerprintService({
+    dispatchPaused,
     isBlocked: (email, { manual = false } = {}) => {
       if (manual && manualFingerprintAllowed(findJobByEmail(email))) return false;
       if (codexChecksBlocked(email)) return true;
@@ -603,6 +611,28 @@ export function createConsoleApp(options = {}) {
       return;
     }
 
+    if (req.method === "GET" && requestUrl.pathname === "/api/release-drain") {
+      const busyJobs = [...jobs.values()].filter(j => !j.deleted && (isActive(j.status) || j.autoTaskStatus === "running")).length;
+      const busyWorkers = admittedWrites + emailJobLocks.size + activeWebSessionChecks + manualWebSessionCheckOperations.size
+        + sessionResetStarts.size + poolRefreshOperations.size + sub2ApiAutoRepairPromises.size + accountSecurityChecks.size
+        + modelFingerprint.inFlight.size + modelFingerprint.runningTasks.size + accountDataSyncOperations.size
+        + [webSessionMonitor.running, modelFingerprint.ticking, overloadMonitor.running, overloadCooldown.running, sub2ApiMonitorPromise].filter(Boolean).length;
+      sendJson(res, 200, { paused: dispatchPaused(), ready: dispatchStarted && !shuttingDown, busyJobs, busyWorkers });
+      return;
+    }
+    const kind = drainRequestKind(req.method, requestUrl.pathname);
+    if (kind === "new" && dispatchPaused()) {
+      res.setHeader("Retry-After", "15");
+      sendJson(res, 503, { code: "RELEASE_DRAIN", error: "更新维护中：已暂停新任务，请在更新完成后重试" });
+      return;
+    }
+    if (kind === "read") return dispatchApi(req, res, requestUrl);
+    admittedWrites++;
+    try { return await dispatchApi(req, res, requestUrl); }
+    finally { admittedWrites--; }
+  }
+
+  async function dispatchApi(req, res, requestUrl) {
     if (await handleReadRoute(req, res, requestUrl)) return;
 
     if (await handleSettingsRoute(req, res, requestUrl)) return;
@@ -3052,6 +3082,7 @@ export function createConsoleApp(options = {}) {
 
   function prepareCooldownSessionReset(email, { id, backend, cooldownMinutes = 0, logoutBeforeCooldown = false }) {
     const job = findJobByEmail(email), state = accountSessionResets.get(email);
+    if (dispatchPaused() && state?.id !== id) return { status: "pending" };
     if (!job) return { status: "failed", error: "冷却已到期，但本地账号记录不存在" };
     if (state?.id === id || state?.source === "manual" && Date.parse(state.startedAt) >= Date.parse(overloadCooldown.accounts.get(email)?.coolingUntil)) {
       if (state.status === "completed") return { status: "completed" };
@@ -5862,7 +5893,7 @@ export function createConsoleApp(options = {}) {
   }
 
   function queueSub2ApiRecovery(listing, config) {
-    if (shuttingDown || !sub2ApiMonitorConfig?.enabled || monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiMonitorConfig)) return;
+    if (dispatchPaused() || shuttingDown || !sub2ApiMonitorConfig?.enabled || monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiMonitorConfig)) return;
     // Keep the freshest complete list if status refreshes arrive during a repair.
     sub2ApiRecoverySnapshot = sub2ApiRecoveryPending = { listing, config: { ...config, groupIds: [...config.groupIds] } };
     if (sub2ApiMonitorPromise) return sub2ApiMonitorPromise;
@@ -6915,6 +6946,7 @@ export function createConsoleApp(options = {}) {
       const seconds = [consoleSettings.current.monitoringSettings.accountStatusIntervalSeconds, consoleSettings.current.monitoringSettings.usageTotalsIntervalSeconds, consoleSettings.current.monitoringSettings.resetCreditsIntervalSeconds][kind];
       const timer = setTimeout(() => {
         if (shuttingDown || generation !== accountDataSyncGeneration) return;
+        if (dispatchPaused()) { schedule(kind); return; }
         const operation = (async () => {
           const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
           const state = await loadSub2ApiAccountStatus();
@@ -9016,6 +9048,10 @@ export function createConsoleApp(options = {}) {
   }
 
   async function runPoolRefresh(job) {
+    if (dispatchPaused() && !activeSessionReset(job) && !job.poolRefreshReady) {
+      if (!shuttingDown && !job.deleted) schedulePoolRefresh(job, 5000);
+      return;
+    }
     if (shuttingDown || job.deleted || accountAutomationBlocked(job.email) || !job.poolRefreshAction) return;
     if (job.poolRefreshReady && job.status === "completed" && job.resultSaved) {
       await synchronizePoolRefresh(job);
@@ -11131,6 +11167,7 @@ export function createConsoleApp(options = {}) {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       shuttingDown = true;
+      clearTimeout(startupDispatchTimer);
       loginTimeouts.close();
       accountDataSyncGeneration++;
       for (const timer of accountDataSyncTimers) clearTimeout(timer);
@@ -11279,26 +11316,37 @@ export function createConsoleApp(options = {}) {
       }
     }
     await ensureSubscriptionHistoryFresh();
-    await restoreAccountSessionResets();
-    for (const job of jobs.values()) {
-      if (job.poolRefreshAction) {
-        schedulePoolRefresh(job, job.poolRefreshAction === "cooldown" && job.poolRefreshDueAt
-          ? Math.max(0, Date.parse(job.poolRefreshDueAt) - Date.now())
-          : 0);
+    const startDispatch = async () => {
+      if (shuttingDown) return;
+      if (dispatchPaused()) {
+        startupDispatchTimer = setTimeout(() => { void startDispatch().catch(error => console.error("[dispatch] 延迟启动失败", error.message)); }, 1000);
+        startupDispatchTimer.unref?.();
+        return;
       }
-    }
-    smsCancellations.start();
-    resumePendingTaskAutoActions();
-    queueSchedulingPaused = false;
-    scheduleQueuedJobs();
-    requestSub2ApiStatusRefresh();
-    overloadMonitor.start();
-    overloadCooldown.start();
-    modelFingerprint.setTickMs(consoleSettings.current.monitoringSettings.fingerprintScanIntervalSeconds * 1000);
-    modelFingerprint.start();
-    webSessionMonitor.setTickMs(consoleSettings.current.monitoringSettings.webSessionScanIntervalSeconds * 1000);
-    webSessionMonitor.start();
-    scheduleAccountDataSync();
+      await restoreAccountSessionResets();
+      if (shuttingDown) return;
+      for (const job of jobs.values()) {
+        if (job.poolRefreshAction) {
+          schedulePoolRefresh(job, job.poolRefreshAction === "cooldown" && job.poolRefreshDueAt
+            ? Math.max(0, Date.parse(job.poolRefreshDueAt) - Date.now())
+            : 0);
+        }
+      }
+      smsCancellations.start();
+      resumePendingTaskAutoActions();
+      queueSchedulingPaused = false;
+      scheduleQueuedJobs();
+      requestSub2ApiStatusRefresh();
+      overloadMonitor.start();
+      overloadCooldown.start();
+      modelFingerprint.setTickMs(consoleSettings.current.monitoringSettings.fingerprintScanIntervalSeconds * 1000);
+      modelFingerprint.start();
+      webSessionMonitor.setTickMs(consoleSettings.current.monitoringSettings.webSessionScanIntervalSeconds * 1000);
+      webSessionMonitor.start();
+      scheduleAccountDataSync();
+      dispatchStarted = true;
+    };
+    await startDispatch();
 
     let staticFrontend;
     if (production) {

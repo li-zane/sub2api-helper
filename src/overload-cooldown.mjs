@@ -22,7 +22,8 @@ export function normalizeOverloadCooldown(value = DEFAULT_OVERLOAD_COOLDOWN) {
 }
 
 export class OverloadCooldown {
-  constructor({ filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, afterPause = null, beforeResume = () => ({ status: "completed" }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  constructor({ dispatchPaused = () => false, filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, afterPause = null, beforeResume = () => ({ status: "completed" }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    this.dispatchPaused = dispatchPaused;
     Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, isCountBlocked, onChange, onNeedCounts, afterPause, beforeResume, now, setTimer, clearTimer });
     this.request = limitPoolRequests(request, () => this.getMonitoringSettings().concurrency);
     this.accounts = new Map();
@@ -210,7 +211,7 @@ export class OverloadCooldown {
       // Only unfinished/failed mutations retry at the shared statistics cadence.
       const due = pending.map(entry => entry.lastError || entry.phase !== "cooling" || !entry.enabled && !entry.restrictionPaused
         ? this.getMonitoringSettings().intervalMs : Math.max(100, Date.parse(entry.coolingUntil) - this.now()));
-      const delay = Math.max(100, Math.min(...due));
+      const delay = this.dispatchPaused() ? 5000 : Math.max(100, Math.min(...due));
       this.timer = this.setTimer(() => this.trigger(), delay);
       this.timer.unref?.();
     });
@@ -219,6 +220,7 @@ export class OverloadCooldown {
 
   async run() {
     this.rerun = false;
+    if (this.dispatchPaused()) return;
     const config = this.getConfig();
     if (this.stopped || !config?.baseUrl || !config?.adminApiKey) return;
     const active = [...this.accounts].filter(([email, entry]) => !this.isBlocked(email) && entry.resumeAccountIds?.length);
@@ -272,7 +274,7 @@ export class OverloadCooldown {
       await this.lock(email, async () => {
         const entry = this.accounts.get(email), settings = this.getSettings(email), backend = this.backendIdentity(config);
         const { bucketMs } = overloadGrid(settings.windowMinutes), start = Date.parse(point?.start), end = Date.parse(point?.end);
-        if (this.stopped || !entry?.enabled || entry.resumeAccountIds?.length || this.isBlocked(email) || this.isCountBlocked(email)
+        if (this.stopped || this.dispatchPaused() || !entry?.enabled || entry.resumeAccountIds?.length || this.isBlocked(email) || this.isCountBlocked(email)
           || backend !== this.backendIdentity(this.getConfig()) || settings.windowMinutes !== windowMinutes
           || !Number.isFinite(sampledAt) || sampledAt > this.now() || start !== Math.floor(this.now() / bucketMs) * bucketMs
           || end - start !== bucketMs || sampledAt < start || sampledAt >= end

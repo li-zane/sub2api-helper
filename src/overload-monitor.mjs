@@ -208,7 +208,8 @@ function mergeCounts(plan, fresh) {
 }
 
 export class OverloadMonitor {
-  constructor({ filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: COUNT_SYNC_INTERVAL_MS }), getWindowMinutes = () => DEFAULT_COUNT_WINDOW_MINUTES, getAdditionalTargets = () => [], onOverloadCounts = async () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  constructor({ dispatchPaused = () => false, filePath, getConfig, backendIdentity, listAccounts, request, isBlocked = () => false, concurrency = DEFAULT_POOL_SYNC_CONCURRENCY, getMonitoringSettings = () => ({ concurrency, intervalMs: COUNT_SYNC_INTERVAL_MS }), getWindowMinutes = () => DEFAULT_COUNT_WINDOW_MINUTES, getAdditionalTargets = () => [], onOverloadCounts = async () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    this.dispatchPaused = dispatchPaused;
     Object.assign(this, { filePath, getConfig, backendIdentity, listAccounts, request, isBlocked, concurrency, getMonitoringSettings, getWindowMinutes, getAdditionalTargets, onOverloadCounts, now, setTimer, clearTimer });
     this.request = limitPoolRequests((config, url, { isEnabled, ...options } = {}) => {
       if (isEnabled && !isEnabled()) throw new Error("过载统计已停止");
@@ -338,6 +339,7 @@ export class OverloadMonitor {
 
   async run() {
     this.rerun = false;
+    if (this.dispatchPaused()) return;
     if (!this.syncBackend() || this.stopped) return;
     const backend = this.backend;
     const config = this.getConfig();

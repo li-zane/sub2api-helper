@@ -14,7 +14,7 @@ spec.loader.exec_module(state_check)
 
 
 class StateCheckTest(unittest.TestCase):
-    def run_check(self, mode, directory, pages):
+    def run_check(self, mode, directory, pages, gate=None):
         reads = []
 
         def response(request, timeout):
@@ -22,12 +22,14 @@ class StateCheckTest(unittest.TestCase):
             reads.append(url)
             if url.endswith("/api/bootstrap"):
                 data = {"token": "synthetic-fixture-token"}
+            elif url.endswith("/api/release-drain"):
+                data = gate
             else:
                 page = int(url.rsplit("=", 1)[1])
                 data = pages[page - 1]
             return io.BytesIO(json.dumps(data).encode())
 
-        with patch.object(sys, "argv", ["state-check.py", mode, str(directory)]), patch.object(state_check.urllib.request, "urlopen", side_effect=response):
+        with patch.object(sys, "argv", ["state-check.py", mode, str(directory)] + (["--require-drain"] if gate is not None else [])), patch.object(state_check.urllib.request, "urlopen", side_effect=response):
             result = state_check.main()
         return result, reads
 
@@ -45,6 +47,18 @@ class StateCheckTest(unittest.TestCase):
             self.assertEqual(result, 75)
             self.assertTrue(reads[-1].endswith("page=2"))
             self.assertFalse((Path(directory) / "account-bindings-before.json").exists())
+
+    def test_drain_requires_ack_and_counts_admitted_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pages = self.pages()
+            for key in ["busyJobs", "busyWorkers"]:
+                gate = {"paused": True, "busyJobs": 0, "busyWorkers": 0, key: 1}
+                self.assertEqual(self.run_check("snapshot", directory, pages, gate)[0], 75)
+            with self.assertRaisesRegex(RuntimeError, "acknowledge"):
+                self.run_check("snapshot", directory, pages, {"paused": False})
+            self.assertEqual(self.run_check("snapshot", directory, pages, {"paused": True, "busyJobs": 0, "busyWorkers": 0})[0], 0)
+            for state, expected in [({"paused": True, "ready": True}, 75), ({"paused": False, "ready": False}, 75), ({"paused": False, "ready": True}, 0)]:
+                self.assertEqual(self.run_check("resumed", directory, pages, state)[0], expected)
 
     def test_snapshot_captures_bindings_on_every_page(self):
         with tempfile.TemporaryDirectory() as directory:

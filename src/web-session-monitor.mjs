@@ -17,7 +17,8 @@ export function normalizeWebSessionMonitor(value = {}) {
 // Server-owned, serial checks. No UI polling, parallel logins, logout-all or
 // At most two retries for non-401 failures; confirmed missing/expired sessions or workspace changes repair.
 export class WebSessionMonitor {
-  constructor({ filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, restoreMissingSession = () => false, lock = (_job, fn) => fn(), withSlot = (_job, fn) => fn(), now = Date.now, tickMs = 30_000, retryDelayMs = 1_000 }) {
+  constructor({ dispatchPaused = () => false, filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, restoreMissingSession = () => false, lock = (_job, fn) => fn(), withSlot = (_job, fn) => fn(), now = Date.now, tickMs = 30_000, retryDelayMs = 1_000 }) {
+    this.dispatchPaused = dispatchPaused;
     Object.assign(this, { filePath, getSettings, listJobs, isBusy, hasSession, probe, repair, restoreMissingSession, lock, withSlot, now, tickMs, retryDelayMs });
     this.accounts = Object.create(null); this.running = null; this.timer = null; this.stopped = false; this.writes = Promise.resolve();
     this.retryAbort = new AbortController();
@@ -55,13 +56,14 @@ export class WebSessionMonitor {
   }
   run({ force = false } = {}) {
     if (this.running) return this.running;
+    if (this.dispatchPaused()) return Promise.resolve(this.snapshot());
     if (this.stopped || !this.getSettings().enabled) return Promise.resolve(this.snapshot());
     this.running = this.scan(force).finally(() => { this.running = null; });
     return this.running;
   }
   async scan(force) {
     for (const job of await this.listJobs()) {
-      if (this.stopped || !this.getSettings().enabled) break;
+      if (this.stopped || this.dispatchPaused() || !this.getSettings().enabled) break;
       const email = job.email.toLowerCase();
       const existing = this.accounts[email];
       if (!force && Date.parse(existing?.nextCheckAt) > this.now()) continue;

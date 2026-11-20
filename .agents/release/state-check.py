@@ -13,10 +13,11 @@ TERMINAL = {"completed", "failed", "mfa_failed", "banned", "canceled",
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["snapshot", "verify"])
+    parser.add_argument("mode", choices=["snapshot", "verify", "resumed"])
     parser.add_argument("backup", type=Path)
     parser.add_argument("--app", type=Path, default=Path("/opt/tosub2/app"))
     parser.add_argument("--base", default="http://127.0.0.1:4399")
+    parser.add_argument("--require-drain", action="store_true")
     args = parser.parse_args()
 
     def get(path, token=None):
@@ -25,6 +26,12 @@ def main():
             return response.read()
 
     token = json.loads(get("/api/bootstrap"))["token"]
+    if args.mode == "resumed":
+        state = json.loads(get("/api/release-drain", token))
+        if state.get("paused") is False and state.get("ready") is True:
+            print("DISPATCH_READY enabled_settings_unchanged=true", flush=True)
+            return 0
+        return 75
     # The console paginates jobs. Both the idle gate and binding verification
     # must include later pages, including accounts with running tasks.
     jobs = []
@@ -49,6 +56,16 @@ def main():
     if args.mode == "snapshot":
         active = sum(job.get("status") not in TERMINAL for job in jobs)
         print(f"IDLE_CHECK jobs={len(jobs)} active={active}", flush=True)
+        if args.require_drain:
+            gate = json.loads(get("/api/release-drain", token))
+            if gate.get("paused") is not True:
+                raise RuntimeError("Running service did not acknowledge the dispatch pause")
+            busy = [gate.get("busyJobs"), gate.get("busyWorkers")]
+            if any(type(n) is not int or n < 0 for n in busy):
+                raise RuntimeError("Missing release drain counters")
+            print(f"DRAIN_CHECK jobs={busy[0]} workers={busy[1]}", flush=True)
+            if any(busy):
+                return 75
         if active:
             return 75
         snapshot.write_text(json.dumps(bindings), encoding="utf-8")

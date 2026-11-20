@@ -1,3 +1,4 @@
+import "./release-drain.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -38,7 +39,8 @@ try {
     version: 1, email, status: "failed", created_at: at, updated_at: at, plan_type: "free",
   }));
 
-  const first = make();
+  let pause = false;
+  const first = make({ releaseDispatchPaused: () => pause });
   const starting = first.start();
   assert.strictEqual(first.start(), starting);
   const { address, urls: [base] } = await starting;
@@ -49,6 +51,34 @@ try {
   const jobs = await call(base, "/api/jobs", token);
   assert.equal(jobs.status, 200);
   assert.equal((await jobs.json()).jobs[0].email, email);
+
+  // Hold an already admitted request before its final bytes arrive. New writes
+  // are fenced, but the old request must finish normally, not be canceled.
+  const headers = { "x-console-token": token, "content-type": "application/json" };
+  let finishRequest;
+  const pending = new Promise((resolve, reject) => {
+    const req = http.request(base + "/api/task-settings", { method: "POST", headers }, res => {
+      res.resume(); res.on("end", () => resolve(res.statusCode));
+    }).on("error", reject);
+    req.write('{"maxActiveJobs":'); finishRequest = () => req.end("2}");
+  });
+  try {
+    let admitted = false;
+    for (let i = 0; i < 100 && !admitted; i++) {
+      admitted = (await call(base, "/api/release-drain", token).then(r => r.json())).busyWorkers > 0;
+      if (!admitted) await new Promise(r => setTimeout(r, 20));
+    }
+    assert(admitted);
+    pause = true;
+    const blocked = await fetch(base + "/api/task-settings", { method: "POST", headers, body: '{"maxActiveJobs":1}' });
+    assert.equal(blocked.status, 503);
+    assert.equal((await blocked.json()).code, "RELEASE_DRAIN");
+    assert.equal((await call(base, "/api/jobs", token)).status, 200);
+    const finish = await fetch(base + "/api/jobs/11111111-1111-4111-8111-000000000000/input", { method: "POST", headers, body: "{}" });
+    assert.notEqual(finish.status, 503);
+  } finally { finishRequest(); pause = false; }
+  assert.equal(await pending, 200);
+  assert.equal((await call(base, "/api/task-settings", token).then(r => r.json())).settings.maxActiveJobs, 2);
 
   const evidenceDir = path.join(jobDir, "credential-history");
   await fs.mkdir(evidenceDir);
@@ -88,11 +118,19 @@ try {
   await assert.rejects(first.start(), /has been stopped/);
   await assert.rejects(call(base, "/api/bootstrap"));
 
-  const restarted = make({ port: address.port });
+  pause = true;
+  const restarted = make({ port: address.port, releaseDispatchPaused: () => pause });
   assert.equal((await restarted.start()).address.port, address.port);
   const nextToken = await call(base, "/api/bootstrap").then(res => res.json()).then(data => data.token);
   assert(nextToken);
   assert.notEqual(nextToken, token);
+  const gateState = () => call(base, "/api/release-drain", nextToken).then(r => r.json());
+  assert.equal((await gateState()).ready, false);
+  pause = false;
+  for (let i = 0; i < 100 && !(await gateState()).ready; i++) await new Promise(r => setTimeout(r, 30));
+  assert.equal((await gateState()).ready, true);
+  assert.equal((await call(base, "/api/task-settings", nextToken).then(r => r.json())).settings.maxActiveJobs, 2);
+  console.log("RELEASE_DRAIN_PASS admitted work finished, new work rejected, inputs accepted, restart resumed previous settings");
   assert.equal((await call(base, "/api/jobs", token)).status, 403);
   assert.equal((await call(base, "/api/jobs", nextToken).then(res => res.json())).jobs[0].email, email);
   await restarted.stop();
