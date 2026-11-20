@@ -15,11 +15,13 @@ npm run codex:check
 
 1. 为本次任务生成随机环境 ID，启动一个全新容器。`CODEX_HOME` 位于容器独占的 tmpfs 内存目录，权限 0700，没有宿主目录挂载或持久化卷。
 2. 官方 CLI app-server 生成 PKCE 授权链接，Helper 把链接交给当前账号已有的 Web 会话。
-3. Helper 校验回调的来源、路径及 state，通过 stdin 把回调送到该容器内部的 localhost:1455，由 CLI 兑换并写入 `auth.json`。
-4. 读取 `auth.json`，核对邮箱、工作区及已知的访问令牌有效期，转换成 Sub2API 格式并原子写入导出文件；授权不读取或写入网关 UA。
+3. Helper 校验回调的来源、路径及 state，通过 stdin 把回调送到该容器内部的 localhost:1455，由 CLI 兑换并写入 `auth.json`。CLI 返回 302/303 时，Helper 仅跟随同一回环端口的 `/success`，让 CLI 结束本地登录服务并发出完成通知。
+4. 收到成功的 `account/login/completed` 通知后，读取 `auth.json`，核对邮箱、工作区及已知的访问令牌有效期，转换成 Sub2API 格式并原子写入导出文件；授权不读取或写入网关 UA。回调页 HTTP 200 本身不表示授权成功。
 5. 导出文件保存成功后销毁容器，确认容器已消失。本次 CLI 的 `auth.json`、配置、安装标识和其他临时状态随 tmpfs 释放。同账号再次授权也创建全新环境。
 
 取消、验证失败及导出失败同样执行清理。失败不会覆盖之前的导出文件；若导出已经写入而清理失败，会保留导出并报告清理错误，避免把未完成清理当作成功。进程退出有清理处理；worker 被强制终止后，stdin 关闭使 CLI 退出，Docker `--rm` 删除临时容器。Docker daemon 故障时清理会报错，恢复后应核查带有 `com.sub2api-helper.codex-oauth=one-shot` 标签的残留容器。
+
+任务日志使用 `[env=环境 ID] stage=阶段 start/ok/failed duration_ms=耗时` 关联一次授权的环境创建、链接生成、Web 授权、回调、CLI 完成通知、凭据校验、导出和清理。回调另记 `/auth/callback` 与 `/success` 的 HTTP 状态；失败同时出现清理错误时，两处均记录失败，最终错误保留最初的原因。日志不记录回调查询参数、token 或 CLI 上游响应正文。
 
 后续 refresh token 刷新使用已导出的凭据，由已配置的 Sub2API 后端完成，携带可用的号池代理 ID，不依赖已销毁的 CLI 环境，也不额外维持第二份活跃 refresh token。刷新令牌失效时，现有重新授权流程会创建新的临时环境。网页登录会话属于 Helper 自身的账号状态，不属于这次被销毁的 CLI 临时环境。
 
@@ -51,9 +53,13 @@ UA 使用 CLI `initialize` 实际返回的 `userAgent`。仅手动点击同步�
 
 ```sh
 node test/codex-cli-oauth.mjs
+node test/codex-cli-callback.mjs
 node test/codex-cli-ua.mjs
 node test/sub2api-oauth-flow.mjs
 node test/codex-cli-docker.mjs
+node test/codex-cli-login-docker.mjs
 ```
 
-前两项使用模拟凭据和本地网关，验证导出在清理前落盘、失败保留和不依赖 Docker 的后续刷新。Docker 测试启动三个真实独立 worker，同时运行官方 CLI，检查独立回调、相同账号串行、干净重试、取消/异常退出清理，并让三个 worker 同时同步模拟网关，确认仅写入一次 UA。测试不完成真实账号授权。
+单元测试使用模拟凭据和本地网关，验证回调跳转边界、阶段日志、导出在清理前落盘、失败保留和不依赖 Docker 的后续刷新。worker Docker 测试启动三个真实独立 worker，同时运行官方 CLI，检查独立回调、相同账号串行、干净重试、取消/异常退出清理，并让三个 worker 同时同步模拟网关，确认仅写入一次 UA。
+
+登录 Docker 回归在 `--network=none` 的容器内启动本地模拟 OAuth 服务，向官方 CLI 提供合成凭据，验证回调 → `/success` → 完成通知 → Sub2API 导出 → 清理的整个流程，以及 token 兑换被拒绝时的错误通知。它执行实际生产回调桥接代码，不访问外部授权服务或使用真实账号。Linux CI 第 1 组必须通过这两项 Docker 测试后才生成运行包。

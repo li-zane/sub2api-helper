@@ -44,7 +44,7 @@ const server = http.createServer(async (req, res) => {
 });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const gateway = { baseUrl: `http://127.0.0.1:${server.address().port}`, adminApiKey: "fixture-private-admin-key" };
-const events = [];
+const events = [], progress = [];
 const exported = path.join(root, "export.json");
 let auth = authFor(), rejectCallback = false;
 const openSession = async () => ({ userAgent: ua,
@@ -60,7 +60,8 @@ const openSession = async () => ({ userAgent: ua,
   async close() { events.push(["closed", await fs.readFile(exported, "utf8").catch(() => "")]); },
 });
 const options = { root, expectedEmail: email, profileEmail: email, gateway, workspaceId: "workspace", openSession,
-  exportPath: exported, accountName: "Chosen name", concurrency: 3, authorize: async () => ({ callbackUrl: callback }) };
+  exportPath: exported, accountName: "Chosen name", concurrency: 3, onProgress: message => progress.push(message),
+  authorize: async () => ({ callbackUrl: callback }) };
 try {
   assert.equal(normalizeCodexAuthMode("cli"), "cli");
   assert.throws(() => normalizeCodexAuthMode("shell"));
@@ -110,6 +111,11 @@ try {
   assert.equal(puts, 0, "OAuth never writes gateway settings");
   assert.equal(settings.site_name, "Preserve me");
   assert.deepEqual(requests, [], "OAuth never reads gateway settings either");
+  assert.deepEqual(progress.filter(line => /stage=\w+ ok /.test(line)).map(line => line.match(/stage=(\w+)/)[1]),
+    ["environment", "login_start", "web_authorization", "callback", "login_completed", "auth_validation", "export", "cleanup"]);
+  assert.equal(new Set(progress.map(line => line.match(/^\[env=([\da-f-]{36})\]/)?.[1])).size, 1);
+  assert(progress.every(line => line.startsWith(`[env=${bundle.account.extra.codex_cli_environment_id}]`)));
+  assert(progress.filter(line => / ok /.test(line)).every(line => /duration_ms=\d+$/.test(line)));
   await syncCliUserAgent(gateway, ua, { root });
   assert.equal(puts, 1);
   assert.deepEqual(requests.map(r => r.method), ["GET", "PUT", "GET"]);
@@ -154,8 +160,22 @@ try {
     async close() { throw new Error("fixture cleanup failed"); } }) }), /cleanup failed/);
   assert.equal(JSON.parse(await fs.readFile(exported)).accounts[0].credentials.refresh_token, auth.tokens.refresh_token,
     "cleanup failure leaves the committed export available");
+  progress.length = 0;
+  const primary = new Error("fixture callback failed");
+  await assert.rejects(runCliOAuth({ ...options, openSession: async () => ({ ...await openSession(),
+    async deliverCallback() { throw primary; }, async close() { throw new Error("fixture cleanup failed"); } }) }), error => error === primary);
+  assert.deepEqual(progress.filter(line => / failed /.test(line)).map(line => line.match(/stage=(\w+)/)[1]), ["callback", "cleanup"]);
+  assert(!progress.some(line => /stage=export/.test(line)), "failed callback never exports credentials");
+  progress.length = 0;
+  auth = authFor("wrong@example.com");
+  await assert.rejects(runCliOAuth({ ...options, openSession: async () => ({ ...await openSession(),
+    async discardAuth() { throw new Error("fixture discard failed"); } }) }), /邮箱/);
+  assert(progress.some(line => /stage=discard_auth failed/.test(line)));
+  assert(progress.some(line => /stage=cleanup ok/.test(line)));
+  auth = authFor();
   await resumeCodexOauth({ follow: async () => ({ finalUrl: callback }) }, flowOptions,
     { stage: "callback_ready", oauth: { provider: "cli", callbackUrl: callback.replace("fixture-state", "expired") } });
+  assert(!/fixture-private-refresh|private-code|fixture-state|fixture-challenge|header\./.test(progress.join("\n")), "stage diagnostics exclude credentials and OAuth query values");
 
   let configured = false;
   const settingsFile = path.join(root, "task-settings.json");
@@ -167,7 +187,7 @@ try {
   const restored = makeSettings(); await restored.load();
   assert.equal(restored.current.codexAuthMode, "cli");
   await preferences.close(); await restored.close();
-  console.log("CODEX_CLI_OAUTH_PASS one-shot environments, account locks, callback/state, account/workspace, export-before-cleanup, zero gateway requests during OAuth, manual UA merge/readback, failure preservation, settings reload");
+  console.log("CODEX_CLI_OAUTH_PASS one-shot environments, account locks, callback/state, account/workspace, export-before-cleanup, zero gateway requests during OAuth, manual UA merge/readback, failure preservation, stage diagnostics, settings reload");
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));

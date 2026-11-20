@@ -126,33 +126,51 @@ export async function syncCliUserAgent(config, userAgent, { root, fetchImpl = fe
 
 export async function runCliOAuth(options) {
   const profile = await cliProfile(options.root, options.profileEmail || options.expectedEmail);
-  return withCliLock(profile.root, `profile:${profile.key}`, async () => {
-    const session = await (options.openSession || openCliSession)(profile, options);
+  const progress = message => options.onProgress?.(`[env=${profile.runId}] ${message}`);
+  async function step(stage, action) {
+    const start = Date.now();
+    progress(`stage=${stage} start`);
     try {
-      const started = await session.request("account/login/start", { type: "chatgpt", codexStreamlinedLogin: true });
+      const value = await action();
+      progress(`stage=${stage} ok duration_ms=${Date.now() - start}`);
+      return value;
+    } catch (error) {
+      progress(`stage=${stage} failed duration_ms=${Date.now() - start}`);
+      throw error;
+    }
+  }
+  return withCliLock(profile.root, `profile:${profile.key}`, async () => {
+    const session = await step("environment", () => (options.openSession || openCliSession)(profile, { ...options, onProgress: progress }));
+    let failure;
+    try {
+      const started = await step("login_start", () => session.request("account/login/start", { type: "chatgpt", codexStreamlinedLogin: true }));
       if (started?.type !== "chatgpt" || !started.loginId) throw fail("CLI 未返回浏览器授权会话");
       const authorization = validateCliAuthUrl(started.authUrl, options.authBase);
       const clientId = authorization.clientId;
-      options.onProgress?.("CLI 已生成链接，正在通过当前账号的 Web 会话授权");
-      const completed = await options.authorize(authorization.authUrl, { provider: "cli", ...authorization });
-      await session.deliverCallback(validateCliCallback(completed.callbackUrl, authorization));
-      await session.waitForLogin(started.loginId);
+      progress("CLI 已生成链接，正在通过当前账号的 Web 会话授权");
+      const completed = await step("web_authorization", () => options.authorize(authorization.authUrl, { provider: "cli", ...authorization }));
+      await step("callback", () => session.deliverCallback(validateCliCallback(completed.callbackUrl, authorization)));
+      await step("login_completed", () => session.waitForLogin(started.loginId));
       let converted;
       try {
-        converted = cliAuthToSub2api(await session.readAuth(), { ...options, clientId,
-          userAgent: session.userAgent, environmentId: profile.runId });
+        converted = await step("auth_validation", async () => cliAuthToSub2api(await session.readAuth(), { ...options, clientId,
+          userAgent: session.userAgent, environmentId: profile.runId }));
       } catch (error) {
         // A valid login to the wrong browser account must not remain in this
         // account's temporary CLI home. Existing Helper exports stay intact.
-        await session.discardAuth();
+        await step("discard_auth", () => session.discardAuth()).catch(() => {});
         throw error;
       }
       if (options.exportPath) {
-        await writePrivateJsonAtomic(options.exportPath, converted.data);
+        await step("export", () => writePrivateJsonAtomic(options.exportPath, converted.data));
         converted.persistedPath = path.resolve(options.exportPath);
       }
-      options.onProgress?.("CLI 凭据已校验；网关 UA 保持不变，可在任务设置中手动同步");
+      progress("CLI 凭据已校验；网关 UA 保持不变，可在任务设置中手动同步");
       return converted;
-    } finally { await session.close(); }
+    } catch (error) { failure = error; throw error; }
+    finally {
+      try { await step("cleanup", () => session.close()); }
+      catch (error) { if (!failure) throw error; /* Both failed stages were logged; preserve the original cause. */ }
+    }
   });
 }

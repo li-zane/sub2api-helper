@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
+import { CLI_CALLBACK_SCRIPT } from "./codex-cli-callback.mjs";
 
 export const CODEX_CLI_VERSION = "0.165.0";
 export const CODEX_CLI_IMAGE = `sub2api-helper/codex-cli:${CODEX_CLI_VERSION}`;
@@ -111,6 +112,26 @@ function docker(args, { input, env, timeout = 30_000 } = {}) {
   });
 }
 
+export async function deliverCliCallbackToContainer(id, callbackUrl, { env, onProgress } = {}) {
+  const raw = await docker(["exec", "--interactive", id, "node", "--input-type=module", "-e", CLI_CALLBACK_SCRIPT],
+    { input: callbackUrl, env, timeout: 100_000 });
+  let result;
+  try { result = JSON.parse(raw); } catch { throw fail("CLI 回调桥接响应格式错误"); }
+  const callbackStatus = Number.isInteger(result?.callbackStatus) ? result.callbackStatus : null;
+  const successStatus = Number.isInteger(result?.successStatus) ? result.successStatus : null;
+  onProgress?.(`本地回调 HTTP ${callbackStatus ?? "未返回"}；/success HTTP ${successStatus ?? "未访问"}`);
+  if (result?.ok !== true) {
+    const stage = result?.stage === "success" ? "/success" : "/auth/callback";
+    const codes = ["INVALID_DESTINATION", "MISSING_LOCATION", "HTTP_STATUS", "TIMEOUT", "CONNECTION"];
+    const code = codes.includes(result?.code) ? result.code : "BRIDGE_RESPONSE";
+    throw fail(`CLI 回调收尾失败：${stage} ${code}`);
+  }
+  if (callbackStatus !== 200 && !(result.followedSuccess === true && [302, 303].includes(callbackStatus) && successStatus === 200)) {
+    throw fail("CLI 回调收尾结果不完整");
+  }
+  return result;
+}
+
 export async function openCliSession(profile, options = {}) {
   const env = dockerEnv(options.proxyUrl);
   // Save the returned ID before attaching. Failed creates must never remove
@@ -163,8 +184,7 @@ export async function openCliSession(profile, options = {}) {
     async deliverCallback(callbackUrl) {
       // The caller validates state/origin first; the bridge also limits the
       // destination. Callback codes travel on stdin, never in process arguments.
-      const script = `let s='';for await(const c of process.stdin)s+=c;const u=new URL(s);if(u.protocol!=='http:'||!['localhost','127.0.0.1','[::1]'].includes(u.hostname)||u.port!=='1455'||u.pathname!=='/auth/callback'||u.username||u.password)process.exit(2);u.hostname='127.0.0.1';const r=await fetch(u,{redirect:'manual',signal:AbortSignal.timeout(90000)});if(r.status!==200&&r.status!==302&&r.status!==303)process.exit(3);`;
-      await docker(["exec", "--interactive", id, "node", "--input-type=module", "-e", script], { input: callbackUrl, timeout: 100_000 });
+      return deliverCliCallbackToContainer(id, callbackUrl, { env, onProgress: options.onProgress });
     },
     async waitForLogin(loginId) {
       const deadline = Date.now() + 120_000;
