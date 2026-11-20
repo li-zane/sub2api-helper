@@ -56,7 +56,7 @@ import { SmsCancellations } from "./sms-cancellations.mjs";
 import { createProjectUpdates } from "./project-updates.mjs";
 import { OperationsBook, beijingDay, cents } from "./operations-book.mjs";
 import { sampleLedger } from "./operations-finance.mjs";
-import { createChatCatalog, readUpstreamManifest } from "./chat-upstream-catalog.mjs";
+import { createChatCatalog } from "./chat-upstream-catalog.mjs";
 import { AccountTestChat } from "./account-test-chat.mjs";
 import { releaseDispatchPaused, drainRequestKind } from "./release-drain.mjs";
 import { legacyCodexEmailGate } from "./codex-email-gate.mjs";
@@ -502,6 +502,7 @@ export function createConsoleApp(options = {}) {
        || current.status!=="active" || sub2ApiAccountSchedulable(current)!==true || accountRateLimit(current).limited
        || usageRestricted(normalizeSub2ApiUsage(current)) || sessionResetAutomationPaused(job.email) || overloadCooldown.isPaused(job.email))
       throw httpError(409,"号池账号已变更、暂停、限流或不可用");
+    if (c !== sub2ApiSettingsConfig) throw httpError(409,"号池配置已变更，请重新打开对话");
     return {id,account:job.email.toLowerCase(),pool:poolKey(c),c};
   }
   async function readChatRecord(t) {
@@ -510,15 +511,8 @@ export function createConsoleApp(options = {}) {
       || record.status!=="active" || sub2ApiAccountSchedulable(record)!==true || accountRateLimit(record).limited || usageRestricted(normalizeSub2ApiUsage(record)) || accountAutomationBlocked(t.account) || overloadCooldown.isPaused(t.account) || sessionResetAutomationPaused(t.account) || t.c!==sub2ApiSettingsConfig)throw Error("账号状态已变更");
     return record;
   }
-  const chatModels = createChatCatalog({
-    identity:monitorBackendIdentity, getAccount:readChatRecord,
-    readManifest: options.accountChatManifest || (async (target,record)=>{
-      const parent = record.parent_account_id == null ? record : await readFingerprintAccount(target.c,record.parent_account_id);
-      if(parent.type!=="oauth" || parent.platform!=="openai")throw httpError(409,"账号授权来源不是 OpenAI OAuth");
-      return readUpstreamManifest(target,record,{credentials:parent.credentials});
-    }),
-  });
-  const chatStore=new AccountTestChat(book,{catalog:chatModels,send:async(t,model,prompt,signal,messages)=>{
+  const chatModels = createChatCatalog({ identity: monitorBackendIdentity, request: requestSub2Api });
+  const chatStore=new AccountTestChat(book,{catalog:async (target)=>(await chatModels(target)).models,send:async(t,model,prompt,signal,messages)=>{
     const record=await readChatRecord(t);
     return (options.accountChatSampler || fingerprintSampler)(t.c,record,model,prompt,signal,{messages,upstreamModel:true});
   }});
@@ -740,8 +734,13 @@ export function createConsoleApp(options = {}) {
       if(req.method==="GET" && !chatAction[2]){sendJson(res,200,{turns:chatStore.list(account)});return;}
       const body=req.method==="POST"?await readJson(req):{};
       const target=await chatTarget(job,body.remoteId || requestUrl.searchParams.get("remoteId"));
-      if(req.method==="GET"){sendJson(res,200,{id:target.id,models:await chatModels(target,{fresh:requestUrl.searchParams.get("refresh")==="1"}),source:"upstream"});return;}
-      if(chatAction[2])throw httpError(405,"Method not allowed");
+      if(chatAction[2]){
+        // The private GET route remains compatible with earlier console tabs.
+        const fresh = req.method === "POST" || requestUrl.searchParams.get("refresh") === "1";
+        const catalog = await chatModels(target, {fresh});
+        sendJson(res, 200, {id:target.id, source:"sub2api-sync-upstream", ...catalog});
+        return;
+      }
       sendJson(res,202,await chatStore.start(account,target,body));return;
     }
     if (await handleReadRoute(req, res, requestUrl)) return;

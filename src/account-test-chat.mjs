@@ -1,22 +1,4 @@
 const problem = (status, message) => Object.assign(Error(message), { status });
-export const poolModels = (payload) => {
-  const data = payload?.data ?? payload;
-  const rows = Array.isArray(data) ? data : (data?.models ?? data?.data ?? []);
-  return [
-    ...new Set(
-      (Array.isArray(rows) ? rows : [])
-        .map((v) => (typeof v === "string" ? v : v?.id))
-        .filter(
-          (v) =>
-            typeof v === "string" &&
-            v.length > 0 &&
-            v.length <= 200 &&
-            !/image|audio|video|embedding|tts|whisper|moderation/i.test(v),
-        ),
-    ),
-  ];
-};
-
 // No polling callbacks re-submit a turn. Only an explicit operator POST starts
 // one request, scoped to one pool account, with no automatic fallback or retry.
 export class AccountTestChat {

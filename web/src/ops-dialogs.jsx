@@ -197,6 +197,7 @@ export function ChatDialog({ job, request, onClose }) {
     [turns, setTurns] = useState([]),
     [err, setErr] = useState(""),
     [catalogError, setCatErr] = useState(""),
+    [catalogWarning, setCatalogWarning] = useState(false),
     [catalogRevision, setCatalogRevision] = useState(0),
     [loadingModels, setLoadingModels] = useState(false),
     [posting, setPosting] = useState(false),
@@ -217,13 +218,20 @@ export function ChatDialog({ job, request, onClose }) {
     setModels([]);
     setModel("");
     setCatErr("");
+    setCatalogWarning(false);
     setLoadingModels(Boolean(remote));
     if (remote)
-      request(endpoint + "/models?remoteId=" + encodeURIComponent(remote) + "&refresh=1")
+      request(endpoint + "/models", {
+        method: "POST",
+        body: JSON.stringify({ remoteId: remote }),
+      })
         .then((r) => {
           if (!gone) {
             setModels(r.models);
-            setModel(r.models[0] || "");
+            setCatalogWarning(r.hasWarnings === true);
+            // The native list can start with a review-only model. Let the
+            // operator choose rather than selecting it for a conversation.
+            setModel(r.models.length === 1 ? r.models[0] : "");
           }
         })
         .catch((e) => {
@@ -326,7 +334,7 @@ export function ChatDialog({ job, request, onClose }) {
               disabled={!models.length}
               onChange={(e) => setModel(e.target.value)}
             >
-              {!models.length && <option value="">{loadingModels?"正在读取上游…":"暂无可选模型"}</option>}
+              {model === "" && <option value="">{loadingModels ? "正在读取上游…" : models.length ? "请选择模型" : "暂无可选模型"}</option>}
               {models.map((m) => (
                 <option key={m}>{m}</option>
               ))}
@@ -336,8 +344,9 @@ export function ChatDialog({ job, request, onClose }) {
         <small>
           使用选中账号的检测通道直连上游，不经号池计费网关。关闭窗口不影响后台回答。
         </small>
-        <div className="upstream-catalog-tools"><small>目录来源：所选 OAuth 账号的上游，不受号池已添加模型限制。</small>
+        <div className="upstream-catalog-tools"><small>目录来自 Sub2API 对所选号池账号执行的「获取上游模型」。</small>
         <button type="button" className="secondary-button" disabled={loadingModels||!remote} onClick={()=>setCatalogRevision(v=>v+1)}><RefreshCw size={13}/>刷新上游模型</button></div>
+        {catalogWarning && <p role="status">Sub2API 返回了目录提示；详情请查看该账号的「获取上游模型」结果。</p>}
         {catalogError && <p role="alert">{catalogError}</p>}
         <div className="ops-transcript" ref={transcript} aria-label="对话记录">
           {!turns.length ? (

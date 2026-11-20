@@ -5,7 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { OperationsBook, beijingDay } from "../src/operations-book.mjs";
 import { sampleLedger } from "../src/operations-finance.mjs";
-import { AccountTestChat, poolModels } from "../src/account-test-chat.mjs";
+import { AccountTestChat } from "../src/account-test-chat.mjs";
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "helper-ops-"));
 let now = Date.parse("2026-01-03T11:00:00Z");
 const file = path.join(dir, "ops.sqlite");
@@ -129,8 +129,7 @@ try {
   const gate = new Promise((r) => (finish = r)),
     target = { pool: ns, id: "7" };
   const chat = new AccountTestChat(b, {
-    catalog: async () =>
-      poolModels({ data: [{ id: "chat-test" }, { id: "image-test" }] }),
+    catalog: async () => ["chat-test"],
     send: async (t, m, q, signal, msgs) => {
       assert.equal(t.id, "7");
       captured = msgs;

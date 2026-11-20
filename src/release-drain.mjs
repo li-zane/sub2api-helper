@@ -17,6 +17,9 @@ export function releaseDispatchPaused({ marker = releaseMarker, read = readFileS
 }
 
 export function drainRequestKind(method, pathname) {
+  // Native model discovery may save capability metadata in the gateway.
+  // Count legacy read-through GETs just like explicit POST refreshes.
+  if (method === "GET" && /^\/api\/jobs\/[a-f0-9-]+\/chat\/models$/.test(pathname)) return "new";
   if (["GET", "HEAD", "OPTIONS"].includes(method) || method === "POST" && pathname === "/api/jobs/query") return "read";
   if (method === "POST" && /^\/api\/jobs\/[a-f0-9-]+\/(input|cancel)$/.test(pathname)) return "finish";
   return "new";
