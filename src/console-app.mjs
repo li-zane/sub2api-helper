@@ -41,7 +41,7 @@ import {
 import { createSmsProvider, publicSmsProviderDefinitions, readSmsProviderBalance } from "./sms-providers.mjs";
 import { loadSmsSettings, saveSmsSettings } from "./sms-settings.mjs";
 import { oauthErrorMessage } from "./oauth-errors.mjs";
-import { hasJobTotpKey, isReauthorizationComplete, isTotpRotationComplete } from "./task-auto-state.mjs";
+import { hasJobTotpKey, isReauthorizationComplete, isTotpRotationComplete, postAuthorizationRecoveryActions } from "./task-auto-state.mjs";
 import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-transport.mjs";
 import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
@@ -9295,6 +9295,11 @@ export function createConsoleApp(options = {}) {
       appendJobLog(job, `[pool-refresh] ${action === "cooldown" ? "冷却后重新授权" : action === "switch-proxy" ? "切换代理后重新授权" : "重新授权"}已完成，号池凭据已同步。\n`);
       touch(job);
       await saveJobMetadata(job);
+      const recovered = await preparePostAuthorizationRecovery(job, { poolSynchronized: true }).catch(() => {
+        appendJobLog(job, "[auto] 号池同步已成功，后置任务恢复保存失败，等待重启后核对恢复。\n");
+        return false;
+      });
+      if (recovered) void runConfiguredTaskActions(job);
       return true;
     } catch (error) {
       recordPoolRefreshFailure(job, "sync", error);
@@ -10636,6 +10641,54 @@ export function createConsoleApp(options = {}) {
     return Boolean(job.totpKnownEnabled || hasJobTotpKey(job));
   }
 
+  async function preparePostAuthorizationRecovery(job, { poolSynchronized = false } = {}) {
+    if (shuttingDown || job.deleted || inspectionPaused(job.email) || accountAutomationBlocked(job.email)
+      || sessionResetAutomationPaused(job.email)) return false;
+    const actions = postAuthorizationRecoveryActions(job, taskAutoActionsForPlanType(getJobPlanType(job)));
+    if (!actions.length) return false;
+    if (!poolSynchronized) {
+      // On restart, an old successful export alone does not prove that the pool
+      // received it. Compare the saved credential with the actual pool rows.
+      const config = sub2ApiSettingsConfig;
+      if (!config?.baseUrl || !config?.adminApiKey) return false;
+      const state = await loadSub2ApiAccountStatus({ forceRefresh: true });
+      const status = getSub2ApiAccountStatusForJob(job, state);
+      if (!status.inPool || !status.accountIds.length) return false;
+      const saved = await privateJsonIfPresent(job.outputPath);
+      const local = saved?.accounts?.find(account => sub2ApiAccountEmail(account) === job.email.toLowerCase());
+      const token = local?.credentials?.refresh_token;
+      if (typeof token !== "string" || !token) return false;
+      for (const id of status.accountIds) {
+        const remote = await fingerprintAccountReader(config, id);
+        if (sub2ApiAccountEmail(remote) !== job.email.toLowerCase() || remote.credentials?.refresh_token !== token) return false;
+      }
+      if (config !== sub2ApiSettingsConfig) return false;
+    }
+    // The caller owns the email lock. Recheck mutable plan/pause settings after
+    // the read-only pool requests, then persist before admitting any work.
+    if (shuttingDown || inspectionPaused(job.email) || accountAutomationBlocked(job.email)) return false;
+    const remaining = postAuthorizationRecoveryActions(job, taskAutoActionsForPlanType(getJobPlanType(job)));
+    if (!remaining.length) return false;
+    appendJobLog(job, `[auto] 授权与号池凭据已确认，恢复未完成的后置规则：${formatTaskAutoActions(remaining)}。原失败：${job.autoTaskError || "授权流程中断"}；已完成的安全与授权步骤不重复执行。\n`);
+    job.autoTaskActions = remaining;
+    job.autoTaskIndex = 0;
+    job.autoTaskStatus = "pending";
+    job.autoTaskError = null;
+    job.autoTaskEligible = false;
+    if (remaining.includes(IMPORT_FINGERPRINT_ACTION)) job.autoTaskFingerprintRunId ||= crypto.randomUUID();
+    touch(job);
+    await saveJobMetadata(job);
+    return true;
+  }
+
+  async function restorePostAuthorizationActions() {
+    for (const job of jobs.values()) {
+      if (!postAuthorizationRecoveryActions(job, taskAutoActionsForPlanType(getJobPlanType(job))).length) continue;
+      try { await withEmailJobLock(job.email, () => preparePostAuthorizationRecovery(job)); }
+      catch { appendJobLog(job, "[auto] 后置规则恢复尚未确认号池凭据，保留原失败状态。\n"); }
+    }
+  }
+
   async function queueConfiguredTaskActions(job) {
     if ((!job.autoTaskEligible && !["initial_authorization", "initial_web_login"].includes(job.lastOperationType)) || (!job.resultSaved && !job.webSessionAvailable) || job.autoTaskStatus !== "idle") return;
     const actions = taskAutoActionsForPlanType(getJobPlanType(job));
@@ -11481,6 +11534,8 @@ export function createConsoleApp(options = {}) {
       }
       await restoreAccountSessionResets();
       if (shuttingDown) return;
+      await restorePostAuthorizationActions();
+      if (shuttingDown) return;
       for (const job of jobs.values()) {
         if (job.poolRefreshAction) {
           schedulePoolRefresh(job, job.poolRefreshAction === "cooldown" && job.poolRefreshDueAt
@@ -11489,7 +11544,6 @@ export function createConsoleApp(options = {}) {
         }
       }
       smsCancellations.start();
-      resumePendingTaskAutoActions();
       queueSchedulingPaused = false;
       scheduleQueuedJobs();
       requestSub2ApiStatusRefresh();
@@ -11497,6 +11551,9 @@ export function createConsoleApp(options = {}) {
       overloadCooldown.start();
       modelFingerprint.setTickMs(consoleSettings.current.monitoringSettings.fingerprintScanIntervalSeconds * 1000);
       modelFingerprint.start();
+      // Pending import checks suppress scheduled scans; start their runner only
+      // after the fingerprint service can accept the recovered one-shot check.
+      resumePendingTaskAutoActions();
       webSessionMonitor.setTickMs(consoleSettings.current.monitoringSettings.webSessionScanIntervalSeconds * 1000);
       webSessionMonitor.start();
       scheduleAccountDataSync();

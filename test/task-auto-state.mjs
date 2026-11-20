@@ -7,6 +7,7 @@ import {
   hasJobTotpKey,
   isReauthorizationComplete,
   isTotpRotationComplete,
+  postAuthorizationRecoveryActions,
 } from "../src/task-auto-state.mjs";
 
 const internalCompletedRotation = {
@@ -96,3 +97,17 @@ for (const [actions, index, expected] of [
   if (actions.slice(index).includes("upload") && actions.includes(rotate)) assert(logs.some(text => text.includes("跳过重复")));
 }
 console.log("TASK_UPLOAD_EXCLUSIVITY_PASS both toggle directions; normalize legacy configuration; skip duplicate uploads without changing resume indexes; preserve monitor tasks");
+
+const afterAuth = { status: "completed", resultSaved: true, lastOperationType: "reauthorize", autoTaskStatus: "failed", autoTaskIndex: 0,
+  autoTaskActions: [rotate, detection, cooldown, "check-model-fingerprint"] };
+const configured = [...afterAuth.autoTaskActions];
+assert.deepEqual(postAuthorizationRecoveryActions(afterAuth, configured), [detection, cooldown, "check-model-fingerprint"]);
+assert.deepEqual(postAuthorizationRecoveryActions(afterAuth, [detection]), [detection], "removed plan rules are not restored");
+assert.deepEqual(afterAuth.autoTaskActions, configured, "planning must not mutate the saved failed queue");
+for (const patch of [{ status: "failed" }, { resultSaved: false }, { autoTaskStatus: "running" }, { autoTaskStatus: "completed" },
+  { lastOperationType: "replace_2fa" }, { poolRefreshAction: "reauthorize" }, { poolRefreshError: "unsynced" },
+  { totpRotationIncomplete: true }, { totpRotationRemoteDisabled: true }, { autoTaskIndex: 1 }, { autoTaskIndex: -1 }]) {
+  assert.deepEqual(postAuthorizationRecoveryActions({ ...afterAuth, ...patch }, configured), [], `unexpected recovery for ${JSON.stringify(patch)}`);
+}
+assert.deepEqual(postAuthorizationRecoveryActions({ ...afterAuth, autoTaskActions: ["authorize-codex", "upload", detection] }, configured), [detection]);
+console.log("POST_AUTH_PLAN_PASS unfinished follow-up rules only; current plan respected; pending sync, active tasks and incomplete security changes excluded");
