@@ -13,6 +13,7 @@ import {
 } from "../src/chat-upstream-catalog.mjs";
 import { OperationsBook } from "../src/operations-book.mjs";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -94,57 +95,96 @@ const target = { id: "7", account: "fixture", c: "pool" },
 let requests = 0,
   clock = 1,
   offline = false;
-const manifest = async (t, account) =>
-  readUpstreamManifest(t, account, {
-    transportFactory: () => ({
-      async configure(proxy) {
-        assert.equal(proxy, data.fingerprintProxyUrl);
-      },
-      async request(method, url, opts) {
-        requests++;
-        assert.equal(method, "GET");
-        assert.equal(new URL(url).hostname, "chatgpt.com");
-        assert.equal(opts.redirect, "manual");
-        assert.equal(opts.headers["chatgpt-account-id"], "test-id");
-        return {
-          ok: !offline,
-          status: offline ? 403 : 200,
-          text: async () =>
-            JSON.stringify({
-              models: [
-                { slug: "only-on-upstream" },
-                { slug: "hidden", visibility: "hide" },
-                { slug: "image-test" },
-              ],
-            }),
-        };
-      },
-      async close() {},
-    }),
+// Exercise a real request/response boundary with fabricated credentials. Only
+// the connection destination changes in the test; the app always uses HTTPS
+// to its fixed origin. Checking a transport-options mock missed a stripped bearer.
+const wire = [];
+let status = 200;
+const fixture = http.createServer((req, res) => {
+  wire.push({ method: req.method, path: req.url, headers: req.headers });
+  res.writeHead(offline ? 403 : status, {
+    "content-type": "application/json",
+    ...(status === 302 ? { location: "/not-a-catalog" } : {}),
   });
-const catalog = createChatCatalog({
-  getAccount: async () => data,
-  readManifest: manifest,
-  identity: (c) => c,
-  now: () => clock,
-  ttl: 100,
+  res.end(
+    JSON.stringify({
+      models: [
+        { slug: "only-on-upstream" },
+        { slug: "hidden", visibility: "hide" },
+        { slug: "image-test" },
+      ],
+    }),
+  );
 });
-assert.deepEqual(await Promise.all([catalog(target), catalog(target)]), [
-  ["only-on-upstream"],
-  ["only-on-upstream"],
-]);
-assert.equal(requests, 1);
-await catalog(target);
-assert.equal(requests, 1);
-await catalog({ ...target, id: "8" });
-assert.equal(requests, 2);
-clock += 200;
-await catalog(target);
-assert.equal(requests, 3);
-offline = true;
-await assert.rejects(catalog(target, { fresh: true }), /HTTP 403/);
-await assert.rejects(catalog(target), /HTTP 403/);
-assert.throws(() => upstreamTextModelIds({ foo: "no list" }));
+await new Promise((resolve, reject) =>
+  fixture.once("error", reject).listen(0, "127.0.0.1", resolve),
+);
+const local = "http://127.0.0.1:" + fixture.address().port;
+const get = (url, options, cb) => {
+  const fixed = new URL(url);
+  assert.equal(fixed.origin, "https://chatgpt.com");
+  assert.equal(fixed.pathname, "/backend-api/codex/models");
+  assert.equal(options.rejectUnauthorized, true);
+  assert.equal(options.agent.proxy.hostname, "unit.invalid");
+  requests++;
+  return http.get(
+    local + fixed.pathname + fixed.search,
+    { headers: options.headers, signal: options.signal, agent: false },
+    cb,
+  );
+};
+const manifest = (t, account) => readUpstreamManifest(t, account, { get });
+try {
+  const catalog = createChatCatalog({
+    getAccount: async () => data,
+    readManifest: manifest,
+    identity: (c) => c,
+    now: () => clock,
+    ttl: 100,
+  });
+  assert.deepEqual(await Promise.all([catalog(target), catalog(target)]), [
+    ["only-on-upstream"],
+    ["only-on-upstream"],
+  ]);
+  assert.equal(requests, 1);
+  assert.equal(wire[0].method, "GET");
+  assert.equal(wire[0].headers.authorization, "Bearer test");
+  assert.equal(wire[0].headers["chatgpt-account-id"], "test-id");
+  assert.equal(wire[0].headers.cookie, undefined);
+  await catalog(target);
+  assert.equal(requests, 1);
+  await catalog({ ...target, id: "8" });
+  assert.equal(requests, 2);
+  clock += 200;
+  await catalog(target);
+  assert.equal(requests, 3);
+  offline = true;
+  await assert.rejects(catalog(target, { fresh: true }), /HTTP 403/);
+  await assert.rejects(catalog(target), /HTTP 403/);
+  assert.throws(() => upstreamTextModelIds({ foo: "no list" }));
+  offline = false;
+  status = 302;
+  const before = wire.length;
+  await assert.rejects(catalog(target, { fresh: true }), /HTTP 302/);
+  assert.equal(wire.length, before + 1);
+  assert(wire.every((r) => r.path.startsWith("/backend-api/codex/models?")));
+  await assert.rejects(manifest(target, { ...data, fingerprintProxyUrl: "" }), {
+    status: 409,
+  });
+  await assert.rejects(
+    manifest(target, {
+      ...data,
+      fingerprintProxyUrl: "unknown://unit.invalid",
+    }),
+    { status: 409 },
+  );
+  assert.equal(wire.length, before + 1);
+} finally {
+  await new Promise((resolve) => fixture.close(resolve));
+}
+console.log(
+  "CATALOG_WIRE_PASS bearer and account header received, fixed GET, no redirect, no proxy fallback",
+);
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "helper-trend-")),
   b = new OperationsBook(path.join(dir, "book.db"), () =>
     Date.parse("2026-01-04T00:00:00Z"),

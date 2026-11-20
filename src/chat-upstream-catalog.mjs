@@ -1,4 +1,6 @@
-import { TlsFingerprintTransport } from "./tls-transport.mjs";
+import https from "node:https";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 
 const ENDPOINT =
   "https://chatgpt.com/backend-api/codex/models?client_version=0.144.0";
@@ -54,19 +56,36 @@ export function createChatCatalog({
   };
 }
 
+// The manifest is a protected resource, not an OAuth token exchange. Use
+// ordinary verified HTTPS, no browser session, redirects, retries or cookies.
+const TIMEOUT_MS = 20_000;
+const MAX_BYTES = 4 * 1024 * 1024;
+
+function agentForBoundProxy(raw) {
+  if (!raw) return false;
+  try {
+    const url = new URL(raw);
+    if (["http:", "https:"].includes(url.protocol))
+      return new HttpsProxyAgent(url, {
+        timeout: TIMEOUT_MS,
+        rejectUnauthorized: true,
+      });
+    if (
+      ["socks:", "socks4:", "socks4a:", "socks5:", "socks5h:"].includes(
+        url.protocol,
+      )
+    )
+      return new SocksProxyAgent(url, { timeout: TIMEOUT_MS });
+  } catch {
+    /* never expose a proxy URL or credentials */
+  }
+  throw problem(409, "账号绑定代理配置无效，未改走直连");
+}
+
 export async function readUpstreamManifest(
   target,
   account,
-  {
-    credentials = account.credentials,
-    transportFactory = () =>
-      new TlsFingerprintTransport({
-        profile: "chrome146",
-        rotateProxySessions: false,
-        sameProxyRiskRetries: 0,
-        cloudflareSolver: false,
-      }),
-  } = {},
+  { credentials = account.credentials, get = https.get } = {},
 ) {
   if (
     account.platform !== "openai" ||
@@ -74,39 +93,54 @@ export async function readUpstreamManifest(
     !credentials?.access_token
   )
     throw problem(409, "所选账号缺少可用的 OAuth 凭据");
-  const proxy =
-    Number(account.proxy_id) > 0 ? account.fingerprintProxyUrl : null;
-  if (Number(account.proxy_id) > 0 && !proxy)
+  const bound = Number(account.proxy_id) > 0;
+  if (bound && !account.fingerprintProxyUrl)
     throw problem(409, "账号绑定代理不可用，未改走直连");
-  const transport = transportFactory();
+  const agent = agentForBoundProxy(bound ? account.fingerprintProxyUrl : null);
+  const headers = {
+    accept: "application/json",
+    authorization: "Bearer " + credentials.access_token,
+    originator: "codex_cli_rs",
+    version: "0.144.0",
+    "user-agent": "sub2api-helper (model catalog)",
+  };
+  const id = credentials.chatgpt_account_id || credentials.account_id;
+  if (id) headers["chatgpt-account-id"] = String(id);
+  let response;
   try {
-    if (proxy && transport.enabled === false)
-      throw problem(409, "模型目录查询需要使用账号绑定的代理");
-    await transport.configure(proxy, { force: true });
-    const headers = {
-      accept: "application/json",
-      authorization: "Bearer " + credentials.access_token,
-      originator: "codex_cli_rs",
-      version: "0.144.0",
-    };
-    const id = credentials.chatgpt_account_id || credentials.account_id;
-    if (id) headers["chatgpt-account-id"] = String(id);
-    const response = await transport.request("GET", ENDPOINT, {
-      headers,
-      timeoutMs: 20000,
-      redirect: "manual",
-      requestKind: "oauth",
+    response = await new Promise((resolve, reject) => {
+      get(
+        ENDPOINT,
+        {
+          headers,
+          agent,
+          rejectUnauthorized: true,
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        },
+        resolve,
+      ).once("error", reject);
     });
-    if (!response.ok)
+    // https.get does not follow Location; a 3xx never forwards this account's bearer.
+    if (response.statusCode !== 200)
       throw problem(
         502,
-        "上游模型目录返回 HTTP " + response.status + "；未使用号池配置列表替代",
+        "上游模型目录返回 HTTP " +
+          response.statusCode +
+          "；未使用号池配置列表替代",
       );
-    return JSON.parse(await response.text());
+    let length = 0;
+    const chunks = [];
+    for await (const chunk of response) {
+      length += chunk.length;
+      if (length > MAX_BYTES) throw problem(502, "上游模型目录响应过大");
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch (e) {
-    if (e?.status && [409, 502].includes(e.status)) throw e;
+    if (e?.status === 502) throw e;
     throw problem(502, "未能读取此账号的上游模型目录，请稍后重试");
   } finally {
-    await transport.close();
+    response?.destroy();
+    if (agent) agent.destroy();
   }
 }
