@@ -73,26 +73,45 @@ function gatewayUrl(config) {
   return `${url.href.replace(/\/$/, "")}/api/v1/admin/settings`;
 }
 
-export async function syncCliUserAgent(config, userAgent, { root, fetchImpl = fetch } = {}) {
-  const url = gatewayUrl(config);
+export function validateCliUserAgent(userAgent) {
   if (typeof userAgent !== "string" || !/^codex_cli_rs\/\d+\.\d+\.\d+ [\x20-\x7e]+$/.test(userAgent) || userAgent.length > 512) throw fail("CLI 未返回有效的 User-Agent");
+  return userAgent;
+}
+
+async function requestGatewaySettings(config, method, body, fetchImpl) {
+  let response;
+  try { response = await fetchImpl(gatewayUrl(config), { method, headers: { "x-api-key": config.adminApiKey, "content-type": "application/json" },
+    ...(body ? { body: JSON.stringify(body) } : {}), redirect: "error", signal: AbortSignal.timeout(30_000) }); }
+  catch { throw fail("Sub2API UA 设置连接失败"); }
+  if (!response.ok) throw fail(`Sub2API UA 设置返回 HTTP ${response.status}`);
+  let payload;
+  try { payload = await response.json(); } catch { throw fail("Sub2API 设置响应格式错误"); }
+  if (payload?.code != null && ![0, 200].includes(payload.code)) throw fail("Sub2API 设置更新失败");
+  const data = payload?.data ?? payload;
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw fail("Sub2API 设置响应格式错误");
+  return data;
+}
+
+export async function readGatewayUserAgent(config, { fetchImpl = fetch } = {}) {
+  const settings = await requestGatewaySettings(config, "GET", undefined, fetchImpl);
+  const ua = settings.openai_codex_user_agent;
+  if (typeof ua !== "string" || ua.length > 512 || /[^\x20-\x7e]/.test(ua)) throw fail("该 Sub2API 版本未提供有效的 OpenAI Codex UA 设置");
+  return ua;
+}
+
+export async function syncCliUserAgent(config, userAgent, { root, fetchImpl = fetch, expectedPreviousUserAgent, assertCurrent = () => {} } = {}) {
+  const url = gatewayUrl(config);
+  validateCliUserAgent(userAgent);
   return withCliLock(root, `gateway:${url}`, async () => {
-    async function request(method, body) {
-      let response;
-      try { response = await fetchImpl(url, { method, headers: { "x-api-key": config.adminApiKey, "content-type": "application/json" },
-        ...(body ? { body: JSON.stringify(body) } : {}), redirect: "error", signal: AbortSignal.timeout(30_000) }); }
-      catch { throw fail("Sub2API UA 同步连接失败"); }
-      if (!response.ok) throw fail(`Sub2API UA 同步返回 HTTP ${response.status}`);
-      let payload;
-      try { payload = await response.json(); } catch { throw fail("Sub2API 设置响应格式错误"); }
-      if (payload?.code != null && ![0, 200].includes(payload.code)) throw fail("Sub2API 设置更新失败");
-      const data = payload?.data ?? payload;
-      if (!data || typeof data !== "object" || Array.isArray(data)) throw fail("Sub2API 设置响应格式错误");
-      return data;
-    }
+    const request = (method, body) => requestGatewaySettings(config, method, body, fetchImpl);
+    assertCurrent();
     const before = await request("GET");
+    assertCurrent();
     if (typeof before.openai_codex_user_agent !== "string") throw fail("该 Sub2API 版本未提供 OpenAI Codex UA 设置");
     if (before.openai_codex_user_agent === userAgent) return { changed: false, userAgent };
+    if (expectedPreviousUserAgent !== undefined && before.openai_codex_user_agent !== expectedPreviousUserAgent) {
+      throw Object.assign(fail("号池 UA 已变更，请重新读取后再同步"), { status: 409 });
+    }
     // PUT is a full settings save for several legacy fields. Carry forward the
     // GET projection exactly; never submit a UA-only body to this endpoint.
     await request("PUT", { ...before, openai_codex_user_agent: userAgent });
@@ -106,7 +125,6 @@ export async function syncCliUserAgent(config, userAgent, { root, fetchImpl = fe
 }
 
 export async function runCliOAuth(options) {
-  gatewayUrl(options.gateway); // Validate before starting a temporary environment.
   const profile = await cliProfile(options.root, options.profileEmail || options.expectedEmail);
   return withCliLock(profile.root, `profile:${profile.key}`, async () => {
     const session = await (options.openSession || openCliSession)(profile, options);
@@ -129,12 +147,11 @@ export async function runCliOAuth(options) {
         await session.discardAuth();
         throw error;
       }
-      await syncCliUserAgent(options.gateway, session.userAgent, { root: profile.root, fetchImpl: options.fetchImpl });
       if (options.exportPath) {
         await writePrivateJsonAtomic(options.exportPath, converted.data);
         converted.persistedPath = path.resolve(options.exportPath);
       }
-      options.onProgress?.("CLI 凭据已校验，Sub2API OpenAI Codex UA 已同步");
+      options.onProgress?.("CLI 凭据已校验；网关 UA 保持不变，可在任务设置中手动同步");
       return converted;
     } finally { await session.close(); }
   });

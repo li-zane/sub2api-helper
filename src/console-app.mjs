@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { createDirectPublicIpReader } from "./direct-public-ip.mjs";
 import { createStaticFrontend } from "./static-frontend.mjs";
 import { createCredentialStore } from "./credential-store.mjs";
+import { createCliUaSettings } from "./codex-cli-ua.mjs";
 import { AccountLoginEmails, normalizeLoginEmail } from "./account-login-email.mjs";
 import { readAccountWebSession, writeAccountWebSession, webSessionPathForJob, inspectAccountWebSession, publicWebCredentialSync } from "./account-web-session.mjs";
 import { appendTimestampedAccountLog, hydrateAccountLog, readAccountLog, recordCredentialHistory, readCredentialHistory, writePrivateJsonAtomic } from "./account-history.mjs";
@@ -188,6 +189,8 @@ export function createConsoleApp(options = {}) {
     options.outputRoot || process.env.ONBOARDING_OUTPUT_ROOT || path.join(WORKSPACE_ROOT, "tmp", "chatgpt-onboarding-console"),
   );
   const projectUpdates=options.projectUpdates || createProjectUpdates();
+  const cliUaSettings = createCliUaSettings({ root: path.join(OUTPUT_ROOT, "codex-cli-profiles"),
+    getConfig: () => sub2ApiSettingsConfig, ...(options.cliUaProbe ? { probe: options.cliUaProbe } : {}) });
   const book = new OperationsBook(path.join(OUTPUT_ROOT, "helper-operations.sqlite"));
   const poolKey = config => String(config?.baseUrl || "").trim().replace(/\/+$/, "");
   const inspectionPaused = email => book.paused(accountLoginEmails.key(email));
@@ -690,6 +693,14 @@ export function createConsoleApp(options = {}) {
   }
 
   async function dispatchApi(req, res, requestUrl) {
+    if (req.method === "POST" && ["/api/codex-cli/ua/read", "/api/codex-cli/ua/sync"].includes(requestUrl.pathname)) {
+      if (["cross-site", "same-site"].includes(req.headers["sec-fetch-site"])) throw httpError(403, "请从当前控制台管理 UA");
+      const body = await readJson(req);
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw httpError(400, "UA 请求格式错误");
+      sendJson(res, 200, requestUrl.pathname.endsWith("/sync") ? await cliUaSettings.sync(body)
+        : await cliUaSettings.read({ refreshCli: body.refreshCli === true }));
+      return;
+    }
     if (requestUrl.pathname === "/api/project-update" && req.method==="GET") {
       sendJson(res,200,await projectUpdates.snapshot());return;
     }

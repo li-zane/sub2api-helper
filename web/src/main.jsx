@@ -3020,6 +3020,7 @@ function App() {
         onConfirm={cooldownMinutes => runSelectedPoolAction("session-reset", { ids: currentSessionResetSelection, cooldownMinutes })} />}
       {taskDialogSettings && (
         <TaskSettingsDialog
+          request={proxyDialogRequest}
           settings={taskDialogSettings}
           availablePlanTypes={availablePlanTypes}
           planTypeMapping={planTypeMapping}

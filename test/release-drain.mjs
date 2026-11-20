@@ -18,3 +18,5 @@ assert.equal(probe("bad marker", null), true);
 assert.equal(drainRequestKind("POST", "/api/jobs/a-b-c/input"), "finish");
 assert.equal(drainRequestKind("POST", "/api/jobs/query"), "read");
 assert.equal(drainRequestKind("POST", "/api/jobs"), "new");
+assert.equal(drainRequestKind("POST", "/api/codex-cli/ua/read"), "new");
+assert.equal(drainRequestKind("POST", "/api/codex-cli/ua/sync"), "new");

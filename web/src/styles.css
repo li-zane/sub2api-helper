@@ -8498,6 +8498,20 @@ select option {
   line-height: 1.6;
 }
 
+.cli-ua-settings { min-width: 0; padding: 14px; border: 1px solid var(--line, #e5e7eb); border-radius: 12px; background: var(--surface-subtle); }
+.cli-ua-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.cli-ua-heading h4 { margin: 0; font-size: 13px; }
+.cli-ua-state { font-size: 12px; color: var(--muted); }
+.cli-ua-values { display: grid; gap: 10px; margin: 12px 0; }
+.cli-ua-values > div { min-width: 0; }
+.cli-ua-values dt { margin-bottom: 4px; font-size: 12px; font-weight: 600; }
+.cli-ua-values dd { margin: 0; }
+.cli-ua-values code { display: block; padding: 8px 10px; border-radius: 6px; background: var(--surface-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
+.cli-ua-error { margin: 8px 0; color: var(--danger, #b91c1c); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.cli-ua-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.cli-ua-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; }
+@media (max-width: 480px) { .cli-ua-actions button { flex: 1 1 100%; } }
+
 .task-settings-dialog .task-auth-mode-field {
   display: flex;
   align-items: center;

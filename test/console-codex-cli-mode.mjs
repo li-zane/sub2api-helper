@@ -8,9 +8,17 @@ import { createConsoleApp } from "../src/console-app.mjs";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "console-cli-mode-"));
 const wrapper = path.join(root, "worker.mjs"), trace = path.join(root, "trace.jsonl");
+const ua = "codex_cli_rs/0.165.0 (Alpine Linux 3.24.1; x86_64) unknown (codex_cli_rs; 0.165.0)";
+let probes = 0, uaPuts = 0;
+let gatewaySettings = { openai_codex_user_agent: "old-UA", site_name: "preserve" };
 const pool = http.createServer(async (req, res) => {
-  for await (const chunk of req) void chunk;
+  const chunks = []; for await (const chunk of req) chunks.push(chunk);
   res.setHeader("content-type", "application/json");
+  if (req.url === "/api/v1/admin/settings") {
+    assert.equal(req.headers["x-api-key"], "fixture-key");
+    if (req.method === "PUT") { uaPuts++; gatewaySettings = JSON.parse(Buffer.concat(chunks)); }
+    res.end(JSON.stringify({ code: 0, data: gatewaySettings })); return;
+  }
   res.end(JSON.stringify({ code: 0, data: req.url.startsWith("/api/v1/admin/accounts") ? { items: [], total: 0, pages: 1 } : [] }));
 });
 let app;
@@ -32,7 +40,7 @@ try {
   process.env.SUB2API_MONITOR_ENABLED = "0";
   await new Promise(resolve => pool.listen(0, "127.0.0.1", resolve));
   const poolBase = `http://127.0.0.1:${pool.address().port}`;
-  app = createConsoleApp({ host: "127.0.0.1", port: 0, production: true, outputRoot: path.join(root, "data") });
+  app = createConsoleApp({ host: "127.0.0.1", port: 0, production: true, outputRoot: path.join(root, "data"), cliUaProbe: async () => { probes++; return ua; } });
   const { urls: [base] } = await app.start();
   const bootstrap = await fetch(`${base}/api/bootstrap`).then(r => r.json());
   const headers = { "x-console-token": bootstrap.token, "content-type": "application/json" };
@@ -40,8 +48,24 @@ try {
     const response = await fetch(base + endpoint, { method: "POST", headers, body: JSON.stringify(body) });
     return { status: response.status, body: await response.json() };
   };
+  const uaRead = "/api/codex-cli/ua/read", uaSync = "/api/codex-cli/ua/sync";
+  assert.equal((await fetch(base + uaRead, { method: "POST", body: "{}" })).status, 403);
+  assert.equal(probes, 0);
+  assert.equal((await fetch(base + uaSync, { method: "POST", headers: { ...headers, "sec-fetch-site": "cross-site" }, body: "{}" })).status, 403);
+  const unconfigured = await post(uaRead, {});
+  assert.equal(unconfigured.body.gateway.configured, false); assert.equal(unconfigured.body.cli.userAgent, ua);
   assert.equal((await post("/api/task-settings", { codexAuthMode: "cli" })).status, 409);
   assert.equal((await post("/api/sub2api/settings", { config: { baseUrl: poolBase, adminApiKey: "fixture-key", groupIds: [] } })).status, 200);
+  const comparison = (await post(uaRead, {})).body;
+  assert.equal(comparison.matches, false); assert.equal(probes, 1); assert.equal(uaPuts, 0);
+  assert(!JSON.stringify(comparison).includes("fixture-key"));
+  const confirmation = { contextId: comparison.contextId, cliUserAgent: comparison.cli.userAgent, gatewayUserAgent: comparison.gateway.userAgent };
+  assert.equal((await post(uaSync, { ...confirmation, cliUserAgent: "browser-injected-UA" })).status, 409);
+  const synced = await post(uaSync, confirmation);
+  assert.equal(synced.status, 200); assert.equal(synced.body.matches, true); assert.equal(uaPuts, 1);
+  assert.equal(gatewaySettings.site_name, "preserve");
+  assert.equal((await post(uaSync, confirmation)).body.changed, false); assert.equal(uaPuts, 1);
+  await post(uaRead, { refreshCli: true }); assert.equal(probes, 2);
   assert.equal((await post("/api/task-settings", { codexAuthMode: "cli" })).status, 200);
   const created = await post("/api/jobs", { email: "routing@example.test" });
   assert.equal(created.status, 201);
@@ -57,7 +81,8 @@ try {
   assert(!JSON.stringify(job).includes("fixture-key"));
   const imported = JSON.parse(await fs.readFile(path.join(root, "data", job.id, "sub2api-import-oauth.json"), "utf8"));
   assert.equal(imported.accounts[0].extra.auth_provider, "codex_cli");
-  console.log("CONSOLE_CLI_MODE_PASS setting guard, worker mode, shared lock directory, account key, gateway config, completed export");
+  assert.equal(uaPuts, 1, "worker authorization never triggers a UA write");
+  console.log("CONSOLE_CLI_MODE_PASS authenticated UA comparison/manual sync, cross-site guard, cached probe, setting guard, worker mode, shared lock directory, account key, gateway config, completed export");
 } finally {
   await app?.stop(); pool.closeAllConnections();
   await new Promise(resolve => pool.close(resolve));

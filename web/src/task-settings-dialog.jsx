@@ -10,6 +10,7 @@ import { DEFAULT_LOGIN_TIMEOUT_MINUTES, normalizeLoginTimeoutMinutes, DEFAULT_SM
 import { trapModalTab } from "./accessible-dialog.jsx";
 import { HelpTip } from "./help-tip.jsx";
 import { CustomSelect } from "./custom-select.jsx";
+import { CodexCliUaSettings } from "./codex-cli-ua-settings.jsx";
 
 const DEFAULT_TASK_AUTO_ACTION_OPTIONS = [
   { value: "authorize-codex", label: "Codex 授权" },
@@ -26,7 +27,7 @@ const OVERLOAD_SETTINGS_FIELDS = TASK_SETTINGS_MONITOR_FIELDS.filter(field => fi
 const WEB_SESSION_SETTINGS_FIELDS = TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group === "WebSession 定时巡检");
 const TASK_SETTINGS_MONITOR_GROUPS = [...new Set(TASK_SETTINGS_MONITOR_FIELDS.filter(field => field.group !== "过载监控" && field.group !== "WebSession 定时巡检").map(field => field.group))];
 
-export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSave }) {
+export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMapping, returnFocusRef, onClose, onSave, request }) {
   const dialogRef = useRef(null);
   const initialSettings = useRef(settings);
   const [limit, setLimit] = useState(() => String(settings.maxActiveJobs));
@@ -42,6 +43,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
   const [codexAuthMode, setCodexAuthMode] = useState(() => settings.codexAuthMode || "local");
   const [autoRows, setAutoRows] = useState(() => taskAutoActionRows(settings.autoActions));
   const [saving, setSaving] = useState(false);
+  const [uaSyncing, setUaSyncing] = useState(false);
   const [error, setError] = useState("");
   const actionOptions = Array.isArray(settings.autoActionOptions) && settings.autoActionOptions.length
     ? settings.autoActionOptions
@@ -89,7 +91,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
 
   async function save(event) {
     event.preventDefault();
-    if (saving) return;
+    if (saving || uaSyncing) return;
     let validTimeZone, poolPriceMultiplier;
     try { validTimeZone = normalizeDisplayTimeZone(displayTimeZone); poolPriceMultiplier = normalizePoolPriceMultiplier(priceMultiplier); } catch (error) { setError(error.message); return; }
     const value = Number(limit);
@@ -161,10 +163,10 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
       aria-labelledby="task-settings-title"
       onCancel={(event) => {
         event.preventDefault();
-        if (!saving) onClose();
+        if (!saving && !uaSyncing) onClose();
       }}
       onClick={(event) => {
-        if (event.target !== event.currentTarget || saving) return;
+        if (event.target !== event.currentTarget || saving || uaSyncing) return;
         const rect = event.currentTarget.getBoundingClientRect();
         if (event.clientX < rect.left || event.clientX > rect.right
           || event.clientY < rect.top || event.clientY > rect.bottom) onClose();
@@ -179,7 +181,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
               任务设置保存到服务端，所有浏览器共用。服务重启后保留此设置。
             </HelpTip>
           </div>
-          <button type="button" className="icon-button" data-dialog-initial-focus onClick={onClose} disabled={saving} aria-label="关闭任务设置"><X size={18} /></button>
+          <button type="button" className="icon-button" data-dialog-initial-focus onClick={onClose} disabled={saving || uaSyncing} aria-label="关闭任务设置"><X size={18} /></button>
         </div>
         <div className="task-settings-body">
         <section className="task-auto-settings task-basic-section" aria-labelledby="task-basic-title">
@@ -261,7 +263,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
                   {codexAuthMode === "sub2api"
                     ? "使用已保存的 Sub2API 后端和管理员 Key，由号池生成授权链接、兑换和刷新令牌；toSub2 完成登录并保存凭据。需要先配置 Sub2API。"
                     : codexAuthMode === "cli"
-                    ? "每次授权新建独立的官方 Codex CLI 临时环境，当前账号的 Web 会话完成授权；凭据导出后销毁环境，并将网关 OpenAI Codex UA 同步为 CLI 实际值。需要先配置 Sub2API 并准备 CLI 镜像。"
+                    ? "每次授权新建独立的官方 Codex CLI 临时环境，当前账号的 Web 会话完成授权；凭据导出后销毁环境。UA 仅通过下方按钮手动同步。需要先配置 Sub2API 并准备 CLI 镜像。"
                     : "由 toSub2 生成授权链接并直接兑换、刷新令牌，沿用当前授权流程。"}
                 </HelpTip>
               </span>
@@ -278,7 +280,8 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
                 ]}
               />
             </label>
-            {codexAuthMode === "cli" && <p className="cli-auth-note">每次授权使用独立临时环境，凭据导出后清理；自动同步网关全局 OpenAI Codex UA。</p>}
+            {codexAuthMode === "cli" && <p className="cli-auth-note">每次授权使用独立临时环境，凭据导出后清理；授权不再读写网关 UA。</p>}
+            {request && <CodexCliUaSettings request={request} disabled={saving} onSyncBusy={setUaSyncing} />}
           </div>
         </section>
         <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">
@@ -398,8 +401,8 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
         <div className="dialog-footer">
           <button type="button" className="selection-text-button" onClick={resetDefaults} disabled={saving} title="恢复基础与监控参数，保留已配置的 PlanType 自动任务">恢复默认</button>
           <span className="dialog-actions-spacer" />
-          <button type="button" className="cancel-button" onClick={onClose} disabled={saving}>取消</button>
-          <button type="submit" className="primary-button" disabled={saving}>
+          <button type="button" className="cancel-button" onClick={onClose} disabled={saving || uaSyncing}>取消</button>
+          <button type="submit" className="primary-button" disabled={saving || uaSyncing}>
             {saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存设置
           </button>
         </div>

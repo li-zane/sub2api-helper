@@ -107,8 +107,11 @@ try {
   assert.deepEqual(events.map(e => e[0]), ["account/login/start", "callback", "completed", "auth", "closed"]);
   assert.deepEqual(JSON.parse(events.at(-1)[1]), bundle.data, "export is durably saved before environment cleanup");
   assert.equal(bundle.account.extra.codex_cli_environment, "one_shot");
-  assert.equal(puts, 1);
+  assert.equal(puts, 0, "OAuth never writes gateway settings");
   assert.equal(settings.site_name, "Preserve me");
+  assert.deepEqual(requests, [], "OAuth never reads gateway settings either");
+  await syncCliUserAgent(gateway, ua, { root });
+  assert.equal(puts, 1);
   assert.deepEqual(requests.map(r => r.method), ["GET", "PUT", "GET"]);
   assert(!requests.some(r => /fixture-private-refresh|private-code/.test(r.body)));
   await Promise.all([syncCliUserAgent(gateway, ua, { root }), syncCliUserAgent(gateway, ua, { root })]);
@@ -133,15 +136,20 @@ try {
   rejectCallback = false;
   for (const failure of ["reject", "redirect", "unsupported", "ignore"]) {
     mode = failure; settings.openai_codex_user_agent = "previous-UA";
-    await assert.rejects(runCliOAuth(options), error => /CODEX_CLI/.test(error.message) && !error.message.includes("fixture-private-admin-key"));
+    await assert.rejects(syncCliUserAgent(gateway, ua, { root }), error => /CODEX_CLI/.test(error.message) && !error.message.includes("fixture-private-admin-key"));
     assert.equal(await fs.readFile(exported, "utf8"), before);
   }
+  mode = "reject";
+  const requestCount = requests.length;
+  await runCliOAuth({ ...options, fetchImpl: () => { throw new Error("OAuth must not contact gateway"); } });
+  assert.equal(requests.length, requestCount, "gateway downtime cannot block CLI OAuth export");
+  const latestExport = await fs.readFile(exported, "utf8");
   mode = "ok";
   const directory = path.join(root, "not-a-file");
   await fs.mkdir(directory);
   await assert.rejects(runCliOAuth({ ...options, exportPath: directory }));
   assert.equal(events.at(-1)[0], "closed", "a failed export write still cleans the temporary environment");
-  assert.equal(await fs.readFile(exported, "utf8"), before);
+  assert.equal(await fs.readFile(exported, "utf8"), latestExport);
   await assert.rejects(runCliOAuth({ ...options, openSession: async () => ({ ...await openSession(),
     async close() { throw new Error("fixture cleanup failed"); } }) }), /cleanup failed/);
   assert.equal(JSON.parse(await fs.readFile(exported)).accounts[0].credentials.refresh_token, auth.tokens.refresh_token,
@@ -159,7 +167,7 @@ try {
   const restored = makeSettings(); await restored.load();
   assert.equal(restored.current.codexAuthMode, "cli");
   await preferences.close(); await restored.close();
-  console.log("CODEX_CLI_OAUTH_PASS one-shot environments, account locks, callback/state, account/workspace, export-before-cleanup, UA merge/readback, failure preservation, settings reload");
+  console.log("CODEX_CLI_OAUTH_PASS one-shot environments, account locks, callback/state, account/workspace, export-before-cleanup, zero gateway requests during OAuth, manual UA merge/readback, failure preservation, settings reload");
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
