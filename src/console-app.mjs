@@ -8322,6 +8322,7 @@ export function createConsoleApp(options = {}) {
       appendJobLog(job, `[monitor] 已用新授权覆盖更新 Sub2API 中的 ${operation.accountIds.length} 条账号记录。\n`);
       touch(job);
       await saveJobMetadata(job);
+      await resumePostAuthorizationAfterSync(job);
       return true;
     } catch (error) {
       job.autoRepairLastAttemptAt = new Date().toISOString();
@@ -9295,11 +9296,7 @@ export function createConsoleApp(options = {}) {
       appendJobLog(job, `[pool-refresh] ${action === "cooldown" ? "冷却后重新授权" : action === "switch-proxy" ? "切换代理后重新授权" : "重新授权"}已完成，号池凭据已同步。\n`);
       touch(job);
       await saveJobMetadata(job);
-      const recovered = await preparePostAuthorizationRecovery(job, { poolSynchronized: true }).catch(() => {
-        appendJobLog(job, "[auto] 号池同步已成功，后置任务恢复保存失败，等待重启后核对恢复。\n");
-        return false;
-      });
-      if (recovered) void runConfiguredTaskActions(job);
+      await resumePostAuthorizationAfterSync(job);
       return true;
     } catch (error) {
       recordPoolRefreshFailure(job, "sync", error);
@@ -10639,6 +10636,14 @@ export function createConsoleApp(options = {}) {
     if ((job.totpRotationIncomplete || job.totpRotationRemoteDisabled) && job.resultSaved) return true;
     if (!(job.status === "completed" && (job.resultSaved || job.webSessionAvailable))) return false;
     return Boolean(job.totpKnownEnabled || hasJobTotpKey(job));
+  }
+
+  async function resumePostAuthorizationAfterSync(job) {
+    const recovered = await preparePostAuthorizationRecovery(job, { poolSynchronized: true }).catch(() => {
+      appendJobLog(job, "[auto] 号池同步已成功，后置任务恢复保存失败，等待重启后核对恢复。\n");
+      return false;
+    });
+    if (recovered) void runConfiguredTaskActions(job);
   }
 
   async function preparePostAuthorizationRecovery(job, { poolSynchronized = false } = {}) {

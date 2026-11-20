@@ -5,13 +5,14 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { OperationsBook } from "../src/operations-book.mjs";
+import { createCredentialStore } from "../src/credential-store.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "post-auth-recovery-"));
 const baseline = process.argv.includes("--baseline");
 const late = ["enable-overload-detection", "enable-overload-cooldown", "check-model-fingerprint"];
 const actions = ["rotate-logout-reauthorize-upload", ...late];
-const fixtures = ["recovered", "mismatch", "paused", "not-authorized", "manual"].map((name, i) => ({
+const fixtures = ["recovered", "mismatch", "paused", "not-authorized", "manual", "automatic"].map((name, i) => ({
   id: `11111111-1111-4111-8111-${String(i + 1).padStart(12, "0")}`, email: `${name}@example.test`,
   remote: { id: 41 + i, name: `${name}@example.test`, platform: "openai", type: "oauth", status: "active", schedulable: true, group_ids: [], proxy_id: null,
     credentials: { email: `${name}@example.test`, access_token: `fixture-access-${i}`, refresh_token: `fixture-refresh-${i}`, chatgpt_account_id: `workspace-${i}`, plan_type: "free" }, extra: {} },
@@ -28,6 +29,10 @@ const pool = http.createServer(async (req, res) => {
   if (url.pathname === "/api/v1/admin/accounts/data") return send({ accounts: fixtures.filter(f => String(f.remote.id) === url.searchParams.get("ids")).map(f => f.remote), proxies: [] });
   if (url.pathname.endsWith("/groups/all") || url.pathname.endsWith("/proxies/all")) return send([]);
   if (url.pathname === "/api/v1/admin/accounts/batch") { creates++; return send({ created: 0, accounts: [] }); }
+  const recovered = fixtures.find(f => url.pathname === `/api/v1/admin/accounts/${f.remote.id}/clear-error`);
+  if (recovered) { recovered.remote.status="active";delete recovered.remote.error_message;return send({}); }
+  const scheduled = fixtures.find(f => url.pathname === `/api/v1/admin/accounts/${f.remote.id}/schedulable`);
+  if (scheduled) { scheduled.remote.schedulable=body.schedulable;return send({}); }
   const f = fixtures.find(f => url.pathname === `/api/v1/admin/accounts/${f.remote.id}`);
   if (f) {
     if (req.method === "PUT") { puts++; Object.assign(f.remote, body); }
@@ -79,15 +84,20 @@ try {
   await fs.writeFile(path.join(temp,"model-fingerprint.json"), JSON.stringify({ version: 1, settings: { models: ["gpt-5.5"], planDefaults: { free: false }, testSequence: { first: "candy", fingerprint: 0, candy: 1 } }, accounts: {} }));
   for (const [i, f] of fixtures.entries()) {
     const dir = path.join(temp,f.id); await fs.mkdir(dir);
-    if (i < 3) await fs.writeFile(path.join(dir,"sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ ...f.remote, credentials: { ...f.remote.credentials, ...(i===1 ? {refresh_token:"fixture-not-synced"} : {}) } }] }));
-    await fs.writeFile(path.join(dir,"job-meta.json"), JSON.stringify({ version: 1, email: f.email, status: i>=3 ? "failed" : "completed", result_saved: i<3, plan_type: "free", last_operation_type: "reauthorize", last_operation_at: "2026-11-20T22:00:00Z",
+    if (i < 3 || i===5) await fs.writeFile(path.join(dir,"sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ ...f.remote, credentials: { ...f.remote.credentials, ...([1,5].includes(i) ? {refresh_token:"fixture-not-synced"} : {}) } }] }));
+    await fs.writeFile(path.join(dir,"job-meta.json"), JSON.stringify({ version: 1, email: f.email, status: [3,4].includes(i) ? "failed" : "completed", result_saved: i<3 || i===5, plan_type: "free", last_operation_type: "reauthorize", last_operation_at: "2026-11-20T22:00:00Z",
+      ...(i===5 ? {last_auth_automated:true,last_auth_requirements:{password:true}} : {}),
       auto_task_actions: actions, auto_task_status: "failed", auto_task_index: 0, auto_task_error: "重新授权未完成：fixture timeout", auto_task_fingerprint_run_id: `import-${i}` }));
   }
   const book=new OperationsBook(path.join(temp,"helper-operations.sqlite"));book.open();book.pause(fixtures[2].email,true);book.close();
+  const store=createCredentialStore({windowsRoot:path.join(temp,"toSub2","credentials"),linuxRoot:path.join(temp,"credentials"),linuxKey:"ab".repeat(32)});
+  await store.save(fixtures[5].email,{password:"fixture-password"});
   await fs.writeFile(wrapper, `import fs from 'node:fs/promises';
 await fs.appendFile(${JSON.stringify(trace)},'authorization\\n');
 const file=process.argv[process.argv.indexOf('--sub2api-out')+1];
-await fs.writeFile(file,JSON.stringify(${JSON.stringify({type:"sub2api-data",accounts:[fixtures[4].remote]})}));
+const email=process.argv[process.argv.indexOf('--email')+1];
+const accounts=${JSON.stringify([fixtures[4].remote,fixtures[5].remote])};
+await fs.writeFile(file,JSON.stringify({type:'sub2api-data',accounts:[accounts.find(a=>a.credentials.email===email)||accounts[0]]}));
 console.log('[ok] Saved sub2api import: '+file);`);
   await start(); await api("/api/sub2api/account-status?refresh=1");
   if (baseline) {
@@ -98,7 +108,7 @@ console.log('[ok] Saved sub2api import: '+file);`);
     const first = await wait(async () => { const j=await job(0); return j.autoTaskStatus==="completed" && j.modelFingerprint.result?.source==="import" && j; });
     assert.deepEqual(first.autoTaskActions,late); assert.equal(first.overloadDetection.enabled,true); assert.equal(first.overloadAutoCooldown.enabled,true);
     assert.equal(first.modelFingerprint.result.method,"candy"); assert.equal(samples,1);
-    for (const i of [1,2,3]) { const j=await job(i); assert.equal(j.autoTaskStatus,"failed"); assert.equal(j.overloadDetection.enabled,false); }
+    for (const i of [1,2,3,5]) { const j=await job(i); assert.equal(j.autoTaskStatus,"failed"); assert.equal(j.overloadDetection.enabled,false); }
     assert.equal(await fs.readFile(trace,"utf8").catch(()=>""),"", "startup recovery must not log in or rotate credentials");
     assert.equal(puts,0); assert.equal(creates,0);
     await stop(); await start(); await api("/api/sub2api/account-status?refresh=1"); await pause(500);
@@ -108,7 +118,20 @@ console.log('[ok] Saved sub2api import: '+file);`);
     assert.equal(manual.overloadDetection.enabled,true);assert.equal(manual.overloadAutoCooldown.enabled,true);assert.equal(samples,2);
     assert.equal(await fs.readFile(trace,"utf8"),"authorization\n","only the requested authorization runs");
     assert.equal(creates,0);assert(puts>=1,"manual authorization synchronizes the existing pool account");
-    console.log("POST_AUTH_RECOVERY_PASS startup_and_manual=true detection=true cooldown=true importChecks=2 duplicateChecks=0 repeatedAuth=0 paused_and_mismatched=preserved");
+    await api("/api/sub2api/monitor",{config:{baseUrl:poolUrl,adminApiKey:"fixture-key"},enabled:true});
+    await wait(async()=>!(await api("/api/sub2api/monitor")).running);
+    fixtures[5].remote.status="error";fixtures[5].remote.error_message="invalid_grant: fixture token expired";
+    await api("/api/sub2api/monitor/check",{});
+    await wait(async()=>{const j=await job(5);return j.status==="completed" && j.autoRepairLastSuccessAt && j;});
+    if (process.argv.includes("--automatic-baseline")) {
+      assert.equal((await job(5)).autoTaskStatus,"failed");assert.equal(samples,2);
+      console.log("AUTOMATIC_POST_AUTH_BASELINE sync=true automation=failed importChecks=0");
+    } else {
+      const automatic=await wait(async()=>{const j=await job(5);return j.autoTaskStatus==="completed" && j.modelFingerprint.result?.source==="import" && j;});
+      assert.equal(automatic.overloadDetection.enabled,true);assert.equal(automatic.overloadAutoCooldown.enabled,true);assert.equal(samples,3);
+      assert.equal(await fs.readFile(trace,"utf8"),"authorization\nauthorization\n","each requested manual/automatic authorization runs only once");
+      console.log("POST_AUTH_RECOVERY_PASS startup_manual_automatic=true detection=true cooldown=true importChecks=3 duplicateChecks=0 repeatedAuth=0 paused_and_mismatched=preserved");
+    }
   }
 } finally {
   await stop(); pool.closeAllConnections(); inference.closeAllConnections();
