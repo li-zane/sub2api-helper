@@ -124,6 +124,12 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   assert.equal(response.status, 200, JSON.stringify(response.body));
   assert.equal(response.body.settings.codexAuthMode, "sub2api");
 
+  const setPolicy = (id,allocationPaused)=>fetch(base+"/api/sub2api/proxies/"+id+"/allocation",{method:"PUT",headers,body:JSON.stringify({allocationPaused,ipCostCny:2.00})});
+  const held=accounts[0].proxy_id;
+  for (const node of proxies) assert.equal((await setPolicy(node.id,true)).status,200);
+  const none=await post("/api/jobs/batch",{text:"no-new-allocation@example.test"});assert.equal(none.status,409);
+  assert.equal(accounts[0].proxy_id,held,"stopping allocation must not change remote bindings");
+  for (const node of proxies) assert.equal((await setPolicy(node.id,false)).status,200);
   const created = await post("/api/jobs/batch", {
     text: "new-a@example.com\nnew-b@example.com",
   });

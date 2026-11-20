@@ -641,80 +641,7 @@ dialog.batch-dialog.subscription-history-dialog {
 /* ==========================================================================
    Dark Mode Support (OS Preference or Explicit Theme Class/Attribute)
    ========================================================================== */
-@media (prefers-color-scheme: dark) {
-  dialog.batch-dialog.subscription-history-dialog {
-    color-scheme: dark;
-    --sh-surface: #16181d;
-    --sh-surface-subtle: #1e2128;
-    --sh-surface-muted: #242832;
-    --sh-surface-hover: rgba(255, 255, 255, 0.04);
-    --sh-ink: #f3f4f6;
-    --sh-ink-2: #d1d5db;
-    --sh-muted: #9ca3af;
-    --sh-subtle: #6b7280;
-    --sh-line: rgba(255, 255, 255, 0.1);
-    --sh-line-strong: rgba(255, 255, 255, 0.18);
-    --sh-accent: #4aa3ff;
-    --sh-accent-hover: #67b2ff;
-    --sh-accent-soft: rgba(74, 163, 255, 0.14);
-    --sh-accent-line: rgba(74, 163, 255, 0.34);
-    --sh-emerald: #34d399;
-    --sh-emerald-strong: #34d399;
-    --sh-emerald-soft: rgba(16, 185, 129, 0.14);
-    --sh-emerald-line: rgba(16, 185, 129, 0.34);
-    --sh-amber: #fbbf24;
-    --sh-amber-strong: #fbbf24;
-    --sh-amber-soft: rgba(245, 158, 11, 0.14);
-    --sh-amber-line: rgba(245, 158, 11, 0.32);
-    --sh-danger-strong: #fb7185;
-    --sh-danger-soft: rgba(244, 63, 94, 0.14);
-    --sh-danger-line: rgba(244, 63, 94, 0.34);
-    --sh-input-bg: #111318;
-    --sh-btn-bg: #1e222b;
-    --sh-btn-hover: #282d39;
-    --sh-shadow: 0 28px 64px -12px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
-    scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
-  }
-
-  dialog.batch-dialog.subscription-history-dialog::backdrop {
-    background: rgba(5, 7, 12, 0.68);
-  }
-
-  .subscription-history-dialog .sub-history-plan-tag.tone-plus {
-    color: #7dd3fc;
-  }
-
-  .subscription-history-dialog .sub-history-plan-tag.tone-team {
-    background: rgba(99, 102, 241, 0.18);
-    border-color: rgba(129, 140, 248, 0.36);
-    color: #a5b4fc;
-  }
-
-  .subscription-history-dialog .sub-history-plan-tag.tone-business {
-    background: rgba(168, 85, 247, 0.18);
-    border-color: rgba(192, 132, 252, 0.36);
-    color: #d8b4fe;
-  }
-
-  .subscription-history-dialog .task-count-badge {
-    background: var(--sh-surface-muted);
-    color: var(--sh-ink-2);
-    border-color: var(--sh-line);
-  }
-
-  .subscription-history-dialog .task-toast {
-    background: #142621;
-    border-color: rgba(52, 211, 153, 0.36);
-    color: #6ee7b7;
-  }
-
-  .subscription-history-dialog .task-toast.error {
-    background: #2b151c;
-    border-color: rgba(251, 113, 133, 0.36);
-    color: #fda4af;
-  }
-}
-
+/* Follow the application's explicit theme; OS dark preference does not override the light console. */
 :root[data-theme="dark"] dialog.batch-dialog.subscription-history-dialog,
 body[data-theme="dark"] dialog.batch-dialog.subscription-history-dialog,
 .dark dialog.batch-dialog.subscription-history-dialog {
@@ -906,3 +833,16 @@ body[data-theme="dark"] .subscription-history-dialog .task-toast.error,
     transition: none;
   }
 }
+
+/* A light ledger that uses the same surfaces as the main account list. */
+dialog.batch-dialog.subscription-history-dialog {color-scheme:light; background:var(--sh-surface);color:var(--sh-ink);}
+.subscription-history-dialog .sub-history-header {border-bottom:1px solid var(--sh-line);background:var(--sh-surface-subtle);}
+.sub-history-row .sub-quality {width:fit-content;border-radius:5px;padding:2px 7px;color:#556879;background:#eff3f6;font-size:11px;line-height:1.45;font-weight:550;}
+.sub-history-row .sub-quality.normal,.sub-history-row .sub-quality.recovered {background:#e3f3ea;color:#1c6545;}
+.sub-history-row .sub-quality.degraded {background:#fff0d5;color:#824400;}
+
+.subscription-history-dialog .sub-outcomes {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:10px 18px 2px;background:var(--sh-surface);}
+.subscription-history-dialog .sub-outcome {display:flex;align-items:baseline;justify-content:space-between;gap:4px;padding:7px 10px;border:1px solid var(--sh-line);border-radius:7px;background:var(--sh-surface-subtle);color:var(--sh-muted);font-size:12px;}
+.subscription-history-dialog .sub-outcome strong {color:var(--sh-ink);font-size:17px;font-variant-numeric:tabular-nums;}
+.subscription-history-dialog .sub-outcome.degraded strong {color:var(--sh-amber-strong);}
+@media(max-width:520px){.subscription-history-dialog .sub-outcomes{grid-template-columns:repeat(2,minmax(0,1fr));padding:8px 12px;gap:4px}.subscription-history-dialog .sub-outcome{padding:3px 7px}}

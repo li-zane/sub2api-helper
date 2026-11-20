@@ -30,7 +30,7 @@ import { notify } from "./toast-events.mjs";
 import { CopyableAccount, AccountText } from "./copyable-account.jsx";
 import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizeAccountCost, formatAccountCost, accountProfitCents, formatCnyCents } from "./account-pricing.mjs";
 import {
-  Ban,
+  Ban, PauseCircle, PlayCircle, MessageSquare,
   Check,
   ChevronDown,
   ChevronUp,
@@ -86,6 +86,9 @@ import { CustomSelect } from "./custom-select.jsx";
 import { GlobalTooltipProvider } from "./tooltip.jsx";
 
 const TaskSettingsDialog = deferredDialog("任务设置", () => import("./task-settings-dialog.jsx").then(m => m.TaskSettingsDialog));
+const FinanceDialog=deferredDialog("每日收支",()=>import("./ops-dialogs.jsx").then(m=>m.FinanceDialog));
+const ChatDialog=deferredDialog("账号对话测试",()=>import("./ops-dialogs.jsx").then(m=>m.ChatDialog));
+const ProxyPolicyDialog=deferredDialog("代理分配与成本",()=>import("./ops-dialogs.jsx").then(m=>m.ProxyPolicyDialog));
 const SubscriptionHistoryDialog = deferredDialog("历史订阅", () => import("./subscription-history.jsx").then(m => m.SubscriptionHistoryDialog));
 const ProxyCreateDialog = deferredDialog("新增代理", () => import("./proxy-create-dialog.jsx").then(m => m.ProxyCreateDialog));
 const ProxyEditDialog = deferredDialog("编辑代理", () => import("./proxy-edit-dialog.jsx").then(m => m.ProxyEditDialog));
@@ -139,6 +142,7 @@ function App() {
   const [batchAction, setBatchAction] = useState("");
   const [sessionActionError, setSessionActionError] = useState("");
   const logoutRunningRef = useRef(false);
+  const [financeOpen,setFinanceOpen]=useState(false),[chatJob,setChatJob]=useState(null),[policyGroup,setPolicyGroup]=useState(null);
   const [subscriptionHistoryOpen, setSubscriptionHistoryOpen] = useState(false);
   const [subscriptionHistoryTotal, setSubscriptionHistoryTotal] = useState(null);
   const {
@@ -1579,6 +1583,7 @@ function App() {
               <strong>{stats.abnormal ?? 0}</strong>
             </button>
             <span className="telemetry-divider" aria-hidden="true" />
+            <button type="button" className="summary-pill" aria-haspopup="dialog" disabled={!token} onClick={()=>setFinanceOpen(true)}>每日收支</button>
             <button
               type="button"
               className={`summary-pill telemetry-history-pill ${subscriptionHistoryOpen ? "is-open" : ""}`}
@@ -2054,6 +2059,7 @@ function App() {
                   key={job.id}
                   job={job}
                   token={token}
+                  onOpenChat={setChatJob}
                   workflowBusy={Boolean(batchAction)}
                   expanded={expandedJobId === job.id}
                   onToggleLogs={() => setExpandedJobId((current) => current === job.id ? null : job.id)}
@@ -2280,7 +2286,7 @@ function App() {
                     <div className="proxy-distribution-container" aria-label="代理 IP 账号分配">
                       <div className="proxy-distribution-grid">
                         {proxyDistributionByIp(accountProxyDistribution).map((proxy) => (
-                          <ProxyManagementCard key={proxy.ipAddress} group={proxy} changes={proxyStatusChanges}
+                          <ProxyManagementCard onPolicy={setPolicyGroup} key={proxy.ipAddress} group={proxy} changes={proxyStatusChanges}
                             editDisabled={proxySettingsSaving} onEdit={setEditingProxies} onToggle={setManagedProxyStatus} />
                         ))}
                         <div className={`proxy-segment-bar unassigned ${accountProxyDirectCount > 0 ? "has-unassigned" : ""}`}>
@@ -2395,6 +2401,11 @@ function App() {
         notify("代理已删除");
         void refreshAccountProxyDistribution().catch(error => notify(`代理已删除，刷新列表失败：${error.message}`, { tone: "error" }));
       }} />}
+      {financeOpen&&<FinanceDialog request={proxyDialogRequest} onClose={()=>setFinanceOpen(false)}/>}
+      {chatJob&&<ChatDialog key={chatJob.id} job={chatJob} request={proxyDialogRequest} onClose={()=>setChatJob(null)}/>}
+      {policyGroup&&<ProxyPolicyDialog nodes={policyGroup} request={proxyDialogRequest} onSaved={()=>{
+        void refreshAccountProxyDistribution().catch(e=>notify(e.message,{tone:"error"}));notify("已保存分配和成本，原有绑定未变");
+      }} onClose={()=>setPolicyGroup(null)}/>}
       {subscriptionHistoryOpen && (
         <SubscriptionHistoryDialog
           open={subscriptionHistoryOpen}
@@ -3520,7 +3531,13 @@ function Sub2ApiPoolNumberField({ kind, label, email, inPool, value, available, 
   );
 }
 
-function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail, onOpenBoundIp }) {
+function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail, onOpenBoundIp }) {
+  const [pauseBusy,setPauseBusy]=useState(false);
+  async function toggleInspection(){
+    if(pauseBusy)return;
+    setPauseBusy(true);try{const r=await apiFetch(token,`/api/jobs/${job.id}/inspection-pause`,{method:"POST",body:JSON.stringify({paused:!job.inspectionPaused})});onJobUpdate(r.job);}
+    catch(e){onError(e.message);}finally{setPauseBusy(false);}
+  }
   useDisplayTimeZone();
   const [value, setValue] = useState("");
   const [smsPopoverOpen, setSmsPopoverOpen] = useState(false);
@@ -3972,6 +3989,10 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
             <FileText size={13} />
           </button>
 
+          <button type="button" className="secondary-button icon-only-action" disabled={pauseBusy} aria-pressed={Boolean(job.inspectionPaused)}
+            title={job.inspectionPaused?"恢复此账号的 helper 自动巡检":"暂停此账号的 helper 自动巡检，不停用号池账号"} aria-label={job.inspectionPaused?"恢复巡检":"暂停巡检"} onClick={toggleInspection}>
+            {job.inspectionPaused?<PlayCircle size={14}/>:<PauseCircle size={14}/>}</button>
+          <button type="button" className="secondary-button icon-only-action" onClick={()=>onOpenChat(job)} aria-label="账号对话测试" title="后台对话与上次回答"><MessageSquare size={14}/></button>
           {/* Row 2: 授权、重试与会话 */}
           <button type="button" className="regenerate-button icon-only-action" onClick={resetSessions}
             disabled={rowBusy || !job.canResetSessions}
@@ -6336,7 +6357,7 @@ function proxyDistributionByIp(proxies) {
   return [...groups.values()];
 }
 
-function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle }) {
+function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, onPolicy }) {
   const { ipAddress, nodes, names, accountCount, activeNodeCount, inactiveNodeCount } = group;
   const allActive = activeNodeCount === nodes.length;
   const allInactive = inactiveNodeCount === nodes.length;
@@ -6348,6 +6369,8 @@ function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle })
         <span>{ipAddress}</span><Pencil size={12} aria-hidden="true" />
       </button>
       <div className="proxy-management-meta">
+        <button type="button" className="secondary-button" onClick={()=>onPolicy(nodes)} disabled={editDisabled} title="按节点管理新分配；同一出口只计一份成本">分配与成本</button>
+        {nodes.some(n=>n.allocationPaused)&&<small>已停分配 {nodes.filter(n=>n.allocationPaused).length}/{nodes.length}</small>}
         <span className={`proxy-management-group-status ${allActive ? "all-active" : allInactive ? "all-inactive" : "mixed"}`}>{groupStatus}</span>
         <span className={`segment-count-pill ${accountCount > 0 ? "has-count" : "zero-count"}`}>{accountCount} 个 OAuth 账号</span>
       </div>

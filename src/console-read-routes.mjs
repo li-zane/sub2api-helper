@@ -15,7 +15,7 @@ function pageNumber(value) {
 export function createConsoleReadRoutes({
   readJson, sendJson, httpError, queryJobs, normalizeEmailFilter,
   syncCompletedOutputs, ensureSubscriptionHistoryFresh, subscriptionHistory,
-  getPriceMultiplier, maxBatchJobs,
+  getPriceMultiplier, qualityFor, maxBatchJobs,
 }) {
   return async function handleReadRoute(req, res, url) {
     const { pathname, searchParams } = url;
@@ -40,7 +40,7 @@ export function createConsoleReadRoutes({
     if (method === "GET" && pathname === "/api/subscription-history") {
       await syncCompletedOutputs();
       await ensureSubscriptionHistoryFresh();
-      const records = subscriptionHistory.list(getPriceMultiplier());
+      const records = subscriptionHistory.list(getPriceMultiplier(),qualityFor);
       sendJson(res, 200, { records, total: records.length });
       return true;
     }

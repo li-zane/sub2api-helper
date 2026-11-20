@@ -53,6 +53,9 @@ import { accountRateLimit } from "./account-rate-limit.mjs";
 import { usageRestricted } from "../web/src/codex-eligibility.mjs";
 import { smsOrderLog } from "./sms-order-cost.mjs";
 import { SmsCancellations } from "./sms-cancellations.mjs";
+import { OperationsBook, beijingDay, cents } from "./operations-book.mjs";
+import { sampleLedger } from "./operations-finance.mjs";
+import { AccountTestChat, poolModels } from "./account-test-chat.mjs";
 import { releaseDispatchPaused, drainRequestKind } from "./release-drain.mjs";
 import { legacyCodexEmailGate } from "./codex-email-gate.mjs";
 import { displayLoginStatus, normalizeLoginAutomationPause, loginAutomationBlocked, loginAutomationPauseMessage } from "./login-automation-pause.mjs";
@@ -182,6 +185,29 @@ export function createConsoleApp(options = {}) {
   const OUTPUT_ROOT = path.resolve(
     options.outputRoot || process.env.ONBOARDING_OUTPUT_ROOT || path.join(WORKSPACE_ROOT, "tmp", "chatgpt-onboarding-console"),
   );
+  const book = new OperationsBook(path.join(OUTPUT_ROOT, "helper-operations.sqlite"));
+  const poolKey = config => String(config?.baseUrl || "").trim().replace(/\/+$/, "");
+  const inspectionPaused = email => book.paused(accountLoginEmails.key(email));
+  let financeWork, financeTimer;
+  function refreshFinance(settle=false) {
+    if (financeWork) return financeWork;
+    const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
+    financeWork = sampleLedger({book,config,settle,namespace:poolKey(config),rate:consoleSettings.current.poolPriceMultiplier,
+      listing:c=>listSub2ApiAccounts(c,{withMeta:true}),proxies:async c=>normalizeSub2ApiProxyList(await listAllSub2ApiProxies(requestSub2Api,c)),
+      jobs:()=>jobs.values(),emailOf:sub2ApiAccountEmail,ipOf:proxyIpKey,request:requestSub2Api}).finally(()=>{financeWork=null;});
+    return financeWork;
+  }
+  function scheduleFinance() {
+    if(shuttingDown)return;
+    const dayEnd=Date.parse(book.today()+"T23:59:55+08:00");
+    const delay=Math.max(5000,Math.min(300000, dayEnd>Date.now()?dayEnd-Date.now():15000));
+    financeTimer=setTimeout(async()=>{
+      try { if(!shuttingDown && !dispatchPaused() && sub2ApiSettingsConfig?.adminApiKey)await refreshFinance(true); }
+      catch { /* Keep the last dated snapshot; retry next tick. */ }
+      finally { scheduleFinance(); }
+    },delay);
+    financeTimer.unref?.();
+  }
   const consoleSettings = createConsoleSettings({
     file: path.join(OUTPUT_ROOT, "task-settings.json"),
     monitoringDefaults, envLimit: process.env.TOSUB2_MAX_ACTIVE_JOBS,
@@ -285,12 +311,12 @@ export function createConsoleApp(options = {}) {
   }
   const readUsageTotals = createUsageTotalsReader({
     getSettings: () => ({ ttlMs: consoleSettings.current.monitoringSettings.usageTotalsIntervalSeconds * 1000, concurrency: consoleSettings.current.monitoringSettings.usageTotalsConcurrency }),
-    isBlocked: id => sessionResetPoolIdPaused(id) || [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
+    isBlocked: id => sessionResetPoolIdPaused(id) || [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && (inspectionPaused(email) || accountAutomationBlocked(email))),
     request: (...args) => shuttingDown
     ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args) });
   const readResetCredits = createResetCreditsReader({
     getSettings: () => ({ ttlMs: consoleSettings.current.monitoringSettings.resetCreditsIntervalSeconds * 1000, concurrency: consoleSettings.current.monitoringSettings.resetCreditsConcurrency }),
-    isBlocked: id => sessionResetPoolIdPaused(id) || [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && accountAutomationBlocked(email)),
+    isBlocked: id => sessionResetPoolIdPaused(id) || [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && (inspectionPaused(email) || accountAutomationBlocked(email))),
     normalize: payload => normalizeSub2ApiUsagePayload(payload, { resetCreditsRefreshed: true }),
     request: (...args) => shuttingDown
       ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args),
@@ -332,7 +358,7 @@ export function createConsoleApp(options = {}) {
       await loadSub2ApiAccountStatus();
       return listUniqueJobs();
     },
-    isBusy: job => shuttingDown || !canLoginWeb(job, { maintenance: true }) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
+    isBusy: job => inspectionPaused(job.email) || shuttingDown || !canLoginWeb(job, { maintenance: true }) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
     hasSession: async job => {
       try { await fs.access(webSessionPathForJob(job)); return true; }
       catch (error) { return error.code !== "ENOENT"; } // Permissions/I/O errors must reach the probe, not trigger a login.
@@ -377,7 +403,7 @@ export function createConsoleApp(options = {}) {
     },
     lock: (job, fn) => withEmailJobLock(job.email, fn),
     repair: async (job, { reason }) => {
-      if (dispatchPaused()) return false;
+      if (dispatchPaused() || inspectionPaused(job.email)) return false;
       const webOnly = !job.resultSaved || webSessionNeedsLogin(reason);
       if (!webOnly && sessionResetAutomationPaused(job.email)) return false;
       if (automaticLoginBlocked(job, webOnly ? "web" : "oauth")) return false;
@@ -398,7 +424,7 @@ export function createConsoleApp(options = {}) {
     getAdditionalTargets: () => overloadCooldown.countTargets(),
     onOverloadCounts: (email, sample) => overloadCooldown.observeCounts(email, sample),
     getMonitoringSettings: () => ({ intervalMs: consoleSettings.current.monitoringSettings.overloadIntervalSeconds * 1000, concurrency: consoleSettings.current.monitoringSettings.overloadConcurrency }),
-    isBlocked: codexChecksBlocked,
+    isBlocked: email=>inspectionPaused(email) || codexChecksBlocked(email),
     filePath: path.join(OUTPUT_ROOT, "overload-monitor.json"),
     getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
     backendIdentity: monitorBackendIdentity,
@@ -422,13 +448,13 @@ export function createConsoleApp(options = {}) {
     dispatchPaused,
     getMonitoringSettings: () => ({ intervalMs: consoleSettings.current.monitoringSettings.overloadIntervalSeconds * 1000, concurrency: consoleSettings.current.monitoringSettings.overloadCooldownConcurrency }),
     isBlocked: email => accountAutomationBlocked(email) || sessionResetAutomationPaused(email),
-    isCountBlocked: codexChecksBlocked,
+    isCountBlocked: email=>inspectionPaused(email) || codexChecksBlocked(email),
     filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
     getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
     backendIdentity: monitorBackendIdentity,
     getSettings: email => {
       const settings = consoleSettings.current.overloadAutoCooldownSettings;
-      return [...jobs.forAccount(accountLoginEmails.key(email))].some(j => !j.deleted && j.codexEmailGate?.required)
+      return inspectionPaused(email) || [...jobs.forAccount(accountLoginEmails.key(email))].some(j => !j.deleted && j.codexEmailGate?.required)
         ? { ...settings, reauthorizeAfterCooldown: false } : settings;
     },
     request: requestSub2Api,
@@ -461,9 +487,32 @@ export function createConsoleApp(options = {}) {
   }
   const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprintAccount, getProxies: listSub2ApiProxies,
     testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
+  async function chatTarget(job,requested) {
+    const c=sub2ApiSettingsConfig;
+    if(!c?.adminApiKey || accountAutomationBlocked(job.email))throw httpError(409,"该账号或号池不可用");
+    const status=getSub2ApiAccountStatusForJob(job,await loadSub2ApiAccountStatus({forceRefresh:true}));
+    const ids=[...new Set((status.accountIds||[]).map(String))];
+    const id=String(requested || (ids.length===1?ids[0]:""));
+    if(!ids.includes(id))throw httpError(409,"请选择该账号对应的号池 OAuth ID");
+    const current=await getSub2ApiAccount(c,id);
+    if(current?.platform!=="openai" || current.type!=="oauth" || sub2ApiAccountEmail(current)!==job.email.toLowerCase()
+       || current.status!=="active" || sub2ApiAccountSchedulable(current)!==true || accountRateLimit(current).limited
+       || usageRestricted(normalizeSub2ApiUsage(current)) || sessionResetAutomationPaused(job.email) || overloadCooldown.isPaused(job.email))
+      throw httpError(409,"号池账号已变更、暂停、限流或不可用");
+    return {id,account:job.email.toLowerCase(),pool:poolKey(c),c};
+  }
+  const chatModels=async t=>poolModels(await requestSub2Api(t.c,"/api/v1/admin/accounts/"+t.id+"/models",{timeoutMs:15000}));
+  const chatStore=new AccountTestChat(book,{catalog:chatModels,send:async(t,model,prompt,signal,messages)=>{
+    const record=await readFingerprintAccount(t.c,t.id);
+    if(String(record?.id)!==t.id || record?.type!=="oauth" || record.platform!=="openai" || sub2ApiAccountEmail(record)!==t.account
+      || record.status!=="active" || sub2ApiAccountSchedulable(record)!==true || accountRateLimit(record).limited || usageRestricted(normalizeSub2ApiUsage(record)) || accountAutomationBlocked(t.account) || overloadCooldown.isPaused(t.account) || sessionResetAutomationPaused(t.account) || t.c!==sub2ApiSettingsConfig)throw Error("账号状态已变更");
+    return (options.accountChatSampler || fingerprintSampler)(t.c,record,model,prompt,signal,{messages});
+  }});
   const modelFingerprint = new ModelFingerprintService({
+    onVerdict:(email,at,status)=>book.recordQuality(email,at,status),
     dispatchPaused,
     isBlocked: (email, { manual = false } = {}) => {
+      if (!manual && inspectionPaused(email)) return true;
       if (manual && manualFingerprintAllowed(findJobByEmail(email))) return false;
       if (codexChecksBlocked(email)) return true;
       const job = findJobByEmail(email), state = job && getSub2ApiAccountStatusForJob(job);
@@ -613,7 +662,7 @@ export function createConsoleApp(options = {}) {
 
     if (req.method === "GET" && requestUrl.pathname === "/api/release-drain") {
       const busyJobs = [...jobs.values()].filter(j => !j.deleted && (isActive(j.status) || j.autoTaskStatus === "running")).length;
-      const busyWorkers = admittedWrites + emailJobLocks.size + activeWebSessionChecks + manualWebSessionCheckOperations.size
+      const busyWorkers = chatStore.work.size + Number(Boolean(financeWork)) + admittedWrites + emailJobLocks.size + activeWebSessionChecks + manualWebSessionCheckOperations.size
         + sessionResetStarts.size + poolRefreshOperations.size + sub2ApiAutoRepairPromises.size + accountSecurityChecks.size
         + modelFingerprint.inFlight.size + modelFingerprint.runningTasks.size + accountDataSyncOperations.size
         + [webSessionMonitor.running, modelFingerprint.ticking, overloadMonitor.running, overloadCooldown.running, sub2ApiMonitorPromise].filter(Boolean).length;
@@ -633,6 +682,43 @@ export function createConsoleApp(options = {}) {
   }
 
   async function dispatchApi(req, res, requestUrl) {
+    if (requestUrl.pathname === "/api/finance/daily" && ["GET","POST"].includes(req.method)) {
+      const day = requestUrl.searchParams.get("day") || book.today();
+      if(req.method==="POST" && day!==book.today()) throw httpError(409,"历史日期只读");
+      sendJson(res,200,req.method==="POST"? await refreshFinance():book.ledger(day)); return;
+    }
+    const inspectAction = /^\/api\/jobs\/([a-f0-9-]+)\/inspection-pause$/.exec(requestUrl.pathname);
+    if(inspectAction && req.method==="POST") {
+      const job=jobs.get(inspectAction[1]); if(!job || job.deleted)throw httpError(404,"账号不存在");
+      const body=await readJson(req);book.pause(job.email,body.paused);touch(job);
+      sendJson(res,200,{job:publicJob(job)});return;
+    }
+    const policyAction=/^\/api\/sub2api\/proxies\/(\d+)\/allocation$/.exec(requestUrl.pathname);
+    if(policyAction && ["GET","PUT"].includes(req.method)) {
+      const c=sub2ApiSettingsConfig,id=Number(policyAction[1]);
+      if(!c?.adminApiKey)throw httpError(409,"请先配置号池");
+      const catalog=normalizeSub2ApiProxyList(await listAllSub2ApiProxies(requestSub2Api,c)),node=catalog.find(p=>p.id===id);
+      if(!node)throw httpError(404,"代理不存在");
+      const ip=proxyIpKey(node),ns=poolKey(c);for(const p of catalog)if(proxyIpKey(p)===ip)book.seeIp(ns,ip,p.created_at||p.createdAt);
+      const body=req.method==="PUT"? await readJson(req):null;
+      let policy;
+      if(body) {
+        const change=accountProxyAssignmentPromise.catch(()=>{}).then(()=>book.savePolicy(ns,id,ip,node.created_at||node.createdAt,body));
+        accountProxyAssignmentPromise=change;policy=await change;
+      } else policy=book.policy(ns,id,ip);
+      sendJson(res,200,{ip,...policy});return;
+    }
+    const chatAction=/^\/api\/jobs\/([a-f0-9-]+)\/chat(?:\/(models))?$/.exec(requestUrl.pathname);
+    if(chatAction && ["GET","POST"].includes(req.method)){
+      const job=jobs.get(chatAction[1]);if(!job || job.deleted)throw httpError(404,"账号不存在");
+      const account=job.email.toLowerCase();
+      if(req.method==="GET" && !chatAction[2]){sendJson(res,200,{turns:chatStore.list(account)});return;}
+      const body=req.method==="POST"?await readJson(req):{};
+      const target=await chatTarget(job,body.remoteId || requestUrl.searchParams.get("remoteId"));
+      if(req.method==="GET"){sendJson(res,200,{id:target.id,models:await chatModels(target)});return;}
+      if(chatAction[2])throw httpError(405,"Method not allowed");
+      sendJson(res,202,await chatStore.start(account,target,body));return;
+    }
     if (await handleReadRoute(req, res, requestUrl)) return;
 
     if (await handleSettingsRoute(req, res, requestUrl)) return;
@@ -1165,8 +1251,9 @@ export function createConsoleApp(options = {}) {
         groups: groupPayload,
         proxies: [...proxiesById.values()].map((proxy) => ({
           ...publicSub2ApiProxy(proxy),
+          ...book.policy(poolKey(config),proxy.id,proxyIpKey(proxy)),
           accountCount: proxyCounts.get(proxyIpKey(proxy)) || 0,
-          availableForBinding: Boolean(proxy.url) && !isSub2ApiProxyExpired(proxy),
+          availableForBinding: Boolean(proxy.url) && !isSub2ApiProxyExpired(proxy) && !book.isBlocked(poolKey(config),proxy.id),
         })),
         directAccountCount,
         directIp: directPublicIp.peek(),
@@ -1247,6 +1334,7 @@ export function createConsoleApp(options = {}) {
         try {
           for (const item of matching) { item.accountCostCny = cost; item.accountCostUpdatedAt = at; }
           await Promise.all(matching.map(saveJobMetadata));
+          const entry=matching.find(j=>j.resultSaved || getSub2ApiAccountStatusForJob(j).inPool);if(entry)book.expense("account",entry.email.toLowerCase(),entry.createdAt,cents(cost));
         } catch (error) {
           for (const old of before) { old.item.accountCostCny = old.cost; old.item.accountCostUpdatedAt = old.at; }
           await Promise.allSettled(matching.map(saveJobMetadata));
@@ -1827,6 +1915,7 @@ export function createConsoleApp(options = {}) {
   const handleReadRoute = createConsoleReadRoutes({
     readJson, sendJson, httpError, queryJobs, normalizeEmailFilter,
     syncCompletedOutputs, ensureSubscriptionHistoryFresh, subscriptionHistory,
+    qualityFor:(email,joined)=>book.quality(email,findJobByEmail(email)?.createdAt || joined),
     getPriceMultiplier: () => consoleSettings.current.poolPriceMultiplier, maxBatchJobs: MAX_BATCH_JOBS,
   });
 
@@ -2536,6 +2625,7 @@ export function createConsoleApp(options = {}) {
     if (activeSessionReset(job)) throw httpError(409, "会话重建正在进行，请等待完成");
     const automatic = context.automatic === true;
     if (!automatic && ["pending", "running"].includes(job.autoTaskStatus)) throw httpError(409, "账号自动化任务正在进行，请等待完成后再授权");
+    if (automatic && inspectionPaused(job.email)) throw httpError(409,"该账号已暂停 helper 自动巡检");
     if (automatic && automaticLoginBlocked(job, "oauth")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
     await automationBlockWrites.get(job.email.toLowerCase());
     if (!canForceRelogin(job)) throw httpError(409, "账号封禁或任务正在进行中，暂不能授权");
@@ -3082,7 +3172,7 @@ export function createConsoleApp(options = {}) {
 
   function prepareCooldownSessionReset(email, { id, backend, cooldownMinutes = 0, logoutBeforeCooldown = false }) {
     const job = findJobByEmail(email), state = accountSessionResets.get(email);
-    if (dispatchPaused() && state?.id !== id) return { status: "pending" };
+    if ((dispatchPaused() || inspectionPaused(email)) && state?.id !== id) return { status: "pending" };
     if (!job) return { status: "failed", error: "冷却已到期，但本地账号记录不存在" };
     if (state?.id === id || state?.source === "manual" && Date.parse(state.startedAt) >= Date.parse(overloadCooldown.accounts.get(email)?.coolingUntil)) {
       if (state.status === "completed") return { status: "completed" };
@@ -3229,6 +3319,7 @@ export function createConsoleApp(options = {}) {
   async function forceReloginJob(job, options = {}, context = {}) {
     const automatic = context.autoRepair || context.webSessionMonitorRepair || context.automatic;
     if (automatic && !context.sessionReset && sessionResetAutomationPaused(job.email)) throw httpError(409, "一键重登尚未成功，自动授权已暂停");
+    if (automatic && inspectionPaused(job.email)) throw httpError(409,"该账号已暂停 helper 自动巡检");
     if (automatic && automaticLoginBlocked(job, "oauth")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
     await automationBlockWrites.get(job.email.toLowerCase());
     if (sessionResetPending(accountSessionResets.get(job.email)) && !context.sessionReset) throw httpError(409, "会话重建正在进行，请等待完成");
@@ -5950,7 +6041,7 @@ export function createConsoleApp(options = {}) {
       try {
         await syncCompletedOutputs(true);
         const refreshRetries = await Promise.allSettled([...jobs.values()]
-          .filter((job) => job.poolRefreshAction && job.poolRefreshReady && job.poolRefreshError && job.status === "completed")
+          .filter((job) => !inspectionPaused(job.email) && job.poolRefreshAction && job.poolRefreshReady && job.poolRefreshError && job.status === "completed")
           .map((job) => withEmailJobLock(job.email, () => synchronizePoolRefresh(job))));
         const refreshFailure = refreshRetries.find((result) => result.status === "rejected");
         if (refreshFailure) summary.poolCredentialSyncFailed = refreshRetries.filter((result) => result.status === "rejected").length;
@@ -5958,12 +6049,15 @@ export function createConsoleApp(options = {}) {
         if (shuttingDown) throw httpError(503, "服务正在关闭，已停止号池巡检");
         const allRemoteAccounts = accountListing.accounts;
         if (accountListing.complete) {
-          await fallBackExpiredSub2ApiProxies(config, profileState, allRemoteAccounts, summary);
+          await fallBackExpiredSub2ApiProxies(config, profileState, allRemoteAccounts.filter(r=>!inspectionPaused(sub2ApiAccountEmail(r))), summary);
           const previousPlanTypes = sub2ApiMonitorState.planTypesBackend === backend
             ? normalizeSub2ApiPlanTypeState(sub2ApiMonitorState.planTypes)
             : Object.create(null);
           const nextPlanTypes = Object.create(null);
           for (const account of allRemoteAccounts) {
+            if (inspectionPaused(sub2ApiAccountEmail(account))) {
+              const id=normalizeSub2ApiAccountId(account.id);if(id && previousPlanTypes[id])nextPlanTypes[id]=previousPlanTypes[id];continue;
+            }
             if (accountSyncBlocked(account)) continue;
             const accountId = normalizeSub2ApiAccountId(account?.id);
             if (!accountId) continue;
@@ -6212,7 +6306,7 @@ export function createConsoleApp(options = {}) {
     for (const proxyId of proxyIds) {
       if (shuttingDown) return;
       const target = await resolveSub2ApiProxyFallback(config, proxyId);
-      if (target === proxyId) continue;
+      if (target === proxyId || book.isBlocked(poolKey(config),Number(target))) continue;
       for (const account of accounts) {
         const accountId = normalizeSub2ApiAccountId(account?.id);
         if (accountSyncBlocked(account)) continue;
@@ -6494,7 +6588,12 @@ export function createConsoleApp(options = {}) {
       const job = findJobByEmail(email);
       return hasPlanProxyBinding(job) ? { proxy_id: normalizeStoredProxyId(job.assignedProxyId) || 0 } : {};
     }
-    if (consoleSettings.current.accountProxyMode !== "sub2api") return sub2ApiProxyFields(accountConfig);
+    if (consoleSettings.current.accountProxyMode !== "sub2api") {
+      const fields=sub2ApiProxyFields(accountConfig);
+      if(fields.proxy_id && book.isBlocked(poolKey(accountConfig.baseUrl?accountConfig:sub2ApiSettingsConfig),Number(fields.proxy_id))
+         && Number(remoteAccount.proxy_id)!==Number(fields.proxy_id) && Number(findJobByEmail(email)?.assignedProxyId)!==Number(fields.proxy_id)) throw httpError(409,"方案代理已停止新分配");
+      return fields;
+    }
     const job = findJobByEmail(email);
     if (job?.manualProxyBinding) return { proxy_id: normalizeStoredProxyId(job.assignedProxyId) || 0 };
     const assignedProxyId = normalizeStoredProxyId(job?.assignedProxyId)
@@ -6686,7 +6785,7 @@ export function createConsoleApp(options = {}) {
   async function retryPendingSub2ApiUploads(config, summary, profileState = snapshotSub2ApiProfileState()) {
     const backend = monitorBackendIdentity(config);
     const legacyBackend = legacyMonitorBackendIdentity(config);
-    for (const candidate of listUniqueJobs().filter(job => job.autoRepairPendingAccountIds?.length)) {
+    for (const candidate of listUniqueJobs().filter(job => !inspectionPaused(job.email) && job.autoRepairPendingAccountIds?.length)) {
       await withEmailJobLock(candidate.email, async () => {
         const job = findJobByEmail(candidate.email);
         const pendingIds = [...new Set(job?.autoRepairPendingAccountIds || [])]
@@ -7641,6 +7740,7 @@ export function createConsoleApp(options = {}) {
     if (mode === "fixed") {
       const proxyId = normalizeStoredProxyId(jobSub2ApiProxyConfig(job)?.proxyId);
       const proxy = (await listSub2ApiProxies()).find((item) => item.id === proxyId);
+      if (book.isBlocked(poolKey(sub2ApiSettingsConfig),proxyId) && Number(job.assignedProxyId)!==proxyId) throw httpError(409,"此代理已停止新分配");
       if (!proxy?.url || isSub2ApiProxyExpired(proxy)) throw httpError(409, "当前方案指定的代理已失效，原绑定保持不变");
       return proxy;
     }
@@ -7670,6 +7770,9 @@ export function createConsoleApp(options = {}) {
   }
 
   async function saveJobProxyBinding(job, proxy) {
+    if(proxy && book.isBlocked(poolKey(sub2ApiSettingsConfig),proxy.id) && Number(job.assignedProxyId)!==proxy.id) {
+      const state=getSub2ApiAccountStatusForJob(job);if(!(state.proxyIds||[]).map(Number).includes(proxy.id))throw httpError(409,"此代理已停止新分配，原绑定保持不变");
+    }
     job.authorizationProxySelected = true;
     job.assignedProxyId = proxy?.id || null;
     job.boundIp = proxy?.ipAddress || null;
@@ -7708,6 +7811,7 @@ export function createConsoleApp(options = {}) {
     }
     const operation = accountProxyAssignmentPromise.catch(() => {}).then(async () => {
       const proxy = proxyId ? (await listSub2ApiProxies(config)).find(item => item.id === proxyId) : null;
+      if (proxyId && book.isBlocked(poolKey(config),proxyId) && !previous.includes(proxyId)) throw httpError(409,"所选代理已停用新分配");
       if (proxyId && (!proxy?.url || isSub2ApiProxyExpired(proxy))) throw httpError(409, "所选代理已不可用，请重新选择");
       if (monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiSettingsConfig)) throw httpError(409, "号池后端已变化，请重新选择");
       await revokeAllAccountSessions({ ...job, proxyUrl: proxy?.url || null, fixedProxy: true });
@@ -7929,10 +8033,12 @@ export function createConsoleApp(options = {}) {
         const previousIp = previousProxy ? proxyIpKey(previousProxy) : null;
         const alternatives = [...ipGroups.values()].filter((group) => !reassign || !previousIp || group.ip !== previousIp);
         if (reassign && previousIp && !alternatives.length) throw httpError(409, `${account.email} 当前 Sub2API 代理没有不同的出口 IP`);
-        const candidates = alternatives;
+        const allow=p=>!book.isBlocked(poolKey(config),p.id);
+        const candidates = alternatives.filter(g=>g.proxies.some(allow));
+        if(!candidates.length)throw httpError(409,"没有允许新分配的代理；现有绑定保持不变");
         candidates.sort((left, right) => left.accountCount - right.accountCount || left.ip.localeCompare(right.ip));
         const group = candidates[0];
-        const proxy = [...group.proxies].sort((left, right) => (group.proxyCounts.get(left.id) || 0) - (group.proxyCounts.get(right.id) || 0) || left.id - right.id)[0];
+        const proxy = group.proxies.filter(allow).sort((left, right) => (group.proxyCounts.get(left.id) || 0) - (group.proxyCounts.get(right.id) || 0) || left.id - right.id)[0];
         assignments.set(account.id || key, proxy);
         group.accountCount += 1;
         group.proxyCounts.set(proxy.id, (group.proxyCounts.get(proxy.id) || 0) + 1);
@@ -8080,6 +8186,7 @@ export function createConsoleApp(options = {}) {
   }
 
   function getAutoRepairEligibility(job) {
+    if (inspectionPaused(job.email)) return {eligible:false,reason:"账号已暂停 helper 自动巡检"};
     if (job.autoRepairBlocked) return { eligible: false, reason: "账号已确认封禁、删除或永久停用" };
     if (automaticLoginBlocked(job, "oauth")) return { eligible: false, reason: loginAutomationPauseMessage(accountLoginPause(job)) };
     if (!job.lastAuthAutomated) return { eligible: false, reason: job.lastAuthAutomationReason || "上次授权不是全自动完成" };
@@ -8630,6 +8737,7 @@ export function createConsoleApp(options = {}) {
     return {
       id: job.id,
       email: job.loginEmail,
+      inspectionPaused: inspectionPaused(job.email),
       status: job.status,
       displayStatus: displayLoginStatus(job),
       planType,
@@ -9263,6 +9371,9 @@ export function createConsoleApp(options = {}) {
 
   async function deleteJobsByEmail(email) {
     email = accountLoginEmails.key(email);
+    if(chatStore.work.has(email))throw httpError(409,"账号对话正在后台生成，请稍后删除");
+    const costRecord=[...jobs.forAccount(email)].filter(j=>j.resultSaved).sort((x,y)=>String(x.createdAt).localeCompare(y.createdAt))[0];
+    if(costRecord)book.expense("account",email,costRecord.createdAt,cents(costRecord.accountCostCny||0));
     // Take a new snapshot before removing the source files, even if an older scan is pending.
     await refreshSubscriptionHistory();
     const sub2api = await deleteSub2ApiAccountsByEmail(email);
@@ -9273,6 +9384,8 @@ export function createConsoleApp(options = {}) {
     await accountSessionResets.remove(email);
     await modelFingerprint.remove(email);
     const matching = [...jobs.values()].filter((job) => job.email.toLowerCase() === email);
+    book.db.prepare("DELETE FROM chats WHERE account=?").run(email);
+    if(book.paused(email))book.pause(email,false);
     const directories = new Set();
     const reaping = [];
     matching.forEach((job) => {
@@ -11167,6 +11280,8 @@ export function createConsoleApp(options = {}) {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       shuttingDown = true;
+      clearTimeout(financeTimer);
+      await Promise.allSettled([financeWork, chatStore.stop()].filter(Boolean));
       clearTimeout(startupDispatchTimer);
       loginTimeouts.close();
       accountDataSyncGeneration++;
@@ -11217,7 +11332,7 @@ export function createConsoleApp(options = {}) {
         }
       }
     })();
-    return shutdownPromise;
+    return shutdownPromise.finally(() => book.close());
   }
 
   function waitForChildExit(child, timeoutMs) {
@@ -11238,6 +11353,7 @@ export function createConsoleApp(options = {}) {
 
   async function startRuntime() {
     await fs.mkdir(OUTPUT_ROOT, { recursive: true });
+    book.open();
     smsProviderSettingsState = await loadSmsSettings(SMS_SETTINGS_PATH);
     await smsCancellations.load();
     await consoleSettings.load();
@@ -11251,6 +11367,7 @@ export function createConsoleApp(options = {}) {
     await overloadCooldown.load();
     await accountSessionResets.load();
     await modelFingerprint.load();
+    for(const [email,entry] of modelFingerprint.accounts) for(const r of [...modelFingerprint.latestRounds(entry)].reverse())book.recordQuality(email,r.checkedAt,r.status);
     await syncCompletedOutputs(true);
     for (const job of jobs.values()) {
       try {
@@ -11344,6 +11461,7 @@ export function createConsoleApp(options = {}) {
       webSessionMonitor.setTickMs(consoleSettings.current.monitoringSettings.webSessionScanIntervalSeconds * 1000);
       webSessionMonitor.start();
       scheduleAccountDataSync();
+      scheduleFinance();
       dispatchStarted = true;
     };
     await startDispatch();

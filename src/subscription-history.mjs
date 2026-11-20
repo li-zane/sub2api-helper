@@ -92,6 +92,7 @@ export class SubscriptionHistory {
         if (accountBanned && previous?.accountBanned !== true) types.push("banned");
         if (!accountBanned && previous?.accountBanned === true) types.push("recovered");
         const record = { ...previous, id: recordId(email), email,
+          accountAddedAt:previous?.accountAddedAt || timestamp(observation.accountAddedAt),
           loginEmail: emailKey(observation.loginEmail) || email,
           remark: text(observation.remark), accountCostCny: restoredAccountCost(observation.accountCostCny),
           planType: toPlan,
@@ -137,13 +138,14 @@ export class SubscriptionHistory {
     this.writes = work;
     return work;
   }
-  list(multiplier) {
+  list(multiplier,qualityFor) {
     return [...this.records.values()].sort((a, b) => String(b.firstSubscribedAt).localeCompare(String(a.firstSubscribedAt)) || a.email.localeCompare(b.email)).map(record => {
       const profit = accountProfitCents(record.userCostUsd, multiplier, record.accountCostCny);
       return { id: record.id, email: record.loginEmail || record.email, remark: record.remark, accountCostCny: record.accountCostCny,
         userCostUsd: record.userCostUsd, poolPriceMultiplier: multiplier,
         profitCents: profit === null ? null : profit.toString(), profitDisplay: formatCnyCents(profit),
         planType: record.planType, lastPaidPlanType: record.lastPaidPlanType,
+        ...(qualityFor ? {quality:qualityFor(record.email,record.accountAddedAt || record.firstSubscribedAt)} : {}),
         accountBanned: record.accountBanned === true,
         lastChange: record.lastChange ? { ...structuredClone(record.lastChange), unread: record.lastSeenChangeRevision !== record.lastChange.revision } : null,
         firstSubscribedAt: record.firstSubscribedAt, updatedAt: record.updatedAt, present: record.present,

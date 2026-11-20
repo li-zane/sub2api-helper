@@ -54,6 +54,13 @@ export function parseProfitCents(profitCents, userCostUsd, poolPriceMultiplier, 
   return accountProfitCents(userCostUsd, poolPriceMultiplier ?? 1, accountCostCny ?? 0);
 }
 
+function qualityLabel(q={}) {
+  const span=m=>m<60?m+" 分钟":Number((m/60).toFixed(1))+" 小时";
+  if(q.kind==="normal")return "未降智";
+  if(q.kind==="degraded")return q.minutesAfterJoin==null?"已观测到降智":"加入 "+span(q.minutesAfterJoin)+" 后观测到降智";
+  if(q.kind==="recovered")return q.minutesToRecovery==null?"已恢复":"降智 "+span(q.minutesToRecovery)+" 后恢复";
+  return "未检测";
+}
 export function profitTone(cents) {
   if (cents === null) return "unknown";
   if (cents > 0n) return "positive";
@@ -509,6 +516,10 @@ export function SubscriptionHistoryDialog({
         </div>
       </div>
 
+      {hasLoaded&&<div className="sub-outcomes" role="group" aria-label="历史订阅检测概览">
+        {[["normal","未降智"],["degraded","观测降智"],["recovered","已恢复"],["unknown","未检测"]].map(([k,v])=><div key={k} className={"sub-outcome "+k}>
+          <span>{v}</span><strong>{records.filter(r=>(r.quality?.kind||"unknown")===k).length}</strong></div>)}
+      </div>}
       <div className="sub-history-toolbar">
         <div className="sub-history-search-box">
           <Search size={14} className="sub-history-search-icon" aria-hidden="true" />
@@ -648,6 +659,9 @@ export function SubscriptionHistoryDialog({
                           {record.remark}
                         </span>
                       )}
+                      <span className={`sub-quality ${record.quality?.kind || "unknown"}`} title={record.quality?.at?"检测记录："+displayDateTime(record.quality.at):"暂无有效检测记录"}>
+                        {qualityLabel(record.quality)}
+                      </span>
                       {timeInfo.label && (
                         <span className="sub-history-time" title={timeInfo.title || undefined}>
                           {timeInfo.label}

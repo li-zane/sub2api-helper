@@ -92,8 +92,9 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
+  constructor({ onVerdict = () => {}, dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
     this.dispatchPaused = dispatchPaused;
+    this.onVerdict = onVerdict;
     Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolAccount, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
     this.manualChecks = new Set();
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
@@ -399,6 +400,7 @@ export class ModelFingerprintService {
           controller.signal.throwIfAborted();
         }
         this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), identities, routingIdentities, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: aggregateFingerprint(results), models: results });
+        this.onVerdict(email,entry.result.checkedAt,entry.result.status);
         if (importRunId) entry.lastImportRunId = importRunId;
         // A completed candy answer consumes its one scheduled turn even when
         // unscorable. Transport/auth failures keep the slot for the next check.
@@ -417,7 +419,8 @@ export class ModelFingerprintService {
           const detail = fingerprintFailure(error);
           entry.lastError = detail.message;
           this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: "error", models: results, error: entry.lastError, failure: detail });
-          if (importRunId) entry.lastImportRunId = importRunId;
+          this.onVerdict(email,entry.result.checkedAt,entry.result.status);
+        if (importRunId) entry.lastImportRunId = importRunId;
           await this.persist();
         });
       }

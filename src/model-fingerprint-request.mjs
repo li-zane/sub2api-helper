@@ -117,7 +117,7 @@ export const extractFingerprintReply = text => extractFingerprintSample(text).te
 // Direct account-specific sampling avoids the admin /test route's hard-coded "hi".
 // Credentials stay on this server; the reference detector only receives local text.
 export function createFingerprintSampler({ getAccount, getProxies, transportFactory = () => new TlsFingerprintTransport({ profile: "chrome146", rotateProxySessions: false, sameProxyRiskRetries: 0, cloudflareSolver: false }), testUrl } = {}) {
-  return async (config, account, model, prompt, signal, { onMetadata } = {}) => {
+  return async (config, account, model, prompt, signal, { onMetadata, messages } = {}) => {
     let credentialAccount = account;
     if (account.parent_account_id != null) credentialAccount = await getAccount(config, account.parent_account_id);
     const credentials = credentialAccount.credentials || {};
@@ -130,7 +130,7 @@ export function createFingerprintSampler({ getAccount, getProxies, transportFact
       if (!proxyUrl) throw new Error("账号绑定的代理不存在，检测已停止");
     }
     const mapped = (account.credentials?.model_mapping || credentials.model_mapping)?.[model];
-    const body = { model: typeof mapped === "string" ? mapped : model, input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }], stream: true, store: false, instructions: "" };
+    const body = { model: typeof mapped === "string" ? mapped : model, input: messages || [{ role: "user", content: [{ type: "input_text", text: prompt }] }], stream: true, store: false, instructions: "" };
     if (!oauth) body.max_output_tokens = 8192;
     const base = String(credentials.base_url || "https://api.openai.com").replace(/\/$/, "");
     const url = testUrl || (oauth ? "https://chatgpt.com/backend-api/codex/responses" : base.endsWith("/v1") ? `${base}/responses` : `${base}/v1/responses`);

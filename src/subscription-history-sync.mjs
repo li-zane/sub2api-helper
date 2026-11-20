@@ -48,7 +48,7 @@ export function createSubscriptionHistorySync({
       }
       if (cached?.json) credentials.sub2apiJson = cached.json;
     } catch { /* Keep the last committed snapshot across temporary file/read failures. */ }
-    return { email, loginEmail: job.loginEmail, planType, historicalPlanType, firstSubscribedAt: evidence?.at,
+    return { email, loginEmail: job.loginEmail, accountAddedAt:job.createdAt, planType, historicalPlanType, firstSubscribedAt: evidence?.at,
       accountBanned: isAccountBlocked(email), remark: job.remark || "", accountCostCny: job.accountCostCny,
       userCostUsd: getUserCost(job), credentials };
   }
