@@ -17,16 +17,34 @@ def get(url):
     return urllib.request.urlopen(request, timeout=60)
 
 
+SEMANTIC_TAG = r"v(?:0|[1-9][0-9]{0,5})\.(?:0|[1-9][0-9]{0,5})\.(?:0|[1-9][0-9]{0,5})"
+COMMIT = r"[0-9a-f]{40}"
+
+
 def release(version):
-    if version != "latest" and not re.fullmatch(r"[0-9a-f]{40}", version):
-        raise ValueError("Use latest or a full 40-character commit SHA")
-    endpoint = "/releases/latest" if version == "latest" else "/releases/tags/helper-" + version
+    if version == "latest":
+        endpoint = "/releases/latest"
+    elif re.fullmatch(SEMANTIC_TAG, version):
+        endpoint = "/releases/tags/" + version
+    elif re.fullmatch(COMMIT, version):
+        endpoint = "/releases/tags/helper-" + version
+    else:
+        raise ValueError("Use latest, vMAJOR.MINOR.PATCH or an exact commit")
     with get(API + endpoint) as response:
         info = json.load(response)
-    revision = info.get("tag_name", "").removeprefix("helper-")
-    if (not re.fullmatch(r"[0-9a-f]{40}", revision) or info.get("draft") or info.get("prerelease")
-            or info.get("target_commitish") != revision or (version != "latest" and version != revision)):
+    tag, revision = info.get("tag_name", ""), info.get("target_commitish", "")
+    if info.get("draft") or info.get("prerelease") or not re.fullmatch(COMMIT, revision):
         raise ValueError("Unexpected release identity")
+    if re.fullmatch(SEMANTIC_TAG, tag):
+        if version not in ("latest", tag):
+            raise ValueError("Version tag mismatch")
+        # This project publishes lightweight v-tags pinned to the exact CI SHA.
+        with get(API + "/git/ref/tags/" + tag) as response:
+            target = json.load(response).get("object", {})
+        if target.get("type") != "commit" or target.get("sha") != revision:
+            raise ValueError("Version tag does not match the release commit")
+    elif tag != "helper-" + revision or version not in ("latest", revision):
+        raise ValueError("Unexpected release tag")
     return info, revision
 
 
@@ -37,7 +55,7 @@ def download(version, destination):
     for name in (bundle.ASSET, "SHA256SUMS"):
         item = assets[name]
         url = item["browser_download_url"]
-        if not url.startswith(PREFIX + "helper-" + revision + "/"):
+        if url != PREFIX + info.get("tag_name", "helper-" + revision) + "/" + name:
             raise ValueError("Unexpected release asset URL")
         path = destination / name
         with get(url) as response, path.open("wb") as output:

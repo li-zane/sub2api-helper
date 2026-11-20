@@ -93,6 +93,7 @@ try {
     outputRoot: root,
     webRoot,
     port: 0,
+    accountChatManifest:async(t,acct)=>{assert.equal(t.id,"3");assert.equal(acct.id,3);return {models:models.map(slug=>({slug}))};},
     accountChatSampler: async (c, a, m, q, sig, opts) => {
       sampled++;
       assert.equal(c.baseUrl, poolUrl);
@@ -141,6 +142,14 @@ try {
     (await api("/api/jobs/" + id + "/chat/models?remoteId=3")).data.models,
     models,
   );
+  const filtered=(await api("/api/jobs?status=inspection_paused")).data;
+  assert.equal(filtered.jobs.length,1);
+  assert.equal(filtered.jobs[0].displayStatus,"inspection_paused");
+  assert.equal(filtered.jobs[0].status,"completed","presentation must not change runtime status");
+  assert(filtered.filterOptions.statuses.includes("inspection_paused"));
+  assert.equal((await api("/api/project-update")).data.current,JSON.parse(await fs.readFile(new URL("../package.json",import.meta.url),"utf8")).version);
+  assert.equal((await fetch(base+"/api/project-update/install",{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).status,403);
+  assert.equal((await api("/api/project-update/install",{confirm:false})).code,400);
   const start = await api("/api/jobs/" + id + "/chat", {
     id: crypto.randomUUID(),
     remoteId: "3",

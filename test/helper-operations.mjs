@@ -168,7 +168,7 @@ try {
   assert.deepEqual(chat.list("other@example.test"), []);
   await assert.rejects(
     chat.start(acct, target, { ...body, id: randomUUID(), model: "made-up" }),
-    /模型列表/,
+    /模型目录/,
   );
   await chat.stop();
   const id = randomUUID();

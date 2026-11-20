@@ -1,3 +1,4 @@
+import { version as projectVersion } from "../../package.json";
 import { apiFetch } from "./console-request.mjs";
 import { DEFAULT_PLAN_TYPE_MAPPING, normalizePlanTypeMapping, formatPlanTypeLabel } from "./plan-type-label.mjs";
 import { RemarkDialog } from "./remark-dialog.jsx";
@@ -30,7 +31,7 @@ import { notify } from "./toast-events.mjs";
 import { CopyableAccount, AccountText } from "./copyable-account.jsx";
 import { DEFAULT_POOL_PRICE_MULTIPLIER, normalizeAccountCost, formatAccountCost, accountProfitCents, formatCnyCents } from "./account-pricing.mjs";
 import {
-  Ban, PauseCircle, PlayCircle, MessageSquare,
+  Ban, PauseCircle, PlayCircle, MessageSquare, ChartNoAxesCombined,
   Check,
   ChevronDown,
   ChevronUp,
@@ -86,6 +87,7 @@ import { CustomSelect } from "./custom-select.jsx";
 import { GlobalTooltipProvider } from "./tooltip.jsx";
 
 const TaskSettingsDialog = deferredDialog("任务设置", () => import("./task-settings-dialog.jsx").then(m => m.TaskSettingsDialog));
+const ProjectUpdateDialog=deferredDialog("版本与更新",()=>import("./project-update-dialog.jsx").then(m=>m.ProjectUpdateDialog));
 const FinanceDialog=deferredDialog("每日收支",()=>import("./ops-dialogs.jsx").then(m=>m.FinanceDialog));
 const ChatDialog=deferredDialog("账号对话测试",()=>import("./ops-dialogs.jsx").then(m=>m.ChatDialog));
 const ProxyPolicyDialog=deferredDialog("代理分配与成本",()=>import("./ops-dialogs.jsx").then(m=>m.ProxyPolicyDialog));
@@ -142,6 +144,7 @@ function App() {
   const [batchAction, setBatchAction] = useState("");
   const [sessionActionError, setSessionActionError] = useState("");
   const logoutRunningRef = useRef(false);
+  const [updatesOpen,setUpdatesOpen]=useState(false);
   const [financeOpen,setFinanceOpen]=useState(false),[chatJob,setChatJob]=useState(null),[policyGroup,setPolicyGroup]=useState(null);
   const [subscriptionHistoryOpen, setSubscriptionHistoryOpen] = useState(false);
   const [subscriptionHistoryTotal, setSubscriptionHistoryTotal] = useState(null);
@@ -1547,7 +1550,7 @@ function App() {
             <div className="brand-copy">
               <div className="brand-title-group">
                 <h1>Sub2api Helper</h1>
-                <span className="brand-badge">Pro Console</span>
+                <button type="button" className="brand-badge project-version" onClick={()=>setUpdatesOpen(true)} disabled={!token} title="检查 GitHub 发布和安装更新" aria-label="版本与更新" aria-haspopup="dialog">v{projectVersion}</button>
                 <HelpTip title="控制台说明" label="查看控制台说明">
                   本地多任务协议登录与号池管理中心，支持自动邮箱/短信接码、2FA 轮换、Web 会话管理、Sub2API 号池同步与代理纯净度检测。
                 </HelpTip>
@@ -1583,7 +1586,7 @@ function App() {
               <strong>{stats.abnormal ?? 0}</strong>
             </button>
             <span className="telemetry-divider" aria-hidden="true" />
-            <button type="button" className="summary-pill" aria-haspopup="dialog" disabled={!token} onClick={()=>setFinanceOpen(true)}>每日收支</button>
+            <button type="button" className="summary-pill" aria-haspopup="dialog" disabled={!token} onClick={()=>setFinanceOpen(true)} title="每日收支与近七日趋势"><ChartNoAxesCombined size={15} aria-hidden="true"/><span>每日收支</span></button>
             <button
               type="button"
               className={`summary-pill telemetry-history-pill ${subscriptionHistoryOpen ? "is-open" : ""}`}
@@ -2401,6 +2404,7 @@ function App() {
         notify("代理已删除");
         void refreshAccountProxyDistribution().catch(error => notify(`代理已删除，刷新列表失败：${error.message}`, { tone: "error" }));
       }} />}
+      {updatesOpen&&<ProjectUpdateDialog request={proxyDialogRequest} onClose={()=>setUpdatesOpen(false)}/>}
       {financeOpen&&<FinanceDialog request={proxyDialogRequest} onClose={()=>setFinanceOpen(false)}/>}
       {chatJob&&<ChatDialog key={chatJob.id} job={chatJob} request={proxyDialogRequest} onClose={()=>setChatJob(null)}/>}
       {policyGroup&&<ProxyPolicyDialog nodes={policyGroup} request={proxyDialogRequest} onSaved={()=>{
@@ -4044,7 +4048,7 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
 
 function LogDialog({ token, job, onClose }) {
   const request = useMemo(() => url => apiFetch(token, url), [token]);
-  return <AccountLogDialog request={request} job={job} onClose={onClose} statusBadge={<StatusBadge status={job.displayStatus || job.status} webSessionStatus={job.webSessionStatus} />} />;
+  return <AccountLogDialog request={request} job={job} onClose={onClose} statusBadge={<StatusBadge status={job.displayStatus==="inspection_paused"?job.status:job.displayStatus || job.status} webSessionStatus={job.webSessionStatus} />} />;
 }
 
 function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, totpReplaceAvailable, onJobUpdate, onClose, onError }) {
@@ -5165,7 +5169,7 @@ function formatWorkspaceRole(role) {
 function StatusBadge({ status, webSessionStatus = "absent" }) {
   const description = status === "canceled"
     ? `上次 Codex 授权任务已取消；${WEB_STATES[webSessionStatus] || "Web 状态未知"}。Web 登录状态与授权任务结果分别记录。`
-    : status === "codex_email_verification" ? "自动 Codex OAuth 已暂停，可手动重新授权" : undefined;
+    : status === "inspection_paused" ? "已暂停：此账号的 helper 自动巡检已关闭，不影响手动操作或号池启用状态" : status === "codex_email_verification" ? "自动 Codex OAuth 已暂停，可手动重新授权" : undefined;
   const config = {
     queued: ["排队中", <LoaderCircle size={14} />],
     starting: ["启动中", <LoaderCircle className="spin" size={14} />],
@@ -5175,6 +5179,7 @@ function StatusBadge({ status, webSessionStatus = "absent" }) {
     totp_starting: ["准备 2FA", <LoaderCircle className="spin" size={14} />],
     password_add_starting: ["准备密码", <LoaderCircle className="spin" size={14} />],
     totp_setup_otp: ["激活 2FA", <ShieldCheck size={14} />],
+    inspection_paused: ["已暂停", <PauseCircle size={14} />],
     codex_email_verification: ["邮箱二验", <Mail size={14} />],
     email_otp: ["待邮箱码", <Mail size={14} />],
     phone: ["待手机号", <Smartphone size={14} />],

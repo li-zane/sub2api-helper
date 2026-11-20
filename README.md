@@ -8,7 +8,7 @@ sub2api helper 提供网页控制台与协议级登录工具：覆盖批量账�
 
 **新账号首次导入默认仅登录 Web**，识别 PlanType 后按“任务设置”的对应规则选择 Codex 授权、上传和自动监控；未匹配规则时不自动申请 OAuth。
 
-[功能概览](#功能概览) · [自动化能力](#自动化能力) · [任务设置](#任务设置) · [快速开始](#快速开始) · [使用与配置指南](docs/usage-guide.md)
+[版本与更新](docs/project-updates.md) · [GitHub Releases](https://github.com/li-zane/sub2api-helper/releases) · [功能概览](#功能概览) · [自动化能力](#自动化能力) · [任务设置](#任务设置) · [快速开始](#快速开始) · [使用与配置指南](docs/usage-guide.md)
 
 ## 功能概览
 

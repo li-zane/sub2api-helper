@@ -53,9 +53,11 @@ import { accountRateLimit } from "./account-rate-limit.mjs";
 import { usageRestricted } from "../web/src/codex-eligibility.mjs";
 import { smsOrderLog } from "./sms-order-cost.mjs";
 import { SmsCancellations } from "./sms-cancellations.mjs";
+import { createProjectUpdates } from "./project-updates.mjs";
 import { OperationsBook, beijingDay, cents } from "./operations-book.mjs";
 import { sampleLedger } from "./operations-finance.mjs";
-import { AccountTestChat, poolModels } from "./account-test-chat.mjs";
+import { createChatCatalog, readUpstreamManifest } from "./chat-upstream-catalog.mjs";
+import { AccountTestChat } from "./account-test-chat.mjs";
 import { releaseDispatchPaused, drainRequestKind } from "./release-drain.mjs";
 import { legacyCodexEmailGate } from "./codex-email-gate.mjs";
 import { displayLoginStatus, normalizeLoginAutomationPause, loginAutomationBlocked, loginAutomationPauseMessage } from "./login-automation-pause.mjs";
@@ -185,6 +187,7 @@ export function createConsoleApp(options = {}) {
   const OUTPUT_ROOT = path.resolve(
     options.outputRoot || process.env.ONBOARDING_OUTPUT_ROOT || path.join(WORKSPACE_ROOT, "tmp", "chatgpt-onboarding-console"),
   );
+  const projectUpdates=options.projectUpdates || createProjectUpdates();
   const book = new OperationsBook(path.join(OUTPUT_ROOT, "helper-operations.sqlite"));
   const poolKey = config => String(config?.baseUrl || "").trim().replace(/\/+$/, "");
   const inspectionPaused = email => book.paused(accountLoginEmails.key(email));
@@ -501,12 +504,23 @@ export function createConsoleApp(options = {}) {
       throw httpError(409,"号池账号已变更、暂停、限流或不可用");
     return {id,account:job.email.toLowerCase(),pool:poolKey(c),c};
   }
-  const chatModels=async t=>poolModels(await requestSub2Api(t.c,"/api/v1/admin/accounts/"+t.id+"/models",{timeoutMs:15000}));
-  const chatStore=new AccountTestChat(book,{catalog:chatModels,send:async(t,model,prompt,signal,messages)=>{
+  async function readChatRecord(t) {
     const record=await readFingerprintAccount(t.c,t.id);
     if(String(record?.id)!==t.id || record?.type!=="oauth" || record.platform!=="openai" || sub2ApiAccountEmail(record)!==t.account
       || record.status!=="active" || sub2ApiAccountSchedulable(record)!==true || accountRateLimit(record).limited || usageRestricted(normalizeSub2ApiUsage(record)) || accountAutomationBlocked(t.account) || overloadCooldown.isPaused(t.account) || sessionResetAutomationPaused(t.account) || t.c!==sub2ApiSettingsConfig)throw Error("账号状态已变更");
-    return (options.accountChatSampler || fingerprintSampler)(t.c,record,model,prompt,signal,{messages});
+    return record;
+  }
+  const chatModels = createChatCatalog({
+    identity:monitorBackendIdentity, getAccount:readChatRecord,
+    readManifest: options.accountChatManifest || (async (target,record)=>{
+      const parent = record.parent_account_id == null ? record : await readFingerprintAccount(target.c,record.parent_account_id);
+      if(parent.type!=="oauth" || parent.platform!=="openai")throw httpError(409,"账号授权来源不是 OpenAI OAuth");
+      return readUpstreamManifest(target,record,{credentials:parent.credentials});
+    }),
+  });
+  const chatStore=new AccountTestChat(book,{catalog:chatModels,send:async(t,model,prompt,signal,messages)=>{
+    const record=await readChatRecord(t);
+    return (options.accountChatSampler || fingerprintSampler)(t.c,record,model,prompt,signal,{messages,upstreamModel:true});
   }});
   const modelFingerprint = new ModelFingerprintService({
     onVerdict:(email,at,status)=>book.recordQuality(email,at,status),
@@ -682,6 +696,17 @@ export function createConsoleApp(options = {}) {
   }
 
   async function dispatchApi(req, res, requestUrl) {
+    if (requestUrl.pathname === "/api/project-update" && req.method==="GET") {
+      sendJson(res,200,await projectUpdates.snapshot());return;
+    }
+    if (req.method==="POST" && ["/api/project-update/check","/api/project-update/install"].includes(requestUrl.pathname)) {
+      // The existing authenticated console boundary applies here too. Reject
+      // browser cross-site writes even if a caller has retained a console token.
+      if (["cross-site","same-site"].includes(req.headers["sec-fetch-site"])) throw httpError(403,"请从当前控制台发起更新");
+      if (requestUrl.pathname.endsWith("/check")) sendJson(res,200,await projectUpdates.check());
+      else sendJson(res,202,await projectUpdates.apply(await readJson(req)));
+      return;
+    }
     if (requestUrl.pathname === "/api/finance/daily" && ["GET","POST"].includes(req.method)) {
       const day = requestUrl.searchParams.get("day") || book.today();
       if(req.method==="POST" && day!==book.today()) throw httpError(409,"历史日期只读");
@@ -715,7 +740,7 @@ export function createConsoleApp(options = {}) {
       if(req.method==="GET" && !chatAction[2]){sendJson(res,200,{turns:chatStore.list(account)});return;}
       const body=req.method==="POST"?await readJson(req):{};
       const target=await chatTarget(job,body.remoteId || requestUrl.searchParams.get("remoteId"));
-      if(req.method==="GET"){sendJson(res,200,{id:target.id,models:await chatModels(target)});return;}
+      if(req.method==="GET"){sendJson(res,200,{id:target.id,models:await chatModels(target,{fresh:requestUrl.searchParams.get("refresh")==="1"}),source:"upstream"});return;}
       if(chatAction[2])throw httpError(405,"Method not allowed");
       sendJson(res,202,await chatStore.start(account,target,body));return;
     }
@@ -1921,7 +1946,7 @@ export function createConsoleApp(options = {}) {
 
   function readJobListRow(job, poolState) {
     const pool = getSub2ApiAccountStatusForJob(job, poolState), blocked = accountAutomationBlocked(job.email);
-    return { job, pool, blocked, planType: getJobPlanType(job, poolState, pool), active: occupiesActiveSlot(job),
+    return { job, pool, blocked, displayStatus:inspectionPaused(job.email)?"inspection_paused":displayLoginStatus(job), planType: getJobPlanType(job, poolState, pool), active: occupiesActiveSlot(job),
       health: accountHealth(job, pool, blocked, accountSessionResets.get(job.email)) };
   }
 
@@ -8733,13 +8758,13 @@ export function createConsoleApp(options = {}) {
     }
   }
 
-  function publicSelectionJob({ job, pool: sub2ApiStatus, planType, blocked }) {
+  function publicSelectionJob({ job, pool: sub2ApiStatus, planType, blocked, displayStatus }) {
     return {
       id: job.id,
       email: job.loginEmail,
       inspectionPaused: inspectionPaused(job.email),
       status: job.status,
-      displayStatus: displayLoginStatus(job),
+      displayStatus: displayStatus || (inspectionPaused(job.email)?"inspection_paused":displayLoginStatus(job)),
       planType,
       sub2apiInPool: sub2ApiStatus.inPool,
       sub2apiEnabled: sub2ApiStatus.enabled,

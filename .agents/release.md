@@ -9,7 +9,7 @@
 - `.github/workflows/check.yml` 在 Linux/Windows 各分 4 组，通过 `npm run check:ci -- --shard N/4` 执行完整检查；清单自动展开自 `npm run check`，每组内部保留原执行顺序，各组均构建生产前端。全部 8 组通过后才发布运行包。
 - 每个平台第 1 组执行发布工具测试和依赖审计；Linux 第 1 组生成唯一运行包。每组将逐项测试耗时保存为 Actions artifact，并在运行摘要中列出最慢的测试。新推送取消同一分支尚在执行的旧测试组，发布运行包的任务仍排队执行。
 - 依赖审计使用 `npm run audit:dependencies`，打印原始 npm 审计结果；尚无上游修复的 Picomatch 公告仅在全部本地解析器防护及哈希校验通过后接受，其他 high/critical 问题仍阻止发布。具体边界见 `.agents/ci/dependency-mitigation.md`；安装时自动应用防护，不跳过安装脚本。
-- `main` 推送或手动运行该流水线，检查全部通过后发布不可覆盖的 GitHub Release `helper-<40位提交SHA>`。包版本以提交 SHA 为准，不自动修改 `package.json` 版本。
+- `main` 推送或手动运行该流水线，检查全部通过后发布不可覆盖的 GitHub Release `helper-<40位提交SHA>`。每个提交保留运行包。正式版按 package.json 和 package-lock.json 中的项目版本创建 vMAJOR.MINOR.PATCH Release；已使用的正式版本号不移动。
 - 构建环境 Linux x64 / Node 22；产物 `helper-linux-x64-node22.tar.gz` 含源码、生产前端及 Node 依赖，另附 `SHA256SUMS`。包内 `release.json` 记录每个文件的哈希和链接目标；禁止打包运行数据、密钥、`.env`、`tmp/`、测试输出或 `.git/`。
 
 ## 线上环境与命令

@@ -85,6 +85,9 @@ jobs:
       group: helper-runtime-release
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v8.0.2
         with:
           name: helper-linux-runtime
@@ -107,8 +110,30 @@ jobs:
           PY
             exit 0
           fi
-          latest=false
-          if [[ $(gh api "repos/$GH_REPO/commits/main" --jq .sha) == "$GITHUB_SHA" ]]; then latest=true; fi
           gh release create "$tag" --target "$GITHUB_SHA" --title "Helper ${GITHUB_SHA:0:12}" \
             --notes "Linux x64 / Node 22 runtime bundle for commit $GITHUB_SHA. Includes built frontend and Node dependencies; x3 performs no npm install or frontend build." \
-            --latest="$latest" release-dist/helper-linux-x64-node22.tar.gz release-dist/SHA256SUMS
+            --latest=false release-dist/helper-linux-x64-node22.tar.gz release-dist/SHA256SUMS
+
+      - name: Publish immutable versioned release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          [[ $version =~ ^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$ ]]
+          tag="v$version"
+          if gh release view "$tag" --json tagName >/dev/null 2>&1; then
+            echo "Retaining the existing $tag. Bump package.json to publish another stable version."
+            exit 0
+          fi
+          # An overtaken CI run must not publish an older head as the stable channel.
+          [[ $(gh api "repos/$GH_REPO/commits/main" --jq .sha) == "$GITHUB_SHA" ]] || exit 0
+          if ref=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq .object.sha 2>/dev/null); then
+            [[ $ref == "$GITHUB_SHA" ]]
+          fi
+          notes="docs/releases/$tag.md"
+          if [[ ! -f $notes ]]; then printf '%s\n' "Sub2api Helper $tag. Verified Linux x64 / Node 22 runtime for $GITHUB_SHA." > release-dist/notes.md; notes=release-dist/notes.md; fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "Sub2api Helper $tag" --notes-file "$notes" --latest=true \
+            release-dist/helper-linux-x64-node22.tar.gz release-dist/SHA256SUMS

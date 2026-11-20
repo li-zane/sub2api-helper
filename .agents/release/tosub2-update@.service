@@ -1,0 +1,16 @@
+[Unit]
+Description=Install verified Sub2api Helper release
+
+[Service]
+Type=exec
+User=root
+ExecStart=/usr/bin/python3 -I /usr/local/lib/sub2api-helper-release/update-agent.py
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RuntimeMaxSec=45min
+UMask=0022

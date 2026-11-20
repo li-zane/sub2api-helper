@@ -70,7 +70,7 @@ export class AccountTestChat {
     let admitted = false;
     try {
       if (!(await this.catalog(target)).includes(model))
-        throw problem(400, "该模型不在此账号当前的号池模型列表");
+        throw problem(400, "该模型不在此账号当前的上游模型目录");
       if (this.closing) throw problem(503, "服务正在关闭");
       const prior = this.book.db
         .prepare(

@@ -229,7 +229,7 @@ export class OperationsBook {
       throw e;
     }
   }
-  ledger(day = this.today()) {
+  daySummary(day) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw failure(400, "日期格式错误");
     const record = this.db
       .prepare("SELECT sampled,complete FROM days WHERE day=?")
@@ -271,10 +271,19 @@ export class OperationsBook {
       profitCents: revenue === null ? null : revenue - total,
       known: income.known,
       count: income.count,
-      days: this.db
-        .prepare("SELECT day FROM days ORDER BY day DESC LIMIT 366")
-        .all()
-        .map((r) => r.day),
+
     };
+  }
+  ledger(day = this.today()) {
+    const end = Date.parse(day + "T00:00:00.000Z");
+    if (!Number.isFinite(end) || new Date(end).toISOString().slice(0,10)!==day) throw failure(400, "日期格式错误");
+    const current = this.daySummary(day);
+    const trend = Array.from({length:7}, (_, i) => {
+      const key = new Date(end - (6-i)*86400000).toISOString().slice(0,10);
+      const r = key === day ? current : this.daySummary(key);
+      return {day:key,exists:r.exists,complete:r.complete,
+        costCents:r.exists?r.costCents:null,incomeCents:r.incomeCents,profitCents:r.profitCents};
+    });
+    return {...current, trend, days:this.db.prepare("SELECT day FROM days ORDER BY day DESC LIMIT 366").all().map(r=>r.day)};
   }
 }

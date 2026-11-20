@@ -1,3 +1,4 @@
+import { FinanceTrend } from "./finance-trend.jsx";
 import React, { useEffect, useState, useRef, useId } from "react";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
 import { X, RefreshCw, Send, MessageSquare, Calculator } from "lucide-react";
@@ -121,6 +122,7 @@ export function FinanceDialog({ request, onClose }) {
         </div>
         {err && <p role="alert">{err}</p>}
         {busy && <p role="status">正在读取…</p>}
+        {data && <FinanceTrend points={data.trend} />}
         {data && !data.exists ? (
           <div className="ops-empty">
             <strong>这一天尚无库存记录</strong>
@@ -195,6 +197,8 @@ export function ChatDialog({ job, request, onClose }) {
     [turns, setTurns] = useState([]),
     [err, setErr] = useState(""),
     [catalogError, setCatErr] = useState(""),
+    [catalogRevision, setCatalogRevision] = useState(0),
+    [loadingModels, setLoadingModels] = useState(false),
     [posting, setPosting] = useState(false),
     [reload, setReload] = useState(0);
   const busy = useRef(false),
@@ -213,8 +217,9 @@ export function ChatDialog({ job, request, onClose }) {
     setModels([]);
     setModel("");
     setCatErr("");
+    setLoadingModels(Boolean(remote));
     if (remote)
-      request(endpoint + "/models?remoteId=" + encodeURIComponent(remote))
+      request(endpoint + "/models?remoteId=" + encodeURIComponent(remote) + "&refresh=1")
         .then((r) => {
           if (!gone) {
             setModels(r.models);
@@ -223,11 +228,11 @@ export function ChatDialog({ job, request, onClose }) {
         })
         .catch((e) => {
           if (!gone) setCatErr(e.message);
-        });
+        }).finally(()=>{if(!gone)setLoadingModels(false);});
     return () => {
       gone = true;
     };
-  }, [remote, endpoint, request, reload]);
+  }, [remote, endpoint, request, catalogRevision]);
   useEffect(() => {
     let gone = false,
       timer;
@@ -321,7 +326,7 @@ export function ChatDialog({ job, request, onClose }) {
               disabled={!models.length}
               onChange={(e) => setModel(e.target.value)}
             >
-              {!models.length && <option value="">暂无可选模型</option>}
+              {!models.length && <option value="">{loadingModels?"正在读取上游…":"暂无可选模型"}</option>}
               {models.map((m) => (
                 <option key={m}>{m}</option>
               ))}
@@ -331,6 +336,8 @@ export function ChatDialog({ job, request, onClose }) {
         <small>
           使用选中账号的检测通道直连上游，不经号池计费网关。关闭窗口不影响后台回答。
         </small>
+        <div className="upstream-catalog-tools"><small>目录来源：所选 OAuth 账号的上游，不受号池已添加模型限制。</small>
+        <button type="button" className="secondary-button" disabled={loadingModels||!remote} onClick={()=>setCatalogRevision(v=>v+1)}><RefreshCw size={13}/>刷新上游模型</button></div>
         {catalogError && <p role="alert">{catalogError}</p>}
         <div className="ops-transcript" ref={transcript} aria-label="对话记录">
           {!turns.length ? (

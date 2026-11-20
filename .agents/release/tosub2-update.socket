@@ -1,0 +1,14 @@
+[Unit]
+Description=Sub2api Helper verified update request socket
+
+[Socket]
+ListenStream=/run/tosub2-update.sock
+Accept=yes
+SocketUser=root
+SocketGroup=tosub2
+SocketMode=0660
+MaxConnections=4
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

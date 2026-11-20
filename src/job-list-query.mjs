@@ -4,7 +4,7 @@ import { hasJobTotpKey } from "./task-auto-state.mjs";
 const STATUSES = [
   "queued", "starting", "working", "password", "mfa_otp", "totp_starting", "password_add_starting",
   "totp_setup_otp", "email_otp", "phone", "phone_otp", "finalizing", "refreshing", "completed",
-  "failed", "codex_email_verification", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available",
+  "failed", "inspection_paused", "codex_email_verification", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available",
 ];
 const oneOf = (value, allowed) => allowed.includes(value) ? value : "";
 const lower = value => String(value || "").trim().toLowerCase();
@@ -31,7 +31,7 @@ function matches(row, f, query, poolValue, enabledValue, isCheckingSession) {
   if (f.summary === "queued" && job.status !== "queued") return false;
   if ((f.summary === "normal" || f.summary === "abnormal") && f.summary !== health) return false;
   if (f.lockedOnly && job.status !== "banned" && !job.autoRepairBlocked) return false;
-  if (f.status && displayLoginStatus(job) !== f.status) return false;
+  if (f.status && (row.displayStatus || displayLoginStatus(job)) !== f.status) return false;
   if (f.planType && (planType || "__unknown__") !== f.planType) return false;
   if (f.sub2apiPool && poolValue !== f.sub2apiPool) return false;
   if (f.sub2apiEnabled && enabledValue !== f.sub2apiEnabled) return false;
@@ -65,7 +65,7 @@ export function projectJobList(jobs, { filters, emails, requestedPage, pageSize,
       : pool.inPool === false ? "not_added" : "unknown";
     const enabledValue = pool.enabled === true ? "enabled" : pool.enabled === false ? "disabled" : "unknown";
     if (planType) plans.add(planType); else planTypeUnknown = true;
-    pools.add(poolValue); enabled.add(enabledValue); statuses.add(displayLoginStatus(job));
+    pools.add(poolValue); enabled.add(enabledValue); statuses.add(row.displayStatus || displayLoginStatus(job));
     stats[health]++;
     if (active) stats.active++;
     if (job.status === "queued") stats.queued++;

@@ -183,3 +183,13 @@
     max-width: 55vw;
   }
 }
+
+.finance-trend{border:1px solid #dbe4eb;border-radius:12px;background:#fff;padding:14px 14px 9px;margin:14px 0;color:#182b3b}
+.finance-trend header,.finance-trend-legend,.finance-trend-legend span{display:flex;align-items:center;gap:8px}
+.finance-trend header{justify-content:space-between;flex-wrap:wrap}.finance-trend h3{font-size:15px;margin:0 0 3px}
+.finance-trend-legend{font-size:12px;gap:12px;color:#445568}.finance-trend-legend span{gap:4px}
+.finance-trend-chart{width:100%;display:block;height:auto;margin-top:5px}.finance-trend-chart text{font-size:12px;fill:#42586b;font-variant-numeric:tabular-nums}
+.finance-trend summary{color:#405d73;cursor:pointer;font-size:12px;min-height:24px}.finance-trend table{width:100%;font-size:12px;border-collapse:collapse;font-variant-numeric:tabular-nums}
+.finance-trend th,.finance-trend td{padding:4px;text-align:right;border-bottom:1px solid #e1e8ed}.finance-trend th:first-child{text-align:left}
+.finance-trend-empty{font-size:12px;color:#496478}
+@media(max-width:480px){.finance-trend{padding:10px}.finance-trend-chart text{font-size:12px}}

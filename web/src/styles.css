@@ -9172,3 +9172,14 @@ select option {
 .codex-status-filters { flex-wrap: wrap; justify-content: center; width: 132px; gap: 3px 8px; }
 .codex-status-filters .codex-status-title { flex-basis: 100%; }
 .codex-status-filters .column-filter-btn { width: auto; gap: 3px; padding: 0 5px; font-size: 10px; }
+
+.status-badge.inspection_paused {color:#40516a;background:#eef2f7;border-color:#cbd5e1;}
+
+.brand-badge.project-version{display:inline-flex;align-items:center;cursor:pointer;font:inherit;font-size:11px;font-weight:650}
+.brand-badge.project-version:focus-visible{outline:2px solid var(--accent,#066cb8);outline-offset:3px}
+.project-updates{width:min(500px,94vw);color:#213043;background:#fff}
+.project-updates-body{padding:15px 20px;font-size:14px}.project-package{display:flex;align-items:center;gap:11px;padding:14px;background:#f2f6fa;border-radius:10px}
+.project-package p{margin:3px 0 0;color:#506579}.project-package span{margin-left:auto;font:600 1rem ui-monospace,monospace}
+.project-release-meta{display:grid;gap:8px;margin:16px 0}.project-release-meta a{display:inline-flex;align-items:center;gap:4px;color:#075e96}
+.project-confirm{background:#fff6de;border:1px solid #e2cf90;padding:12px;border-radius:8px}.project-update-state{color:#185779}.project-updates [role=alert]{color:#8d2634}
+.upstream-catalog-tools{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0}
