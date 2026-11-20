@@ -69,5 +69,15 @@ try{
  assert.equal(service.snapshot(email).operation.status,'completed');
  assert.equal(events.filter(e=>e.phase==='logout-request').length,requests);
  assert(!events.includes('reauthorize'),'ordinary cooldown attempted reauthorization at expiry');
+ await service.stop(); events.length=0; rows[0].enabled=true;
+ const accountOptions={...options,filePath:path.join(root,'email-gate.json'),
+  getSettings:account=>({...rules,reauthorizeAfterCooldown:account!==email}),
+  afterPause:()=>assert.fail('email gate must prevent automatic logout'),
+  beforeResume:()=>assert.fail('email gate must prevent automatic OAuth')};
+ service=new OverloadCooldown(accountOptions);service.stopped=false;await service.setEnabled(email,true);
+ await service.observeCounts(email,{config,accountIds:['7'],windowMinutes:15,sampledAt:now,point:{start:new Date(Math.floor(now/900000)*900000).toISOString(),end:new Date(Math.floor(now/900000)*900000+900000).toISOString(),count:4}});
+ assert.equal(service.snapshot(email).phase,'cooling');
+ now+=360*60000+1000;await service.refresh();assert.equal(service.snapshot(email).phase,'idle');
+ assert.deepEqual(events,['pause','resume']);
  console.log('COOLDOWN_OPTION_OFF_PASS canceled pending logout; durable deadline; ordinary resume without reauthorization');
 }finally{await service.stop();await fs.rm(root,{recursive:true,force:true});}

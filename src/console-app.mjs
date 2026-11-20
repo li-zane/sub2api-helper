@@ -53,7 +53,8 @@ import { accountRateLimit } from "./account-rate-limit.mjs";
 import { usageRestricted } from "../web/src/codex-eligibility.mjs";
 import { smsOrderLog } from "./sms-order-cost.mjs";
 import { SmsCancellations } from "./sms-cancellations.mjs";
-import { normalizeLoginAutomationPause, loginAutomationBlocked, loginAutomationPauseMessage } from "./login-automation-pause.mjs";
+import { legacyCodexEmailGate } from "./codex-email-gate.mjs";
+import { displayLoginStatus, normalizeLoginAutomationPause, loginAutomationBlocked, loginAutomationPauseMessage } from "./login-automation-pause.mjs";
 import { limitPoolRequests } from "./pool-network.mjs";
 import { createUsageTotalsReader, combineUsageTotals, mergeUsageTotals } from "./sub2api-usage-totals.mjs";
 import { UsageSnapshots, usageSnapshotKey } from "./usage-snapshots.mjs";
@@ -216,6 +217,7 @@ export function createConsoleApp(options = {}) {
   function registerJob(id, job) {
     Object.defineProperty(job, "loginEmail", { enumerable: true, get: () => accountLoginEmails.email(job.email) });
     Object.defineProperty(job, "emailAliases", { enumerable: true, get: () => accountLoginEmails.emails(job.email) });
+    if (job.codexEmailGate === undefined) job.codexEmailGate = [...jobs.forAccount(job.email)].find(j => !j.deleted && j.codexEmailGate)?.codexEmailGate;
     jobs.set(id, job);
     historySync.invalidate();
   }
@@ -417,7 +419,11 @@ export function createConsoleApp(options = {}) {
     filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
     getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
     backendIdentity: monitorBackendIdentity,
-    getSettings: () => consoleSettings.current.overloadAutoCooldownSettings,
+    getSettings: email => {
+      const settings = consoleSettings.current.overloadAutoCooldownSettings;
+      return [...jobs.forAccount(accountLoginEmails.key(email))].some(j => !j.deleted && j.codexEmailGate?.required)
+        ? { ...settings, reauthorizeAfterCooldown: false } : settings;
+    },
     request: requestSub2Api,
     onChange: invalidateSub2ApiAccountStatusCache,
     onNeedCounts: () => overloadMonitor.trigger(),
@@ -2155,6 +2161,7 @@ export function createConsoleApp(options = {}) {
     job.runResultSaved = false;
     job.runId = runId;
     job.runMode = mode;
+    job.inCodexSignIn = false;
     job.mailOtpRequestedAt = null;
     const args = mode === "web_login"
       ? [PROTOCOL_SCRIPT, "--email", job.loginEmail, "--web-only", "--output-mode", "web",
@@ -2335,6 +2342,7 @@ export function createConsoleApp(options = {}) {
       return;
     }
     if (!isTerminalStatus(job.status) && code === 0 && job.runResultSaved && (await fileExists(job.outputPath))) {
+      if (job.codexEmailGate?.required && ["full", "refresh"].includes(mode)) setCodexEmailGate(job, false);
       job.planType = await readPlanTypeFromOutput(job.outputPath);
       await reconcilePlanAutomations(job, job.planType);
       if (job.webSessionMonitorRepair) {
@@ -3056,7 +3064,7 @@ export function createConsoleApp(options = {}) {
       const promise = Promise.resolve().then(() => withEmailJobLock(email, async () => {
         const entry = overloadCooldown.accounts.get(email);
         if (shuttingDown || !entry?.resumeAccountIds?.length || entry.resetRequestId !== id || entry.backend !== backend
-          || consoleSettings.current.overloadAutoCooldownSettings.reauthorizeAfterCooldown !== true) return;
+          || job.codexEmailGate?.required || consoleSettings.current.overloadAutoCooldownSettings.reauthorizeAfterCooldown !== true) return;
         try { await startAccountSessionReset(job, { automatic: true, requestId: id, cooldownMinutes: logoutBeforeCooldown ? cooldownMinutes : 0 }); }
         catch (error) {
           await accountSessionResets.save(email, { id, source: "cooldown", jobId: job.id, status: "failed", logoutCompletedAt: null,
@@ -3123,7 +3131,14 @@ export function createConsoleApp(options = {}) {
       if (!sessionResetBlocksAutomation(state)) continue;
       const job = jobs.get(state.jobId);
       if (!job || accountAutomationBlocked(email) || automaticLoginBlocked(job, "oauth")) {
-        await accountSessionResets.fail(email, "账号缺失、已封禁或自动登录暂停，需要手动处理"); continue;
+        await accountSessionResets.fail(email, "账号缺失、已封禁或自动登录暂停，需要手动处理");
+        if (job?.codexEmailGate?.required && job.status === "queued" && job.poolRefreshAction === "session-reset") {
+          job.queuedMode = null;
+          job.poolRefreshDueAt = null;
+          failJob(job, "邮箱二验：已停止冷却后的自动授权，请手动重新授权");
+          await saveJobMetadata(job);
+        }
+        continue;
       }
       try { await ensureSessionResetPoolPaused(job); }
       catch (error) { await accountSessionResets.fail(email, error); continue; }
@@ -3826,6 +3841,7 @@ export function createConsoleApp(options = {}) {
 
     for (const { type } of authOutputStages(scan, scan.length - text.length)) {
       if (type === "auth_expired") {
+        job.inCodexSignIn = false;
         job.awaitingMfa = false;
         stopSmsPolling(job);
         releaseSmsNumber(job, "idle");
@@ -3834,9 +3850,11 @@ export function createConsoleApp(options = {}) {
         setStage(job, "starting", "新登录状态被服务端拒绝，正在自动重新获取邮箱验证码");
       }
       if (type === "codex_auth_login") {
+        job.inCodexSignIn = job.runMode === "full";
         setStage(job, "working", "Codex 要求独立身份验证，正在继续授权；原 Web 会话已保留");
       }
       if (type === "email_otp") {
+        if (job.inCodexSignIn && !job.codexEmailGate?.required) setCodexEmailGate(job, true);
         job.awaitingMfa = false;
         markAuthorizationRequirement(job, "emailOtp");
         const rejected = scan.includes("[email-otp-rejected]");
@@ -7987,7 +8005,19 @@ export function createConsoleApp(options = {}) {
     if (!codexMonitoringAllowed(job, poolState)) throw httpError(409, "账号需已加入号池并启用，且未达到用量限额、不处于 429 限流中，才能开启 Codex 检测");
   }
 
+  function setCodexEmailGate(job, required) {
+    const state = { required, at: new Date().toISOString() };
+    for (const related of jobs.forAccount(job.email)) {
+      if (related.deleted) continue;
+      related.codexEmailGate = state;
+      touch(related);
+      void saveJobMetadata(related).catch(error => console.error("[email-gate] 保存状态失败", error.code));
+    }
+  }
   function accountLoginPause(job) {
+    return baseLoginPause(job) || (job.codexEmailGate?.required ? { reason: "codex_email_verification", at: job.codexEmailGate.at } : null);
+  }
+  function baseLoginPause(job) {
     const entries = [...jobs.forAccount(job.email)].filter(j => !j.deleted);
     return entries.map(j => normalizeLoginAutomationPause(j.loginAutomationPause)).find(p => p?.reason === "mfa_failed")
       || entries.map(j => normalizeLoginAutomationPause(j.loginAutomationPause)).find(Boolean) || null;
@@ -7996,7 +8026,7 @@ export function createConsoleApp(options = {}) {
     return loginAutomationBlocked(accountLoginPause(job), kind);
   }
   function pauseAutomaticLogin(job, reason) {
-    const old = accountLoginPause(job);
+    const old = baseLoginPause(job);
     const pause = old?.reason === "mfa_failed" || old?.reason === reason ? old : { reason, at: new Date().toISOString() };
     for (const related of jobs.values()) {
       if (related.deleted || related.email.toLowerCase() !== job.email.toLowerCase()) continue;
@@ -8569,6 +8599,7 @@ export function createConsoleApp(options = {}) {
       id: job.id,
       email: job.loginEmail,
       status: job.status,
+      displayStatus: displayLoginStatus(job),
       planType,
       sub2apiInPool: sub2ApiStatus.inPool,
       sub2apiEnabled: sub2ApiStatus.enabled,
@@ -8993,6 +9024,14 @@ export function createConsoleApp(options = {}) {
     if (job.poolRefreshAction === "session-reset") {
       const reset = activeSessionReset(job);
       if (reset?.status !== "cooling") return;
+      if (job.codexEmailGate?.required) {
+        await accountSessionResets.fail(job.email, "邮箱二验：已停止冷却后的自动授权，请手动重新授权");
+        job.queuedMode = null;
+        job.poolRefreshDueAt = null;
+        failJob(job, "邮箱二验：已停止冷却后的自动授权，请手动重新授权");
+        await saveJobMetadata(job);
+        return;
+      }
       const remaining = Date.parse(reset.resumeAt) - Date.now();
       if (remaining > 0) { schedulePoolRefresh(job, remaining); return; }
       await validateSessionResetRoute(job, reset);
@@ -9281,6 +9320,7 @@ export function createConsoleApp(options = {}) {
           storedCredentials = totpRecovery.credentials;
           const restoredOperation = restoredOutputOperationState(metadata, completedAt, totpRecovery, passwordRecovery);
           registerJob(entry.name, {
+            codexEmailGate: metadata.codex_email_gate,
             id: entry.name,
             email,
             status: restoredOperation.status,
@@ -9393,6 +9433,7 @@ export function createConsoleApp(options = {}) {
             ? "resume_available"
             : isTerminalStatus(savedStatus) ? savedStatus : "resume_available";
           registerJob(entry.name, {
+            codexEmailGate: metadata.codex_email_gate,
             id: entry.name,
             email,
             status: restoredStatus,
@@ -9514,6 +9555,7 @@ export function createConsoleApp(options = {}) {
               ? metadata.last_error || `上次 ${savedStatus || "未知"} 阶段未完成`
               : metadata.last_error || null;
           registerJob(entry.name, {
+            codexEmailGate: metadata.codex_email_gate,
             id: entry.name,
             email: metadata.email,
             status: restoredStatus,
@@ -10725,7 +10767,8 @@ export function createConsoleApp(options = {}) {
           has_stored_credentials: Boolean(job.password || job.totpSecret),
           has_password: Boolean(job.password || job.hasPasswordCredential),
           security_state: publicSecurityState(job),
-          login_automation_pause: accountLoginPause(job),
+          login_automation_pause: baseLoginPause(job),
+          codex_email_gate: job.codexEmailGate,
           phone_verification_pending: job.phoneVerificationPending === true,
           phone_verified_at: job.phoneVerifiedAt || null,
           login_waiting_mfa: job.awaitingMfa === true,
@@ -11188,6 +11231,20 @@ export function createConsoleApp(options = {}) {
       job.loginAutomationPause = normalizeLoginAutomationPause(metadata.login_automation_pause);
       job.phoneVerificationPending = metadata.phone_verification_pending === true;
       job.phoneVerifiedAt = typeof metadata.phone_verified_at === "string" && Number.isFinite(Date.parse(metadata.phone_verified_at)) ? metadata.phone_verified_at : null;
+    }
+    // A later successful OAuth supersedes a challenge on a sibling record.
+    // Restore this before timers run; a separate field survives manual/Web login starts.
+    const emailGateStates = new Map();
+    for (const job of jobs.values()) {
+      const metadata = restoredLoginMetadata.get(job.id);
+      const gate = Object.hasOwn(metadata, "codex_email_gate") ? metadata.codex_email_gate : await legacyCodexEmailGate(path.dirname(job.outputPath));
+      const key = job.email.toLowerCase();
+      if (typeof gate?.required === "boolean" && Number.isFinite(Date.parse(gate.at)) &&
+          (!emailGateStates.has(key) || Date.parse(gate.at) > Date.parse(emailGateStates.get(key).at))) emailGateStates.set(key, gate);
+    }
+    for (const job of jobs.values()) {
+      job.codexEmailGate = emailGateStates.get(job.email.toLowerCase()) || null;
+      if (JSON.stringify(restoredLoginMetadata.get(job.id).codex_email_gate) !== JSON.stringify(job.codexEmailGate)) await saveJobMetadata(job);
     }
     // Load every same-email entry before propagating/writing a pause; otherwise a
     // migration write could overwrite a sibling's not-yet-read restriction.

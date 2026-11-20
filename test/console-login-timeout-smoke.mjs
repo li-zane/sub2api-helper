@@ -82,7 +82,24 @@ try {
     releaseMailbox(); await sleep(200);
     const starts = (await fs.readFile(trace, "utf8")).trim().split("\n").map(JSON.parse);
     assert(!starts.some(s => s.email === "timeout-preparation@example.test"), "late preparation revived timed-out login");
+    const gate = await create("email-gate@example.test");
+    await waitJob(gate, j => j.displayStatus === "codex_email_verification");
+    assert.equal((await job(gate)).autoRepairEligible, false);
+    assert.equal((await job(gate)).canForceRelogin, true);
+    assert.equal((await request("/api/jobs?status=codex_email_verification")).data.jobs.length, 1);
     await settings({ loginTimeoutMinutes: 7 }); await stop(); await start();
+    assert.equal((await job(gate)).displayStatus, "codex_email_verification");
+    assert.equal((await request(`/api/jobs/${gate}/authorize`, {})).status, 200);
+    await waitJob(gate, j => j.status === "email_otp");
+    assert.equal((await job(gate)).loginAutomationPause.reason, "codex_email_verification");
+    await request(`/api/jobs/${gate}/cancel`, {});
+    await waitJob(gate, j => j.displayStatus === "codex_email_verification");
+    // Model successful completion without contacting an identity provider.
+    await fs.writeFile(trace + ".complete", "fixture");
+    assert.equal((await request(`/api/jobs/${gate}/authorize`, {})).status, 200);
+    await waitJob(gate, j => j.status === "completed" && !j.loginAutomationPause);
+    assert.equal((await job(gate)).displayStatus, "completed");
+    console.log("CODEX_EMAIL_GATE_HTTP_PASS held across restart and canceled manual attempt; manual authorization allowed; success cleared hold");
     assert.equal((await settings()).data.settings.loginTimeoutMinutes, 7);
     await stop(); const file = path.join(temp, "task-settings.json"), legacy = JSON.parse(await fs.readFile(file, "utf8")); delete legacy.loginTimeoutMinutes;
     await fs.writeFile(file, JSON.stringify(legacy)); await start(); assert.equal((await settings()).data.settings.loginTimeoutMinutes, 3);

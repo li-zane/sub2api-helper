@@ -7,6 +7,7 @@ export const JOB_STATUS_LABELS = {
   totp_starting: "准备 2FA",
   password_add_starting: "准备密码",
   totp_setup_otp: "激活 2FA",
+  codex_email_verification: "邮箱二验",
   email_otp: "待邮箱码",
   phone: "待手机号",
   phone_otp: "待手机码",

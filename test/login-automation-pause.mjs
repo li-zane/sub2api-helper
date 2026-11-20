@@ -1,3 +1,4 @@
+import "./legacy-codex-email-gate.mjs";
 import assert from "node:assert/strict";
 import { normalizeLoginAutomationPause, loginAutomationBlocked } from "../src/login-automation-pause.mjs";
 import { codexStatusEligible } from "../web/src/codex-eligibility.mjs";
@@ -8,4 +9,6 @@ for (const kind of ["oauth", "web"]) assert.equal(loginAutomationBlocked({ reaso
 assert.equal(normalizeLoginAutomationPause({ reason: "unknown" }), null);
 assert.equal(codexStatusEligible({ sub2apiInPool: true, sub2apiEnabled: true }), true);
 for (const j of [{}, { sub2apiInPool: true }, { sub2apiEnabled: true }, { sub2apiInPool: true, sub2apiEnabled: false }, { sub2apiInPool: true, sub2apiEnabled: true, status: "banned" }]) assert.equal(codexStatusEligible(j), false);
+assert.equal(loginAutomationBlocked({ reason: "codex_email_verification" }, "web"), false);
+assert.equal(loginAutomationBlocked({ reason: "codex_email_verification" }, "oauth"), true);
 console.log("LOGIN_PAUSE_PASS MFA blocks Web+OAuth; phone blocks OAuth only; unknown never enabled; Codex requires confirmed pool membership+enabled");

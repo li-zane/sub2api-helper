@@ -3760,7 +3760,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
         </div>
       </td>
       <td className="status-cell">
-        <StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} />
+        <StatusBadge status={job.displayStatus || job.status} webSessionStatus={job.webSessionStatus} />
         <AccountSecurityLights job={job} token={token} onJobUpdate={onJobUpdate} onError={onError}
           disabledReason={isBlockedAccount(job) ? "账号已封禁，已停止远端安全状态核对" : mutationReason} />
       </td>
@@ -4023,7 +4023,7 @@ function JobRow({ job, token, pricingAvailable, onOpenCost, poolPriceMultiplier,
 
 function LogDialog({ token, job, onClose }) {
   const request = useMemo(() => url => apiFetch(token, url), [token]);
-  return <AccountLogDialog request={request} job={job} onClose={onClose} statusBadge={<StatusBadge status={job.status} webSessionStatus={job.webSessionStatus} />} />;
+  return <AccountLogDialog request={request} job={job} onClose={onClose} statusBadge={<StatusBadge status={job.displayStatus || job.status} webSessionStatus={job.webSessionStatus} />} />;
 }
 
 function CredentialDialog({ token, job, readOnlyReason = "", accountProxyUrl, totpReplaceAvailable, onJobUpdate, onClose, onError }) {
@@ -5144,7 +5144,7 @@ function formatWorkspaceRole(role) {
 function StatusBadge({ status, webSessionStatus = "absent" }) {
   const description = status === "canceled"
     ? `上次 Codex 授权任务已取消；${WEB_STATES[webSessionStatus] || "Web 状态未知"}。Web 登录状态与授权任务结果分别记录。`
-    : undefined;
+    : status === "codex_email_verification" ? "自动 Codex OAuth 已暂停，可手动重新授权" : undefined;
   const config = {
     queued: ["排队中", <LoaderCircle size={14} />],
     starting: ["启动中", <LoaderCircle className="spin" size={14} />],
@@ -5154,6 +5154,7 @@ function StatusBadge({ status, webSessionStatus = "absent" }) {
     totp_starting: ["准备 2FA", <LoaderCircle className="spin" size={14} />],
     password_add_starting: ["准备密码", <LoaderCircle className="spin" size={14} />],
     totp_setup_otp: ["激活 2FA", <ShieldCheck size={14} />],
+    codex_email_verification: ["邮箱二验", <Mail size={14} />],
     email_otp: ["待邮箱码", <Mail size={14} />],
     phone: ["待手机号", <Smartphone size={14} />],
     phone_otp: ["待手机码", <Smartphone size={14} />],

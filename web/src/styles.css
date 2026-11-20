@@ -2502,6 +2502,7 @@ select {
 .status-badge.password,
 .status-badge.mfa_otp,
 .status-badge.totp_setup_otp,
+.status-badge.codex_email_verification,
 .status-badge.email_otp,
 .status-badge.phone,
 .status-badge.phone_otp,

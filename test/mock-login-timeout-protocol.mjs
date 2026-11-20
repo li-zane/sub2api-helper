@@ -4,7 +4,14 @@ const arg = name => process.argv.includes(name) ? process.argv[process.argv.inde
 const output = arg("--sub2api-out");
 const email = arg("--email") || JSON.parse(await fs.readFile(arg("--refresh-sub2api"), "utf8")).accounts[0].credentials.email;
 if (process.env.LOGIN_TIMEOUT_TRACE) await fs.appendFile(process.env.LOGIN_TIMEOUT_TRACE, JSON.stringify({ email, pid: process.pid, at: Date.now() }) + "\n");
-if (email.startsWith("fast-")) {
+const emailGate = email === "email-gate@example.test";
+if (emailGate && !await fs.stat(process.env.LOGIN_TIMEOUT_TRACE + ".complete").then(() => true, () => false)) {
+  console.log("[codex-auth-login] Codex requires its own sign-in.");
+  console.log("Email OTP (r=resend, q=quit):");
+  process.stdin.resume();
+  await new Promise(() => {});
+}
+if (email.startsWith("fast-") || emailGate) {
   await new Promise(r => setTimeout(r, 80));
   await fs.mkdir(path.dirname(output), { recursive: true });
   await fs.writeFile(output, JSON.stringify({ type: "sub2api-data", accounts: [{ platform: "openai", type: "oauth", credentials: { email, access_token: "fixture", refresh_token: "fixture", plan_type: "free" }, extra: {} }] }));

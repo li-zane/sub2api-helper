@@ -65,7 +65,7 @@ export class OverloadCooldown {
   snapshot(email) {
     const entry = this.accounts.get(email.toLowerCase());
     const config = this.getConfig();
-    const settings = this.getSettings();
+    const settings = this.getSettings(email);
     return {
       configured: Boolean(config?.baseUrl && config?.adminApiKey), enabled: entry?.enabled === true, revision: entry?.revision || 0,
       phase: entry?.phase || "idle", coolingUntil: entry?.coolingUntil || null,
@@ -270,7 +270,7 @@ export class OverloadCooldown {
     email = email.toLowerCase();
     try {
       await this.lock(email, async () => {
-        const entry = this.accounts.get(email), settings = this.getSettings(), backend = this.backendIdentity(config);
+        const entry = this.accounts.get(email), settings = this.getSettings(email), backend = this.backendIdentity(config);
         const { bucketMs } = overloadGrid(settings.windowMinutes), start = Date.parse(point?.start), end = Date.parse(point?.end);
         if (this.stopped || !entry?.enabled || entry.resumeAccountIds?.length || this.isBlocked(email) || this.isCountBlocked(email)
           || backend !== this.backendIdentity(this.getConfig()) || settings.windowMinutes !== windowMinutes
@@ -335,7 +335,7 @@ export class OverloadCooldown {
     }
     if (this.stopped || this.isBlocked(email) || this.backendIdentity(this.getConfig()) !== entry.backend) return;
     if (entry.logoutBeforeCooldown && entry.enabled && !entry.restrictionPaused && typeof this.afterPause === "function") {
-      if (this.getSettings().reauthorizeAfterCooldown !== true) {
+      if (this.getSettings(email).reauthorizeAfterCooldown !== true) {
         if (!entry.coolingUntil) {
           // No reset owns this pause yet. Invalidate its pending logout request
           // and give the ordinary cooldown a real, restart-safe deadline.
@@ -357,7 +357,7 @@ export class OverloadCooldown {
 
   async resume(email, config, records) {
     const previous = this.accounts.get(email);
-    if (previous.enabled && !previous.restrictionPaused && this.getSettings().reauthorizeAfterCooldown === true
+    if (previous.enabled && !previous.restrictionPaused && this.getSettings(email).reauthorizeAfterCooldown === true
       && Date.parse(previous.coolingUntil) <= this.now()) {
       const id = previous.resetRequestId || `${previous.backend}:${previous.coolingUntil}`;
       if (!previous.resetRequestId) await this.update(email, { resetRequestId: id });
