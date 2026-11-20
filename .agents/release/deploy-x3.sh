@@ -43,6 +43,8 @@ build="$backup/staging"
 cmp "$app/requirements.txt" "$build/requirements.txt"
 /opt/tosub2/venv/bin/python -c 'import curl_cffi'
 node --check "$build/src/console-server.mjs"
+# Fail before pausing/stopping if the service-UID probe itself is unavailable.
+bash "$scripts/service-read-check.sh" "$app/src/console-server.mjs" "$app/package.json"
 if [[ $mode == check ]]; then
   printf 'CHECK_PASS revision=%s bundle=verified build_on_x3=false service=unchanged\n' "$release"
   rm -rf -- "$backup"
@@ -102,8 +104,7 @@ if [[ -d "$app/node_modules" ]]; then mv "$app/node_modules" "$backup/node_modul
 cp -a "$build/node_modules" "$app/node_modules"
 if [[ -d "$app/web/dist" ]]; then mv "$app/web/dist" "$backup/dist-before"; else touch "$backup/dist-was-absent"; fi
 cp -a "$build/web/dist" "$app/web/dist"
-runuser -u tosub2 -- test -r "$app/src/console-server.mjs"
-runuser -u tosub2 -- test -r "$app/web/dist/index.html"
+bash "$scripts/service-read-check.sh" "$app/src/console-server.mjs" "$app/web/dist/index.html"
 systemctl start "$service"
 ready=0
 for ((attempt=0; attempt<30; attempt++)); do

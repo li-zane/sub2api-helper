@@ -6,7 +6,7 @@ src=/opt/tosub2/app/.agents/release
 dest=/usr/local/lib/sub2api-helper-release
 units=/etc/systemd/system
 install -d -o root -g root -m 0755 "$dest"
-for name in update-agent.py download.py bundle.py state-check.py deploy-x3.sh rollback-x3.sh; do
+for name in update-agent.py download.py bundle.py state-check.py deploy-x3.sh rollback-x3.sh service-read-check.sh; do
   if ! cmp -s "$src/$name" "$dest/$name"; then install -o root -g root -m 0644 "$src/$name" "$dest/$name"; fi
 done
 if ! cmp -s "$src/helper-update" /usr/local/sbin/helper-update; then install -o root -g root -m 0755 "$src/helper-update" /usr/local/sbin/helper-update; fi
