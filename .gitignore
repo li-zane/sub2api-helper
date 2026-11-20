@@ -14,6 +14,7 @@ login-checkpoint.json
 web-session.json
 web-login-checkpoint.json
 browser-identities/
+codex-cli-profiles/
 job-meta.json
 
 # Runtime state and credentials stay outside the Git working tree.

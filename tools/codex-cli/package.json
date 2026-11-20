@@ -1,0 +1,7 @@
+{
+  "name": "helper-official-codex-client",
+  "private": true,
+  "dependencies": {
+    "@openai/codex": "0.165.0"
+  }
+}

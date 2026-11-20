@@ -212,8 +212,8 @@ export function createConsoleSettings({
         catch (error) { throw errorWithStatus(400, error.message); }
       }
       normalize("codexAuthMode", normalizeCodexAuthMode);
-      if (has("codexAuthMode") && next.codexAuthMode === "sub2api" && !hasSub2ApiConfig()) {
-        throw errorWithStatus(409, "请先保存 Sub2API 后端地址和管理员 API Key，再选择 Sub2API 授权");
+      if (has("codexAuthMode") && ["sub2api", "cli"].includes(next.codexAuthMode) && !hasSub2ApiConfig()) {
+        throw errorWithStatus(409, "请先保存 Sub2API 后端地址和管理员 API Key，再选择 Sub2API 或 CLI 授权");
       }
       normalize("maxActiveJobs", boundedLimit);
       normalize("autoActions", value => normalizeAutoActions(value, normalizePlanType), "taskAutoActions");

@@ -260,6 +260,8 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
                 <HelpTip label="Codex 授权方式说明">
                   {codexAuthMode === "sub2api"
                     ? "使用已保存的 Sub2API 后端和管理员 Key，由号池生成授权链接、兑换和刷新令牌；toSub2 完成登录并保存凭据。需要先配置 Sub2API。"
+                    : codexAuthMode === "cli"
+                    ? "每次授权新建独立的官方 Codex CLI 临时环境，当前账号的 Web 会话完成授权；凭据导出后销毁环境，并将网关 OpenAI Codex UA 同步为 CLI 实际值。需要先配置 Sub2API 并准备 CLI 镜像。"
                     : "由 toSub2 生成授权链接并直接兑换、刷新令牌，沿用当前授权流程。"}
                 </HelpTip>
               </span>
@@ -272,9 +274,11 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
                 options={[
                   { value: "local", label: "本地授权（toSub2 生成链接和凭据）" },
                   { value: "sub2api", label: "Sub2API 授权（号池生成链接和凭据）" },
+                  { value: "cli", label: "Codex CLI OAuth（账号独立环境）" },
                 ]}
               />
             </label>
+            {codexAuthMode === "cli" && <p className="cli-auth-note">每次授权使用独立临时环境，凭据导出后清理；自动同步网关全局 OpenAI Codex UA。</p>}
           </div>
         </section>
         <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">

@@ -124,6 +124,22 @@ try {
     TOSUB2_OAUTH_PROXY_ID: "17", CHATGPT_PROXY_URL: "http://127.0.0.1:1", TOSUB2_TLS_PYTHON: "nonexistent-fixture-python" } });
   assert.match(cli.stdout, /Refreshed OAuth account/,
     "remote refresh must not prepare a local login proxy or TLS worker");
+  // A CLI-origin account remains refreshable after its one-shot home is gone.
+  // Empty PATH also proves this path does not launch Docker or a TLS worker.
+  const cliSource = structuredClone(exported.data);
+  cliSource.accounts[0].extra.auth_provider = "codex_cli";
+  await fs.writeFile(output, JSON.stringify(cliSource));
+  const cliRefresh = await promisify(execFile)(process.execPath, [fileURLToPath(new URL("../src/protocol-login.mjs", import.meta.url)),
+    "--refresh-sub2api", output, "--sub2api-out", output], { env: {
+    ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toLowerCase() !== "path")), PATH: "",
+    TOSUB2_CODEX_AUTH_MODE: "cli", TOSUB2_OAUTH_BASE_URL: config.baseUrl, TOSUB2_OAUTH_ADMIN_KEY: key,
+    TOSUB2_OAUTH_PROXY_ID: "17", CHATGPT_PROXY_URL: "http://127.0.0.1:1", TOSUB2_TLS_PYTHON: "nonexistent-fixture-python" } });
+  assert.match(cliRefresh.stdout, /Saved sub2api import/);
+  assert.match(cliRefresh.stdout, /Refreshed OAuth account/);
+  const refreshedCli = JSON.parse(await fs.readFile(output));
+  assert.equal(refreshedCli.accounts[0].credentials.refresh_token, "pool-rotated-refresh");
+  assert.equal(refreshedCli.accounts[0].credentials.chatgpt_account_id, "remote-account");
+  assert.equal(refreshedCli.accounts[0].extra.auth_provider, "codex_cli");
   const beforeRefreshFailure = await fs.readFile(output, "utf8");
   for (const failure of [
     { status: 400, body: { error: "invalid_grant", message: key }, invalid: true },

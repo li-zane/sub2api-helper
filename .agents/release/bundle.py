@@ -12,7 +12,7 @@ import subprocess
 import tarfile
 
 ASSET = "helper-linux-x64-node22.tar.gz"
-ROOTS = ("src", "shared", "web/src", "web/dist", "node_modules", "package.json", "package-lock.json", "requirements.txt")
+ROOTS = ("src", "shared", "web/src", "web/dist", "node_modules", "tools/codex-cli", "package.json", "package-lock.json", "requirements.txt")
 
 
 def digest(path):

@@ -12,6 +12,7 @@ import {
   TlsFingerprintTransport,
 } from "./tls-transport.mjs";
 import { normalizeCodexAuthMode, generateSub2ApiOAuth, exchangeSub2ApiOAuth, refreshSub2ApiOAuth, sub2ApiOAuthIdentity } from "./sub2api-oauth.mjs";
+import { runCliOAuth } from "./codex-cli-oauth.mjs";
 import { getAccountBrowserIdentity } from "./account-browser-identity.mjs";
 import { recordCredentialHistory, writePrivateJsonAtomic } from "./account-history.mjs";
 import { recordWorkspaceHistory, recordAcceptedPhone } from "./credential-events.mjs";
@@ -346,7 +347,7 @@ class ProtocolClient {
 async function run() {
   const args = parseArgs(process.argv.slice(2));
   let codexAuthMode = normalizeCodexAuthMode(process.env.TOSUB2_CODEX_AUTH_MODE);
-  let sub2ApiOAuth = codexAuthMode === "sub2api" ? {
+  let sub2ApiOAuth = ["sub2api", "cli"].includes(codexAuthMode) ? {
     baseUrl: process.env.TOSUB2_OAUTH_BASE_URL,
     adminApiKey: process.env.TOSUB2_OAUTH_ADMIN_KEY,
     proxyId: process.env.TOSUB2_OAUTH_PROXY_ID || null,
@@ -367,6 +368,12 @@ async function run() {
   const sub2apiOutPath = path.resolve(args.sub2apiOut || DEFAULT_SUB2API_OUT);
   const webSessionPath = process.env.TOSUB2_WEB_SESSION_PATH || path.join(path.dirname(sub2apiOutPath), "web-session.json");
   const browserIdentityRoot = process.env.TOSUB2_BROWSER_IDENTITY_ROOT || path.join(path.dirname(sub2apiOutPath), "browser-identities");
+  const cliOptions = () => ({ root: process.env.TOSUB2_CLI_PROFILE_ROOT || path.join(path.dirname(browserIdentityRoot), "codex-cli-profiles"),
+    profileEmail: process.env.TOSUB2_CLI_PROFILE_EMAIL || args.email, gateway: sub2ApiOAuth,
+    ...(!args.noSub2apiExport && outputMode !== "session" ? { exportPath: sub2apiOutPath } : {}),
+    accountName: args.sub2apiName, concurrency: args.concurrency, priority: args.priority, rateMultiplier: args.rateMultiplier,
+    proxyUrl: typeof transport.configuredProxy === "string" ? transport.configuredProxy : proxyTemplate,
+    authBase, onProgress: message => console.log(`[codex-cli] ${message}`) });
   const accountBrowserIdentity = args.email && !args.refreshSub2api
     ? await getAccountBrowserIdentity(args.email, { root: browserIdentityRoot, profile: args.tlsProfile || process.env.TOSUB2_BROWSER_TLS_PROFILE }) : null;
   let proxyTemplate = normalizeProxyUrl(args.proxy || process.env.CHATGPT_PROXY_URL);
@@ -403,6 +410,8 @@ async function run() {
   }
   try {
     if (args.refreshSub2api) {
+      // CLI environments are disposable. Refresh the exported credentials
+      // through the configured gateway, without reviving an old CLI home.
       if (!sub2ApiOAuth) {
         if (proxyTemplate) await prepareLoginProxy(`${authBase}/`);
         else await transport.configure(null, { force: true });
@@ -513,6 +522,7 @@ async function run() {
       authBase,
       codexAuthMode,
       sub2ApiOAuth,
+      cliOptions,
       expectedEmail: email,
       credentialHistoryRoot: path.dirname(sub2apiOutPath),
       credentialHistoryRunId: process.env.TOSUB2_LOGIN_RUN_ID || crypto.randomUUID(),
@@ -691,7 +701,7 @@ async function run() {
       console.log("[ok] Codex callback URL:");
       console.log(safeUrl(codex.callbackUrl));
     }
-    if (codex?.callbackUrl && (codex?.codeVerifier || codex?.sub2ApiSessionId) && !args.noSub2apiExport && outputMode !== "session") {
+    if ((codex?.cliExport || codex?.callbackUrl && (codex?.codeVerifier || codex?.sub2ApiSessionId)) && !args.noSub2apiExport && outputMode !== "session") {
       console.log("[6/6] Convert OAuth callback to sub2api import");
       const sub2apiExport = await buildSub2apiOauthExport({
         authBase,
@@ -708,7 +718,7 @@ async function run() {
         sub2ApiOAuth: codex.provider === "sub2api" ? sub2ApiOAuth : null,
         oauth: codex,
       });
-      await writeJsonAtomic(sub2apiOutPath, sub2apiExport.data);
+      if (sub2apiExport.persistedPath !== sub2apiOutPath) await writeJsonAtomic(sub2apiOutPath, sub2apiExport.data);
       await removeProtocolCheckpoint(checkpointPath);
       console.log(`[ok] Saved sub2api import: ${sub2apiOutPath}`);
       console.log(`[ok] Account: ${sub2apiExport.account.name}`);
@@ -2043,6 +2053,16 @@ function requestCodexProxy(identity) {
 }
 
 async function runCodexOauth(client, options) {
+  if (options.codexAuthMode === "cli") {
+    // The app-server owns PKCE and code exchange. Save only the reusable Web
+    // checkpoint: an interrupted CLI process must start a fresh OAuth session.
+    await options.saveCheckpoint?.("email_verified", {});
+    const cliExport = await runCliOAuth({ ...(typeof options.cliOptions === "function" ? options.cliOptions() : options.cliOptions),
+      expectedEmail: options.expectedEmail, workspaceId: options.currentWorkspaceId,
+      authorize: (authUrl, session) => followCodexAuthorization(client,
+        { ...options, codexRedirectUri: session.redirectUri, saveCheckpoint: undefined }, authUrl, session) });
+    return { provider: "cli", cliExport };
+  }
   if (options.codexAuthMode === "sub2api") {
     const oauth = await generateSub2ApiOAuth(options.sub2ApiOAuth, options);
     const { authUrl, ...session } = oauth;
@@ -2235,6 +2255,7 @@ function isEmailOtpSendPayload(payload) {
 }
 
 async function resumeCodexOauth(client, options, checkpoint) {
+  if (options.codexAuthMode === "cli" || checkpoint.oauth?.provider === "cli") return runCodexOauth(client, options);
   if (checkpoint.stage === "email_verified") {
     console.log("[resume] Email login is still available; starting Codex OAuth without a new email code.");
     return runCodexOauth(client, options);
@@ -2491,6 +2512,15 @@ async function buildSub2apiOauthExport({
   sub2ApiOAuth,
   oauth,
 }) {
+  if (oauth?.provider === "cli" && oauth.cliExport) {
+    const result = structuredClone(oauth.cliExport);
+    if (accountName) result.account.name = accountName;
+    if (concurrency) result.account.concurrency = Number(concurrency);
+    if (priority) result.account.priority = Number(priority);
+    if (rateMultiplier) result.account.rate_multiplier = Number(rateMultiplier);
+    result.data.accounts = [result.account];
+    return result;
+  }
   const code = validateCodexCallback(callbackUrl, { redirectUri, expectedState });
 
   const tokenSet = sub2ApiOAuth ? await exchangeSub2ApiOAuth(sub2ApiOAuth, oauth, code) : await exchangeOAuthCode({

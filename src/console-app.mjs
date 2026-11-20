@@ -2362,6 +2362,8 @@ export function createConsoleApp(options = {}) {
         TOSUB2_ACCOUNT_EMAIL_ALIASES: JSON.stringify(job.emailAliases),
         TOSUB2_EMAIL_OTP_API_AVAILABLE: job.mailApiUrl && mailApiUrlForJob(job) ? "1" : "0",
         TOSUB2_BROWSER_IDENTITY_ROOT: path.join(OUTPUT_ROOT, "browser-identities"),
+        TOSUB2_CLI_PROFILE_ROOT: path.join(OUTPUT_ROOT, "codex-cli-profiles"),
+        TOSUB2_CLI_PROFILE_EMAIL: job.email,
         TOSUB2_WEB_SESSION_PATH: mode === "web_login" ? webLoginCandidatePath(job) : webSessionPathForJob(job),
         TOSUB2_CREDENTIAL_HISTORY_ROOT: path.dirname(job.outputPath),
         TOSUB2_LOGIN_RUN_ID: runId,
@@ -3143,7 +3145,7 @@ export function createConsoleApp(options = {}) {
     job.fixedProxy = true;
     job.proxyFallbackActive = false;
     return { codexAuthMode: state.codexAuthMode, loginProxyUrl: state.proxyUrl || null, loginProxyFixed: true,
-      sub2ApiOAuth: state.codexAuthMode === "sub2api" ? { baseUrl: config.baseUrl, adminApiKey: config.adminApiKey, proxyId: state.proxyId || null } : null };
+      sub2ApiOAuth: ["sub2api", "cli"].includes(state.codexAuthMode) ? { baseUrl: config.baseUrl, adminApiKey: config.adminApiKey, proxyId: state.proxyId || null } : null };
   }
 
   async function startAccountSessionReset(job, { automatic = false, requestId = null, cooldownMinutes = 0 } = {}) {
@@ -7720,9 +7722,11 @@ export function createConsoleApp(options = {}) {
         : await preparePlanCodexProxy(job, getJobPlanType(job), job.workspaceAccountId);
       return { ...route, loginProxyUrl: route.proxyUrl };
     }
-    if (selectedMode !== "sub2api") return { codexAuthMode: "local" };
+    if (!["sub2api", "cli"].includes(selectedMode)) return { codexAuthMode: "local" };
     const config = sub2ApiSettingsConfig;
     if (!config?.baseUrl || !config?.adminApiKey) throw new Error("请先配置 Sub2API 后端地址和管理员 API Key");
+    if (selectedMode === "cli") return { codexAuthMode: "cli", loginProxyUrl: job.proxyUrl,
+      sub2ApiOAuth: { baseUrl: config.baseUrl, adminApiKey: config.adminApiKey, proxyId: normalizeStoredProxyId(job.assignedProxyId) } };
     let proxyId = null;
     if (consoleSettings.current.accountProxyMode === "sub2api") {
       proxyId = normalizeStoredProxyId(job.assignedProxyId);
@@ -7900,7 +7904,7 @@ export function createConsoleApp(options = {}) {
     const config = sub2ApiSettingsConfig;
     return { proxyUrl: job.proxyUrl || null, helperLoginProxy: helperLoginProxyRoute(job, job.proxyUrl), codexAuthMode: consoleSettings.current.codexAuthMode,
       workspaceId: typeof workspaceId === "string" ? workspaceId : null,
-      sub2ApiOAuth: consoleSettings.current.codexAuthMode === "sub2api" ? { baseUrl: config.baseUrl, adminApiKey: config.adminApiKey, proxyId: normalizeStoredProxyId(job.assignedProxyId) } : null };
+      sub2ApiOAuth: ["sub2api", "cli"].includes(consoleSettings.current.codexAuthMode) ? { baseUrl: config.baseUrl, adminApiKey: config.adminApiKey, proxyId: normalizeStoredProxyId(job.assignedProxyId) } : null };
   }
 
   async function refreshJobProxyBinding(job) {

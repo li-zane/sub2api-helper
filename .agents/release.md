@@ -18,6 +18,8 @@
 - 运行数据 `/var/lib/tosub2`，凭据 `/etc/tosub2/credentials.env`，Python 环境 `/opt/tosub2/venv`；不打印或提交秘密。
 - 内部 API `http://127.0.0.1:4399`，公网入口沿用现有认证。匿名 401 不代表故障。
 - 安装命令 `/usr/local/sbin/helper-update`，初始工具位于 `/usr/local/lib/sub2api-helper-release/`；服务更新后优先读取当前代码中的 `.agents/release/`。调用前复制本次脚本到独立临时目录，避免更新过程中脚本被替换。
+- Codex CLI OAuth 使用 `tosub2` 用户自己的 rootless Docker，不把服务用户加入宿主 `docker` 组。用户服务 `helper-codex-docker.service`，套接字 `/run/tosub2-codex/docker.sock`，镜像及容器运行数据在 `/var/lib/tosub2-codex/docker`；不放进账号目录的升级备份。Helper 通过服务环境 `DOCKER_HOST=unix:///run/tosub2-codex/docker.sock` 连接，保留已有 systemd 隔离设置。
+- CLI 镜像由 `tools/codex-cli` 的固定版本与基础镜像摘要构建，发布前在构建机验证；x3 仅导入已校验摘要的镜像，不现场执行 npm 构建。新版本更新 CLI 时先准备对应镜像，再排空切换 Helper。验证以服务用户启动全新未登录 CLI、生成/取消链接、销毁容器，不对真实账号授权；也不自动切换全局授权方式或写网关 UA。
 
 ```bash
 # 只验证最新产物，不切换或重启

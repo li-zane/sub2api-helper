@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 
 export function normalizeCodexAuthMode(value) {
   if (value === undefined) return "local";
-  if (value !== "local" && value !== "sub2api") throw new Error("Codex 授权方式必须是 local 或 sub2api");
+  if (!["local", "sub2api", "cli"].includes(value)) throw new Error("Codex 授权方式必须是 local、sub2api 或 cli");
   return value;
 }
 

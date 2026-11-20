@@ -49,6 +49,9 @@ jobs:
         run: python -m unittest discover -s .agents/release -p 'test_*.py' -v
       - name: Check source and credential storage
         run: npm run check:ci -- --shard ${{ matrix.shard }}/4 --timings "${{ runner.temp }}/ci-timings.json"
+      - name: Check isolated Codex CLI workers
+        if: runner.os == 'Linux' && matrix.shard == 1
+        run: npm run codex:build && node test/codex-cli-docker.mjs
       - name: Upload test timings
         if: always()
         uses: actions/upload-artifact@v7.0.2

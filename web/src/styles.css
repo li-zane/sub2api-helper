@@ -8491,6 +8491,13 @@ select option {
   gap: 8px;
 }
 
+.task-settings-dialog .cli-auth-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .task-settings-dialog .task-auth-mode-field {
   display: flex;
   align-items: center;
