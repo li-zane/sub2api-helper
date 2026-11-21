@@ -845,8 +845,9 @@ async function addChatgptPassword(client, {
     console.log("[ok] Account password added and saved securely");
     return state;
   } catch (error) {
-    if (!state.activation_succeeded) await persist({ stage: submitted ? "submission_unconfirmed" : "verification_failed" });
-    if (submitted) {
+    const reauthenticationRejected = !state.activation_succeeded && isRecentAuthenticationRequired(error);
+    if (!state.activation_succeeded) await persist({ stage: submitted && !reauthenticationRejected ? "submission_unconfirmed" : "verification_failed" });
+    if (submitted && !reauthenticationRejected) {
       throw new Error("ADD_PASSWORD_SUBMISSION_UNCONFIRMED: Password addition was submitted but final completion or persistence was not verified; original and candidate values are retained in private history");
     }
     let message = String(error?.message || "ADD_PASSWORD_FAILED");
@@ -889,10 +890,16 @@ async function verifyAddPasswordEmailOtp(client, { authBase, rl, deviceId, refer
   }
 }
 
-// Security tasks use the same durable Web credential as OAuth. A stale
-// checkpoint must not force a new login when the retained Web session is valid.
-// Only checkpoint-expiry can retry an action after a fresh login; errors from a
-// validated Web session (including recent_auth_required) propagate unchanged.
+function isRecentAuthenticationRequired(error) {
+  return [401, 403].includes(Number(error?.status || error?.remoteStatus))
+    && /\b(?:recent[_ -]auth(?:entication)?[_ -]required|reauth(?:entication)?[_ -]required|(?:user\s+)?must\s+re[- ]?authenticate)\b/i.test(
+      `${error?.providerCode || ""} ${error?.message || ""}`,
+    );
+}
+
+// Reuse valid Web credentials until the upstream explicitly requires recent
+// authentication. Verify with the same browser once, then retry the operation;
+// ambiguous mutation results and unrelated failures must never restart it.
 async function runSavedWebSecurityTask({
   args, transport, chatgptBase, authBase, webSessionPath, checkpointPath, rl,
   label, loginMessage, action,
@@ -908,12 +915,34 @@ async function runSavedWebSecurityTask({
   let checkpoint = args.email ? null : await readCheckpoint();
   const email = args.email || checkpoint?.email || await ask(rl, "Email: ");
   if (!email) throw new Error("Email is required");
+  let reauthenticationAttempted = false;
+  async function runAction(login) {
+    try {
+      await action(login);
+      return login;
+    } catch (error) {
+      if (!isRecentAuthenticationRequired(error) || reauthenticationAttempted) throw error;
+      reauthenticationAttempted = true;
+      console.log(`[${label}] Recent authentication required; verifying the account before one retry.`);
+      const web = await loginChatgptWeb(login.client, { chatgptBase, authBase, email, rl,
+        password: process.env.CHATGPT_LOGIN_PASSWORD || "", totpSecret: process.env.CHATGPT_TOTP_SECRET || "",
+        forceReauthentication: true });
+      const { data: session } = await login.client.getJson("GET", `${chatgptBase}/api/auth/session`, { referer: `${chatgptBase}/` });
+      const token = session?.accessToken || session?.access_token;
+      if (String(session?.user?.email || "").trim().toLowerCase() !== email.trim().toLowerCase()
+        || typeof token !== "string" || !token) {
+        throw new Error("SECURITY_REAUTH_ACCOUNT_UNCONFIRMED: Reauthentication did not confirm the requested account");
+      }
+      const verified = { ...login, web };
+      await action(verified);
+      return verified;
+    }
+  }
   const previous = await reuseSavedWebLogin({ file: webSessionPath, email, transport, chatgptBase, verbose: args.verbose });
   if (previous?.reused) {
     console.log(`[${label}] Reused saved Web session; account login skipped.`);
     const login = { client: previous.client, web: previous.web, email };
-    await action(login);
-    return login;
+    return runAction(login);
   }
   checkpoint ||= await readCheckpoint();
   let checkpointClient = null;
@@ -926,10 +955,9 @@ async function runSavedWebSecurityTask({
     const login = { client: checkpointClient, web: checkpoint.web || null, email };
     console.log(`[${label}] Reusing verified login checkpoint from ${checkpoint.stage}.`);
     try {
-      await action(login);
-      return login;
+      return await runAction(login);
     } catch (error) {
-      if (!isExpiredCheckpointError(error)) throw error;
+      if (reauthenticationAttempted || !isExpiredCheckpointError(error)) throw error;
       console.log(`[${label}] Saved login state expired; falling back to a fresh account login.`);
     }
   }
@@ -938,8 +966,7 @@ async function runSavedWebSecurityTask({
   const web = await loginChatgptWeb(client, { chatgptBase, authBase, email, rl,
     password: process.env.CHATGPT_LOGIN_PASSWORD || "", totpSecret: process.env.CHATGPT_TOTP_SECRET || "" });
   const login = { client, web, email };
-  await action(login);
-  return login;
+  return runAction(login);
 }
 
 // A successful password/2FA mutation does not guarantee that its resulting
@@ -970,18 +997,14 @@ async function runPasswordReplacement({ args, transport, chatgptBase, authBase, 
   const resultPath = path.resolve(args.passwordAddResult || DEFAULT_PASSWORD_ADD_RESULT);
   const rl = readline.createInterface({ input, output });
   try {
-    const previous = await reuseSavedWebLogin({ file: webSessionPath, email, transport, chatgptBase, verbose: args.verbose });
-    let client = previous?.client, web = previous?.web;
-    if (previous?.reused) console.log("[password-replace] Reused saved Web session; account login skipped.");
-    else {
-      client ||= new ProtocolClient({ verbose: args.verbose, transport });
-      console.log("[password-replace] Verify the account before replacing its password.");
-      web = await loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password: previousPassword,
-        totpSecret: process.env.CHATGPT_TOTP_SECRET || "" });
-    }
-    await replaceChatgptPassword(client, { chatgptBase, authBase, email, rl,
-      deviceId: client.browserIdentity?.deviceId || web?.deviceId, password, previousPassword,
-      totpSecret: process.env.CHATGPT_TOTP_SECRET || "", resultPath });
+    const { client, web } = await runSavedWebSecurityTask({
+      args, transport, chatgptBase, authBase, webSessionPath, checkpointPath: null, rl,
+      label: "password-replace",
+      loginMessage: "[password-replace] Verify the account before replacing its password.",
+      action: ({ client, web }) => replaceChatgptPassword(client, { chatgptBase, authBase, email, rl,
+        deviceId: client.browserIdentity?.deviceId || web?.deviceId, password, previousPassword,
+        totpSecret: process.env.CHATGPT_TOTP_SECRET || "", resultPath }),
+    });
     // Changing a password can affect browser sessions. A successful password
     // mutation must still be saved even if the new cookie jar cannot be read;
     // never replace the retained Web file with an unverified jar.
@@ -1064,8 +1087,9 @@ async function replaceChatgptPassword(client, { chatgptBase, authBase, email, rl
   } catch (error) {
     // A lost response after submission is ambiguous, not evidence that the old
     // password still works. Keep both values without claiming activation.
-    if (!state.activation_succeeded) await persist({ stage: submitted ? "submission_unconfirmed" : "verification_failed" });
-    if (submitted) {
+    const reauthenticationRejected = !state.activation_succeeded && isRecentAuthenticationRequired(error);
+    if (!state.activation_succeeded) await persist({ stage: submitted && !reauthenticationRejected ? "submission_unconfirmed" : "verification_failed" });
+    if (submitted && !reauthenticationRejected) {
       // Do not surface a transport retry marker after a potentially accepted
       // credential mutation: a generic proxy restart could submit it twice.
       throw new Error("PASSWORD_REPLACE_SUBMISSION_UNCONFIRMED: Password change was submitted but final completion or persistence was not verified; original and candidate values are retained in private history");
@@ -1461,7 +1485,7 @@ async function reuseSavedWebLogin({ file, email, transport, chatgptBase, verbose
   return { client, reused: true, web: { ...saved.web, deviceId: identity.deviceId } };
 }
 
-async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password, totpSecret,
+async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, password, totpSecret, forceReauthentication = false,
   emailOtpApiAvailable = process.env.TOSUB2_EMAIL_OTP_API_AVAILABLE === "1" }) {
   if (!client.browserIdentity) {
     client.browserIdentity = await getAccountBrowserIdentity(email, { root: client.transport?.accountIdentityRoot });
@@ -1495,6 +1519,7 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
       auth_session_logging_id: authSessionLoggingId,
       screen_hint: "login_or_signup",
       login_hint: email,
+      ...(forceReauthentication ? { max_age: "0", reauth: "password" } : {}),
     }).toString();
 
   const { data: signin } = await client.getJson("POST", signinUrl, {

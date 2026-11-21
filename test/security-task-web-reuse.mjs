@@ -142,13 +142,18 @@ try {
       if (name === "resume-disabled") assert(!requests.some(route => route.includes("disable_in_house")));
       if (name === "prefer-canonical") assert.match(result.output, /Reused saved Web session/);
     }
-    for (const name of ["transient", "html", "wrong-account", "recent-auth", "activation-failed"]) {
+    for (const name of ["transient", "html", "wrong-account", "activation-failed"]) {
       const result = await run(name);
       assert.notEqual(result.code, 0, result.output); assert.equal(freshLogins, 0);
       assert.equal(await fs.readFile(result.file, "utf8"), result.original, `${name} replaced retained Web session`);
       if (name !== "activation-failed") assert(!requests.some(route => /disable_in_house|mfa\/enroll/.test(route)));
       else assert.equal(JSON.parse(await fs.readFile(result.resultFile, "utf8")).secret, candidate);
     }
+    const recentAuth = await run("recent-auth");
+    assert.notEqual(recentAuth.code, 0); assert.equal(freshLogins, 1);
+    assert.match(recentAuth.output, /Recent authentication required/);
+    assert.equal(await fs.readFile(recentAuth.file, "utf8"), recentAuth.original);
+    assert(!requests.some(route => /disable_in_house|mfa\/enroll/.test(route)));
     const expired = await run("expired");
     assert.notEqual(expired.code, 0); assert.equal(freshLogins, 1);
     assert.equal(await fs.readFile(expired.file, "utf8"), expired.original);
@@ -158,7 +163,7 @@ try {
     assert.equal(postChange.code, 0, postChange.output); assert.equal(freshLogins, 0);
     assert.equal(await fs.readFile(postChange.file, "utf8"), postChange.original);
     assert.equal(JSON.parse(await fs.readFile(postChange.resultFile, "utf8")).activation_succeeded, true);
-    console.log("SECURITY_TASK_WEB_REUSE_PASS 14/14: setup/replace TOTP and add-password reuse retained cookies/device; disabled rotation resumes; valid Web precedes stale checkpoint; checkpoint fallback retained; only confirmed expiry/missing session signs in; transient/identity/recent-auth errors never restart login; failed mutations preserve Web/OAuth and candidate history; unverified post-change session never replaces retained session");
+    console.log("SECURITY_TASK_WEB_REUSE_PASS 14/14: setup/replace TOTP and add-password reuse retained cookies/device; disabled rotation resumes; valid Web precedes stale checkpoint; checkpoint fallback retained; explicit recent-auth requests one verification; transient/identity errors never restart login; failed mutations preserve Web/OAuth and candidate history; unverified post-change session never replaces retained session");
   }
 } finally {
   await new Promise(resolve => server.close(resolve));
