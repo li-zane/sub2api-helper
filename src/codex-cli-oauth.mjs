@@ -141,7 +141,7 @@ export async function runCliOAuth(options) {
   }
   return withCliLock(profile.root, `profile:${profile.key}`, async () => {
     const session = await step("environment", () => (options.openSession || openCliSession)(profile, { ...options, onProgress: progress }));
-    let failure;
+    let failure, persistedExport;
     try {
       const started = await step("login_start", () => session.request("account/login/start", { type: "chatgpt", codexStreamlinedLogin: true }));
       if (started?.type !== "chatgpt" || !started.loginId) throw fail("CLI 未返回浏览器授权会话");
@@ -164,13 +164,24 @@ export async function runCliOAuth(options) {
       if (options.exportPath) {
         await step("export", () => writePrivateJsonAtomic(options.exportPath, converted.data));
         converted.persistedPath = path.resolve(options.exportPath);
+        persistedExport = converted;
       }
       progress("CLI 凭据已校验；网关 UA 保持不变，可在任务设置中手动同步");
       return converted;
     } catch (error) { failure = error; throw error; }
     finally {
       try { await step("cleanup", () => session.close()); }
-      catch (error) { if (!failure) throw error; /* Both failed stages were logged; preserve the original cause. */ }
+      catch (error) {
+        if (!failure && !persistedExport) throw error;
+        if (!failure && persistedExport) {
+          // The OAuth export is already validated and durably written. A local
+          // container cleanup timeout must not turn a successful authorization
+          // into a retryable failure that creates another remote session.
+          progress("cleanup warning: CLI 授权已完成，临时容器清理待确认；保留成功结果，不重复授权。");
+        }
+        // When an earlier stage failed, preserve that primary error. When the
+        // export succeeded, return it and let the process-exit cleanup retry.
+      }
     }
   });
 }

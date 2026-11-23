@@ -9,6 +9,8 @@ import { CLI_CALLBACK_SCRIPT } from "./codex-cli-callback.mjs";
 export const CODEX_CLI_VERSION = "0.165.0";
 export const CODEX_CLI_IMAGE = `sub2api-helper/codex-cli:${CODEX_CLI_VERSION}`;
 const fail = (message) => new Error(`CODEX_CLI: ${message}`);
+const CONTAINER_CLEANUP_TIMEOUT_MS = 10_000;
+const CONTAINER_CLEANUP_POLL_MS = 100;
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 
 export function normalizeCliEmail(value) {
@@ -112,6 +114,27 @@ function docker(args, { input, env, timeout = 30_000 } = {}) {
   });
 }
 
+export async function waitForContainerRemoval(id, {
+  env,
+  timeoutMs = CONTAINER_CLEANUP_TIMEOUT_MS,
+  pollMs = CONTAINER_CLEANUP_POLL_MS,
+  run = docker,
+} = {}) {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;;) {
+    try {
+      const listing = await run(["ps", "--all", "--quiet", "--filter", `id=${id}`],
+        { env, timeout: Math.max(1, deadline - Date.now()) });
+      if (!String(listing || "").trim()) return;
+    } catch { /* A transient daemon error is not proof of removal. */ }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw fail("临时授权容器尚未清理");
+    }
+    await new Promise(resolve => setTimeout(resolve, Math.min(Math.max(1, pollMs), remaining)));
+  }
+}
+
 export async function deliverCliCallbackToContainer(id, callbackUrl, { env, onProgress } = {}) {
   const raw = await docker(["exec", "--interactive", id, "node", "--input-type=module", "-e", CLI_CALLBACK_SCRIPT],
     { input: callbackUrl, env, timeout: 100_000 });
@@ -207,9 +230,10 @@ export async function openCliSession(profile, options = {}) {
       child.stdin.end();
       await docker(["rm", "--force", id]).catch(() => {});
       try {
-        // --rm can win the race with explicit removal. A successful empty
-        // listing confirms cleanup; daemon errors must not count as success.
-        if ((await docker(["ps", "--all", "--quiet", "--filter", `id=${id}`])).trim()) throw fail("临时授权容器尚未清理");
+        // --rm can win the race with explicit removal. Poll until the daemon
+        // confirms the container is gone instead of turning that race into a
+        // failed OAuth, which would invite a duplicate remote authorization.
+        await waitForContainerRemoval(id, { env });
         closed = true;
         process.off("exit", cleanupSync); process.off("SIGTERM", signal); process.off("SIGINT", signal);
       } finally { child.kill(); lines.close(); abort(); }

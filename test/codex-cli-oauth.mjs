@@ -156,10 +156,22 @@ try {
   await assert.rejects(runCliOAuth({ ...options, exportPath: directory }));
   assert.equal(events.at(-1)[0], "closed", "a failed export write still cleans the temporary environment");
   assert.equal(await fs.readFile(exported, "utf8"), latestExport);
-  await assert.rejects(runCliOAuth({ ...options, openSession: async () => ({ ...await openSession(),
-    async close() { throw new Error("fixture cleanup failed"); } }) }), /cleanup failed/);
+  const loginCount = events.filter(event => event[0] === "account/login/start").length;
+  const cleanupWarningResult = await runCliOAuth({ ...options, openSession: async () => ({ ...await openSession(),
+    async close() { throw new Error("fixture cleanup failed fixture-private-cleanup-error"); } }) });
+  assert.equal(events.filter(event => event[0] === "account/login/start").length, loginCount + 1,
+    "cleanup warning must not trigger another OAuth authorization");
+  assert.equal(cleanupWarningResult.persistedPath, path.resolve(exported));
+  assert.equal(cleanupWarningResult.data.accounts[0].credentials.refresh_token, auth.tokens.refresh_token);
+  assert(progress.some(line => /stage=cleanup failed/.test(line)));
+  assert(progress.some(line => /cleanup warning:.*不重复授权/.test(line)));
+  assert(!progress.join("\n").includes("fixture-private-cleanup-error"), "cleanup warning must not expose raw daemon output");
   assert.equal(JSON.parse(await fs.readFile(exported)).accounts[0].credentials.refresh_token, auth.tokens.refresh_token,
-    "cleanup failure leaves the committed export available");
+    "cleanup warning leaves the committed export available without retrying OAuth");
+  await assert.rejects(runCliOAuth({ ...options, exportPath: undefined, openSession: async () => ({ ...await openSession(),
+    async close() { throw new Error("fixture unpersisted cleanup failed"); } }) }), /unpersisted cleanup failed/,
+    "cleanup failure cannot be downgraded before a validated export is durably saved");
+  console.log("CLI_CLEANUP_EXPORT_PASS persisted_success_retained=true authorization_attempts=1 no_export_still_fails=true primary_error_preserved=true");
   progress.length = 0;
   const primary = new Error("fixture callback failed");
   await assert.rejects(runCliOAuth({ ...options, openSession: async () => ({ ...await openSession(),
@@ -187,7 +199,7 @@ try {
   const restored = makeSettings(); await restored.load();
   assert.equal(restored.current.codexAuthMode, "cli");
   await preferences.close(); await restored.close();
-  console.log("CODEX_CLI_OAUTH_PASS one-shot environments, account locks, callback/state, account/workspace, export-before-cleanup, zero gateway requests during OAuth, manual UA merge/readback, failure preservation, stage diagnostics, settings reload");
+  console.log("CODEX_CLI_OAUTH_PASS one-shot environments, account locks, callback/state, account/workspace, export-before-cleanup, cleanup-warning retains successful export without duplicate OAuth, zero gateway requests during OAuth, manual UA merge/readback, failure preservation, stage diagnostics, settings reload");
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
