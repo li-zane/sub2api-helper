@@ -1,8 +1,7 @@
-export const PRIORITY_STEP_FIELDS = Object.freeze([
-  Object.freeze({ step: 1, key: "matchedFirstTrip", label: "不降智头车", inputLabel: "不降智头车优先级" }),
-  Object.freeze({ step: 2, key: "mismatchedFirstTrip", label: "降智头车", inputLabel: "降智头车优先级" }),
-  Object.freeze({ step: 3, key: "matchedLongTerm", label: "不降智长效", inputLabel: "不降智长效优先级" }),
-]);
+import { FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, isLegacyFingerprintConcurrency } from "../../shared/fingerprint-pool-policy.mjs";
+
+export const POOL_STEP_FIELDS = Object.keys(FINGERPRINT_POOL_TIERS);
+const poolFields = Object.keys(FINGERPRINT_POOL_FIELDS);
 
 export function normalizePlanTypeKey(value) {
   return String(value ?? "").trim().toLowerCase().slice(0, 128);
@@ -18,35 +17,27 @@ function parseIntegerInRange(value, min = 0, max = 10000) {
   return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
 }
 
+function mapPoolSections(readSection) {
+  return Object.fromEntries(poolFields.map(field => [field, readSection(field)]));
+}
+
+function mapPoolTiers(readTier) {
+  return Object.fromEntries(POOL_STEP_FIELDS.map(key => [key, readTier(key)]));
+}
+
 export function createDefaultPolicyDraft() {
-  return {
-    concurrency: { enabled: false, value: "10" },
-    priority: {
-      enabled: false,
-      matchedFirstTrip: "",
-      mismatchedFirstTrip: "",
-      matchedLongTerm: "",
-    },
-  };
+  return mapPoolSections(() => ({ enabled: false, ...mapPoolTiers(() => "") }));
 }
 
 export function normalizeFingerprintPoolPolicyEntry(raw) {
-  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  const rawConcurrency = source.concurrency && typeof source.concurrency === "object" ? source.concurrency : {};
-  const rawPriority = source.priority && typeof source.priority === "object" ? source.priority : {};
-  const parsedConcurrency = parseIntegerInRange(rawConcurrency.value, 0, 10000);
-  return {
-    concurrency: {
-      enabled: rawConcurrency.enabled === true,
-      value: parsedConcurrency ?? 10,
-    },
-    priority: {
-      enabled: rawPriority.enabled === true,
-      matchedFirstTrip: parseIntegerInRange(rawPriority.matchedFirstTrip, 0, 10000),
-      mismatchedFirstTrip: parseIntegerInRange(rawPriority.mismatchedFirstTrip, 0, 10000),
-      matchedLongTerm: parseIntegerInRange(rawPriority.matchedLongTerm, 0, 10000),
-    },
-  };
+  return mapPoolSections(field => {
+    const section = raw?.[field] || {};
+    const enabled = section.enabled === true;
+    if (field === "concurrency" && isLegacyFingerprintConcurrency(section)) {
+      return { enabled, value: parseIntegerInRange(section.value) ?? 10 };
+    }
+    return { enabled, ...mapPoolTiers(key => parseIntegerInRange(section[key])) };
+  });
 }
 
 export function normalizeFingerprintPoolPoliciesMap(rawPolicies) {
@@ -61,20 +52,15 @@ export function normalizeFingerprintPoolPoliciesMap(rawPolicies) {
 }
 
 export function policyToDraft(policy) {
-  if (!policy || typeof policy !== "object") return createDefaultPolicyDraft();
   const normalized = normalizeFingerprintPoolPolicyEntry(policy);
-  return {
-    concurrency: {
-      enabled: normalized.concurrency.enabled,
-      value: String(normalized.concurrency.value ?? 10),
-    },
-    priority: {
-      enabled: normalized.priority.enabled,
-      matchedFirstTrip: normalized.priority.matchedFirstTrip === null ? "" : String(normalized.priority.matchedFirstTrip),
-      mismatchedFirstTrip: normalized.priority.mismatchedFirstTrip === null ? "" : String(normalized.priority.mismatchedFirstTrip),
-      matchedLongTerm: normalized.priority.matchedLongTerm === null ? "" : String(normalized.priority.matchedLongTerm),
-    },
-  };
+  const draft = mapPoolSections(field => ({
+    enabled: normalized[field].enabled,
+    ...mapPoolTiers(key => String(normalized[field][key] ?? "")),
+  }));
+  if (isLegacyFingerprintConcurrency(normalized.concurrency)) {
+    draft.legacyConcurrencyValue = normalized.concurrency.value;
+  }
+  return draft;
 }
 
 export function policiesMapToDrafts(policiesMap) {
@@ -86,127 +72,50 @@ export function policiesMapToDrafts(policiesMap) {
   return drafts;
 }
 
-export function togglePolicyDraftSwitch(currentDraft, section, enabled) {
+export function togglePolicyDraftSwitch(currentDraft, field, enabled) {
   const draft = currentDraft || createDefaultPolicyDraft();
-  const prevBadInputs = draft.__badInputs || {};
-  if (section === "concurrency") {
-    const nextValueText = enabled && String(draft.concurrency?.value ?? "").trim() === "" && !prevBadInputs.concurrency
-      ? "10"
-      : String(draft.concurrency?.value ?? "10");
-    return {
-      ...draft,
-      concurrency: {
-        enabled: Boolean(enabled),
-        value: nextValueText,
-      },
-      __badInputs: enabled ? prevBadInputs : { ...prevBadInputs, concurrency: false },
-    };
+  const badInputs = { ...draft.__badInputs };
+  if (!enabled) {
+    for (const key of POOL_STEP_FIELDS) delete badInputs[`${field}.${key}`];
   }
-  if (section === "priority") {
-    return {
-      ...draft,
-      priority: {
-        matchedFirstTrip: "",
-        mismatchedFirstTrip: "",
-        matchedLongTerm: "",
-        ...draft.priority,
-        enabled: Boolean(enabled),
-      },
-      __badInputs: enabled
-        ? prevBadInputs
-        : {
-          ...prevBadInputs,
-          matchedFirstTrip: false,
-          mismatchedFirstTrip: false,
-          matchedLongTerm: false,
-        },
-    };
-  }
-  return draft;
+  return {
+    ...draft,
+    [field]: { ...draft[field], enabled },
+    __badInputs: badInputs,
+  };
 }
 
 export function validatePolicyDraft(draft) {
-  const current = draft || createDefaultPolicyDraft();
-  const badInputs = current.__badInputs || {};
-  const errors = {
-    concurrency: "",
-    matchedFirstTrip: "",
-    mismatchedFirstTrip: "",
-    matchedLongTerm: "",
-  };
+  const errors = {};
   let firstErrorField = null;
   let firstErrorMessage = "";
-
-  if (current.concurrency?.enabled === true) {
-    const parsedConcurrency = badInputs.concurrency
-      ? null
-      : parseIntegerInRange(current.concurrency.value, 0, 10000);
-    if (parsedConcurrency === null) {
-      errors.concurrency = "请输入 0–10000 的整数";
-      firstErrorField = "concurrency";
-      firstErrorMessage = errors.concurrency;
-    }
-  }
-
-  if (current.priority?.enabled === true) {
-    for (const stepField of PRIORITY_STEP_FIELDS) {
-      if (badInputs[stepField.key]) {
-        errors[stepField.key] = "留空或输入 0–10000 的整数";
-        if (!firstErrorField) {
-          firstErrorField = stepField.key;
-          firstErrorMessage = errors[stepField.key];
-        }
-        continue;
-      }
-      const rawText = String(current.priority?.[stepField.key] ?? "").trim();
-      if (rawText === "") continue;
-      if (parseIntegerInRange(rawText, 0, 10000) === null) {
-        errors[stepField.key] = "留空或输入 0–10000 的整数";
-        if (!firstErrorField) {
-          firstErrorField = stepField.key;
-          firstErrorMessage = errors[stepField.key];
-        }
+  for (const field of poolFields) {
+    if (!draft?.[field]?.enabled) continue;
+    for (const key of POOL_STEP_FIELDS) {
+      const input = `${field}.${key}`;
+      const text = String(draft[field][key] ?? "").trim();
+      if (!draft.__badInputs?.[input] && (!text || parseIntegerInRange(text) !== null)) continue;
+      errors[input] = "留空或输入 0–10000 的整数";
+      if (!firstErrorField) {
+        firstErrorField = input;
+        firstErrorMessage = errors[input];
       }
     }
   }
-
-  return {
-    valid: firstErrorField === null,
-    errors,
-    firstErrorField,
-    firstErrorMessage,
-  };
-}
-
-export function isPriorityAllEmpty(draft) {
-  if (draft?.priority?.enabled !== true) return false;
-  return PRIORITY_STEP_FIELDS.every((field) => String(draft.priority?.[field.key] ?? "").trim() === "");
+  return { valid: firstErrorField === null, errors, firstErrorField, firstErrorMessage };
 }
 
 export function draftToPolicy(draft) {
-  const current = draft || createDefaultPolicyDraft();
-  const badInputs = current.__badInputs || {};
-  const parsedConcurrency = badInputs.concurrency
-    ? null
-    : parseIntegerInRange(current.concurrency?.value, 0, 10000);
-  return {
-    concurrency: {
-      enabled: current.concurrency?.enabled === true,
-      value: parsedConcurrency ?? 10,
-    },
-    priority: {
-      enabled: current.priority?.enabled === true,
-      matchedFirstTrip: badInputs.matchedFirstTrip
-        ? null
-        : parseIntegerInRange(current.priority?.matchedFirstTrip, 0, 10000),
-      mismatchedFirstTrip: badInputs.mismatchedFirstTrip
-        ? null
-        : parseIntegerInRange(current.priority?.mismatchedFirstTrip, 0, 10000),
-      matchedLongTerm: badInputs.matchedLongTerm
-        ? null
-        : parseIntegerInRange(current.priority?.matchedLongTerm, 0, 10000),
-    },
-  };
+  return mapPoolSections(field => {
+    const enabled = draft?.[field]?.enabled === true;
+    if (field === "concurrency" && Number.isInteger(draft?.legacyConcurrencyValue)) {
+      return { enabled, value: draft.legacyConcurrencyValue };
+    }
+    return {
+      enabled,
+      ...mapPoolTiers(key => draft?.__badInputs?.[`${field}.${key}`] ? null : parseIntegerInRange(draft?.[field]?.[key])),
+    };
+  });
 }
 
 export function resolveProfilePlanTypes({

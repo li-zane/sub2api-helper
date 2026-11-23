@@ -326,41 +326,8 @@
   line-height: 1.35;
 }
 
-/* 2.1 Concurrency Single-row Layout */
-.fpp-concurrency-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
-}
-
-.fpp-concurrency-switch {
-  margin-left: auto;
-}
-
-.fpp-conc-input-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.fpp-conc-input {
-  width: 104px;
-}
-
-.fpp-range-hint {
-  font-size: 11.5px;
-  color: var(--muted, #475569);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.fpp-conc-error {
-  text-align: right;
-}
-
-/* 2.2 Priority Ladder */
-.fpp-priority-header {
+/* Shared policy ladder */
+.fpp-ladder-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -368,7 +335,7 @@
   margin-bottom: 10px;
 }
 
-.fpp-priority-grid {
+.fpp-ladder-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
@@ -469,7 +436,7 @@
 
 /* Medium Container Width: 380px - 559px */
 @container fpp-container (max-width: 559px) {
-  .fpp-priority-grid {
+  .fpp-ladder-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
@@ -497,49 +464,35 @@
     flex: 0 0 auto;
   }
 
-  .fpp-conc-input-group {
-    flex: 1 0 100%;
-    justify-content: space-between;
-  }
-
-  .fpp-conc-input {
-    flex: 1 1 auto;
-    width: auto;
-    min-height: 38px;
-    height: 38px;
-  }
-
-  .fpp-conc-error {
-    text-align: left;
-  }
-
-  .fpp-priority-grid {
+  .fpp-ladder-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
   }
 
   .fpp-step-tile {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: center;
     gap: 4px 10px;
   }
 
   .fpp-step-control {
-    min-width: 88px;
-    width: 112px;
+    width: 100%;
+  }
+
+  .fpp-fallback-block {
+    min-height: 38px;
+    height: 38px;
+    padding-inline: 4px;
+    white-space: normal;
+    text-align: center;
+    line-height: 1.2;
   }
 
   .fpp-step-input {
     min-height: 38px;
     height: 38px;
     text-align: right;
-  }
-
-  .fpp-fallback-block {
-    min-height: 38px;
-    height: 38px;
-    min-width: 112px;
   }
 
   .fpp-step-tile .fpp-inline-error {

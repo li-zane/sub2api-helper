@@ -1,9 +1,9 @@
 import React, { useEffect, useId, useMemo, useRef } from "react";
+import { FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS } from "../../shared/fingerprint-pool-policy.mjs";
 import { formatPlanTypeLabel } from "./plan-type-label.mjs";
 import {
-  PRIORITY_STEP_FIELDS,
+  POOL_STEP_FIELDS,
   createDefaultPolicyDraft,
-  isPriorityAllEmpty,
   policyToDraft,
   resolveProfilePlanTypes,
   togglePolicyDraftSwitch,
@@ -15,9 +15,98 @@ function getTabStatusSummary({ draft, residual, hasError }) {
   if (residual) return "残留策略，仅查看或移除";
   if (hasError) return "存在输入错误";
   const parts = [];
-  if (draft?.concurrency?.enabled) parts.push("已启用独立并发");
+  if (draft?.concurrency?.enabled) parts.push("已启用分级并发");
   if (draft?.priority?.enabled) parts.push("已启用分级优先级");
   return parts.join("、");
+}
+
+function PoolPolicyLadder({ field, section, errors, legacyValue, planLabel, locked, onToggle, onUpdate, onInputRef }) {
+  const baseId = useId();
+  const label = FINGERPRINT_POOL_FIELDS[field];
+  const title = `分级${label}`;
+  const footnoteId = `${baseId}-footnote`;
+  const statusId = `${baseId}-status`;
+  const allEmpty = POOL_STEP_FIELDS.every(tier => !section[tier]);
+  let status = "";
+  if (section.enabled) {
+    if (Number.isInteger(legacyValue)) {
+      status = `沿用旧版不降智并发 ${legacyValue}${locked ? "" : " · 编辑任一级后启用分级"}`;
+    } else if (allEmpty) {
+      status = "三项均留空，全部回退至 PlanType 默认";
+    }
+  }
+
+  return (
+    <fieldset className="fpp-pane" aria-labelledby={`${baseId}-legend`}>
+      <legend id={`${baseId}-legend`} className="sr-only">{title}</legend>
+      <div className="fpp-ladder-header">
+        <span className="fpp-pane-title" aria-hidden="true">{title}</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={section.enabled}
+          aria-label={`启用 ${planLabel} ${title}`}
+          disabled={locked}
+          className={`fpp-switch${section.enabled ? " is-on" : ""}`}
+          onClick={onToggle}
+        >
+          <span className="fpp-switch-thumb" aria-hidden="true" />
+        </button>
+      </div>
+
+      <div className="fpp-ladder-grid">
+        {POOL_STEP_FIELDS.map((tier, index) => {
+          const inputId = `${baseId}-${tier}`;
+          const errorId = `${inputId}-error`;
+          const error = errors[`${field}.${tier}`];
+          return (
+            <div className="fpp-step-tile" key={tier}>
+              <div className="fpp-step-head">
+                <span className="fpp-step-badge" aria-hidden="true">{index + 1}</span>
+                <label htmlFor={inputId} className="fpp-step-label">
+                  {FINGERPRINT_POOL_TIERS[tier]}<span className="sr-only">{label}</span>
+                </label>
+              </div>
+              <div className="fpp-step-control">
+                <input
+                  ref={element => onInputRef(tier, element)}
+                  id={inputId}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={10000}
+                  step={1}
+                  placeholder="跳过"
+                  disabled={locked || !section.enabled}
+                  value={section[tier]}
+                  onChange={event => onUpdate(tier, event)}
+                  aria-invalid={error ? "true" : undefined}
+                  aria-describedby={[footnoteId, status && statusId, error && errorId].filter(Boolean).join(" ")}
+                  className={`fpp-number-input fpp-step-input${error ? " is-invalid" : ""}`}
+                />
+              </div>
+              {error && <div id={errorId} className="fpp-inline-error" role="alert">{error}</div>}
+            </div>
+          );
+        })}
+
+        <div className="fpp-step-tile">
+          <div className="fpp-step-head">
+            <span className="fpp-step-badge is-muted" aria-hidden="true">4</span>
+            <span className="fpp-step-label">PlanType 默认</span>
+          </div>
+          <div className="fpp-step-control">
+            <div className="fpp-fallback-block">{field === "priority" ? "兜底 · 含导入日期" : "兜底 · 方案并发"}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="fpp-footnote-row">
+        <span id={footnoteId}>仅明确检测结论生效 · 留空跳过 · 0 有效</span>
+        {status && <span id={statusId} className="fpp-all-empty-hint" aria-live="polite">{status}</span>}
+      </div>
+    </fieldset>
+  );
 }
 
 export function FingerprintPoolPolicyPanel({
@@ -73,7 +162,7 @@ export function FingerprintPoolPolicyPanel({
         ? policyToDraft(savedPolicies[tab.key])
         : (draftsByKey[tab.key] || policyToDraft(savedPolicies[tab.key]) || createDefaultPolicyDraft());
       const validation = tab.residual
-        ? { valid: true, errors: { concurrency: "", matchedFirstTrip: "", mismatchedFirstTrip: "", matchedLongTerm: "" } }
+        ? { valid: true, errors: {} }
         : validatePolicyDraft(draft);
 
       map.set(tab.key, {
@@ -134,36 +223,20 @@ export function FingerprintPoolPolicyPanel({
     onChangeDraft?.(planKey, nextDraft);
   }
 
-  function updateConcurrencyValue(planKey, event) {
+  function updateTierValue(planKey, field, tier, event) {
     const isBad = Boolean(event.target.validity?.badInput);
     const meta = tabMetaMap.get(planKey);
     const currentDraft = meta?.draft || createDefaultPolicyDraft();
     onChangeDraft?.(planKey, {
       ...currentDraft,
-      concurrency: {
-        ...currentDraft.concurrency,
-        value: event.target.value,
+      legacyConcurrencyValue: field === "concurrency" ? undefined : currentDraft.legacyConcurrencyValue,
+      [field]: {
+        ...currentDraft[field],
+        [tier]: event.target.value,
       },
       __badInputs: {
         ...(currentDraft.__badInputs || {}),
-        concurrency: isBad,
-      },
-    });
-  }
-
-  function updatePriorityValue(planKey, fieldKey, event) {
-    const isBad = Boolean(event.target.validity?.badInput);
-    const meta = tabMetaMap.get(planKey);
-    const currentDraft = meta?.draft || createDefaultPolicyDraft();
-    onChangeDraft?.(planKey, {
-      ...currentDraft,
-      priority: {
-        ...currentDraft.priority,
-        [fieldKey]: event.target.value,
-      },
-      __badInputs: {
-        ...(currentDraft.__badInputs || {}),
-        [fieldKey]: isBad,
+        [`${field}.${tier}`]: isBad,
       },
     });
   }
@@ -188,22 +261,7 @@ export function FingerprintPoolPolicyPanel({
   const activeLabel = formatPlanTypeLabel(activeTab.rawValue, planTypeMapping);
   const activeTabId = `${baseId}-tab-${activeTab.key}`;
   const activePanelId = `${baseId}-panel-${activeTab.key}`;
-  const concLegendId = `${baseId}-conc-legend`;
-  const concInputId = `${baseId}-conc-input`;
-  const concHintId = `${baseId}-conc-hint`;
-  const concErrorId = `${baseId}-conc-error`;
-  const prioLegendId = `${baseId}-prio-legend`;
-  const footnoteId = `${baseId}-prio-footnote`;
-  const emptyWarnId = `${baseId}-prio-empty-warn`;
-
   const isResidual = Boolean(activeTab.residual);
-  const concLocked = disabled || isResidual || !activeDraft.concurrency.enabled;
-  const prioLocked = disabled || isResidual || !activeDraft.priority.enabled;
-  const allPriorityEmpty = !isResidual && isPriorityAllEmpty(activeDraft);
-  const prioritySharedDescribedBy = [
-    footnoteId,
-    allPriorityEmpty ? emptyWarnId : "",
-  ].filter(Boolean).join(" ");
 
   return (
     <section className={`fpp-section${disabled ? " is-disabled" : ""}`} aria-label="按 PlanType 配置指纹分池策略">
@@ -332,142 +390,24 @@ export function FingerprintPoolPolicyPanel({
           </div>
         )}
 
-        <fieldset className="fpp-pane" aria-labelledby={concLegendId}>
-          <legend id={concLegendId} className="sr-only">不降智独立并发</legend>
-          <div className="fpp-concurrency-row">
-            <span className="fpp-pane-title" aria-hidden="true">不降智独立并发</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={Boolean(activeDraft.concurrency.enabled)}
-              aria-label={`启用 ${activeLabel} 不降智独立并发`}
-              disabled={disabled || isResidual}
-              className={`fpp-switch fpp-concurrency-switch${activeDraft.concurrency.enabled ? " is-on" : ""}`}
-              onClick={() => updateSectionSwitch(activeTab.key, "concurrency", !activeDraft.concurrency.enabled)}
-            >
-              <span className="fpp-switch-thumb" aria-hidden="true" />
-            </button>
-            <div className="fpp-conc-input-group">
-              <label htmlFor={concInputId} className="sr-only">{`${activeLabel} 不降智独立并发上限`}</label>
-              <input
-                ref={(el) => {
-                  const refKey = `${activeTab.key}:concurrency`;
-                  if (el) inputRefs.current.set(refKey, el);
-                  else inputRefs.current.delete(refKey);
-                }}
-                id={concInputId}
-                type="number"
-                inputMode="numeric"
-                min={0}
-                max={10000}
-                step={1}
-                placeholder="10"
-                disabled={concLocked}
-                value={activeDraft.concurrency.value}
-                onChange={(event) => updateConcurrencyValue(activeTab.key, event)}
-                aria-invalid={activeErrors.concurrency ? "true" : undefined}
-                aria-describedby={[concHintId, activeErrors.concurrency ? concErrorId : ""].filter(Boolean).join(" ")}
-                className={`fpp-number-input fpp-conc-input${activeErrors.concurrency ? " is-invalid" : ""}`}
-              />
-              <span id={concHintId} className="fpp-range-hint">0–10000</span>
-            </div>
-          </div>
-          {activeErrors.concurrency && (
-            <div id={concErrorId} className="fpp-inline-error fpp-conc-error" role="alert">
-              {activeErrors.concurrency}
-            </div>
-          )}
-        </fieldset>
-
-        <fieldset className="fpp-pane" aria-labelledby={prioLegendId}>
-          <legend id={prioLegendId} className="sr-only">分级优先级</legend>
-          <div className="fpp-priority-header">
-            <span className="fpp-pane-title" aria-hidden="true">分级优先级</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={Boolean(activeDraft.priority.enabled)}
-              aria-label={`启用 ${activeLabel} 分级优先级`}
-              disabled={disabled || isResidual}
-              className={`fpp-switch${activeDraft.priority.enabled ? " is-on" : ""}`}
-              onClick={() => updateSectionSwitch(activeTab.key, "priority", !activeDraft.priority.enabled)}
-            >
-              <span className="fpp-switch-thumb" aria-hidden="true" />
-            </button>
-          </div>
-
-          <div className="fpp-priority-grid">
-            {PRIORITY_STEP_FIELDS.map((step) => {
-              const stepInputId = `${baseId}-prio-${step.key}`;
-              const stepErrorId = `${baseId}-prio-err-${step.key}`;
-              const stepError = activeErrors[step.key] || "";
-              const describedBy = [prioritySharedDescribedBy, stepError ? stepErrorId : ""].filter(Boolean).join(" ");
-              return (
-                <div className="fpp-step-tile" key={step.key}>
-                  <div className="fpp-step-head">
-                    <span className="fpp-step-badge" aria-hidden="true">{step.step}</span>
-                    <label htmlFor={stepInputId} className="fpp-step-label">
-                      {step.label}
-                      <span className="sr-only">优先级</span>
-                    </label>
-                  </div>
-                  <div className="fpp-step-control">
-                    <input
-                      ref={(el) => {
-                        const refKey = `${activeTab.key}:${step.key}`;
-                        if (el) inputRefs.current.set(refKey, el);
-                        else inputRefs.current.delete(refKey);
-                      }}
-                      id={stepInputId}
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={10000}
-                      step={1}
-                      placeholder="跳过"
-                      disabled={prioLocked}
-                      value={activeDraft.priority[step.key]}
-                      onChange={(event) => updatePriorityValue(activeTab.key, step.key, event)}
-                      aria-invalid={stepError ? "true" : undefined}
-                      aria-describedby={describedBy}
-                      className={`fpp-number-input fpp-step-input${stepError ? " is-invalid" : ""}`}
-                    />
-                  </div>
-                  {stepError && (
-                    <div id={stepErrorId} className="fpp-inline-error" role="alert">
-                      {stepError}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-            <div className="fpp-step-tile">
-              <div className="fpp-step-head">
-                <span className="fpp-step-badge is-muted" aria-hidden="true">4</span>
-                <span className="fpp-step-label">PlanType 默认</span>
-              </div>
-              <div className="fpp-step-control">
-                <div
-                  className="fpp-fallback-block"
-                  role="note"
-                  aria-label="第 4 级 PlanType 默认：兜底 · 含导入日期"
-                >
-                  兜底 · 含导入日期
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="fpp-footnote-row">
-            <span id={footnoteId}>仅明确检测结论生效 · 留空跳过 · 0 有效</span>
-            {allPriorityEmpty && (
-              <span id={emptyWarnId} className="fpp-all-empty-hint" aria-live="polite">
-                三项均留空，全部回退至 PlanType 默认
-              </span>
-            )}
-          </div>
-        </fieldset>
+        {Object.keys(FINGERPRINT_POOL_FIELDS).map(field => (
+          <PoolPolicyLadder
+            key={field}
+            field={field}
+            section={activeDraft[field]}
+            errors={activeErrors}
+            legacyValue={field === "concurrency" ? activeDraft.legacyConcurrencyValue : undefined}
+            planLabel={activeLabel}
+            locked={disabled || isResidual}
+            onToggle={() => updateSectionSwitch(activeTab.key, field, !activeDraft[field].enabled)}
+            onUpdate={(tier, event) => updateTierValue(activeTab.key, field, tier, event)}
+            onInputRef={(tier, element) => {
+              const key = `${activeTab.key}:${field}.${tier}`;
+              if (element) inputRefs.current.set(key, element);
+              else inputRefs.current.delete(key);
+            }}
+          />
+        ))}
       </div>
     </section>
   );

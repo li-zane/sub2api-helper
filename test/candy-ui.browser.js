@@ -19,7 +19,7 @@ async (page) => {
   }await route.fulfill({json:{settings,profiles,groups:groupsUnavailable?[]:groups,groupsError:groupsUnavailable?'fixture-group-catalog-failed':null,runtime:{activeAccounts:0,queuedAccounts:0,maxConcurrentAccounts:3}}});});
   await page.route('**/api/model-fingerprint/reference',r=>r.fulfill({json:{models:[],builtAt:null}}));
   await page.route('**/api/task-settings',async route=>{if(route.request().method()==='GET'){const r=await route.fetch();const data=await r.json();data.settings.modelFingerprint=settings;data.settings.monitoring={...data.settings.monitoring,fingerprintScanIntervalSeconds:77};await route.fulfill({json:data});}else{const body=route.request().postDataJSON();saves.push({kind:'task',value:body});await route.fulfill({json:{settings:{...body,default:3,current:body.maxActiveJobs,max:20}}});}});
-  let poolConfig={baseUrl:'https://fixture.test',profiles:[{id:'default',name:'默认方案'}],activeProfileId:'default',planTypeBindings:{free:'default',plus:'default'}};
+  let poolConfig={baseUrl:'https://fixture.test',profiles:[{id:'default',name:'默认方案',fingerprintPoolPolicies:{free:{concurrency:{enabled:true,value:10}}}}],activeProfileId:'default',planTypeBindings:{free:'default',plus:'default'}};
   for(const path of ['**/api/sub2api/settings','**/api/sub2api/monitor'])await page.route(path,r=>{
     if(r.request().method()==='POST') poolConfig=r.request().postDataJSON().config;
     return r.fulfill({json:{hasAdminApiKey:true,config:poolConfig,profiles:poolConfig.profiles,
@@ -71,42 +71,53 @@ async (page) => {
     check(await d.getByRole('button',{name:'Business Premium 分组 2 加入规则',exact:true}).getAttribute('aria-pressed')==='true','re-enabling PlanType lost draft policy');
     await d.getByRole('button',{name:'取消',exact:true}).click();await d.waitFor({state:'detached'});
   });
-  await test('pool-priority-by-plan-validates-and-saves-on-mobile',async()=>{
+  await test('pool-concurrency-and-priority-by-plan-validate-and-save-on-mobile',async()=>{
     const open=()=>page.getByRole('region',{name:'Sub2API 配置与号池监控'}).getByRole('button',{name:'配置',exact:true}).click();
     await open();
     const d=page.getByRole('dialog',{name:'Sub2API 配置',exact:true});
     const panel=d.locator('.fpp-section');
     const free=panel.getByRole('tab',{name:/^Free\b/i}),plus=panel.getByRole('tab',{name:/^Plus\b/i});
     const save=d.getByRole('button',{name:'保存配置',exact:true});
-    const first=panel.locator('.fpp-step-input').first();
+    const firstConcurrency=panel.getByRole('spinbutton',{name:/不降智头车\s*并发/});
+    const firstPriority=panel.getByRole('spinbutton',{name:/不降智头车\s*优先级/});
+    const concurrencySwitch=panel.getByRole('switch',{name:/分级并发/});
+    const prioritySwitch=panel.getByRole('switch',{name:/分级优先级/});
     await free.click();
-    await panel.getByRole('switch',{name:/不降智独立并发/}).click();
-    await panel.getByRole('spinbutton',{name:/不降智独立并发上限/}).fill('0');
-    await panel.getByRole('switch',{name:/分级优先级/}).click();
-    await first.fill('-1');
+    await panel.getByText(/沿用旧版不降智并发 10/).waitFor();
+    await prioritySwitch.click();
+    await firstPriority.fill('0');
+    await save.click();await d.waitFor({state:'detached'});
+    check(poolConfig.profiles[0].fingerprintPoolPolicies.free.concurrency.value===10,'editing priority replaced legacy concurrency');
+    await open();await free.click();
+    await firstConcurrency.fill('-1');
     await plus.click();
-    check(await panel.getByRole('switch',{name:/分级优先级/}).getAttribute('aria-checked')==='false','Free priority leaked into Plus');
+    check(await prioritySwitch.getAttribute('aria-checked')==='false'&&await concurrencySwitch.getAttribute('aria-checked')==='false','Free switches leaked into Plus');
     await save.click();
-    check(await free.getAttribute('aria-selected')==='true'&&await first.getAttribute('aria-invalid')==='true','invalid rule in other tab was not selected');
-    await first.fill('0');
+    check(await free.getAttribute('aria-selected')==='true'&&await firstConcurrency.getAttribute('aria-invalid')==='true','invalid concurrency in other tab was not selected');
+    check(await firstConcurrency.evaluate(el=>document.activeElement===el),'invalid concurrency field did not receive focus');
+    await firstConcurrency.fill('0');
+    await panel.getByRole('spinbutton',{name:/^降智头车\s*并发/}).fill('9');
+    const card=panel.getByRole('tabpanel');
+    await card.screenshot({path:evidence+'/tiered-policy-desktop.png'});
     await page.setViewportSize({width:375,height:812});
-    const grid=panel.locator('.fpp-priority-grid');
-    await grid.evaluate(el=>new Promise(resolve=>requestAnimationFrame(resolve)));
-    const gridFits=await grid.evaluate(el=>{
+    const grids=panel.locator('.fpp-ladder-grid');
+    await grids.first().evaluate(el=>new Promise(resolve=>requestAnimationFrame(resolve)));
+    check(await grids.evaluateAll(els=>els.length===2&&els.every(el=>{
       const bounds=el.getBoundingClientRect(),dialog=el.closest('[role="dialog"]').getBoundingClientRect();
       return bounds.left>=dialog.left-1&&bounds.right<=dialog.right+1&&bounds.right<=innerWidth+1;
-    });
-    check(gridFits,'priority grid is clipped by the mobile modal');
-    check(await grid.locator('.fpp-step-label').evaluateAll(labels=>labels.every(label=>label.scrollWidth<=label.clientWidth+1)),
+    })),'policy grids are clipped by the mobile modal');
+    check(await grids.locator('.fpp-step-label').evaluateAll(labels=>labels.every(label=>label.scrollWidth<=label.clientWidth+1)),
       'tier labels are clipped on mobile');
-    await panel.locator('.fpp-priority-grid').screenshot({path:evidence+'/priority-mobile.png'});
-    check(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'priority controls overflow on mobile');
+    check(await grids.locator('.fpp-fallback-block').evaluateAll(blocks=>blocks.every(block=>block.scrollWidth<=block.clientWidth+1)),
+      'fallback text is clipped on mobile');
+    await card.screenshot({path:evidence+'/tiered-policy-mobile.png'});
+    check(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'policy controls overflow on mobile');
     await save.click();await d.waitFor({state:'detached'});
     const policy=poolConfig.profiles[0].fingerprintPoolPolicies.free;
-    check(policy.concurrency.enabled&&policy.concurrency.value===0,'zero concurrency did not save');
+    check(policy.concurrency.enabled&&policy.concurrency.matchedFirstTrip===0&&policy.concurrency.mismatchedFirstTrip===9&&policy.concurrency.matchedLongTerm===null&&policy.concurrency.value===undefined,'concurrency tiers or legacy migration did not save');
     check(policy.priority.enabled&&policy.priority.matchedFirstTrip===0&&policy.priority.mismatchedFirstTrip===null,'zero/blank tier did not save');
     await open();await free.click();
-    check(await first.inputValue()==='0','saved tier did not reopen');
+    check(await firstConcurrency.inputValue()==='0'&&await firstPriority.inputValue()==='0','saved tiers did not reopen');
     await page.keyboard.press('Escape');
     await page.setViewportSize({width:1480,height:1000});
   });

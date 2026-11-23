@@ -69,7 +69,7 @@ import { SubscriptionHistory } from "./subscription-history.mjs";
 import { createSubscriptionHistorySync } from "./subscription-history-sync.mjs";
 import { normalizeAccountCost, restoredAccountCost } from "../shared/account-pricing.mjs";
 import { TAG_OPTION_KEYS, readAccountTags, patchAccountTags, writeAccountTags } from "../shared/account-tags.mjs";
-import { DEFAULT_FINGERPRINT_POOL_POLICY, fingerprintPoolNumber } from "../shared/fingerprint-pool-policy.mjs";
+import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolNumber, isLegacyFingerprintConcurrency } from "../shared/fingerprint-pool-policy.mjs";
 import { createAccountTagCatalog } from "./account-tag-catalog.mjs";
 import { OverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService } from "./model-fingerprint.mjs";
@@ -5413,21 +5413,23 @@ export function createConsoleApp(options = {}) {
       if (!type || Object.hasOwn(policies, type) || !policy || typeof policy !== "object" || Array.isArray(policy)) {
         throw httpError(400, "PlanType 调度规则格式无效");
       }
-      const { concurrency = DEFAULT_FINGERPRINT_POOL_POLICY.concurrency, priority = DEFAULT_FINGERPRINT_POOL_POLICY.priority } = policy;
-      if (typeof concurrency?.enabled !== "boolean" || typeof priority?.enabled !== "boolean") {
-        throw httpError(400, "独立并发与分级优先级开关必须为布尔值");
+      const normalized = {};
+      for (const [field, label] of Object.entries(FINGERPRINT_POOL_FIELDS)) {
+        const section = Object.hasOwn(policy, field) ? policy[field] : DEFAULT_FINGERPRINT_POOL_POLICY[field];
+        if (typeof section?.enabled !== "boolean") throw httpError(400, `分级${label}开关必须为布尔值`);
+        if (field === "concurrency" && isLegacyFingerprintConcurrency(section)) {
+          const value = parseOptionalSub2ApiInteger(section.value, "旧版不降智账号并发", 0, 10000);
+          if (value === null) throw httpError(400, "请填写旧版不降智账号并发");
+          normalized[field] = { enabled: section.enabled, value };
+          continue;
+        }
+        const ladder = { enabled: section.enabled };
+        for (const [tier, tierLabel] of Object.entries(FINGERPRINT_POOL_TIERS)) {
+          ladder[tier] = parseOptionalSub2ApiInteger(section[tier], tierLabel + label, 0, 10000);
+        }
+        normalized[field] = ladder;
       }
-      const concurrencyValue = parseOptionalSub2ApiInteger(concurrency.value, "不降智账号并发", 0, 10000);
-      if (concurrencyValue === null) throw httpError(400, "请填写不降智账号并发");
-      policies[type] = {
-        concurrency: { enabled: concurrency.enabled, value: concurrencyValue },
-        priority: {
-          enabled: priority.enabled,
-          matchedFirstTrip: parseOptionalSub2ApiInteger(priority.matchedFirstTrip, "不降智头车优先级", 0, 10000),
-          mismatchedFirstTrip: parseOptionalSub2ApiInteger(priority.mismatchedFirstTrip, "降智头车优先级", 0, 10000),
-          matchedLongTerm: parseOptionalSub2ApiInteger(priority.matchedLongTerm, "不降智长效优先级", 0, 10000),
-        },
-      };
+      policies[type] = normalized;
     }
     return policies;
   }
