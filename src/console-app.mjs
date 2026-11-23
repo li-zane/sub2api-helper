@@ -68,6 +68,8 @@ import { UsageSnapshots, usageSnapshotKey } from "./usage-snapshots.mjs";
 import { SubscriptionHistory } from "./subscription-history.mjs";
 import { createSubscriptionHistorySync } from "./subscription-history-sync.mjs";
 import { normalizeAccountCost, restoredAccountCost } from "../shared/account-pricing.mjs";
+import { readAccountTags, patchAccountTags, writeAccountTags } from "../shared/account-tags.mjs";
+import { createAccountTagCatalog } from "./account-tag-catalog.mjs";
 import { OverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService } from "./model-fingerprint.mjs";
 import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
@@ -189,6 +191,7 @@ export function createConsoleApp(options = {}) {
     options.outputRoot || process.env.ONBOARDING_OUTPUT_ROOT || path.join(WORKSPACE_ROOT, "tmp", "chatgpt-onboarding-console"),
   );
   const projectUpdates=options.projectUpdates || createProjectUpdates();
+  const accountTagCatalog = createAccountTagCatalog(path.join(OUTPUT_ROOT, "account-tag-options.json"));
   const cliUaSettings = createCliUaSettings({ root: path.join(OUTPUT_ROOT, "codex-cli-profiles"),
     getConfig: () => sub2ApiSettingsConfig, ...(options.cliUaProbe ? { probe: options.cliUaProbe } : {}) });
   const book = new OperationsBook(path.join(OUTPUT_ROOT, "helper-operations.sqlite"));
@@ -657,6 +660,7 @@ export function createConsoleApp(options = {}) {
           sub2apiAccountPriority: true,
           sub2apiAccountConcurrency: true,
           accountRemarks: true,
+          accountTags: true,
           overloadDetection: true,
           proxyQuality: true,
           overloadAutoCooldown: true,
@@ -1340,6 +1344,28 @@ export function createConsoleApp(options = {}) {
       await withEmailJobLock(job.email, () => overloadMonitor.setEnabled(job.email, body.enabled));
       if (body.enabled) overloadMonitor.trigger();
       sendJson(res, 200, { job: publicJob(job) });
+      return;
+    }
+
+    if (req.method === "GET" && requestUrl.pathname === "/api/account-tag-options") {
+      sendJson(res, 200, await accountTagCatalog.list(jobs.values()));
+      return;
+    }
+    const tagsMatch = /^\/api\/jobs\/([a-f0-9-]+)\/tags$/.exec(requestUrl.pathname);
+    if (req.method === "POST" && tagsMatch) {
+      const patch = await readJson(req);
+      const job = jobs.get(tagsMatch[1]);
+      if (!job) throw httpError(404, "账号不存在");
+      const sub2api = await withEmailJobLock(job.email, async () => {
+        if (jobs.get(job.id) !== job || job.deleted) throw httpError(404, "账号不存在");
+        let tags;
+        try { tags = patchAccountTags(readAccountTags(job.remark, job.accountTagsCleared), patch); }
+        catch (error) { throw httpError(400, error.message); }
+        const remark = normalizeAccountRemark(writeAccountTags(job.remark || "", tags));
+        await accountTagCatalog.remember(tags);
+        return updateJobRemark(job, remark, tags);
+      });
+      sendJson(res, 200, { job: publicJob(job), sub2api });
       return;
     }
 
@@ -6563,7 +6589,7 @@ export function createConsoleApp(options = {}) {
     const remarkJob = findJobByEmail(sub2ApiAccountEmail(localAccount));
     // Routine uploads/workspace changes must not overwrite a newer pool edit.
     // Explicit local changes remain pending until their notes write succeeds.
-    const remark = remarkJob ? (remarkJob.remarkSyncPending ? remarkJob.remark || "" : undefined) : localAccount.notes;
+    const remark = remarkJob ? (remarkJob.remarkSyncPending ? pendingPoolRemark(remarkJob, remoteAccount) : undefined) : localAccount.notes;
     const remoteCredentials = remoteAccount?.credentials && typeof remoteAccount.credentials === "object"
       ? remoteAccount.credentials
       : {};
@@ -6653,6 +6679,8 @@ export function createConsoleApp(options = {}) {
 
   function restoredRemarkState(metadata) {
     return {
+      accountTagsCleared: metadata.account_tags_cleared === true,
+      remarkTagsOnly: metadata.remark_tags_only === true,
       remarkSyncPending: metadata.remark_sync_pending === true,
       remarkSyncBackend: typeof metadata.remark_sync_backend === "string" ? metadata.remark_sync_backend : null,
       remarkRemoteSnapshot: metadata.remark_remote_snapshot && typeof metadata.remark_remote_snapshot === "object" ? metadata.remark_remote_snapshot : {},
@@ -6665,11 +6693,18 @@ export function createConsoleApp(options = {}) {
       accountCostUpdatedAt: Number.isFinite(Date.parse(metadata.account_cost_updated_at)) ? metadata.account_cost_updated_at : null };
   }
 
-  async function updateJobRemark(job, value) {
+  async function updateJobRemark(job, value, tags = null) {
     const remark = normalizeAccountRemark(value);
     const matching = [...jobs.values()].filter((item) => item.email.toLowerCase() === job.email.toLowerCase());
-    await Promise.all(matching.map(async (item) => {
-      item.remark = remark;
+    const updates = matching.map(item => ({
+      item,
+      nextRemark: tags && item !== job ? normalizeAccountRemark(writeAccountTags(item.remark || "", tags)) : remark,
+    }));
+    await Promise.all(updates.map(async ({ item, nextRemark }) => {
+      // A pending full-note edit still owns the entire next pool write.
+      item.remarkTagsOnly = Boolean(tags && (!item.remarkSyncPending || item.remarkTagsOnly));
+      if (tags) item.accountTagsCleared = !Object.values(tags).some(Boolean);
+      item.remark = nextRemark;
       item.remarkRevision = crypto.randomUUID();
       item.remarkSyncPending = true;
       touch(item);
@@ -6678,11 +6713,16 @@ export function createConsoleApp(options = {}) {
     return synchronizeSub2ApiRemark(job);
   }
 
+  function pendingPoolRemark(job, account) {
+    if (!job.remarkTagsOnly) return job.remark || "";
+    if (!Object.hasOwn(account, "notes")) return undefined;
+    return normalizeAccountRemark(writeAccountTags(account.notes ?? "", readAccountTags(job.remark, job.accountTagsCleared)));
+  }
+
   async function synchronizeSub2ApiRemark(job, context = {}) {
     const config = context.config || sub2ApiSettingsConfig || sub2ApiMonitorConfig;
     const result = { configured: Boolean(config?.baseUrl && config?.adminApiKey), matched: 0, updated: 0, failed: 0, error: null };
     if (!result.configured || accountAutomationBlocked(job.email)) return result;
-    const remark = job.remark || "";
     const revision = job.remarkRevision;
     try {
       const listing = context.listing || await listSub2ApiAccounts(config, { withMeta: true });
@@ -6692,10 +6732,22 @@ export function createConsoleApp(options = {}) {
         .map((account) => [normalizeSub2ApiAccountId(account.id), account])
         .filter(([id]) => id));
       result.matched = matching.size;
+      const backend = monitorBackendIdentity(config);
+      const snapshot = job.remarkSyncBackend === backend ? job.remarkRemoteSnapshot || {} : {};
+      let latestRemoteEdit;
       for (const [id, account] of matching) {
-        const notes = remark;
-        if (notes === account.notes || accountSyncBlocked(account)) continue;
+        if (accountSyncBlocked(account)) continue;
         try {
+          const notes = pendingPoolRemark(job, account);
+          if (notes === undefined) throw new Error("号池未返回原备注，标签已保存在本地");
+          // A pool operator may edit free text between the last poll and this
+          // tag click. Reflect that edit locally if both sides shared a base.
+          if (job.remarkTagsOnly && Object.hasOwn(snapshot, id) && snapshot[id] !== (account.notes ?? "")
+            && notes !== job.remark && pendingPoolRemark(job, { notes: snapshot[id] }) === job.remark) {
+            const time = Date.parse(account.updated_at) || 0;
+            if (!latestRemoteEdit || time >= latestRemoteEdit.time) latestRemoteEdit = { time, notes };
+          }
+          if (notes === account.notes) continue;
           await requestProfileSync(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, {
             method: "PUT", body: JSON.stringify({ notes }),
           });
@@ -6707,9 +6759,11 @@ export function createConsoleApp(options = {}) {
         }
       }
       if (result.matched && !result.failed && job.remarkRevision === revision) {
-        const backend = monitorBackendIdentity(config);
+        const previousRemark = job.remark;
         await Promise.all([...jobs.values()].filter((item) => item.email.toLowerCase() === job.email.toLowerCase()).map(async (item) => {
+          if (latestRemoteEdit && item.remark === previousRemark) { item.remark = latestRemoteEdit.notes; touch(item); }
           item.remarkSyncPending = false;
+          item.remarkTagsOnly = false;
           item.remarkSyncBackend = backend;
           item.remarkRemoteSnapshot = Object.fromEntries([...matching].map(([id, account]) => [id, account.notes ?? ""]));
           await saveJobMetadata(item);
@@ -6956,9 +7010,11 @@ export function createConsoleApp(options = {}) {
         const current = accounts.get(email);
         const observedUsage = usage;
         if (!current) {
+          const remarkJob = findJobByEmail(email);
           accounts.set(email, {
             email,
-            remark: findJobByEmail(email)?.remark ?? null,
+            remark: remarkJob?.remark ?? null,
+            accountTags: remarkJob ? readAccountTags(remarkJob.remark, remarkJob.accountTagsCleared) : null,
             accountIds: [accountId],
             proxyIds: [normalizeStoredProxyId(remoteAccount.proxy_id)].filter(Boolean),
             groupIds,
@@ -8299,7 +8355,7 @@ export function createConsoleApp(options = {}) {
         const accountUpdate = {
           credentials,
           extra,
-          ...(job.remarkSyncPending ? { notes: job.remark || "" } : {}),
+          ...(job.remarkSyncPending ? { notes: pendingPoolRemark(job, remoteAccount) } : {}),
           ...(accountName ? { name: accountName } : {}),
           ...(accountConfig.groupIds.length ? { group_ids: fingerprintGroupIds(accountConfig, profileAccount, accountConfig.groupIds, remoteAccount) } : {}),
           ...await sub2ApiProxyFieldsForAccount(accountConfig, job.email, remoteAccount),
@@ -8449,6 +8505,7 @@ export function createConsoleApp(options = {}) {
     return {
       ...selection,
       remark: job.remark || "",
+      accountTags: readAccountTags(job.remark, job.accountTagsCleared),
       remarkSyncPending: Boolean(job.remarkSyncPending),
       accountCostCny: restoredAccountCost(job.accountCostCny),
       accountCostUpdatedAt: job.accountCostUpdatedAt || null,
@@ -10975,6 +11032,8 @@ export function createConsoleApp(options = {}) {
           version: 1,
           email: job.email,
           remark: job.remark || "",
+          account_tags_cleared: Boolean(job.accountTagsCleared),
+          remark_tags_only: Boolean(job.remarkTagsOnly),
           account_cost_cny: restoredAccountCost(job.accountCostCny),
           account_cost_updated_at: job.accountCostUpdatedAt || null,
           remark_sync_pending: Boolean(job.remarkSyncPending),

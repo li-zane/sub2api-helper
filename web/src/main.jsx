@@ -2,6 +2,8 @@ import { version as projectVersion } from "../../package.json";
 import { apiFetch } from "./console-request.mjs";
 import { DEFAULT_PLAN_TYPE_MAPPING, normalizePlanTypeMapping, formatPlanTypeLabel } from "./plan-type-label.mjs";
 import { RemarkDialog } from "./remark-dialog.jsx";
+import { AccountTags } from "./account-tags.jsx";
+import { DEFAULT_TAG_OPTIONS } from "../../shared/account-tags.mjs";
 import { deferredDialog } from "./deferred-dialog.jsx";
 import { useConsoleSettings } from "./use-console-settings.jsx";
 import { consoleFetch as fetch, getConsoleBootstrap } from "./console-api.mjs";
@@ -70,6 +72,7 @@ import {
   Tags,
   PhoneIncoming,
   Trash2,
+  Wallet,
   X,
 } from "lucide-react";
 import "./styles.css";
@@ -221,6 +224,7 @@ function App() {
   useModalFocus(planTypeMappingRef, planTypeMappingOpen);
   const [credentialJob, setCredentialJob] = useState(null);
   const [remarkJob, setRemarkJob] = useState(null);
+  const [tagOptions, setTagOptions] = useState(DEFAULT_TAG_OPTIONS);
   const [costJob, setCostJob] = useState(null);
   const [sessionJob, setSessionJob] = useState(null);
   const [workspaceJob, setWorkspaceJob] = useState(null);
@@ -1186,6 +1190,28 @@ function App() {
     finally { setSmsSettingsSaving(false); }
   }
 
+  async function loadTagOptions() {
+    const options = await apiFetch(token, "/api/account-tag-options");
+    setTagOptions(current => shareSnapshot(current, options));
+    return options;
+  }
+
+  function acceptRemarkUpdate({ job, sub2api }, action) {
+    const email = job.email.toLowerCase();
+    const merge = current => current.map(item => item.email.toLowerCase() === email
+      ? { ...item, remark: job.remark, accountTags: job.accountTags, remarkSyncPending: job.remarkSyncPending, updatedAt: job.updatedAt } : item);
+    setJobs(merge);
+    setJobSelectionIndex(merge);
+    setUploadNotice(sub2api?.error
+      ? `${action}，已保存在本地；号池同步未完成：${sub2api.error}`
+      : sub2api?.matched ? `${action}，已同步同邮箱的 ${sub2api.matched} 条号池记录` : `本地${action}，上传账号时会同步到号池`);
+  }
+
+  async function saveAccountTags(job, patch) {
+    const data = await apiFetch(token, `/api/jobs/${job.id}/tags`, { method: "POST", body: JSON.stringify(patch) });
+    acceptRemarkUpdate(data, "标签和备注已保存");
+  }
+
   function openPlanTypeMapping() {
     setPlanTypeMappingDraft(planTypeMappingRows(planTypeMapping));
     setPlanTypeMappingError("");
@@ -2099,6 +2125,10 @@ function App() {
                   credentialsAvailable={Boolean(features.credentialDetails)}
                   onOpenCredentials={() => setCredentialJob(job)}
                   remarksAvailable={Boolean(features.accountRemarks)}
+                  tagsAvailable={Boolean(features.accountTags)}
+                  tagOptions={tagOptions}
+                  onLoadTagOptions={loadTagOptions}
+                  onSaveTags={saveAccountTags}
                   onOpenRemark={() => setRemarkJob(job)}
                   pricingAvailable={Boolean(features.accountPricing)}
                   onOpenCost={() => setCostJob(job)}
@@ -2145,15 +2175,7 @@ function App() {
           job={remarkJob}
           onClose={() => setRemarkJob(null)}
           onSaved={(data) => {
-            const email = data.job.email.toLowerCase();
-            const merge = (current) => current.map((item) => item.email.toLowerCase() === email ? { ...item, remark: data.job.remark, remarkSyncPending: data.job.remarkSyncPending, updatedAt: data.job.updatedAt } : item);
-            setJobs(merge);
-            setJobSelectionIndex(merge);
-            setUploadNotice(data.sub2api?.error
-              ? `备注已保存在本地；号池同步未完成：${data.sub2api.error}`
-              : data.sub2api?.matched
-                ? `备注已${data.job.remark ? "保存" : "清空"}，已同步同邮箱的 ${data.sub2api.matched} 条号池记录`
-                : `本地备注已${data.job.remark ? "保存" : "清空"}，上传账号时会同步到号池`);
+            acceptRemarkUpdate(data, `备注已${data.job.remark ? "保存" : "清空"}`);
             setRemarkJob(null);
           }}
         />
@@ -3238,13 +3260,19 @@ function AccountCostDialog({ token, job, onClose, onSaved }) {
   }
   return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onClose(); }}>
     <ModalForm className="batch-dialog remark-dialog account-cost-dialog" role="dialog" aria-modal="true" aria-labelledby="account-cost-title" onSubmit={save} onClose={onClose} closeDisabled={saving}>
-      <div className="dialog-header"><div><h2 id="account-cost-title">账号成本</h2><span><CopyableAccount email={job.email} /></span></div>
+      <div className="dialog-header"><div><span className="cost-emblem"><Wallet size={16} aria-hidden="true" /></span><h2 id="account-cost-title">账号成本</h2></div>
         <button type="button" className="icon-button" onClick={onClose} disabled={saving} aria-label="关闭账号成本"><X size={18} /></button></div>
-      <label className="batch-label" htmlFor="account-cost-cny">账号成本（人民币）</label>
-      <input id="account-cost-cny" aria-label="账号成本（人民币）" type="number" min="0" max="1000000000" step="0.01" required autoFocus
-        value={cost} onChange={event => setCost(event.target.value)} disabled={saving} />
-      <small className="account-cost-help">仅保存在 Helper；利润按 U × 号池价格倍率 − 账号成本计算，不修改号池额度或凭据。</small>
-      {error && <div className="dialog-error" role="alert">{error}</div>}
+      <div className="cost-body">
+        <div className="cost-account"><span>账号</span><CopyableAccount email={job.email}><span>{job.email}</span><Copy size={13} aria-hidden="true" /></CopyableAccount></div>
+        <label className="batch-label" htmlFor="account-cost-cny">账号成本（人民币）</label>
+        <div className="cost-input-wrap"><span aria-hidden="true">¥</span>
+          <input id="account-cost-cny" aria-describedby="account-cost-help" type="number" min="0" max="1000000000" step="0.01" required autoFocus
+            value={cost} onFocus={event => event.target.select()} onChange={event => setCost(event.target.value)} disabled={saving} />
+          <small aria-hidden="true">CNY</small>
+        </div>
+        <small className="account-cost-help" id="account-cost-help">最多两位小数，零成本填 0。利润按 U × 号池价格倍率 − 账号成本计算。</small>
+        {error && <div className="dialog-error" role="alert">{error}</div>}
+      </div>
       <div className="dialog-footer"><button type="button" className="cancel-button" disabled={saving} onClick={onClose}>取消</button>
         <button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}保存成本</button></div>
     </ModalForm>
@@ -3456,7 +3484,7 @@ function BulkMoreMenu({
 
 // The boundary keeps event handlers fresh without invalidating unchanged memoized rows.
 const MemoizedJobRow = React.memo(JobRow);
-const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onUpdateSub2ApiConcurrency", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onOpenCost", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
+const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onUpdateSub2ApiConcurrency", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onLoadTagOptions", "onSaveTags", "onOpenCost", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
 function JobRowBoundary(props) {
   const latest = useRef(props);
   useLayoutEffect(() => { latest.current = props; });
@@ -3536,7 +3564,7 @@ function Sub2ApiPoolNumberField({ kind, label, email, inPool, value, available, 
   );
 }
 
-function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail, onOpenBoundIp }) {
+function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, tagsAvailable, tagOptions, onLoadTagOptions, onSaveTags, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail, onOpenBoundIp }) {
   const [pauseBusy,setPauseBusy]=useState(false);
   async function toggleInspection(){
     if(pauseBusy)return;
@@ -3730,6 +3758,7 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
       </td>
       <td className={`plan-cell ${job.planType ? "" : "unknown"}`} title={job.planType || "未知"}>
         <span className="plan-tag">{formatPlanTypeLabel(job.planType, planTypeMapping)}</span>
+        {tagsAvailable && <AccountTags job={job} options={tagOptions} onLoadOptions={onLoadTagOptions} onSave={onSaveTags} />}
         <CredentialSyncNote sync={job.webCredentialSync} planTypeMapping={planTypeMapping} />
         {job.sub2apiInPool === true && job.sub2apiPlanType && job.planType
           && job.sub2apiPlanType !== job.planType && (
@@ -6482,6 +6511,7 @@ function mergeSub2ApiStatusIntoJob(job, state) {
   if (!status) return { ...job, ...sub2ApiStatusJobFields({ inPool: false }), sub2apiPlanType: null };
   const fields = sub2ApiStatusJobFields(status);
   if (Date.parse(state.fetchedAt) < Date.parse(job.updatedAt || "")) delete fields.remark;
+  if (typeof fields.remark === "string" && status.accountTags) fields.accountTags = status.accountTags;
   // `planType` is the account's currently selected workspace and is supplied
   // by the completed local OAuth output. Only use the remote value as a
   // fallback for legacy jobs that never persisted a local PlanType.

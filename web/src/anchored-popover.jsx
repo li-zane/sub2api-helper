@@ -22,7 +22,10 @@ export function AnchoredPopover({ anchorRef, align = "left", onClose, children, 
     };
     const scroll = event => { if (!menu.contains(event.target)) place(); };
     place(); window.addEventListener("scroll", scroll, true); window.addEventListener("resize", place);
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(place) : null;
+    observer?.observe(menu);
     return () => {
+      observer?.disconnect();
       window.removeEventListener("scroll", scroll, true); window.removeEventListener("resize", place);
       if (popover && menu.matches(":popover-open")) menu.hidePopover();
     };
