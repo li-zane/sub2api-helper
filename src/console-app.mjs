@@ -68,7 +68,8 @@ import { UsageSnapshots, usageSnapshotKey } from "./usage-snapshots.mjs";
 import { SubscriptionHistory } from "./subscription-history.mjs";
 import { createSubscriptionHistorySync } from "./subscription-history-sync.mjs";
 import { normalizeAccountCost, restoredAccountCost } from "../shared/account-pricing.mjs";
-import { readAccountTags, patchAccountTags, writeAccountTags } from "../shared/account-tags.mjs";
+import { TAG_OPTION_KEYS, readAccountTags, patchAccountTags, writeAccountTags } from "../shared/account-tags.mjs";
+import { DEFAULT_FINGERPRINT_POOL_POLICY, fingerprintPoolNumber } from "../shared/fingerprint-pool-policy.mjs";
 import { createAccountTagCatalog } from "./account-tag-catalog.mjs";
 import { OverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService } from "./model-fingerprint.mjs";
@@ -124,6 +125,7 @@ export function createConsoleApp(options = {}) {
     "loadFactor",
     "priority",
     "importDatePriority",
+    "fingerprintPoolPolicies",
     "accountNameTemplate",
     "modelWhitelist",
     "codexFingerprintMode",
@@ -548,6 +550,18 @@ export function createConsoleApp(options = {}) {
       return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && (sub2ApiAccountSchedulable(a) === true || manual && a.status === "active" && overloadCooldown.ownsPause(sub2ApiAccountEmail(a), a.id)) && !limited.has(sub2ApiAccountEmail(a))).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
     },
     getAccount: readFingerprintAccount, getPoolAccount: getSub2ApiAccount, sample: fingerprintSampler,
+    getPoolNumberPolicy: (email, planType, field, verdict) => {
+      const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
+      const type = normalizePlanType(planType).toLowerCase();
+      if (!config || !type) return null;
+      const binding = resolveSub2ApiProfileBinding(type);
+      const policies = binding ? sub2ApiProfiles.get(binding)?.fingerprintPoolPolicies : config.fingerprintPoolPolicies;
+      if (!policies || !Object.hasOwn(policies, type)) return null;
+      const policy = policies[type];
+      const job = findJobByEmail(email);
+      const tags = readAccountTags(job?.remark, job?.accountTagsCleared);
+      return { enabled: policy[field].enabled, value: fingerprintPoolNumber(policy, field, verdict, tags) };
+    },
     getPoolNumberDefaults: async (email, id, planType) => {
       const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
       if (!config) return {};
@@ -1351,6 +1365,17 @@ export function createConsoleApp(options = {}) {
       sendJson(res, 200, await accountTagCatalog.list(jobs.values()));
       return;
     }
+    if (req.method === "DELETE" && requestUrl.pathname === "/api/account-tag-options") {
+      const { field, value } = (await readJson(req)) || {};
+      if (typeof field !== "string" || !Object.hasOwn(TAG_OPTION_KEYS, field)) throw httpError(400, "请选择要删除的标签选项");
+      let label;
+      try { label = patchAccountTags({}, { [field]: value })[field]; }
+      catch (error) { throw httpError(400, error.message); }
+      if (!label) throw httpError(400, "请输入要删除的选项名称");
+      await accountTagCatalog.remove(field, label);
+      sendJson(res, 200, await accountTagCatalog.list(jobs.values()));
+      return;
+    }
     const tagsMatch = /^\/api\/jobs\/([a-f0-9-]+)\/tags$/.exec(requestUrl.pathname);
     if (req.method === "POST" && tagsMatch) {
       const patch = await readJson(req);
@@ -1362,7 +1387,7 @@ export function createConsoleApp(options = {}) {
         try { tags = patchAccountTags(readAccountTags(job.remark, job.accountTagsCleared), patch); }
         catch (error) { throw httpError(400, error.message); }
         const remark = normalizeAccountRemark(writeAccountTags(job.remark || "", tags));
-        await accountTagCatalog.remember(tags);
+        await accountTagCatalog.remember(patch, tags);
         return updateJobRemark(job, remark, tags);
       });
       sendJson(res, 200, { job: publicJob(job), sub2api });
@@ -1540,6 +1565,7 @@ export function createConsoleApp(options = {}) {
       await persistSub2ApiSettingsConfiguration();
       const profileSync = await syncSub2ApiProfileChanges(config, profileSyncTargets, snapshotSub2ApiProfileState());
       const datePrioritySync = await refreshImportDatePriorities(config);
+      await modelFingerprint.refreshPoolNumbers();
       overloadMonitor.trigger();
       overloadCooldown.trigger();
       sendJson(res, 200, { ...publicSub2ApiSettingsState(), profileSync, datePrioritySync });
@@ -1565,6 +1591,7 @@ export function createConsoleApp(options = {}) {
       requestSub2ApiStatusRefresh();
       const profileSync = await syncSub2ApiProfileChanges(config, profileSyncTargets, snapshotSub2ApiProfileState());
       const datePrioritySync = await refreshImportDatePriorities(config);
+      await modelFingerprint.refreshPoolNumbers();
       overloadMonitor.trigger();
       overloadCooldown.trigger();
       sendJson(res, 200, { ...publicSub2ApiMonitorState(), profileSync, datePrioritySync });
@@ -5370,11 +5397,39 @@ export function createConsoleApp(options = {}) {
         ?? "off",
     );
     const importDatePriority = normalizeImportDatePriority(config.importDatePriority ?? stored.importDatePriority);
+    const fingerprintPoolPolicies = normalizeFingerprintPoolPolicies(config.fingerprintPoolPolicies ?? stored.fingerprintPoolPolicies);
     const autoResetCreditEnabled = config.autoResetCreditEnabled ?? stored.autoResetCreditEnabled ?? false;
     if (typeof autoResetCreditEnabled !== "boolean") throw httpError(400, "自动使用重置卡开关必须是布尔值");
     const autoResetCredit5hThresholdPercent = normalizeAutoResetCreditThreshold(config.autoResetCredit5hThresholdPercent ?? stored.autoResetCredit5hThresholdPercent ?? 100, "5h");
     const autoResetCredit7dThresholdPercent = normalizeAutoResetCreditThreshold(config.autoResetCredit7dThresholdPercent ?? stored.autoResetCredit7dThresholdPercent ?? 100, "7d");
-    return { baseUrl, adminApiKey, groupIds, proxyId, concurrency, loadFactor, priority, importDatePriority, accountNameTemplate, modelWhitelist, codexFingerprintMode, autoResetCreditEnabled, autoResetCredit5hThresholdPercent, autoResetCredit7dThresholdPercent, wsMode, profileId: String(config.profileId || stored.profileId || "default") };
+    return { baseUrl, adminApiKey, groupIds, proxyId, concurrency, loadFactor, priority, importDatePriority, fingerprintPoolPolicies, accountNameTemplate, modelWhitelist, codexFingerprintMode, autoResetCreditEnabled, autoResetCredit5hThresholdPercent, autoResetCredit7dThresholdPercent, wsMode, profileId: String(config.profileId || stored.profileId || "default") };
+  }
+
+  function normalizeFingerprintPoolPolicies(value = {}) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw httpError(400, "PlanType 调度规则格式无效");
+    const policies = Object.create(null);
+    for (const [key, policy] of Object.entries(value)) {
+      const type = normalizePlanType(key).toLowerCase();
+      if (!type || Object.hasOwn(policies, type) || !policy || typeof policy !== "object" || Array.isArray(policy)) {
+        throw httpError(400, "PlanType 调度规则格式无效");
+      }
+      const { concurrency = DEFAULT_FINGERPRINT_POOL_POLICY.concurrency, priority = DEFAULT_FINGERPRINT_POOL_POLICY.priority } = policy;
+      if (typeof concurrency?.enabled !== "boolean" || typeof priority?.enabled !== "boolean") {
+        throw httpError(400, "独立并发与分级优先级开关必须为布尔值");
+      }
+      const concurrencyValue = parseOptionalSub2ApiInteger(concurrency.value, "不降智账号并发", 0, 10000);
+      if (concurrencyValue === null) throw httpError(400, "请填写不降智账号并发");
+      policies[type] = {
+        concurrency: { enabled: concurrency.enabled, value: concurrencyValue },
+        priority: {
+          enabled: priority.enabled,
+          matchedFirstTrip: parseOptionalSub2ApiInteger(priority.matchedFirstTrip, "不降智头车优先级", 0, 10000),
+          mismatchedFirstTrip: parseOptionalSub2ApiInteger(priority.mismatchedFirstTrip, "降智头车优先级", 0, 10000),
+          matchedLongTerm: parseOptionalSub2ApiInteger(priority.matchedLongTerm, "不降智长效优先级", 0, 10000),
+        },
+      };
+    }
+    return policies;
   }
 
   function normalizeAutoResetCreditThreshold(value, label) {
@@ -5782,6 +5837,7 @@ export function createConsoleApp(options = {}) {
       loadFactor: config.loadFactor,
       priority: config.priority,
       importDatePriority: config.importDatePriority,
+      fingerprintPoolPolicies: config.fingerprintPoolPolicies,
       accountNameTemplate: config.accountNameTemplate,
       modelWhitelist: config.modelWhitelist,
       codexFingerprintMode: config.codexFingerprintMode,
@@ -6407,7 +6463,7 @@ export function createConsoleApp(options = {}) {
       const before = previous.profiles.get(previousProfileId);
       const after = next.profiles.get(profileId);
       if (!before || !after) continue;
-      const fields = SUB2API_PROFILE_FIELDS.filter((field) => (
+      const fields = SUB2API_PROFILE_FIELDS.filter((field) => field !== "fingerprintPoolPolicies" && (
         JSON.stringify(before[field] ?? null) !== JSON.stringify(after[field] ?? null)
       ));
       if (fields.length) targets.push({ planType, profileId, fields });
@@ -6695,6 +6751,7 @@ export function createConsoleApp(options = {}) {
 
   async function updateJobRemark(job, value, tags = null) {
     const remark = normalizeAccountRemark(value);
+    const previousTags = readAccountTags(job.remark, job.accountTagsCleared);
     const matching = [...jobs.values()].filter((item) => item.email.toLowerCase() === job.email.toLowerCase());
     const updates = matching.map(item => ({
       item,
@@ -6710,7 +6767,16 @@ export function createConsoleApp(options = {}) {
       touch(item);
       await saveJobMetadata(item);
     }));
-    return synchronizeSub2ApiRemark(job);
+    const sync = await synchronizeSub2ApiRemark(job);
+    await refreshPoolRuleAfterRemark(job, previousTags);
+    return sync;
+  }
+
+  async function refreshPoolRuleAfterRemark(job, previousTags) {
+    const currentTags = readAccountTags(job.remark, job.accountTagsCleared);
+    if (previousTags.trip !== currentTags.trip || previousTags.validity !== currentTags.validity) {
+      await modelFingerprint.refreshPoolNumbers(job.email);
+    }
   }
 
   function pendingPoolRemark(job, account) {
@@ -6792,8 +6858,10 @@ export function createConsoleApp(options = {}) {
       await withEmailJobLock(email, async () => {
         const job = findJobByEmail(email);
         if (!job || job.remarkRevision !== versions.get(job.id)) return;
+        const previousTags = readAccountTags(job.remark, job.accountTagsCleared);
         if (job.remarkSyncPending) {
           await synchronizeSub2ApiRemark(job, { listing, config });
+          await refreshPoolRuleAfterRemark(job, previousTags);
           return;
         }
         const candidates = remote.filter((account) => Object.hasOwn(account, "notes") && (typeof account.notes === "string" || account.notes === null));
@@ -6817,6 +6885,7 @@ export function createConsoleApp(options = {}) {
           touch(item);
           await saveJobMetadata(item);
         }));
+        await refreshPoolRuleAfterRemark(job, previousTags);
       });
     }
   }

@@ -113,6 +113,14 @@ try {
   assert.equal((await localJob()).remark, "原有备注", "first pool sync imports complete notes");
   const tags = (patch, expected) => post("/api/jobs/" + id + "/tags", patch, expected);
   const tagOptions = async () => (await fetch(base + "/api/account-tag-options", { headers })).json();
+  async function removeTagOption(field, value, expected = 200) {
+    const response = await fetch(base + "/api/account-tag-options", {
+      method: "DELETE", headers, body: JSON.stringify({ field, value }),
+    });
+    const data = await response.json();
+    assert.equal(response.status, expected, JSON.stringify(data));
+    return data;
+  }
   const manual = " 康神头车非轮；客服说周五复查。\n  [自留]  请保留  ";
   assert.deepEqual((await remark(manual)).job.accountTags, { merchant: "康神", trip: "头车", validity: "长效", stopAt: "" });
   const tagged = await tags({ merchant: "新商家" });
@@ -137,6 +145,30 @@ try {
   assert.deepEqual((await localJob()).accountTags, { merchant: "", trip: "", validity: "", stopAt: "" });
   assert((await tagOptions()).merchants.includes("新商家"));
   assert((await tagOptions()).trips.includes("夜班车"));
+  assert.deepEqual((await tagOptions()).validities, ["长效", "轮转"]);
+  const withOptions = await tags({ merchant: "康神", trip: "夜班车", validity: "长效" });
+  assert(!(await removeTagOption("merchant", "康神")).merchants.includes("康神"));
+  assert(!(await removeTagOption("trip", "夜班车")).trips.includes("夜班车"));
+  assert.deepEqual((await removeTagOption("validity", "长效")).validities, ["轮转"]);
+  await removeTagOption("validity", "任意值", 400);
+  assert.equal((await localJob()).remark, withOptions.job.remark);
+  assert.deepEqual((await localJob()).accountTags, withOptions.job.accountTags);
+  await tags({ validity: "轮转" });
+  await stop(); await start();
+  const hiddenOptions = await tagOptions();
+  assert(!hiddenOptions.merchants.includes("康神") && !hiddenOptions.trips.includes("夜班车"));
+  assert.deepEqual(hiddenOptions.validities, ["轮转"]);
+  assert.equal((await localJob()).accountTags.merchant, "康神");
+  assert.equal((await localJob()).accountTags.trip, "夜班车");
+  await tags({ trip: "夜班车" });
+  const restoredOptions = await tagOptions();
+  assert(!restoredOptions.merchants.includes("康神") && restoredOptions.trips.includes("夜班车"));
+  assert.deepEqual((await removeTagOption("validity", "轮转")).validities, []);
+  const rotatingAfterRemoval = await tags({ stopAt: "2026-12-01T08:30" });
+  assert.equal(rotatingAfterRemoval.job.accountTags.validity, "轮转");
+  assert.equal(rotatingAfterRemoval.job.accountTags.stopAt, "2026-12-01T08:30");
+  assert.deepEqual((await tagOptions()).validities, []);
+  console.log("PASS: removing default and custom options preserves account tags and remarks, survives restart, and supports explicit re-creation");
   console.log("PASS: legacy aliases, custom choices across restarts, concurrent tag edits, rotation deadlines, per-record notes and clearing");
   const unauthorized = await fetch(`${base}/api/jobs/${id}/remark`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"remark":"forbidden"}' });
   assert.equal(unauthorized.status, 403);

@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, Clock3, Infinity as InfinityIcon, Plus, RefreshCw, Store, TrainFront, X } from "lucide-react";
+import { Check, Clock3, Infinity as InfinityIcon, Plus, RefreshCw, Store, TrainFront, Trash2, X } from "lucide-react";
+import { TAG_OPTION_KEYS } from "../../shared/account-tags.mjs";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
 import { AnchoredPopover } from "./anchored-popover.jsx";
 import "./account-tags.css";
@@ -8,13 +9,27 @@ import "./account-tags.css";
 const labels = { merchant: "商家", trip: "车次", validity: "时效" };
 const icons = { merchant: Store, trip: TrainFront, validity: Clock3 };
 
-export function AccountTags({ job, options, onSave, onLoadOptions }) {
+export function AccountTags({ job, options, onSave, onLoadOptions, onRemoveOption, onError }) {
   const [field, setField] = useState("");
+  const [clearing, setClearing] = useState(false);
   const anchor = useRef(null);
   const tags = job.accountTags || {};
   function close(restore = true) {
     setField("");
     if (restore) anchor.current?.focus({ preventScroll: true });
+  }
+  async function clear(key, event) {
+    if (clearing) return;
+    const trigger = event.currentTarget.previousElementSibling;
+    setClearing(true);
+    try {
+      await onSave(job, { [key]: "" });
+      trigger?.focus({ preventScroll: true });
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setClearing(false);
+    }
   }
   return <div className="account-tags">
     {Object.entries(labels).map(([key, label]) => {
@@ -22,20 +37,25 @@ export function AccountTags({ job, options, onSave, onLoadOptions }) {
       const Icon = key === "validity" && value ? (value === "轮转" ? RefreshCw : InfinityIcon) : icons[key];
       const detail = value === "轮转" && tags.stopAt ? "轮转至 " + tags.stopAt.replace("T", " ") + "（北京时间）" : value;
       const deadline = key === "validity" && value === "轮转" && tags.stopAt;
-      return <button key={key} type="button" className="account-tag-chip" data-tone={value ? (key === "validity" ? value : "filled") : "empty"}
+      return <div key={key} className="account-tag-line"><button type="button" className="account-tag-chip" data-tone={value ? (key === "validity" ? value : "filled") : "empty"}
         aria-label={label + "：" + (detail || "未设置") + "，点击编辑"} title={label + " · " + (detail || "未设置")}
         aria-haspopup="dialog" aria-expanded={field === key} onClick={event => {
+          if (clearing) return;
           anchor.current = event.currentTarget;
           setField(current => current === key ? "" : key);
         }}><Icon size={11} aria-hidden="true" /><span>{value || label}</span>
         {deadline && <time dateTime={deadline + "+08:00"}>{deadline.slice(5).replace("-", "/").replace("T", " ")}</time>}
-      </button>;
+      </button>
+        {value && <button type="button" className="tag-remove tag-remove-current" disabled={clearing}
+          aria-label={"清除当前账号的" + label + "标签"} title={"清除当前账号的" + label + "标签"}
+          onClick={event => clear(key, event)}><X size={12} aria-hidden="true" /></button>}
+      </div>;
     })}
-    {field && <TagEditor key={field} {...{ field, tags, options, anchor, close, onLoadOptions }} onSave={patch => onSave(job, patch)} />}
+    {field && <TagEditor key={field} {...{ field, tags, options, anchor, close, onLoadOptions, onRemoveOption }} onSave={patch => onSave(job, patch)} />}
   </div>;
 }
 
-function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onSave }) {
+function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onRemoveOption, onSave }) {
   const id = useId();
   const panel = useRef(null);
   const [query, setQuery] = useState("");
@@ -43,22 +63,26 @@ function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onSave 
   const [time, setTime] = useState(tags.stopAt || "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [removeCandidate, setRemoveCandidate] = useState("");
   const validity = field === "validity";
   const current = tags[field];
-  const choices = validity ? ["长效", "轮转"] : options[field === "merchant" ? "merchants" : "trips"];
+  const choices = options?.[TAG_OPTION_KEYS[field]] ?? [];
   const text = query.trim();
   const visible = choices.filter(value => value.toLowerCase().includes(text.toLowerCase()));
   const create = text && !choices.includes(text);
 
   useEffect(() => {
     let mounted = true;
-    if (!validity) onLoadOptions().catch(err => { if (mounted) setError(err.message); });
+    onLoadOptions().catch(err => { if (mounted) setError(err.message); });
     return () => { mounted = false; };
-  }, [validity, onLoadOptions]);
+  }, [onLoadOptions]);
 
   useLayoutEffect(() => {
     if (rotation) return;
-    const frame = requestAnimationFrame(() => panel.current?.querySelector("input, button")?.focus({ preventScroll: true }));
+    const frame = requestAnimationFrame(() => {
+      const target = panel.current?.querySelector("input:not(:disabled), button:not(:disabled)") || panel.current;
+      target?.focus({ preventScroll: true });
+    });
     const outside = event => {
       if (!saving && !panel.current?.contains(event.target) && !anchor.current?.contains(event.target)) close(false);
     };
@@ -71,6 +95,10 @@ function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onSave 
     };
   }, [rotation, saving, anchor]); // The owning row keeps its trigger ref for focus restoration.
 
+  useLayoutEffect(() => {
+    if (removeCandidate && !saving) panel.current?.querySelector(".tag-cancel-remove")?.focus();
+  }, [removeCandidate, saving]);
+
   async function save(patch) {
     if (saving) return;
     setSaving(true);
@@ -82,13 +110,26 @@ function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onSave 
     if (validity && value === "轮转") { setError(""); setRotation(true); }
     else save({ [field]: value });
   }
+  async function removeOption() {
+    if (saving || !removeCandidate) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onRemoveOption(field, removeCandidate);
+      setRemoveCandidate("");
+    }
+    catch (err) { setError(err.message); }
+    finally { setSaving(false); }
+  }
   function navigate(event) {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === "Escape") {
       event.preventDefault(); event.stopPropagation();
-      if (!saving) close();
+      if (saving) return;
+      if (removeCandidate) cancelRemoval();
+      else close();
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      const items = [...panel.current.querySelectorAll("button:not(:disabled)")];
+      const items = [...panel.current.querySelectorAll("button:not(:disabled):not(.tag-remove)")];
       if (!items.length) return;
       const index = items.indexOf(document.activeElement);
       event.preventDefault();
@@ -97,6 +138,11 @@ function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onSave 
     } else if (event.key === "Enter" && event.target.tagName === "INPUT" && text) {
       event.preventDefault(); choose(text);
     }
+  }
+  function cancelRemoval() {
+    setRemoveCandidate("");
+    setError("");
+    panel.current?.querySelector("input, .tag-option-row button")?.focus({ preventScroll: true });
   }
   const message = error && <div className="tag-error" role="alert">{error}</div>;
   if (rotation) return createPortal(
@@ -115,15 +161,29 @@ function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onSave 
     </AccessibleDialog>, document.body);
   return createPortal(<AnchoredPopover anchorRef={anchor} className="account-tag-popover" onClose={() => { if (!saving) close(false); }}
     role="dialog" aria-label={"选择" + labels[field]} onKeyDown={navigate}>
-    <div ref={panel}>
+    <div ref={panel} tabIndex={-1}>
       <div className="tag-picker-label">{labels[field]}</div>
       {!validity && <input type="text" aria-label={"搜索或新建" + labels[field]} placeholder={"搜索或输入新" + labels[field]} value={query}
         onChange={event => setQuery(event.target.value)} maxLength={64} disabled={saving} />}
       <div className="tag-options">
+        {options && !choices.length && !create && <div role="status">暂无参考值</div>}
         {create && <button type="button" className="tag-create" onClick={() => choose(text)} disabled={saving}><Plus size={13} />新建「{text}」</button>}
-        {visible.map(value => <button type="button" key={value} onClick={() => choose(value)} disabled={saving} aria-pressed={value === current}>
-          <span>{value}</span>{value === current && <Check size={14} />}</button>)}
+        {visible.map(value => <div className="tag-option-row" key={value}>
+          <button type="button" onClick={() => choose(value)} disabled={saving} aria-pressed={value === current}>
+            <span>{value}</span>{value === current && <Check size={14} />}</button>
+          <button type="button" className="tag-remove" disabled={saving} aria-label={"从列表删除" + labels[field] + "「" + value + "」"}
+            title="从下拉列表删除" onClick={() => { setError(""); setRemoveCandidate(value); }}><Trash2 size={14} aria-hidden="true" /></button>
+        </div>)}
       </div>
+      {removeCandidate && <div className="tag-remove-confirm" role="group" aria-label="确认删除下拉选项">
+        <p>从所有账号的下拉列表移除「{removeCandidate}」？</p>
+        <div>
+          <button type="button" className="cancel-button tag-cancel-remove" disabled={saving} onClick={cancelRemoval}>取消</button>
+          <button type="button" className="tag-confirm-remove" disabled={saving} onClick={removeOption}>删除选项</button>
+        </div>
+      </div>}
+      {options && validity && current === "轮转" && !choices.includes(current) &&
+        <button type="button" className="tag-clear" onClick={() => choose(current)} disabled={saving}>修改当前账号的停止时间</button>}
       {current && <button type="button" className="tag-clear" onClick={() => choose("")} disabled={saving}>清空{labels[field]}</button>}
       {message}
     </div>

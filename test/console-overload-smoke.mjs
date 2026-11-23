@@ -137,7 +137,7 @@ try {
   assert.deepEqual(entry.overloadDetection.points.map((point) => point.requestCount), expectedCounts(entry.overloadDetection.points, requestCounts));
   assert.equal((await job(ids[1])).overloadDetection.enabled, false);
   assert(logRequests.every((url) => ["7", "8"].includes(url.searchParams.get("account_id"))), "each remote account for this email is included");
-  assert(logRequests.every((url) => url.searchParams.get("status_codes") === "503"));
+  assert(logRequests.every((url) => url.searchParams.get("status_codes") === "503,429"));
   assert.equal(entry.overloadDetection.bucketMinutes,15);assert.equal(entry.overloadDetection.points.length,6);
   assert.equal(Date.parse(entry.overloadDetection.points.at(-1).end)%COUNT_BUCKET_MS,0,"labels follow the configured overload window");
   assert(Date.parse(entry.overloadDetection.points.at(-1).end)>Date.parse(entry.overloadDetection.updatedAt));

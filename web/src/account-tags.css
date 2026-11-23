@@ -10,6 +10,7 @@
   max-width: 100%;
   margin: 5px auto 0;
 }
+.account-tag-line, .tag-option-row { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .account-tag-chip {
   display: flex;
   align-items: center;
@@ -38,7 +39,7 @@
 .account-tag-chip:has(time) { display: grid; grid-template-columns: 11px 1fr; gap: 1px 4px; height: auto; padding-block: 2px; text-align: left; line-height: 1.25; }
 .account-tag-chip time { grid-column: 1 / -1; font-size: 10px; white-space: nowrap; }
 .account-tag-chip:hover { border-style: solid; border-color: var(--tag-purple); }
-.account-tag-chip:focus-visible, .account-tag-popover :focus-visible { outline: 2px solid var(--tag-purple); outline-offset: 1px; }
+.account-tag-chip:focus-visible, .tag-remove:focus-visible, .account-tag-popover :focus-visible { outline: 2px solid var(--tag-purple); outline-offset: 1px; }
 .account-tag-popover {
   z-index: 75;
   width: 224px;
@@ -66,6 +67,21 @@
   font-size: 12px; overflow-wrap: anywhere; cursor: pointer;
 }
 .tag-options button:hover, .tag-options button:focus-visible { background: var(--surface-muted); }
+.tag-option-row > button:first-child { min-width: 0; flex: 1; }
+.tag-remove, .tag-options .tag-remove {
+  display: grid; place-items: center; flex: none; width: 28px; padding: 0;
+  border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer;
+}
+.tag-remove-current { width: 24px; height: 24px; }
+.tag-remove:not(:disabled):is(:hover, :focus-visible) { color: var(--danger-strong); background: var(--danger-soft); }
+.tag-remove:disabled { opacity: .5; cursor: default; }
+.account-tag-line:has(.tag-remove) .account-tag-chip { flex: 1; }
+.account-tag-line:has(.tag-remove) time { font-size: 9px; }
+.tag-remove-confirm { margin-top: 5px; padding: 7px; border: 1px solid var(--danger-line); border-radius: 7px; background: var(--danger-soft); }
+.tag-remove-confirm p { margin: 0 0 6px; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
+.tag-remove-confirm > div { display: flex; justify-content: flex-end; gap: 5px; }
+.tag-remove-confirm button { padding: 4px 8px; border-radius: 5px; min-height: 26px; font-size: 12px; }
+.tag-confirm-remove { border: 1px solid var(--danger-line); background: var(--surface); color: var(--danger-strong); cursor: pointer; }
 .tag-options button[aria-pressed="true"], .tag-options .tag-create { color: var(--tag-purple); background: var(--tag-soft); }
 .tag-options .tag-create { justify-content: flex-start; }
 .tag-clear { margin-top: 3px; border-top: 1px solid var(--line); border-radius: 0; color: var(--muted); }

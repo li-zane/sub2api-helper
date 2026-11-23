@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { completedIntervals, collectOverloadIntervals, collectRequestIntervals, OverloadMonitor, OVERLOAD_MESSAGE, OVERLOAD_INTERVAL_MS, COUNT_SYNC_INTERVAL_MS, COUNT_BUCKET_MS, COUNT_POINT_COUNT } from "../src/overload-monitor.mjs";
+import { completedIntervals, collectOverloadIntervals, collectRequestIntervals, OverloadMonitor, OVERLOAD_MESSAGE, RATE_LIMIT_MESSAGE, OVERLOAD_INTERVAL_MS, COUNT_SYNC_INTERVAL_MS, COUNT_BUCKET_MS, COUNT_POINT_COUNT } from "../src/overload-monitor.mjs";
 import { buildOverloadChart } from "../web/src/overload-chart.mjs";
 
 const now = Date.parse("2026-10-31T03:00:00+08:00");
@@ -26,6 +26,12 @@ const rows = [
   row(10, 2, { status_code: 502 }), row(11, 2, { account_id: 123 }),
   row(12, 2, { message: "other 503" }), row(13, 2, { message: "generic upstream failure" }),
   row(14, 2, { message: "unrelated 503", resolved: true }),
+  row(15, 3, { status_code: 429, message: RATE_LIMIT_MESSAGE, resolved: true }),
+  row(16, 3, { status_code: 502, upstream_status_code: "429", message: "generic upstream failure" }),
+  row(17, 3, { status_code: 429, message: "Too many requests" }),
+  row(18, 3, { status_code: 503, message: RATE_LIMIT_MESSAGE }),
+  row(19, 3, { status_code: 429, message: OVERLOAD_MESSAGE }),
+  row(20, 3, { status_code: 429, upstream_status_code: 401, message: RATE_LIMIT_MESSAGE }),
 ];
 const calls = [];
 const request = async (_config, endpoint) => {
@@ -33,20 +39,22 @@ const request = async (_config, endpoint) => {
   const url = new URL(endpoint, "https://fixture.test");
   if (/\/\d+$/.test(url.pathname)) {
     const id = Number(url.pathname.split("/").at(-1));
-    return { data: { ...rows.find((item) => item.id === id), error_body: id === 13 ? JSON.stringify({ error: { message: OVERLOAD_MESSAGE } }) : "unrelated" } };
+    const message = ({ 13: OVERLOAD_MESSAGE, 16: RATE_LIMIT_MESSAGE })[id] || "unrelated";
+    return { data: { ...rows.find((item) => item.id === id), error_body: JSON.stringify({ error: { message } }) } };
   }
   assert.equal(url.searchParams.get("start_time"), new Date(start).toISOString());
   assert.equal(url.searchParams.get("end_time"), new Date(end).toISOString());
-  assert.equal(url.searchParams.get("status_codes"), "503");
+  assert.equal(url.searchParams.get("status_codes"), "503,429");
   assert.equal(url.searchParams.get("view"), "all");
   const page = Number(url.searchParams.get("page"));
   // Small pages exercise pagination even when the server caps the requested page size.
   return { data: { items: rows.slice((page - 1) * 5, page * 5), total: rows.length } };
 };
 const points = await collectOverloadIntervals({ config: {}, accountIds: [7, 7], request, now, points: completedIntervals(now) });
-assert.deepEqual(points.map((point) => point.count), [3, 1, 1, 1, 1, 1]);
-assert.equal(calls.filter((call) => call.includes("page=")).length, 3);
+assert.deepEqual(points.map((point) => point.count), [5, 1, 1, 1, 1, 1]);
+assert.equal(calls.filter((call) => call.includes("page=")).length, 4);
 assert(calls.some((call) => call.endsWith("/13")), "generic list message needs upstream detail");
+assert(calls.some((call) => call.endsWith("/16")), "429 list messages also consult upstream details");
 
 let fallbackCalls = 0;
 await collectOverloadIntervals({ config: {}, accountIds: [7], now, request: async (_c, endpoint) => {
@@ -133,6 +141,12 @@ try {
   assert(monitor.snapshot("first@example.test").points.every((point) => point.count === null));
   await monitor.refresh();
   assert.deepEqual(monitor.snapshot("first@example.test").points.map((point) => point.count), Array(COUNT_POINT_COUNT).fill(0));
+  const entry = monitor.accounts.get("first@example.test");
+  entry.overloadScope = JSON.stringify({ accountIds: ["7"], windowMinutes: COUNT_BUCKET_MS / 60_000 });
+  entry.points[0].count = 99;
+  assert.equal(monitor.snapshot("first@example.test").points[0].count, 99);
+  await monitor.refresh();
+  assert.equal(monitor.snapshot("first@example.test").points[0].count, 0, "an old 503-only cache must refresh its full history");
   assert.equal(monitor.snapshot("second@example.test").enabled, false);
   clock += OVERLOAD_INTERVAL_MS;
   fail = true;
@@ -218,4 +232,4 @@ try {
   await scheduled.stop();
   assert.equal(timer, null, "shutdown clears the sync timer");
 } finally { await fs.rm(root, { recursive: true, force: true }); }
-console.log("PASS: request/overload half-open bounds and pagination/deduplication; fixed cached bins; unknown new bins on partial failure; independent chart scales; exact 503 message; per-account toggle, restart, disable race, backend isolation and minute scheduler");
+console.log("PASS: exact 503 and 429 signatures; detail lookup; full 503-only cache refresh; fixed buckets, pagination and deduplication; per-account toggles and minute scheduler");

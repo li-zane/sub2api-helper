@@ -4,6 +4,12 @@ import { DEFAULT_POOL_SYNC_CONCURRENCY, limitPoolRequests } from "./pool-network
 import { overloadGrid, DEFAULT_COUNT_WINDOW_MINUTES } from "../web/src/overload-grid.mjs";
 
 export const OVERLOAD_MESSAGE = "Our servers are currently overloaded. Please try again later.";
+export const RATE_LIMIT_MESSAGE = "Rate limit exceeded";
+const COUNTED_UPSTREAM_ERRORS = new Map([
+  [503, OVERLOAD_MESSAGE],
+  [429, RATE_LIMIT_MESSAGE],
+]);
+const COUNTED_STATUS_CODES = [...COUNTED_UPSTREAM_ERRORS.keys()].join(",");
 export const OVERLOAD_INTERVAL_MS = 15 * 60_000;
 export const COUNT_SYNC_INTERVAL_MS = 60_000;
 export const COUNT_BUCKET_MS = DEFAULT_COUNT_WINDOW_MINUTES * 60_000;
@@ -31,14 +37,14 @@ export function recentIntervals(now = Date.now(), windowMinutes = DEFAULT_COUNT_
   }));
 }
 
-function containsOverload(value) {
-  if (typeof value === "string") return value.includes(OVERLOAD_MESSAGE);
-  return false;
+function errorStatus(row) {
+  return Number(row.upstream_status_code ?? row.status_code);
 }
 
-function isOverload(row) {
-  return Number(row.upstream_status_code ?? row.status_code) === 503
-    && [row.message, row.upstream_error_message, row.upstream_error_detail, row.error_body].some(containsOverload);
+function matchesCountedError(row) {
+  const message = COUNTED_UPSTREAM_ERRORS.get(errorStatus(row));
+  return Boolean(message) && [row.message, row.upstream_error_message, row.upstream_error_detail, row.error_body]
+    .some(value => typeof value === "string" && value.includes(message));
 }
 
 // The split upstream list includes recovered failures, so successful failovers still count.
@@ -69,7 +75,7 @@ async function collectOverloadCounts({ config, accountIds, request, points, quer
       const query = new URLSearchParams({
         page: String(page), page_size: "500", platform: "openai", account_id: accountId,
         start_time: points[0].start, end_time: new Date(end).toISOString(),
-        status_codes: "503", view: "all", sort_by: "created_at", sort_order: "asc",
+        status_codes: COUNTED_STATUS_CODES, view: "all", sort_by: "created_at", sort_order: "asc",
       });
       let payload;
       try {
@@ -98,7 +104,7 @@ async function collectOverloadCounts({ config, accountIds, request, points, quer
         if (seen.has(key)) continue;
         seen.add(key);
         let row = item;
-        if (!isOverload(row) && Number(row.upstream_status_code ?? row.status_code) === 503) {
+        if (!matchesCountedError(row) && COUNTED_UPSTREAM_ERRORS.has(errorStatus(row))) {
           // List rows omit the upstream body; inspect it before deciding whether to count.
           if (!isEnabled()) return null;
           const detail = await request(config, `${endpoint}/${encodeURIComponent(item.id)}`);
@@ -107,7 +113,7 @@ async function collectOverloadCounts({ config, accountIds, request, points, quer
             throw new Error("运维日志详情与账号不匹配");
           }
         }
-        if (isOverload(row)) {
+        if (matchesCountedError(row)) {
           const index = Math.floor((timestamp - start) / bucketMs);
           counts[index] += 1;
           events?.[index].push(timestamp);
@@ -370,8 +376,11 @@ export class OverloadMonitor {
           const accountIds = mapping.get(email) || [];
           if (!accountIds.length) throw new Error("该账号尚未加入 Sub2API 号池");
           const options = { config, accountIds, request: (config, url) => this.request(config, url, { isEnabled }), now, isEnabled };
-          const scope = JSON.stringify({ accountIds: [...new Set(accountIds.map(String))].sort(), windowMinutes });
-          const overloadPlan = refreshPlan(entry, "overload", scope, now, windowMinutes), requestPlan = refreshPlan(entry, "request", scope, now, windowMinutes);
+          const dimensions = { accountIds: [...new Set(accountIds.map(String))].sort(), windowMinutes };
+          const overloadScope = JSON.stringify({ ...dimensions, errors: [...COUNTED_UPSTREAM_ERRORS] });
+          const requestScope = JSON.stringify(dimensions);
+          const overloadPlan = refreshPlan(entry, "overload", overloadScope, now, windowMinutes);
+          const requestPlan = refreshPlan(entry, "request", requestScope, now, windowMinutes);
           const [overloads, requests] = await Promise.allSettled([
             collectOverloadIntervals({ ...options, points: overloadPlan.points }),
             entry.enabled ? collectRequestIntervals({ ...options, points: requestPlan.points }) : Promise.resolve(null),
@@ -381,8 +390,8 @@ export class OverloadMonitor {
           this.accounts.set(email, { ...entry,
             points: overloadPoints || entry.points || [],
             requestPoints: requests.status === "fulfilled" && requests.value ? mergeCounts(requestPlan, requests.value) : entry.requestPoints || [],
-            ...(overloads.status === "fulfilled" && overloads.value ? { overloadScope: scope, overloadUpdatedAt: new Date(now).toISOString(), overloadReconciledAt: overloadPlan.full ? new Date(now).toISOString() : entry.overloadReconciledAt } : {}),
-            ...(requests.status === "fulfilled" && requests.value ? { requestScope: scope, requestUpdatedAt: new Date(now).toISOString(), requestReconciledAt: requestPlan.full ? new Date(now).toISOString() : entry.requestReconciledAt } : {}),
+            ...(overloads.status === "fulfilled" && overloads.value ? { overloadScope, overloadUpdatedAt: new Date(now).toISOString(), overloadReconciledAt: overloadPlan.full ? new Date(now).toISOString() : entry.overloadReconciledAt } : {}),
+            ...(requests.status === "fulfilled" && requests.value ? { requestScope, requestUpdatedAt: new Date(now).toISOString(), requestReconciledAt: requestPlan.full ? new Date(now).toISOString() : entry.requestReconciledAt } : {}),
             updatedAt: overloads.status === "fulfilled" || requests.status === "fulfilled" ? new Date(now).toISOString() : entry.updatedAt || null,
             lastError: overloads.status === "rejected" ? String(overloads.reason?.message || overloads.reason).slice(0, 500) : null,
             requestError: requests.status === "rejected" ? String(requests.reason?.message || requests.reason).slice(0, 500) : null,

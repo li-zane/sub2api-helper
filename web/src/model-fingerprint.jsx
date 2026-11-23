@@ -187,8 +187,6 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
     try {
       const next = await api(token, "/api/model-fingerprint/settings");
       const rawSettings = next?.settings || {};
-      const matched = rawSettings.matchedConcurrency || {};
-      const priority = rawSettings.matchedPriority || {};
       const initialSettings = {
         models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8,
         failureRetries: 1, failureRetryDelaySeconds: 5,
@@ -196,8 +194,6 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         groupPolicies: {},
         ...rawSettings,
         enabledPlanTypes: readEnabledPlanTypes(rawSettings),
-        matchedConcurrency: { enabled: matched.enabled === true, value: matched.value ?? 10 },
-        matchedPriority: { enabled: priority.enabled === true, value: priority.value ?? 1 },
       };
       setData({ ...next, initialSettings, settings: initialSettings });
       setNewPlan("");
@@ -217,8 +213,6 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
       return { value: plan, label: plan, ...(alias ? { description: alias } : {}) };
     })
     : [{ value: "__empty__", label: "暂无未添加的已识别套餐（请直接输入）", disabled: true }];
-  const matchedConcurrency = data?.settings?.matchedConcurrency || { enabled: false, value: 10 };
-  const matchedPriority = data?.settings?.matchedPriority || { enabled: false, value: 1 };
   const candidatePlan = normalizePlanName(newPlan);
 
   function addEnabledPlan(raw) {
@@ -250,22 +244,6 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
       const failureRetries = data.settings.failureRetries ?? 1, failureRetryDelaySeconds = data.settings.failureRetryDelaySeconds ?? 5;
       if (!Number.isInteger(failureRetries) || failureRetries < 0 || failureRetries > 5) throw new Error("检测失败重试次数必须为 0–5 的整数");
       if (!Number.isInteger(failureRetryDelaySeconds) || failureRetryDelaySeconds < 1 || failureRetryDelaySeconds > 300) throw new Error("检测失败重试间隔必须为 1–300 秒的整数");
-      const mcEnabled = matchedConcurrency.enabled === true;
-      const mcText = String(matchedConcurrency.value ?? "").trim();
-      const mcValue = /^\d+$/.test(mcText) ? Number(mcText) : NaN;
-      if (mcEnabled && (!Number.isInteger(mcValue) || mcValue < 0 || mcValue > 10000)) {
-        throw new Error("不降智账号并发必须为 0–10000 的整数");
-      }
-      const nextMatchedConcurrency = {
-        enabled: mcEnabled,
-        value: Number.isInteger(mcValue) && mcValue >= 0 && mcValue <= 10000 ? mcValue : 10,
-      };
-      const mpEnabled = matchedPriority.enabled === true;
-      const mpText = String(matchedPriority.value ?? "").trim();
-      const mpValue = /^\d+$/.test(mpText) ? Number(mpText) : NaN;
-      if (mpEnabled && (!Number.isInteger(mpValue) || mpValue < 0 || mpValue > 10000)) {
-        throw new Error("不降智账号优先级必须为 0–10000 的整数");
-      }
       const payload = {
         models: data.settings.models ?? [],
         intervalMinutes: data.settings.intervalMinutes ?? 360,
@@ -275,8 +253,6 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         failureRetryDelaySeconds,
         testSequence: { first: seq.first, fingerprint: fp, candy: cd },
         enabledPlanTypes: enabledPlans,
-        matchedConcurrency: nextMatchedConcurrency,
-        matchedPriority: { enabled: mpEnabled, value: Number.isInteger(mpValue) && mpValue >= 0 && mpValue <= 10000 ? mpValue : 1 },
         groupPolicies: data.settings.groupPolicies || {},
       };
       await onSave(fingerprintSettingsPatch(payload, data.initialSettings));
@@ -361,68 +337,6 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
             添加类型
           </button>
         </div>
-      </section>
-      <section className="fingerprint-section" aria-label="不降智账号独立并发">
-        <div className="fingerprint-concurrency-row">
-          <div className="fingerprint-concurrency-toggle">
-            <label className="fingerprint-checkbox">
-              <input
-                type="checkbox"
-                disabled={busy}
-                checked={matchedConcurrency.enabled === true}
-                onChange={e => patch({ matchedConcurrency: { ...matchedConcurrency, enabled: e.target.checked } })}
-              />
-              <span>不降智账号独立并发</span>
-            </label>
-            <HelpTip title="不降智账号独立并发" label="查看不降智账号独立并发说明">
-              开启后，最近一轮检测通过的账号将自动使用此并发值；明确不通过或关闭本选项时恢复原并发；请求失败或证据不足不算明确降智，保持当前并发。此项控制号池账号并发，与上方“同时检测账号数”不同。
-            </HelpTip>
-          </div>
-          <label className="settings-field fingerprint-matched-concurrency-field">
-            <span>通过后并发（0–10000）</span>
-            <input
-              aria-label="不降智账号独立并发值"
-              type="number"
-              min="0"
-              max="10000"
-              step="1"
-              inputMode="numeric"
-              disabled={busy || matchedConcurrency.enabled !== true}
-              value={matchedConcurrency.value ?? 10}
-              onChange={e => patch({ matchedConcurrency: { ...matchedConcurrency, value: e.target.value } })}
-            />
-          </label>
-        </div>
-        <p className="fingerprint-compact-note">仅明确通过时生效；请求失败或证据不足不算明确降智，保持当前并发；明确不通过或关闭本选项将恢复原并发。</p>
-      </section>
-      <section className="fingerprint-section" aria-label="不降智账号独立优先级">
-        <div className="fingerprint-concurrency-row">
-          <div className="fingerprint-concurrency-toggle">
-            <label className="fingerprint-checkbox">
-              <input
-                type="checkbox"
-                disabled={busy}
-                checked={matchedPriority.enabled === true}
-                onChange={e => patch({ matchedPriority: { ...matchedPriority, enabled: e.target.checked } })}
-              />
-              <span>不降智账号独立优先级</span>
-            </label>
-            <HelpTip title="不降智账号独立优先级" label="查看不降智账号独立优先级说明">
-              检测明确通过后使用此优先级，优先于套餐和导入日期规则；明确不通过、关闭本选项或移除对应 PlanType 后恢复原优先级。请求失败或证据不足时保持当前值。与独立并发分开设置。
-            </HelpTip>
-          </div>
-          <label className="settings-field fingerprint-matched-concurrency-field">
-            <span>通过后优先级（0–10000）</span>
-            <input
-              aria-label="不降智账号独立优先级值"
-              type="number" min="0" max="10000" step="1" inputMode="numeric"
-              disabled={busy || matchedPriority.enabled !== true}
-              value={matchedPriority.value ?? 1}
-              onChange={e => patch({ matchedPriority: { ...matchedPriority, value: e.target.value } })}
-            />
-          </label>
-        </div>
-        <p className="fingerprint-compact-note">仅明确通过时生效；请求失败或证据不足保持当前值，明确不通过或关闭后恢复原优先级。</p>
       </section>
       <section className="fingerprint-section" aria-label="号池分组加入规则">
         <div className="section-title-row">

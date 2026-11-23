@@ -3,7 +3,6 @@ import { apiFetch } from "./console-request.mjs";
 import { DEFAULT_PLAN_TYPE_MAPPING, normalizePlanTypeMapping, formatPlanTypeLabel } from "./plan-type-label.mjs";
 import { RemarkDialog } from "./remark-dialog.jsx";
 import { AccountTags } from "./account-tags.jsx";
-import { DEFAULT_TAG_OPTIONS } from "../../shared/account-tags.mjs";
 import { deferredDialog } from "./deferred-dialog.jsx";
 import { useConsoleSettings } from "./use-console-settings.jsx";
 import { consoleFetch as fetch, getConsoleBootstrap } from "./console-api.mjs";
@@ -80,6 +79,13 @@ import { logoutAccountSessions, proxySwitchSelectionState } from "./account-sess
 import { ProxyQualityPanel } from "./proxy-quality.jsx";
 import { WebLoginBatch } from "./web-login-batch.jsx";
 import { FingerprintSettingsButton, ModelFingerprintPolicyContext, readEnabledPlanTypes } from "./model-fingerprint.jsx";
+import { FingerprintPoolPolicyPanel } from "./fingerprint-pool-policy-panel.jsx";
+import {
+  normalizeFingerprintPoolPoliciesMap,
+  normalizePlanTypeKey,
+  policiesMapToDrafts,
+  validateAndSerializeAllProfilePolicies,
+} from "./fingerprint-pool-policy.mjs";
 import { CodexStatus } from "./codex-status.jsx";
 import { CodexIcon } from "./codex-icon.jsx";
 import { SessionResetDialog } from "./session-reset-dialog.jsx";
@@ -183,6 +189,10 @@ function App() {
   const [sub2apiGroupsLoading, setSub2apiGroupsLoading] = useState(false);
   const [sub2apiSettingsSaving, setSub2apiSettingsSaving] = useState(false);
   const [sub2apiPlanTypeDraft, setSub2apiPlanTypeDraft] = useState("");
+  const [sub2apiPolicyDraftsByProfile, setSub2apiPolicyDraftsByProfile] = useState({});
+  const [sub2apiRemovedResidualsByProfile, setSub2apiRemovedResidualsByProfile] = useState({});
+  const [sub2apiSelectedPolicyPlanType, setSub2apiSelectedPolicyPlanType] = useState("");
+  const [sub2apiPolicyFocusRequest, setSub2apiPolicyFocusRequest] = useState(null);
   const [sub2apiMonitorChecking, setSub2apiMonitorChecking] = useState(false);
   const [sub2apiMonitorStatus, setSub2apiMonitorStatus] = useState({
     configured: false,
@@ -224,7 +234,8 @@ function App() {
   useModalFocus(planTypeMappingRef, planTypeMappingOpen);
   const [credentialJob, setCredentialJob] = useState(null);
   const [remarkJob, setRemarkJob] = useState(null);
-  const [tagOptions, setTagOptions] = useState(DEFAULT_TAG_OPTIONS);
+  const [tagOptions, setTagOptions] = useState(null);
+  const tagOptionsVersion = useRef(0);
   const [costJob, setCostJob] = useState(null);
   const [sessionJob, setSessionJob] = useState(null);
   const [workspaceJob, setWorkspaceJob] = useState(null);
@@ -519,6 +530,9 @@ function App() {
   // switch profiles, while preserving the backend format and migration path.
   const activeProfileBindings = Object.entries(sub2apiSettingsDraft.planTypeBindings || {})
     .filter(([, profileId]) => String(profileId) === String(sub2apiSettingsDraft.activeProfileId));
+  const activeSub2ApiProfile = sub2apiSettingsDraft.profiles.find(
+    (profile) => String(profile.id) === String(sub2apiSettingsDraft.activeProfileId),
+  ) || sub2apiSettingsDraft.profiles[0] || sub2apiSettingsDraft;
 
   async function refreshAccountUsage(jobId) {
     if (!token || !features.accountUsage) return;
@@ -632,7 +646,14 @@ function App() {
 
   function openSub2ApiSettings() {
     const normalized = normalizeSub2ApiSettings({ ...sub2apiSettings, monitorEnabled: Boolean(sub2apiMonitorStatus.enabled) });
+    const initialPolicyDrafts = Object.fromEntries(
+      normalized.profiles.map((profile) => [String(profile.id), policiesMapToDrafts(profile.fingerprintPoolPolicies)]),
+    );
     setSub2apiSettingsDraft(normalized);
+    setSub2apiPolicyDraftsByProfile(initialPolicyDrafts);
+    setSub2apiRemovedResidualsByProfile({});
+    setSub2apiSelectedPolicyPlanType("");
+    setSub2apiPolicyFocusRequest(null);
     setSub2apiSettingsError("");
     setSub2apiSettingsOpen(true);
   }
@@ -650,24 +671,42 @@ function App() {
     });
   }
 
-  function selectSub2ApiProfile(profileId) {
+  function selectSub2ApiProfile(profileId, { resetPolicyUi = true } = {}) {
+    const targetId = String(profileId);
+    const currentProfiles = normalizeSub2ApiSettings(sub2apiSettingsDraft).profiles;
+    const nextActive = currentProfiles.find((profile) => profile.id === targetId) || currentProfiles[0];
     setSub2apiSettingsDraft((current) => {
       const normalized = normalizeSub2ApiSettings(current);
-      const active = normalized.profiles.find((profile) => profile.id === String(profileId)) || normalized.profiles[0];
+      const active = normalized.profiles.find((profile) => profile.id === targetId) || normalized.profiles[0];
       return { ...normalized, ...active, activeProfileId: active.id };
     });
+    if (nextActive) {
+      setSub2apiPolicyDraftsByProfile((current) => (
+        Object.hasOwn(current, nextActive.id)
+          ? current
+          : { ...current, [nextActive.id]: policiesMapToDrafts(nextActive.fingerprintPoolPolicies) }
+      ));
+    }
+    if (resetPolicyUi) {
+      setSub2apiSelectedPolicyPlanType("");
+      setSub2apiPolicyFocusRequest(null);
+    }
   }
 
   function addSub2ApiProfile() {
+    const id = `profile-${Date.now()}`;
     setSub2apiSettingsDraft((current) => {
       const normalized = normalizeSub2ApiSettings(current);
-      const id = `profile-${Date.now()}`;
       const profile = normalizeSub2ApiProfile({ id, name: `方案 ${normalized.profiles.length + 1}` }, normalized.profiles.length);
       return { ...normalized, ...profile, profiles: [...normalized.profiles, profile], activeProfileId: id };
     });
+    setSub2apiPolicyDraftsByProfile((current) => ({ ...current, [id]: {} }));
+    setSub2apiSelectedPolicyPlanType("");
+    setSub2apiPolicyFocusRequest(null);
   }
 
   function removeSub2ApiProfile() {
+    const removedId = String(sub2apiSettingsDraft.activeProfileId || "");
     setSub2apiSettingsDraft((current) => {
       const normalized = normalizeSub2ApiSettings(current);
       if (normalized.profiles.length <= 1 || normalized.activeProfileId === "default") return current;
@@ -677,15 +716,74 @@ function App() {
         .filter(([, profileId]) => profileId !== normalized.activeProfileId));
       return { ...normalized, ...active, profiles: remaining, activeProfileId: active.id, planTypeBindings };
     });
+    setSub2apiPolicyDraftsByProfile((current) => {
+      if (!Object.hasOwn(current, removedId)) return current;
+      const next = { ...current };
+      delete next[removedId];
+      return next;
+    });
+    setSub2apiRemovedResidualsByProfile((current) => {
+      if (!Object.hasOwn(current, removedId)) return current;
+      const next = { ...current };
+      delete next[removedId];
+      return next;
+    });
+    setSub2apiSelectedPolicyPlanType("");
+    setSub2apiPolicyFocusRequest(null);
   }
 
   function updateSub2ApiPlanTypeBinding(planType, profileId) {
+    const targetProfileId = String(profileId);
+    const key = String(planType || "").trim();
+    const normalizedKey = normalizePlanTypeKey(key);
     setSub2apiSettingsDraft((current) => {
       const normalized = normalizeSub2ApiSettings(current);
       const next = { ...normalized.planTypeBindings };
-      const key = String(planType || "").trim();
-      if (key) next[key] = String(profileId);
+      if (key) next[key] = targetProfileId;
       return { ...normalized, planTypeBindings: next };
+    });
+    if (normalizedKey) {
+      setSub2apiRemovedResidualsByProfile((current) => {
+        const list = current[targetProfileId];
+        if (!Array.isArray(list) || !list.includes(normalizedKey)) return current;
+        return { ...current, [targetProfileId]: list.filter((item) => item !== normalizedKey) };
+      });
+    }
+  }
+
+  function updateActiveSub2ApiPolicyDraft(planKey, nextDraft) {
+    const activeId = String(sub2apiSettingsDraft.activeProfileId || "");
+    const normalizedKey = normalizePlanTypeKey(planKey);
+    if (!activeId || !normalizedKey) return;
+    setSub2apiPolicyDraftsByProfile((current) => ({
+      ...current,
+      [activeId]: {
+        ...(current[activeId] || policiesMapToDrafts(activeSub2ApiProfile?.fingerprintPoolPolicies)),
+        [normalizedKey]: nextDraft,
+      },
+    }));
+    setSub2apiRemovedResidualsByProfile((current) => {
+      const list = current[activeId];
+      if (!Array.isArray(list) || !list.includes(normalizedKey)) return current;
+      return { ...current, [activeId]: list.filter((item) => item !== normalizedKey) };
+    });
+  }
+
+  function removeActiveSub2ApiResidualPolicy(planKey) {
+    const activeId = String(sub2apiSettingsDraft.activeProfileId || "");
+    const normalizedKey = normalizePlanTypeKey(planKey);
+    if (!activeId || !normalizedKey) return;
+    setSub2apiRemovedResidualsByProfile((current) => {
+      const existing = current[activeId] || [];
+      if (existing.includes(normalizedKey)) return current;
+      return { ...current, [activeId]: [...existing, normalizedKey] };
+    });
+    setSub2apiPolicyDraftsByProfile((current) => {
+      const profileDrafts = current[activeId];
+      if (!profileDrafts || !Object.hasOwn(profileDrafts, normalizedKey)) return current;
+      const nextProfileDrafts = { ...profileDrafts };
+      delete nextProfileDrafts[normalizedKey];
+      return { ...current, [activeId]: nextProfileDrafts };
     });
   }
 
@@ -758,8 +856,37 @@ function App() {
         return;
       }
     }
+    const policyValidation = validateAndSerializeAllProfilePolicies({
+      profiles: sub2apiSettingsDraft.profiles,
+      draftsByProfileId: sub2apiPolicyDraftsByProfile,
+      removedResidualsByProfileId: sub2apiRemovedResidualsByProfile,
+      planTypeBindings: sub2apiSettingsDraft.planTypeBindings,
+      availablePlanTypes,
+    });
+    if (!policyValidation.valid) {
+      const { profileId, profileName, planType, field, message } = policyValidation.error;
+      if (String(sub2apiSettingsDraft.activeProfileId) !== String(profileId)) {
+        selectSub2ApiProfile(profileId, { resetPolicyUi: false });
+      }
+      setSub2apiSelectedPolicyPlanType(planType);
+      setSub2apiPolicyFocusRequest({
+        profileId: String(profileId),
+        planType,
+        field,
+        seq: Date.now(),
+      });
+      setSub2apiSettingsError(`方案“${profileName}”的 ${formatPlanTypeLabel(planType, planTypeMapping)} 分池策略输入有误：${message}`);
+      return;
+    }
+    const draftWithPolicies = {
+      ...sub2apiSettingsDraft,
+      profiles: sub2apiSettingsDraft.profiles.map((profile) => ({
+        ...profile,
+        fingerprintPoolPolicies: policyValidation.nextPoliciesByProfileId[String(profile.id)] || {},
+      })),
+    };
     const nextSettings = {
-      ...readSub2ApiSettings(sub2apiSettingsDraft),
+      ...readSub2ApiSettings(draftWithPolicies),
       baseUrl: baseUrl.replace(/\/+$/, ""),
       adminApiKey,
       hasStoredAdminApiKey: true,
@@ -1191,9 +1318,18 @@ function App() {
   }
 
   async function loadTagOptions() {
+    const version = tagOptionsVersion.current;
     const options = await apiFetch(token, "/api/account-tag-options");
-    setTagOptions(current => shareSnapshot(current, options));
+    if (version === tagOptionsVersion.current) setTagOptions(current => shareSnapshot(current, options));
     return options;
+  }
+
+  async function removeTagOption(field, value) {
+    const options = await apiFetch(token, "/api/account-tag-options", {
+      method: "DELETE", body: JSON.stringify({ field, value }),
+    });
+    tagOptionsVersion.current++;
+    setTagOptions(current => shareSnapshot(current, options));
   }
 
   function acceptRemarkUpdate({ job, sub2api }, action) {
@@ -2128,6 +2264,7 @@ function App() {
                   tagsAvailable={Boolean(features.accountTags)}
                   tagOptions={tagOptions}
                   onLoadTagOptions={loadTagOptions}
+                  onRemoveTagOption={removeTagOption}
                   onSaveTags={saveAccountTags}
                   onOpenRemark={() => setRemarkJob(job)}
                   pricingAvailable={Boolean(features.accountPricing)}
@@ -2694,7 +2831,7 @@ function App() {
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !sub2apiSettingsSaving) setSub2apiSettingsOpen(false);
         }}>
-          <ModalForm onClose={() => setSub2apiSettingsOpen(false)} closeDisabled={sub2apiSettingsSaving} className="batch-dialog sub2api-settings-dialog" onSubmit={saveSub2ApiSettings} role="dialog" aria-modal="true" aria-labelledby="sub2api-settings-title">
+          <ModalForm noValidate onClose={() => setSub2apiSettingsOpen(false)} closeDisabled={sub2apiSettingsSaving} className="batch-dialog sub2api-settings-dialog" onSubmit={saveSub2ApiSettings} role="dialog" aria-modal="true" aria-labelledby="sub2api-settings-title">
             <div className="dialog-header">
               <div>
                 <h2 id="sub2api-settings-title">Sub2API 配置</h2>
@@ -2815,6 +2952,30 @@ function App() {
                     <button type="button" className="secondary-button compact-btn" onClick={addSub2ApiPlanTypeBinding} disabled={!sub2apiPlanTypeDraft.trim()}><Plus size={14} />绑定</button>
                   </div>
                 </div>
+                <FingerprintPoolPolicyPanel
+                  activeProfile={activeSub2ApiProfile}
+                  profiles={sub2apiSettingsDraft.profiles}
+                  planTypeBindings={sub2apiSettingsDraft.planTypeBindings}
+                  availablePlanTypes={availablePlanTypes}
+                  planTypeMapping={planTypeMapping}
+                  draftsByKey={sub2apiPolicyDraftsByProfile[String(activeSub2ApiProfile?.id || "")] || {}}
+                  removedResidualKeys={sub2apiRemovedResidualsByProfile[String(activeSub2ApiProfile?.id || "")] || []}
+                  selectedPlanType={sub2apiSelectedPolicyPlanType}
+                  onSelectPlanType={setSub2apiSelectedPolicyPlanType}
+                  onChangeDraft={updateActiveSub2ApiPolicyDraft}
+                  onRemoveResidual={removeActiveSub2ApiResidualPolicy}
+                  focusRequest={sub2apiPolicyFocusRequest}
+                  onHandledFocusRequest={(seq) => setSub2apiPolicyFocusRequest((current) => (current?.seq === seq ? null : current))}
+                  disabled={sub2apiSettingsSaving}
+                  headerTip={(
+                    <HelpTip title="按 PlanType 指纹分池策略" label="查看按 PlanType 指纹分池策略说明">
+                      <div>为当前方案服务的可选 PlanType 分别设置指纹检测后的并发与分级优先级。</div>
+                      <div>分级顺序：1. 不降智头车 › 2. 降智头车 › 3. 不降智长效 › 4. PlanType 默认（含下方导入日期优先级）。0 为有效整数，留空自动跳过至下一级。</div>
+                      {(fpSettings?.matchedConcurrency?.enabled || fpSettings?.matchedPriority?.enabled) &&
+                        <div>旧规则会继续用于尚未保存独立设置的 PlanType。保存该类型的独立设置后，以本页开关为准。</div>}
+                    </HelpTip>
+                  )}
+                />
                 <fieldset className="settings-field wide-settings-field import-date-priority-section">
                   <legend className="field-label-row">
                     <span>按导入日期设置优先级（当前方案）</span>
@@ -3484,7 +3645,7 @@ function BulkMoreMenu({
 
 // The boundary keeps event handlers fresh without invalidating unchanged memoized rows.
 const MemoizedJobRow = React.memo(JobRow);
-const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onUpdateSub2ApiConcurrency", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onLoadTagOptions", "onSaveTags", "onOpenCost", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
+const JOB_ROW_CALLBACKS = ["onToggleLogs", "onError", "onJobUpdate", "onToggleSelected", "onDelete", "onUpload", "onToggleSub2Api", "onUpdateSub2ApiPriority", "onUpdateSub2ApiConcurrency", "onRefreshUsage", "onOpenCredentials", "onOpenRemark", "onLoadTagOptions", "onRemoveTagOption", "onSaveTags", "onOpenCost", "onOpenSessions", "onLogoutAllSessions", "onOpenWorkspaces", "onOpenOperationDetail"];
 function JobRowBoundary(props) {
   const latest = useRef(props);
   useLayoutEffect(() => { latest.current = props; });
@@ -3564,7 +3725,7 @@ function Sub2ApiPoolNumberField({ kind, label, email, inPool, value, available, 
   );
 }
 
-function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, tagsAvailable, tagOptions, onLoadTagOptions, onSaveTags, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail, onOpenBoundIp }) {
+function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPriceMultiplier, workflowBusy = false, expanded, onToggleLogs, onError, onJobUpdate, selected, onToggleSelected, onDelete, deleteAvailable, deleteDisabled, deleteBusy, selectionSupported, smsProviderAvailable, smsProvider, onUpload, sub2apiUploadAvailable, sub2apiToggleAvailable, sub2apiToggleBusy, onToggleSub2Api, sub2apiPriorityAvailable, sub2apiPriorityBusy, onUpdateSub2ApiPriority, sub2apiConcurrencyAvailable, sub2apiConcurrencyBusy, onUpdateSub2ApiConcurrency, totpSetupAvailable, passwordAddAvailable, webLoginAvailable, accountProxyUrl, planTypeMapping, accountUsage, accountUsageAvailable, onRefreshUsage, credentialsAvailable, onOpenCredentials, remarksAvailable, onOpenRemark, tagsAvailable, tagOptions, onLoadTagOptions, onRemoveTagOption, onSaveTags, sessionsAvailable, onOpenSessions, onLogoutAllSessions, logoutAllBusy, workspacesAvailable, onOpenWorkspaces, onOpenOperationDetail, onOpenBoundIp }) {
   const [pauseBusy,setPauseBusy]=useState(false);
   async function toggleInspection(){
     if(pauseBusy)return;
@@ -3758,7 +3919,8 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
       </td>
       <td className={`plan-cell ${job.planType ? "" : "unknown"}`} title={job.planType || "未知"}>
         <span className="plan-tag">{formatPlanTypeLabel(job.planType, planTypeMapping)}</span>
-        {tagsAvailable && <AccountTags job={job} options={tagOptions} onLoadOptions={onLoadTagOptions} onSave={onSaveTags} />}
+        {tagsAvailable && <AccountTags job={job} options={tagOptions} onLoadOptions={onLoadTagOptions}
+          onRemoveOption={onRemoveTagOption} onSave={onSaveTags} onError={onError} />}
         <CredentialSyncNote sync={job.webCredentialSync} planTypeMapping={planTypeMapping} />
         {job.sub2apiInPool === true && job.sub2apiPlanType && job.planType
           && job.sub2apiPlanType !== job.planType && (
@@ -6158,10 +6320,12 @@ function normalizeSub2ApiSettings(value) {
     autoResetCredit5hThresholdPercent: String(stored.autoResetCredit5hThresholdPercent ?? 100),
     autoResetCredit7dThresholdPercent: String(stored.autoResetCredit7dThresholdPercent ?? 100),
     wsMode: SUB2API_WS_MODES.has(wsMode) ? wsMode : "off",
+    fingerprintPoolPolicies: normalizeFingerprintPoolPoliciesMap(stored.fingerprintPoolPolicies),
   };
   const rawProfiles = Array.isArray(stored.profiles) ? stored.profiles : [];
+  const profileFallback = { ...legacyProfile, fingerprintPoolPolicies: {} };
   const profiles = rawProfiles.length
-    ? rawProfiles.map((profile, index) => normalizeSub2ApiProfile(profile, index, legacyProfile))
+    ? rawProfiles.map((profile, index) => normalizeSub2ApiProfile(profile, index, profileFallback))
     : [legacyProfile];
   const activeProfileId = profiles.some((profile) => profile.id === String(stored.activeProfileId || ""))
     ? String(stored.activeProfileId)
@@ -6208,6 +6372,7 @@ function normalizeSub2ApiProfile(value, index = 0, fallback = {}) {
     autoResetCredit5hThresholdPercent: String(stored.autoResetCredit5hThresholdPercent ?? fallbackProfile.autoResetCredit5hThresholdPercent ?? 100),
     autoResetCredit7dThresholdPercent: String(stored.autoResetCredit7dThresholdPercent ?? fallbackProfile.autoResetCredit7dThresholdPercent ?? 100),
     wsMode: SUB2API_WS_MODES.has(wsMode) ? wsMode : "off",
+    fingerprintPoolPolicies: normalizeFingerprintPoolPoliciesMap(stored.fingerprintPoolPolicies ?? fallbackProfile.fingerprintPoolPolicies),
   };
 }
 

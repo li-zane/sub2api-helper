@@ -92,10 +92,10 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ onVerdict = () => {}, dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
+  constructor({ onVerdict = () => {}, dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
     this.dispatchPaused = dispatchPaused;
     this.onVerdict = onVerdict;
-    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolAccount, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
+    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolAccount, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
     this.manualChecks = new Set();
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
     this.detectorLoader = detectorLoader || (() => loadDetector({ source: "https://lm.ikale.io/data/", cache: path.join(path.dirname(filePath), "model-fingerprint-data.bin") }));
@@ -138,6 +138,7 @@ export class ModelFingerprintService {
         this.accounts.get(email).prioritySyncPending = Boolean(entry.prioritySyncPending || Object.keys(entry.priorityOverrides || {}).length || this.settings.matchedPriority.enabled && entry.result?.status === "match");
       }
       // Persist pruning immediately, including legacy histories that previously kept 200 rounds.
+      if (this.getPoolNumberPolicy) this.markPoolNumbersPending();
       await this.persist();
     } catch (error) { if (error.code !== "ENOENT") throw new Error(`模型指纹配置读取失败：${error.message}`); }
   }
@@ -213,7 +214,12 @@ export class ModelFingerprintService {
     return { record };
   }
   saveSettings(raw, { applyRuntime = true } = {}) {
-    const next = normalizeFingerprintSettings({ ...raw, matchedPriority: Object.hasOwn(raw, "matchedPriority") ? raw.matchedPriority : this.settings.matchedPriority, groupPolicies: Object.hasOwn(raw, "groupPolicies") ? raw.groupPolicies : this.settings.groupPolicies });
+    const next = normalizeFingerprintSettings({
+      matchedConcurrency: this.settings.matchedConcurrency,
+      matchedPriority: this.settings.matchedPriority,
+      groupPolicies: this.settings.groupPolicies,
+      ...raw,
+    });
     const samplingSettings = settings => [settings.models, settings.minProbability, settings.intervalMinutes, settings.enabledPlanTypes, settings.testSequence];
     const changedSampling = JSON.stringify(samplingSettings(next)) !== JSON.stringify(samplingSettings(this.settings));
     if (changedSampling) this.invalidate();
@@ -505,14 +511,34 @@ export class ModelFingerprintService {
   reconcileConcurrencyLocked(email, planType, targets, revision) {
     return this.reconcilePoolNumberLocked(email, planType, targets, revision, "concurrency");
   }
+  markPoolNumbersPending(email) {
+    const entries = email ? [this.accounts.get(label(email))] : this.accounts.values();
+    for (const entry of entries) {
+      if (!entry?.result && !Object.keys(entry?.concurrencyOverrides || {}).length && !Object.keys(entry?.priorityOverrides || {}).length) continue;
+      entry.concurrencySyncPending = true;
+      entry.prioritySyncPending = true;
+    }
+  }
+  refreshPoolNumbers(email) {
+    return this.mutate(async () => {
+      this.markPoolNumbersPending(email);
+    }).then(() => {
+      if (this.ticking) void this.ticking.then(() => this.trigger());
+      else this.trigger();
+    });
+  }
   async reconcilePoolNumberLocked(email, planType, targets, revision, field) {
     if (this.isBlocked(email)) return;
     const entry = this.accounts.get(email), result = this.groupResult(email, planType), context = this.getContext();
     const descriptor = poolNumberPolicies[field], update = this[descriptor.update];
     const pendingKey = `${field}SyncPending`, errorKey = `${field}SyncError`;
     if (!entry?.[pendingKey] || !update) return;
-    const policy = this.settings[descriptor.setting];
-    const enabled = policy.enabled && this.effective(email, planType).enabled;
+    const legacyPolicy = this.settings[descriptor.setting];
+    const configured = this.getPoolNumberPolicy?.(email, planType, field, result?.status);
+    const enabled = configured ? configured.enabled : legacyPolicy.enabled && this.effective(email, planType).enabled;
+    const value = configured ? configured.value : result?.status === "match" ? legacyPolicy.value : null;
+    const definitive = result?.status === "match" || result?.status === "mismatch";
+    const restore = !enabled || (configured ? definitive && value === null : result?.status === "mismatch" || !result);
     const overrides = entry[`${field}Overrides`] ||= {};
     const externalEdits = entry[`${field}ExternalEdits`] ||= {};
     const manualEdits = entry[`${field}ManualEdits`] ||= {};
@@ -533,7 +559,7 @@ export class ModelFingerprintService {
           delete manualEdits[target.id]; delete externalEdits[target.id];
         }
         if (owned && owned.backend !== context.backend) continue;
-        if (!owned && !manual && !Object.hasOwn(externalEdits, target.id) && (!enabled || result?.status !== "match")) continue;
+        if (!owned && !manual && !Object.hasOwn(externalEdits, target.id) && (!enabled || value === null || !definitive)) continue;
         const account = await this.getAccount(context.config, target.id);
         if (this.isBlocked(email) || revision !== this.revision || context.backend !== this.getContext().backend) return;
         const current = account[field];
@@ -553,24 +579,23 @@ export class ModelFingerprintService {
           delete externalEdits[target.id];
           continue;
         }
-        const restore = !enabled || result?.status === "mismatch" || !result;
         if (restore) {
           if (owned) {
-            if (current !== owned.baseValue) await update(context.config, target.id, owned.baseValue);
+            const defaults = configured && await this.getPoolNumberDefaults?.(email, target.id, state.planType);
+            const baseValue = Number.isInteger(defaults?.[field]) ? defaults[field] : owned.baseValue;
+            if (current !== baseValue) await update(context.config, target.id, baseValue);
             delete overrides[target.id];
             await this.persist();
           }
           continue;
         }
-        // Transport/unknown results preserve existing values. Only a current,
-        // explicit pass can apply the special pool value, for either method.
-        if (result?.status !== "match") continue;
+        if (!definitive || !Number.isInteger(value)) continue;
         if (result.identities?.[target.id] !== fingerprintAccountIdentity(account)) continue;
-        if (!owned && current === policy.value) continue;
-        const intent = { planType: state.planType, baseValue: owned?.baseValue ?? current, appliedValue: policy.value, previousValue: current, backend: context.backend, pending: true };
+        if (current === value && (!owned || !owned.pending)) continue;
+        const intent = { planType: state.planType, baseValue: owned?.baseValue ?? current, appliedValue: value, previousValue: current, backend: context.backend, pending: true };
         overrides[target.id] = intent;
         await this.persist();
-        if (current !== policy.value) await update(context.config, target.id, policy.value);
+        if (current !== value) await update(context.config, target.id, value);
         intent.pending = false;
         await this.persist();
       }
@@ -678,14 +703,23 @@ export class ModelFingerprintService {
   async tick() {
     if (this.dispatchPaused()) return;
     const context = this.getContext(), scheduled = [];
+    let targetsByEmail;
     for (const job of context.jobs) {
       if (this.stopped || this.dispatchPaused()) break;
       if (this.isBlocked(job.email)) continue;
       if (this.inFlight.has(label(job.email))) continue;
       const state = this.snapshot(job.email, job.planType), entry = this.accounts.get(label(job.email));
       if (entry?.concurrencySyncPending || entry?.prioritySyncPending || entry?.groupSyncPending) {
-        const targets = (await this.listTargets(context.config)).filter(t => label(t.email) === label(job.email));
-        await this.reconcile(label(job.email), job.planType, targets);
+        if (!targetsByEmail) {
+          targetsByEmail = new Map();
+          for (const target of await this.listTargets(context.config)) {
+            const email = label(target.email);
+            if (!targetsByEmail.has(email)) targetsByEmail.set(email, []);
+            targetsByEmail.get(email).push(target);
+          }
+        }
+        const email = label(job.email);
+        await this.reconcile(email, job.planType, targetsByEmail.get(email) || []);
       }
       if (job.importCheckPending || !state.enabled || !state.models.length) continue;
       if (!state.nextCheckAt || Date.parse(state.nextCheckAt) <= this.now()) { const task = this.run(job.email, job.planType); void task.catch(() => {}); scheduled.push(task); }

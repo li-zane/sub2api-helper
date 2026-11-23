@@ -1,4 +1,5 @@
-export const DEFAULT_TAG_OPTIONS = { merchants: ["康神", "豆姐"], trips: ["头车", "二车"] };
+export const TAG_OPTION_KEYS = { merchant: "merchants", trip: "trips", validity: "validities" };
+export const DEFAULT_TAG_OPTIONS = { merchants: ["康神", "豆姐"], trips: ["头车", "二车"], validities: ["长效", "轮转"] };
 const fields = { merchant: "商家", trip: "车次", validity: "时效", stopAt: "停止时间" };
 const emptyTags = () => ({ merchant: "", trip: "", validity: "", stopAt: "" });
 const valuePattern = /[\[\],，。\x00-\x1f\x7f\u2028\u2029]/u;

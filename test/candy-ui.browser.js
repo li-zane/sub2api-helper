@@ -19,7 +19,12 @@ async (page) => {
   }await route.fulfill({json:{settings,profiles,groups:groupsUnavailable?[]:groups,groupsError:groupsUnavailable?'fixture-group-catalog-failed':null,runtime:{activeAccounts:0,queuedAccounts:0,maxConcurrentAccounts:3}}});});
   await page.route('**/api/model-fingerprint/reference',r=>r.fulfill({json:{models:[],builtAt:null}}));
   await page.route('**/api/task-settings',async route=>{if(route.request().method()==='GET'){const r=await route.fetch();const data=await r.json();data.settings.modelFingerprint=settings;data.settings.monitoring={...data.settings.monitoring,fingerprintScanIntervalSeconds:77};await route.fulfill({json:data});}else{const body=route.request().postDataJSON();saves.push({kind:'task',value:body});await route.fulfill({json:{settings:{...body,default:3,current:body.maxActiveJobs,max:20}}});}});
-  for(const path of ['**/api/sub2api/settings','**/api/sub2api/monitor'])await page.route(path,r=>r.fulfill({json:{hasAdminApiKey:true,config:{baseUrl:'https://fixture.test'}}}));
+  let poolConfig={baseUrl:'https://fixture.test',profiles:[{id:'default',name:'默认方案'}],activeProfileId:'default',planTypeBindings:{free:'default',plus:'default'}};
+  for(const path of ['**/api/sub2api/settings','**/api/sub2api/monitor'])await page.route(path,r=>{
+    if(r.request().method()==='POST') poolConfig=r.request().postDataJSON().config;
+    return r.fulfill({json:{hasAdminApiKey:true,config:poolConfig,profiles:poolConfig.profiles,
+      activeProfileId:poolConfig.activeProfileId,planTypeBindings:poolConfig.planTypeBindings}});
+  });
   await page.route('**/api/sub2api/account-status*',r=>r.fulfill({json:{configured:false,accounts:{}}}));
   await page.route(/\/api\/jobs(?:\?|$)/,async route=>{if(freezeJobs)await new Promise(resolve=>waitingJobs.push(resolve));const r=await route.fetch(),data=await r.json();data.taskSettings={...data.taskSettings,modelFingerprint:settings};data.jobs=data.jobs.map(j=>({...j,planType:'free',status:'completed',autoRepairBlocked:false,sub2apiInPool:true,sub2apiEnabled:true,codexStatusEligible:true,modelFingerprint:state()}));await route.fulfill({json:data});});
   await page.route(/\/api\/jobs\/[^/]+\/model-fingerprint$/,async route=>{override=route.request().postDataJSON();saves.push({kind:'override',value:override});await route.fulfill({json:{job:{modelFingerprint:state()}}});});
@@ -43,14 +48,7 @@ async (page) => {
     await plans.fill('custom_plan');await d.getByRole('button',{name:'添加类型',exact:true}).click();
     check(await d.getByRole('button',{name:'移除 custom_plan',exact:true}).count()===1,'custom PlanType was duplicated');
     await d.getByRole('button',{name:'移除 custom_plan',exact:true}).click();
-    const matched=d.getByRole('checkbox',{name:'不降智账号独立并发',exact:true}),value=d.getByRole('spinbutton',{name:'不降智账号独立并发值',exact:true});
-    check(!await matched.isChecked()&&await value.isDisabled(),'independent concurrency must default off');
-    await matched.check();await value.fill('0');
-    const priority=d.getByRole('checkbox',{name:'不降智账号独立优先级',exact:true}),priorityValue=d.getByRole('spinbutton',{name:'不降智账号独立优先级值',exact:true});
-    check(!await priority.isChecked()&&await priorityValue.isDisabled()&&await priorityValue.inputValue()==='1','independent priority must default off at 1 for legacy settings');
-    await priority.check();await priorityValue.fill('0');
-    check(await matched.isChecked()&&await value.inputValue()==='0','priority toggle changed independent concurrency');
-    await d.getByRole('region',{name:'不降智账号独立优先级',exact:true}).screenshot({path:evidence+'/priority-desktop.png'});
+    check(await d.getByRole('checkbox',{name:/不降智账号独立并发|不降智账号独立优先级/}).count()===0,'pool controls remain in detection settings');
     check(await d.getByText('不降智加入（指纹一致）',{exact:true}).count()===0,'fingerprint-only policy label remains');
     await page.screenshot({path:evidence+'/settings-desktop.png'});
     await page.setViewportSize({width:375,height:812});await rule.click();check(await rule.getAttribute('aria-pressed')==='false','mobile toggle off failed');await rule.click();check(await rule.getAttribute('aria-pressed')==='true','mobile toggle on failed');await page.screenshot({path:evidence+'/groups-mobile.png'});check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'settings horizontal overflow');await page.screenshot({path:evidence+'/settings-mobile.png'});await page.setViewportSize({width:1480,height:1000});
@@ -61,8 +59,7 @@ async (page) => {
     check(!Object.hasOwn(saves[0].patch,'minProbability')&&saves[0].value.minProbability===0.95,'unchanged threshold overwrote a newer value');
     check(JSON.stringify(saves[0].value.testSequence)===JSON.stringify({first:'candy',fingerprint:5,candy:1}),'global request incorrect');
     check(JSON.stringify(saves[0].value.enabledPlanTypes)===JSON.stringify(['free','self_serve_business_prolite']),'PlanType allowlist not saved');
-    check(saves[0].value.matchedConcurrency.enabled&&saves[0].value.matchedConcurrency.value===0,'zero matched concurrency not saved');
-    check(saves[0].value.matchedPriority.enabled&&saves[0].value.matchedPriority.value===0,'zero matched priority not saved');
+    check(!Object.hasOwn(saves[0].patch,'matchedConcurrency')&&!Object.hasOwn(saves[0].patch,'matchedPriority'),'detection save sent old pool settings');
     check(saves[0].value.groupPolicies.business['2']==='verified'&&!Object.hasOwn(saves[0].value,'planDefaults'),'group rules not saved alongside allowlist');
     check(saves[0].value.groupPolicies.plus['2']==='verified','hidden rules erased on save');
   });
@@ -74,21 +71,43 @@ async (page) => {
     check(await d.getByRole('button',{name:'Business Premium 分组 2 加入规则',exact:true}).getAttribute('aria-pressed')==='true','re-enabling PlanType lost draft policy');
     await d.getByRole('button',{name:'取消',exact:true}).click();await d.waitFor({state:'detached'});
   });
-  await test('independent-priority-validates-reopens-and-disables-on-mobile',async()=>{
-    await page.getByRole('button',{name:'降智检测设置',exact:true}).click();const d=page.getByRole('dialog',{name:'降智检测设置',exact:true});
-    const toggle=d.getByRole('checkbox',{name:'不降智账号独立优先级',exact:true}),value=d.getByRole('spinbutton',{name:'不降智账号独立优先级值',exact:true});
-    check(await toggle.isChecked()&&await value.inputValue()==='0','saved priority did not reopen');
-    const before=saves.length;await value.fill('-1');await d.getByRole('button',{name:'保存降智检测设置',exact:true}).click();
-    check(saves.length===before&&!await value.evaluate(el=>el.validity.valid),'negative priority was accepted');
-    await value.fill('1.5');check(!await value.evaluate(el=>el.validity.valid),'fractional priority accepted');
-    await value.fill('10001');check(!await value.evaluate(el=>el.validity.valid),'out-of-range priority accepted');
-    await value.fill('10000');await page.setViewportSize({width:375,height:812});
-    await d.getByRole('region',{name:'不降智账号独立优先级',exact:true}).screenshot({path:evidence+'/priority-mobile.png'});
-    check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'priority controls overflow on mobile');
-    await toggle.uncheck();check(await value.isDisabled(),'off switch leaves priority input enabled');
-    check(await d.getByRole('checkbox',{name:'不降智账号独立并发',exact:true}).isChecked(),'priority off changed concurrency policy');
-    await d.getByRole('button',{name:'保存降智检测设置',exact:true}).click();await d.waitFor({state:'detached'});
-    check(saves.at(-1).value.matchedPriority.enabled===false&&saves.at(-1).value.matchedPriority.value===10000,'off policy did not save independently');
+  await test('pool-priority-by-plan-validates-and-saves-on-mobile',async()=>{
+    const open=()=>page.getByRole('region',{name:'Sub2API 配置与号池监控'}).getByRole('button',{name:'配置',exact:true}).click();
+    await open();
+    const d=page.getByRole('dialog',{name:'Sub2API 配置',exact:true});
+    const panel=d.locator('.fpp-section');
+    const free=panel.getByRole('tab',{name:/^Free\b/i}),plus=panel.getByRole('tab',{name:/^Plus\b/i});
+    const save=d.getByRole('button',{name:'保存配置',exact:true});
+    const first=panel.locator('.fpp-step-input').first();
+    await free.click();
+    await panel.getByRole('switch',{name:/不降智独立并发/}).click();
+    await panel.getByRole('spinbutton',{name:/不降智独立并发上限/}).fill('0');
+    await panel.getByRole('switch',{name:/分级优先级/}).click();
+    await first.fill('-1');
+    await plus.click();
+    check(await panel.getByRole('switch',{name:/分级优先级/}).getAttribute('aria-checked')==='false','Free priority leaked into Plus');
+    await save.click();
+    check(await free.getAttribute('aria-selected')==='true'&&await first.getAttribute('aria-invalid')==='true','invalid rule in other tab was not selected');
+    await first.fill('0');
+    await page.setViewportSize({width:375,height:812});
+    const grid=panel.locator('.fpp-priority-grid');
+    await grid.evaluate(el=>new Promise(resolve=>requestAnimationFrame(resolve)));
+    const gridFits=await grid.evaluate(el=>{
+      const bounds=el.getBoundingClientRect(),dialog=el.closest('[role="dialog"]').getBoundingClientRect();
+      return bounds.left>=dialog.left-1&&bounds.right<=dialog.right+1&&bounds.right<=innerWidth+1;
+    });
+    check(gridFits,'priority grid is clipped by the mobile modal');
+    check(await grid.locator('.fpp-step-label').evaluateAll(labels=>labels.every(label=>label.scrollWidth<=label.clientWidth+1)),
+      'tier labels are clipped on mobile');
+    await panel.locator('.fpp-priority-grid').screenshot({path:evidence+'/priority-mobile.png'});
+    check(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'priority controls overflow on mobile');
+    await save.click();await d.waitFor({state:'detached'});
+    const policy=poolConfig.profiles[0].fingerprintPoolPolicies.free;
+    check(policy.concurrency.enabled&&policy.concurrency.value===0,'zero concurrency did not save');
+    check(policy.priority.enabled&&policy.priority.matchedFirstTrip===0&&policy.priority.mismatchedFirstTrip===null,'zero/blank tier did not save');
+    await open();await free.click();
+    check(await first.inputValue()==='0','saved tier did not reopen');
+    await page.keyboard.press('Escape');
     await page.setViewportSize({width:1480,height:1000});
   });
   await test('missing-group-catalog-retains-configured-rules',async()=>{
@@ -107,14 +126,12 @@ async (page) => {
     await d.getByRole('button',{name:'移除 self_serve_business_prolite',exact:true}).click();
     await d.getByRole('button',{name:'移除 free',exact:true}).click();
     check(await d.locator('.fingerprint-group-profile').count()===0,'all PlanTypes off still displays group rules');
-    await d.getByRole('checkbox',{name:'不降智账号独立并发',exact:true}).uncheck();
-    check(await d.getByRole('spinbutton',{name:'不降智账号独立并发值',exact:true}).isDisabled(),'disabled matched-concurrency input still editable');
     check((await d.innerText()).includes('已全部关闭'),'empty allowlist is not explained');
     await page.screenshot({path:evidence+'/settings-mobile-bottom.png'});
     freezeJobs=true;
     try{await d.getByRole('button',{name:'保存降智检测设置'}).click();await d.waitFor({state:'detached'});
       check(await toggle.isDisabled()&&await toggle.getAttribute('aria-checked')==='false','saved empty list was lost before next server poll');
-      check(saves.at(-1).value.enabledPlanTypes.length===0&&!saves.at(-1).value.matchedConcurrency.enabled,'empty list/off policy not saved');
+      check(saves.at(-1).value.enabledPlanTypes.length===0,'empty list not saved');
       check(saves.at(-1).value.groupPolicies.business['2']==='verified'&&saves.at(-1).value.groupPolicies.plus['2']==='verified','hidden policies erased when disabling all PlanTypes');
     }finally{freezeJobs=false;for(const release of waitingJobs.splice(0))release();await page.setViewportSize({width:1480,height:1000});}
   });

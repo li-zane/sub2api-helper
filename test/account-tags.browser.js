@@ -66,6 +66,56 @@ async page => {
     await cost.waitFor({ state: "hidden" });
     if (await row.locator(".account-cost-button").innerText() !== "￥12.34") throw Error("成本未更新");
   });
+  await check("删除列表里的商家选项需确认，重新加载后仍隐藏", async () => {
+    const original = await remark();
+    await chip("商家").click();
+    const list = picker("商家");
+    const remove = list.getByRole("button", { name: "从列表删除商家「豆姐」" });
+    await remove.click();
+    await list.getByRole("button", { name: "取消", exact: true }).click();
+    await remove.waitFor();
+    await remove.click();
+    await list.getByRole("button", { name: "删除选项", exact: true }).click();
+    await remove.waitFor({ state: "hidden" });
+    if (await remark() !== original) throw Error("移除共享选项改动了账号备注");
+    await page.reload();
+    const optionsLoaded = page.waitForResponse(response => response.url().endsWith("/api/account-tag-options") && response.request().method() === "GET");
+    await row.getByRole("button", { name: /^商家：豆姐/ }).click();
+    await optionsLoaded;
+    await list.getByRole("button", { name: "康神", exact: true }).waitFor();
+    await list.getByRole("button", { name: "豆姐", exact: true }).waitFor({ state: "hidden" });
+    await page.keyboard.press("Escape");
+  });
+  await check("行内清除时效会一同清除停止时间", async () => {
+    await chip("时效").click();
+    await picker("时效").getByRole("button", { name: "轮转", exact: true }).click();
+    await rotation.getByLabel("停止时间（北京时间）").fill("2027-01-23T10:45");
+    await rotation.getByRole("button", { name: "确认修改" }).click();
+    await rotation.waitFor({ state: "hidden" });
+    await row.getByRole("button", { name: "清除当前账号的时效标签" }).click();
+    await row.getByRole("button", { name: /^时效：未设置/ }).waitFor();
+    const remaining = await remark();
+    if (!remaining.includes("[商家] 豆姐") || remaining.includes("[时效]") || remaining.includes("[停止时间]")) throw Error(remaining);
+  });
+  await check("删除时效参考值后仍可修改已有轮转时间", async () => {
+    const list = picker("时效");
+    await chip("时效").click();
+    await list.getByRole("button", { name: "轮转", exact: true }).click();
+    await rotation.getByRole("button", { name: "不指定时间" }).click();
+    await rotation.waitFor({ state: "hidden" });
+    await chip("时效").click();
+    await list.getByRole("button", { name: "从列表删除时效「轮转」" }).click();
+    await list.getByRole("button", { name: "删除选项", exact: true }).click();
+    await list.getByRole("button", { name: "轮转", exact: true }).waitFor({ state: "hidden" });
+    await list.getByRole("button", { name: "长效", exact: true }).waitFor();
+    await page.reload();
+    await row.getByRole("button", { name: /^时效：轮转/ }).click();
+    await list.getByRole("button", { name: "修改当前账号的停止时间" }).click();
+    await rotation.getByLabel("停止时间（北京时间）").fill("2027-01-23T10:45");
+    await rotation.getByRole("button", { name: "确认修改" }).click();
+    await rotation.waitFor({ state: "hidden" });
+    await row.getByRole("button", { name: /^时效：轮转至 2027-01-23 10:45/ }).waitFor();
+  });
   await check("页面正常渲染", async () => {
     if (!await page.title() || await page.locator("vite-error-overlay").count() || errors.length) throw Error(errors.join("\n") || "页面异常");
   });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { OverloadMonitor, OVERLOAD_MESSAGE } from "../src/overload-monitor.mjs";
+import { OverloadMonitor, OVERLOAD_MESSAGE, RATE_LIMIT_MESSAGE } from "../src/overload-monitor.mjs";
 import { OverloadCooldown } from "../src/overload-cooldown.mjs";
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "helper-unified-overload-"));
 const email = "shared@example.test", config = { baseUrl: "fixture", adminApiKey: "fixture" };
@@ -35,10 +35,11 @@ try {
   assert.equal(monitor.snapshot(email).enabled, false, "cooldown must not enable the display switch");
   assert.equal(monitor.snapshot(email).recentCount, 2); assert.equal(monitor.snapshot(email).countMode, "fixed_bucket");
   await monitor.setEnabled(email, true); calls.length = 0; now += 1000; failRequests = true;
-  rows.push({ ...rows[0], id: 99, created_at: "2026-11-11T12:18:59Z" });
+  rows.push({ ...rows[0], id: 99, status_code: 429, message: RATE_LIMIT_MESSAGE, created_at: "2026-11-11T12:18:59Z" });
   await monitor.refresh(); await drain();
   assert.equal(calls.filter(url => url.includes("/upstream-errors")).length, 1, "display+cooldown share exactly one overload query");
-  assert.deepEqual(mutations, [false]); assert.equal(cooldown.snapshot(email).windowCount, 3);
+  assert.deepEqual(mutations, [false], "one matching 429 and two matching 503s reach the shared threshold");
+  assert.equal(cooldown.snapshot(email).windowCount, 3);
   assert.equal(monitor.snapshot(email).points.at(-1).count, 3); assert(monitor.snapshot(email).requestError);
   assert.equal(timerDelay, 60_000);
   // No count or status poll is needed to wake the saved deadline.
