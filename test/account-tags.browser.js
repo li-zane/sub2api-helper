@@ -97,20 +97,19 @@ async page => {
     const remaining = await remark();
     if (!remaining.includes("[商家] 豆姐") || remaining.includes("[时效]") || remaining.includes("[停止时间]")) throw Error(remaining);
   });
-  await check("删除时效参考值后仍可修改已有轮转时间", async () => {
+  await check("两个时效选项固定且仍可修改已有轮转时间", async () => {
     const list = picker("时效");
     await chip("时效").click();
     await list.getByRole("button", { name: "轮转", exact: true }).click();
     await rotation.getByRole("button", { name: "不指定时间" }).click();
     await rotation.waitFor({ state: "hidden" });
     await chip("时效").click();
-    await list.getByRole("button", { name: "从列表删除时效「轮转」" }).click();
-    await list.getByRole("button", { name: "删除选项", exact: true }).click();
-    await list.getByRole("button", { name: "轮转", exact: true }).waitFor({ state: "hidden" });
+    await list.getByRole("button", { name: "轮转", exact: true }).waitFor();
     await list.getByRole("button", { name: "长效", exact: true }).waitFor();
+    if (await list.getByRole("button", { name: /^从列表删除/ }).count()) throw Error("固定时效仍有删除按钮");
     await page.reload();
     await row.getByRole("button", { name: /^时效：轮转/ }).click();
-    await list.getByRole("button", { name: "修改当前账号的停止时间" }).click();
+    await list.getByRole("button", { name: "轮转", exact: true }).click();
     await rotation.getByLabel("停止时间（北京时间）").fill("2027-01-23T10:45");
     await rotation.getByRole("button", { name: "确认修改" }).click();
     await rotation.waitFor({ state: "hidden" });

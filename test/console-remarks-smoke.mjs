@@ -108,7 +108,9 @@ try {
     await fs.writeFile(path.join(dir, "sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ name: jobEmail, platform: "openai", type: "oauth", credentials: { email: jobEmail }, extra: { email: jobEmail } }] }));
   }
   await fs.writeFile(path.join(output, "sub2api-settings.json"), JSON.stringify(config));
-  await fs.writeFile(path.join(output, "account-tag-options.json"), JSON.stringify({ merchants: ["旧商家"], trips: ["旧车次"] }));
+  await fs.writeFile(path.join(output, "account-tag-options.json"), JSON.stringify({
+    merchants: ["旧商家"], trips: ["旧车次"], removed: { validities: ["长效", "轮转"] },
+  }));
   await start();
   await refresh();
   assert.equal((await localJob()).remark, "原有备注", "first pool sync imports complete notes");
@@ -160,7 +162,7 @@ try {
   const withOptions = await tags({ merchant: "康神", trip: "夜班车", validity: "长效" });
   assert(!(await removeTagOption("merchant", "康神")).merchants.includes("康神"));
   assert(!(await removeTagOption("trip", "夜班车")).trips.includes("夜班车"));
-  assert.deepEqual((await removeTagOption("validity", "长效")).validities, ["轮转"]);
+  await removeTagOption("validity", "长效", 400);
   await removeTagOption("validity", "任意值", 400);
   assert.equal((await localJob()).remark, withOptions.job.remark);
   assert.deepEqual((await localJob()).accountTags, withOptions.job.accountTags);
@@ -168,17 +170,18 @@ try {
   await stop(); await start();
   const hiddenOptions = await tagOptions();
   assert(!hiddenOptions.merchants.includes("康神") && !hiddenOptions.trips.includes("夜班车"));
-  assert.deepEqual(hiddenOptions.validities, ["轮转"]);
+  assert.deepEqual(hiddenOptions.validities, ["长效", "轮转"]);
   assert.equal((await localJob()).accountTags.merchant, "康神");
   assert.equal((await localJob()).accountTags.trip, "夜班车");
   await tags({ trip: "夜班车" });
   const restoredOptions = await tagOptions();
   assert(!restoredOptions.merchants.includes("康神") && restoredOptions.trips.includes("夜班车"));
-  assert.deepEqual((await removeTagOption("validity", "轮转")).validities, []);
-  const rotatingAfterRemoval = await tags({ stopAt: "2026-12-01T08:30" });
-  assert.equal(rotatingAfterRemoval.job.accountTags.validity, "轮转");
-  assert.equal(rotatingAfterRemoval.job.accountTags.stopAt, "2026-12-01T08:30");
-  assert.deepEqual((await tagOptions()).validities, []);
+  await removeTagOption("validity", "轮转", 400);
+  const rotatingAfterRejection = await tags({ stopAt: "2026-12-01T08:30" });
+  assert.equal(rotatingAfterRejection.job.accountTags.validity, "轮转");
+  assert.equal(rotatingAfterRejection.job.accountTags.stopAt, "2026-12-01T08:30");
+  assert.deepEqual((await tagOptions()).validities, ["长效", "轮转"]);
+  console.log("PASS: fixed validity options ignore legacy removals and reject deletion");
   console.log("PASS: removing default and custom options preserves account tags and remarks, survives restart, and supports explicit re-creation");
   console.log("PASS: legacy aliases, custom choices across restarts, concurrent tag edits, rotation deadlines, per-record notes and clearing");
   const unauthorized = await fetch(`${base}/api/jobs/${id}/remark`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"remark":"forbidden"}' });

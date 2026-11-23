@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, Clock3, Infinity as InfinityIcon, Plus, RefreshCw, Store, TrainFront, Trash2, X } from "lucide-react";
-import { TAG_OPTION_KEYS } from "../../shared/account-tags.mjs";
+import { DEFAULT_TAG_OPTIONS, TAG_OPTION_KEYS } from "../../shared/account-tags.mjs";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
 import { AnchoredPopover } from "./anchored-popover.jsx";
 import "./account-tags.css";
@@ -66,7 +66,7 @@ function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onRemov
   const [removeCandidate, setRemoveCandidate] = useState("");
   const validity = field === "validity";
   const current = tags[field];
-  const choices = options?.[TAG_OPTION_KEYS[field]] ?? [];
+  const choices = validity ? DEFAULT_TAG_OPTIONS.validities : options?.[TAG_OPTION_KEYS[field]] ?? [];
   const text = query.trim();
   const visible = choices.filter(value => value.toLowerCase().includes(text.toLowerCase()));
   const create = text && !choices.includes(text);
@@ -171,8 +171,8 @@ function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onRemov
         {visible.map(value => <div className="tag-option-row" key={value}>
           <button type="button" onClick={() => choose(value)} disabled={saving} aria-pressed={value === current}>
             <span>{value}</span>{value === current && <Check size={14} />}</button>
-          <button type="button" className="tag-remove" disabled={saving} aria-label={"从列表删除" + labels[field] + "「" + value + "」"}
-            title="从下拉列表删除" onClick={() => { setError(""); setRemoveCandidate(value); }}><Trash2 size={14} aria-hidden="true" /></button>
+          {!validity && <button type="button" className="tag-remove" disabled={saving} aria-label={"从列表删除" + labels[field] + "「" + value + "」"}
+            title="从下拉列表删除" onClick={() => { setError(""); setRemoveCandidate(value); }}><Trash2 size={14} aria-hidden="true" /></button>}
         </div>)}
       </div>
       {removeCandidate && <div className="tag-remove-confirm" role="group" aria-label="确认删除下拉选项">
@@ -182,8 +182,6 @@ function TagEditor({ field, tags, options, anchor, close, onLoadOptions, onRemov
           <button type="button" className="tag-confirm-remove" disabled={saving} onClick={removeOption}>删除选项</button>
         </div>
       </div>}
-      {options && validity && current === "轮转" && !choices.includes(current) &&
-        <button type="button" className="tag-clear" onClick={() => choose(current)} disabled={saving}>修改当前账号的停止时间</button>}
       {current && <button type="button" className="tag-clear" onClick={() => choose("")} disabled={saving}>清空{labels[field]}</button>}
       {message}
     </div>

@@ -3,7 +3,7 @@ import { DEFAULT_TAG_OPTIONS, TAG_OPTION_KEYS, readAccountTags } from "../shared
 import { writePrivateJsonAtomic } from "./account-history.mjs";
 
 const creatableOptions = Object.entries(TAG_OPTION_KEYS).filter(([field]) => field !== "validity");
-const catalogKeys = Object.values(TAG_OPTION_KEYS);
+const catalogKeys = creatableOptions.map(([, key]) => key);
 
 // Keep custom choices available to other accounts even after the original
 // account changes labels. Serialize updates made under different email locks.
@@ -47,6 +47,7 @@ export function createAccountTagCatalog(file) {
       });
     },
     remove(field, value) {
+      if (field === "validity") throw Object.assign(new Error("长效和轮转是固定时效选项"), { status: 400 });
       return update((choices, removed) => {
         const key = TAG_OPTION_KEYS[field];
         if (removed[key].has(value)) return false;
@@ -73,7 +74,7 @@ export function createAccountTagCatalog(file) {
       for (const key of catalogKeys) {
         for (const value of removed[key]) options[key].delete(value);
       }
-      return serialize(options);
+      return { ...serialize(options), validities: DEFAULT_TAG_OPTIONS.validities };
     },
   };
 }
