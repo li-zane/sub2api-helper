@@ -9,9 +9,11 @@ async page => {
   await page.setViewportSize({width:1480,height:1000});await page.reload();
   const row=page.locator('tr.job-row').first();await row.locator('.usage-profit-pill').waitFor();
   const closeToasts=async()=>{while(await page.locator('.task-toast:not(.is-leaving)').count()){const toast=page.locator('.task-toast:not(.is-leaving)').first();await toast.locator('.toast-dismiss').click();await toast.waitFor({state:'hidden'});}};
-  await run('default-cost-beside-remark',async()=>{
+  await run('default-cost-above-separate-remark-icon',async()=>{
     const cost=row.locator('.account-cost-button'),remark=row.locator('.account-remark-button');
-    check(await cost.innerText()==='￥0','legacy cost is not zero');const a=await remark.boundingBox(),b=await cost.boundingBox();check(b.x>=a.x+a.width-1&&Math.abs(a.y-b.y)<2,'cost not beside remark');
+    check(await cost.innerText()==='￥0','legacy cost is not zero');
+    const remarkBox=await remark.boundingBox(),costBox=await cost.boundingBox();
+    check(remarkBox.y>=costBox.y+costBox.height-1,'remark icon is not on its own row below the cost');
     check((await row.locator('.usage-profit-pill').innerText()).includes('￥2.00'),'default multiplier is not 1');
   });
   await run('multiplier-shares-timezone-row-and-saves',async()=>{

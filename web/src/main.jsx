@@ -3901,16 +3901,21 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
                   </span>
                 )}
               </div>
-              {remarksAvailable && (
+              {(tagsAvailable || pricingAvailable) && (
                 <div className="account-meta-line account-cost-line">
-                  <button type="button" className={`account-remark-button ${job.remark ? "has-remark" : ""}`} onClick={onOpenRemark} title={job.remark || "添加备注"} aria-label={`编辑 ${job.email} 的备注`}>
-                    <FileText size={11} aria-hidden="true" />
-                    <span>{job.remark || "备注"}</span>
-                  </button>
+                  {tagsAvailable && <AccountTags placement="account" job={job} options={tagOptions} onLoadOptions={onLoadTagOptions}
+                    onRemoveOption={onRemoveTagOption} onSave={onSaveTags} onError={onError} />}
                   {pricingAvailable && <button type="button" className="account-cost-button" onClick={onOpenCost}
                     title={`账号成本 ${formatAccountCost(job.accountCostCny)}；点击修改`} aria-label={`编辑 ${job.email} 的账号成本`}>
                     {formatAccountCost(job.accountCostCny)}
                   </button>}
+                </div>
+              )}
+              {remarksAvailable && (
+                <div className="account-meta-line account-remark-line">
+                  <button type="button" className={`account-remark-button ${job.remark ? "has-remark" : ""}`} onClick={onOpenRemark} title={job.remark || "添加备注"} aria-label={`编辑 ${job.email} 的备注`}>
+                    <FileText size={13} aria-hidden="true" />
+                  </button>
                 </div>
               )}
             </div>
@@ -3919,7 +3924,7 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
       </td>
       <td className={`plan-cell ${job.planType ? "" : "unknown"}`} title={job.planType || "未知"}>
         <span className="plan-tag">{formatPlanTypeLabel(job.planType, planTypeMapping)}</span>
-        {tagsAvailable && <AccountTags job={job} options={tagOptions} onLoadOptions={onLoadTagOptions}
+        {tagsAvailable && <AccountTags placement="plan" job={job} options={tagOptions} onLoadOptions={onLoadTagOptions}
           onRemoveOption={onRemoveTagOption} onSave={onSaveTags} onError={onError} />}
         <CredentialSyncNote sync={job.webCredentialSync} planTypeMapping={planTypeMapping} />
         {job.sub2apiInPool === true && job.sub2apiPlanType && job.planType

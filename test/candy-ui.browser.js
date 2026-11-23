@@ -78,11 +78,14 @@ async (page) => {
     const panel=d.locator('.fpp-section');
     const free=panel.getByRole('tab',{name:/^Free\b/i}),plus=panel.getByRole('tab',{name:/^Plus\b/i});
     const save=d.getByRole('button',{name:'保存配置',exact:true});
+    const card=panel.getByRole('tabpanel');
+    const placement=()=>card.locator('.fpp-pane > legend').allTextContents();
     const firstConcurrency=panel.getByRole('spinbutton',{name:/不降智长效\s*并发/});
     const firstPriority=panel.getByRole('spinbutton',{name:/不降智长效\s*优先级/});
     const concurrencySwitch=panel.getByRole('switch',{name:/分级并发/});
     const prioritySwitch=panel.getByRole('switch',{name:/分级优先级/});
     await free.click();
+    check((await placement()).join(',')==='轮转设置,分级并发,分级优先级','rotation settings are not the first policy section');
     await panel.getByText(/沿用旧版不降智长效并发 10/).waitFor();
     await prioritySwitch.click();
     await firstPriority.fill('0');
@@ -104,9 +107,9 @@ async (page) => {
     check(await rotatingRate.getAttribute('aria-invalid')==='true','invalid fractional rate was accepted');
     await rotatingRate.fill('1.25');
     await panel.getByRole('spinbutton',{name:/^降智长效\s*并发/}).fill('9');
-    const card=panel.getByRole('tabpanel');
     await card.screenshot({path:evidence+'/tiered-policy-desktop.png'});
     await page.setViewportSize({width:375,height:812});
+    check((await placement())[0]==='轮转设置','rotation settings are not first on mobile');
     const grids=panel.locator('.fpp-ladder-grid');
     await grids.first().evaluate(el=>new Promise(resolve=>requestAnimationFrame(resolve)));
     check(await grids.evaluateAll(els=>els.length===2&&els.every(el=>{

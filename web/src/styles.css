@@ -1775,15 +1775,15 @@ select {
 
 /* Account Column */
 .account-column {
-  width: 180px;
-  min-width: 180px;
+  width: 208px;
+  min-width: 208px;
 }
 
 .account-cell {
   display: flex;
   align-items: flex-start;
   min-width: 0;
-  max-width: 180px;
+  max-width: 208px;
 }
 
 .account-details {
@@ -1896,17 +1896,16 @@ select {
 }
 
 .account-remark-button {
-  max-width: 160px;
-  height: 19px;
-  padding: 0 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border: 1px dashed var(--line-strong);
   border-radius: 5px;
   background: var(--surface-subtle);
   color: var(--muted);
-  font-size: 10.5px;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  justify-content: center;
   cursor: pointer;
   transition: all 120ms ease;
 }
@@ -1916,7 +1915,6 @@ select {
   border-color: #bfdbfe;
   background: #eff6ff;
   color: #1d4ed8;
-  font-weight: 500;
 }
 
 .account-remark-button:hover {
@@ -1924,12 +1922,6 @@ select {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent);
-}
-
-.account-remark-button span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Plan & Pool Cells */
@@ -8693,8 +8685,7 @@ select option {
 .toast-dismiss:hover { background: var(--line); }
 .toast-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 @keyframes task-toast-enter { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
-.account-cost-line .account-remark-button { flex: 0 1 auto; min-width: 0; }
-.account-cost-button { flex-shrink: 0; height: 19px; max-width: 92px; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-subtle); color: var(--ink-2); font-size: 10.5px; font-variant-numeric: tabular-nums; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-cost-button { flex-shrink: 0; height: 24px; max-width: 92px; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-subtle); color: var(--ink-2); font-size: 10.5px; font-variant-numeric: tabular-nums; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-cost-button:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .account-cost-dialog > input { width: 100%; }
 .account-cost-help { display: block; margin-top: 8px; color: var(--muted); line-height: 1.5; }

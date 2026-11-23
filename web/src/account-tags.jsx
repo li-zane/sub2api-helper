@@ -8,8 +8,9 @@ import "./account-tags.css";
 
 const labels = { merchant: "商家", trip: "车次", validity: "时效" };
 const icons = { merchant: Store, trip: TrainFront, validity: Clock3 };
+const fieldsByPlacement = { account: ["merchant", "trip"], plan: ["validity"] };
 
-export function AccountTags({ job, options, onSave, onLoadOptions, onRemoveOption, onError }) {
+export function AccountTags({ placement, job, options, onSave, onLoadOptions, onRemoveOption, onError }) {
   const [field, setField] = useState("");
   const [clearing, setClearing] = useState(false);
   const anchor = useRef(null);
@@ -31,8 +32,9 @@ export function AccountTags({ job, options, onSave, onLoadOptions, onRemoveOptio
       setClearing(false);
     }
   }
-  return <div className="account-tags">
-    {Object.entries(labels).map(([key, label]) => {
+  return <div className={`account-tags account-tags--${placement}`}>
+    {fieldsByPlacement[placement].map(key => {
+      const label = labels[key];
       const value = tags[key];
       const Icon = key === "validity" && value ? (value === "轮转" ? RefreshCw : InfinityIcon) : icons[key];
       const detail = value === "轮转" && tags.stopAt ? "轮转至 " + tags.stopAt.replace("T", " ") + "（北京时间）" : value;

@@ -428,6 +428,17 @@ export function FingerprintPoolPolicyPanel({
           </div>
         )}
 
+        <RotationPoolPolicy
+          values={activeDraft.rotation}
+          errors={activeErrors}
+          locked={disabled || isResidual}
+          onUpdate={(field, event) => updateTierValue(activeTab.key, "rotation", field, event)}
+          onInputRef={(field, element) => {
+            const key = `${activeTab.key}:rotation.${field}`;
+            if (element) inputRefs.current.set(key, element);
+            else inputRefs.current.delete(key);
+          }}
+        />
         {Object.keys(FINGERPRINT_POOL_FIELDS).map(field => (
           <PoolPolicyLadder
             key={field}
@@ -446,17 +457,6 @@ export function FingerprintPoolPolicyPanel({
             }}
           />
         ))}
-        <RotationPoolPolicy
-          values={activeDraft.rotation}
-          errors={activeErrors}
-          locked={disabled || isResidual}
-          onUpdate={(field, event) => updateTierValue(activeTab.key, "rotation", field, event)}
-          onInputRef={(field, element) => {
-            const key = `${activeTab.key}:rotation.${field}`;
-            if (element) inputRefs.current.set(key, element);
-            else inputRefs.current.delete(key);
-          }}
-        />
       </div>
     </section>
   );

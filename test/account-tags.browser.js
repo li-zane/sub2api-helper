@@ -12,7 +12,24 @@ async page => {
   const chip = label => row.getByRole("button", { name: new RegExp("^" + label + "：") });
   const picker = name => page.getByRole("dialog", { name: "选择" + name });
   const rotation = page.getByRole("dialog", { name: "轮转停止时间" });
-  const remark = () => row.locator(".account-remark-button").innerText();
+  const remarkButton = row.locator(".account-remark-button");
+  const remark = () => remarkButton.getAttribute("title");
+  const checkAccountLayout = () => row.evaluate(element => {
+    const account = element.querySelector(".account-column");
+    const plan = element.querySelector(".plan-cell");
+    const tags = [...account.querySelectorAll(".account-tag-chip")];
+    const labels = tags.map(tag => tag.getAttribute("aria-label").split("：")[0]);
+    if (labels.join(",") !== "商家,车次" || plan.querySelectorAll(".account-tag-chip").length !== 1 ||
+        !plan.querySelector('.account-tag-chip[aria-label^="时效："]')) throw Error("标签位置不正确");
+    const costLine = account.querySelector(".account-cost-line");
+    const cost = costLine.querySelector(".account-cost-button").getBoundingClientRect();
+    const remarkLine = account.querySelector(".account-remark-line");
+    const remark = remarkLine.querySelector(".account-remark-button");
+    if (tags.some(tag => !costLine.contains(tag) || Math.abs(tag.getBoundingClientRect().top - cost.top) > 1) ||
+        cost.right > account.getBoundingClientRect().right) throw Error("商家、车次和金额未对齐");
+    if (remarkLine.children.length !== 1 || remark.getBoundingClientRect().top < cost.bottom ||
+        remark.textContent.trim()) throw Error("备注图标未独占一行");
+  });
   await page.setViewportSize({ width: 1440, height: 900 });
   await chip("商家").waitFor();
   await check("选择商家、新建车次并写入备注", async () => {
@@ -24,6 +41,8 @@ async page => {
     await picker("车次").getByRole("textbox").press("Enter");
     await picker("车次").waitFor({ state: "hidden" });
     if (!(await remark()).endsWith("[商家] 豆姐, [车次] 晚班车。")) throw Error(await remark());
+    await checkAccountLayout();
+    await row.locator(".account-column").screenshot({ path: evidence + "/account-tags.png" });
   });
   await check("取消轮转保留原备注，确认后显示停止时间", async () => {
     const before = await remark();
@@ -50,6 +69,7 @@ async page => {
   });
   await check("窄屏标签可选且成本弹窗可保存", async () => {
     await page.setViewportSize({ width: 375, height: 812 });
+    await checkAccountLayout();
     await chip("车次").click();
     const list = picker("车次");
     await list.getByRole("button", { name: "晚班车", exact: true }).waitFor();
