@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { OVERLOAD_MESSAGE } from "../src/overload-monitor.mjs";
+import { OVERLOAD_MESSAGE, RATE_LIMIT_MESSAGE } from "../src/overload-monitor.mjs";
 import { recentOperation } from "../web/src/recent-operation.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -19,7 +19,6 @@ const records = [
   { id: 7, platform: "openai", type: "oauth", name: "冷却测试账号", status: "active", schedulable: true, proxy_id: 0, credentials: { email, plan_type: "plus" } },
   { id: 8, platform: "openai", type: "oauth", name: "原本停用账号", status: "active", schedulable: false, proxy_id: 0, credentials: { email: "manual@example.test", plan_type: "free" } },
 ];
-let logRows = makeRows();
 let samples = 0, finishSample;
 const sampleReady = new Promise(resolve => { finishSample = resolve; });
 let releaseSample;
@@ -43,7 +42,19 @@ const remote = http.createServer(async (req, res) => {
   if (url.pathname === "/api/v1/admin/proxies/all" || url.pathname === "/api/v1/admin/groups/all") return res.end("[]");
   if (url.pathname.includes("/ops/requests")) return res.end('{"data":{"items":[],"total":0}}');
   if (url.pathname.includes("/ops/upstream-errors")) {
-    const rows = logRows.filter(row => String(row.account_id) === url.searchParams.get("account_id"));
+    // Anchor logs to the monitor's exclusive query end so CI can start
+    // immediately after a 15-minute boundary without seeding the prior bucket.
+    const timestamp = new Date(Date.parse(url.searchParams.get("end_time")) - 1).toISOString();
+    const codes = url.searchParams.get("status_codes").split(",");
+    const rows = url.searchParams.get("account_id") === "7"
+      ? [503, 503, 429].filter(code => codes.includes(String(code))).map((code, index) => ({
+        id: index + 1,
+        account_id: 7,
+        status_code: code,
+        message: code === 429 ? RATE_LIMIT_MESSAGE : OVERLOAD_MESSAGE,
+        created_at: timestamp,
+      }))
+      : [];
     return res.end(JSON.stringify({ data: { items: rows, total: rows.length } }));
   }
   const match = /\/accounts\/(\d+)\/schedulable$/.exec(url.pathname);
@@ -129,7 +140,6 @@ try {
   assert.deepEqual((await job()).overloadAutoCooldown.operation, resumed.overloadAutoCooldown.operation, "recovery operation was lost on restart");
   console.log("PASS: auto-cooldown HTTP auth/validation, saved task rule, per-account switch, threshold pool pause, unchanged login/binding, persisted restart deadline, overdue resume and originally-disabled preservation");
   if (process.argv.includes("--serve")) {
-    logRows = makeRows();
     const disk = JSON.parse(await fs.readFile(statePath, "utf8"));
     delete disk.accounts[email].lastResumedAt;
     await stop(); await fs.writeFile(statePath, JSON.stringify(disk)); await start();
@@ -143,7 +153,6 @@ try {
 } catch (error) { error.message += `\n${logs}`; throw error; }
 finally { releaseSample(); await stop(); remote.closeAllConnections(); await new Promise(resolve => remote.close(resolve)); await fs.rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 
-function makeRows() { return [1, 2, 3].map(id => ({ id, account_id: 7, status_code: 503, message: OVERLOAD_MESSAGE, created_at: new Date(Date.now() - 10_000 - id).toISOString() })); }
 async function job() { return (await get("/api/jobs")).jobs.find(job => job.id === jobId); }
 async function get(route) { return (await fetch(`${base}${route}`, { headers })).json(); }
 async function post(route, body) { const r = await fetch(`${base}${route}`, { method: "POST", headers, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() }; }
