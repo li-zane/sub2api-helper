@@ -13,7 +13,7 @@ async page => {
   const picker = name => page.getByRole("dialog", { name: "选择" + name });
   const rotation = page.getByRole("dialog", { name: "轮转停止时间" });
   const remarkButton = row.locator(".account-remark-button");
-  const remark = () => remarkButton.getAttribute("title");
+  const remark = () => remarkButton.locator(".account-remark-text").textContent();
   const checkAccountLayout = () => row.evaluate(element => {
     const account = element.querySelector(".account-column");
     const plan = element.querySelector(".plan-cell");
@@ -28,7 +28,11 @@ async page => {
     if (tags.some(tag => !costLine.contains(tag) || Math.abs(tag.getBoundingClientRect().top - cost.top) > 1) ||
         cost.right > account.getBoundingClientRect().right) throw Error("商家、车次和金额未对齐");
     if (remarkLine.children.length !== 1 || remark.getBoundingClientRect().top < cost.bottom ||
-        remark.textContent.trim()) throw Error("备注图标未独占一行");
+        !remark.querySelector(".account-remark-text")?.textContent.trim()) throw Error("备注未独占一行显示");
+    if (element.querySelector(".account-tags .tag-remove") ||
+        [...element.querySelectorAll(".account-tags > button")].some(button => !button.classList.contains("account-tag-chip"))) {
+      throw Error("标签旁仍有清除按钮");
+    }
   });
   await page.setViewportSize({ width: 1440, height: 900 });
   await chip("商家").waitFor();
@@ -61,6 +65,7 @@ async page => {
     if (!(await remark()).endsWith("[时效] 轮转, [停止时间] 2027-01-23 10:45。")) throw Error(await remark());
     await page.reload();
     await row.getByRole("button", { name: /时效：轮转至 2027-01-23 10:45/ }).waitFor();
+    await checkAccountLayout();
     await row.locator(".plan-cell").screenshot({ path: evidence + "/plan-tags.png" });
     await openRotation();
     await rotation.getByRole("button", { name: "不指定时间" }).click();
@@ -106,13 +111,15 @@ async page => {
     await list.getByRole("button", { name: "豆姐", exact: true }).waitFor({ state: "hidden" });
     await page.keyboard.press("Escape");
   });
-  await check("行内清除时效会一同清除停止时间", async () => {
+  await check("从时效菜单清空标签会一同清除停止时间", async () => {
     await chip("时效").click();
     await picker("时效").getByRole("button", { name: "轮转", exact: true }).click();
     await rotation.getByLabel("停止时间（北京时间）").fill("2027-01-23T10:45");
     await rotation.getByRole("button", { name: "确认修改" }).click();
     await rotation.waitFor({ state: "hidden" });
-    await row.getByRole("button", { name: "清除当前账号的时效标签" }).click();
+    await chip("时效").click();
+    await picker("时效").getByRole("button", { name: "清空时效" }).click();
+    await picker("时效").waitFor({ state: "hidden" });
     await row.getByRole("button", { name: /^时效：未设置/ }).waitFor();
     const remaining = await remark();
     if (!remaining.includes("[商家] 豆姐") || remaining.includes("[时效]") || remaining.includes("[停止时间]")) throw Error(remaining);

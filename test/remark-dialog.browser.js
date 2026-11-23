@@ -31,14 +31,26 @@ async page => {
   });
   await test('successful-save-updates-row-and-reopens', async () => {
     await page.unroute(/\/api\/jobs\/[^/]+\/remark$/, fail);
-    await dialog.locator('#account-remark').fill('fixture saved remark');
+    const content = '第一行备注，保留完整内容。\n' + 'longAccountRemarkWithoutSpaces'.repeat(5) + '\n最后一行。';
+    await dialog.locator('#account-remark').fill(content);
     const response = page.waitForResponse(r => /\/api\/jobs\/[^/]+\/remark$/.test(r.url()) && r.request().method() === 'POST');
     await dialog.getByRole('button', { name: '保存备注', exact: true }).click();
     check((await response).ok(), 'save failed');
     await dialog.waitFor({ state: 'hidden' });
-    await page.waitForFunction(() => document.querySelector('tr.job-row .account-remark-button')?.getAttribute('title') === 'fixture saved remark');
+    await page.waitForFunction(expected => document.querySelector('tr.job-row .account-remark-text')?.textContent === expected, content);
+    for (const width of [1440, 375]) {
+      await page.setViewportSize({ width, height: 900 });
+      check(await trigger.locator('.account-remark-text').evaluate(element => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const rects = [...range.getClientRects()];
+        const button = element.closest('button').getBoundingClientRect();
+        return new Set(rects.map(rect => rect.top)).size > 3 && rects.every(rect =>
+          rect.right <= button.right && rect.bottom <= button.bottom);
+      }), 'multiline remark was not fully visible at width ' + width);
+    }
     dialog = await open();
-    check(await dialog.locator('#account-remark').inputValue() === 'fixture saved remark', 'saved remark not restored');
+    check(await dialog.locator('#account-remark').inputValue() === content, 'saved remark not restored');
     await page.keyboard.press('Escape');
     await dialog.waitFor({ state: 'hidden' });
     check(errors.length === 0, errors.join('; '));

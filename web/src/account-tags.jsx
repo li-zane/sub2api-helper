@@ -10,27 +10,13 @@ const labels = { merchant: "商家", trip: "车次", validity: "时效" };
 const icons = { merchant: Store, trip: TrainFront, validity: Clock3 };
 const fieldsByPlacement = { account: ["merchant", "trip"], plan: ["validity"] };
 
-export function AccountTags({ placement, job, options, onSave, onLoadOptions, onRemoveOption, onError }) {
+export function AccountTags({ placement, job, options, onSave, onLoadOptions, onRemoveOption }) {
   const [field, setField] = useState("");
-  const [clearing, setClearing] = useState(false);
   const anchor = useRef(null);
   const tags = job.accountTags || {};
   function close(restore = true) {
     setField("");
     if (restore) anchor.current?.focus({ preventScroll: true });
-  }
-  async function clear(key, event) {
-    if (clearing) return;
-    const trigger = event.currentTarget.previousElementSibling;
-    setClearing(true);
-    try {
-      await onSave(job, { [key]: "" });
-      trigger?.focus({ preventScroll: true });
-    } catch (err) {
-      onError(err.message);
-    } finally {
-      setClearing(false);
-    }
   }
   return <div className={`account-tags account-tags--${placement}`}>
     {fieldsByPlacement[placement].map(key => {
@@ -39,19 +25,14 @@ export function AccountTags({ placement, job, options, onSave, onLoadOptions, on
       const Icon = key === "validity" && value ? (value === "轮转" ? RefreshCw : InfinityIcon) : icons[key];
       const detail = value === "轮转" && tags.stopAt ? "轮转至 " + tags.stopAt.replace("T", " ") + "（北京时间）" : value;
       const deadline = key === "validity" && value === "轮转" && tags.stopAt;
-      return <div key={key} className="account-tag-line"><button type="button" className="account-tag-chip" data-tone={value ? (key === "validity" ? value : "filled") : "empty"}
+      return <button key={key} type="button" className="account-tag-chip" data-tone={value ? (key === "validity" ? value : "filled") : "empty"}
         aria-label={label + "：" + (detail || "未设置") + "，点击编辑"} title={label + " · " + (detail || "未设置")}
         aria-haspopup="dialog" aria-expanded={field === key} onClick={event => {
-          if (clearing) return;
           anchor.current = event.currentTarget;
           setField(current => current === key ? "" : key);
         }}><Icon size={11} aria-hidden="true" /><span>{value || label}</span>
         {deadline && <time dateTime={deadline + "+08:00"}>{deadline.slice(5).replace("-", "/").replace("T", " ")}</time>}
-      </button>
-        {value && <button type="button" className="tag-remove tag-remove-current" disabled={clearing}
-          aria-label={"清除当前账号的" + label + "标签"} title={"清除当前账号的" + label + "标签"}
-          onClick={event => clear(key, event)}><X size={12} aria-hidden="true" /></button>}
-      </div>;
+      </button>;
     })}
     {field && <TagEditor key={field} {...{ field, tags, options, anchor, close, onLoadOptions, onRemoveOption }} onSave={patch => onSave(job, patch)} />}
   </div>;

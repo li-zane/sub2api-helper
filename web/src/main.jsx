@@ -3904,7 +3904,7 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
               {(tagsAvailable || pricingAvailable) && (
                 <div className="account-meta-line account-cost-line">
                   {tagsAvailable && <AccountTags placement="account" job={job} options={tagOptions} onLoadOptions={onLoadTagOptions}
-                    onRemoveOption={onRemoveTagOption} onSave={onSaveTags} onError={onError} />}
+                    onRemoveOption={onRemoveTagOption} onSave={onSaveTags} />}
                   {pricingAvailable && <button type="button" className="account-cost-button" onClick={onOpenCost}
                     title={`账号成本 ${formatAccountCost(job.accountCostCny)}；点击修改`} aria-label={`编辑 ${job.email} 的账号成本`}>
                     {formatAccountCost(job.accountCostCny)}
@@ -3913,8 +3913,11 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
               )}
               {remarksAvailable && (
                 <div className="account-meta-line account-remark-line">
-                  <button type="button" className={`account-remark-button ${job.remark ? "has-remark" : ""}`} onClick={onOpenRemark} title={job.remark || "添加备注"} aria-label={`编辑 ${job.email} 的备注`}>
+                  <button type="button" className={`account-remark-button ${job.remark ? "has-remark" : ""}`} onClick={onOpenRemark}
+                    aria-label={`编辑 ${job.email} 的备注`} aria-describedby={job.remark ? `account-remark-text-${job.id}` : undefined}
+                    title={job.remark ? undefined : "添加备注"}>
                     <FileText size={13} aria-hidden="true" />
+                    {job.remark && <span className="account-remark-text" id={`account-remark-text-${job.id}`}>{job.remark}</span>}
                   </button>
                 </div>
               )}
@@ -3925,7 +3928,7 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
       <td className={`plan-cell ${job.planType ? "" : "unknown"}`} title={job.planType || "未知"}>
         <span className="plan-tag">{formatPlanTypeLabel(job.planType, planTypeMapping)}</span>
         {tagsAvailable && <AccountTags placement="plan" job={job} options={tagOptions} onLoadOptions={onLoadTagOptions}
-          onRemoveOption={onRemoveTagOption} onSave={onSaveTags} onError={onError} />}
+          onRemoveOption={onRemoveTagOption} onSave={onSaveTags} />}
         <CredentialSyncNote sync={job.webCredentialSync} planTypeMapping={planTypeMapping} />
         {job.sub2apiInPool === true && job.sub2apiPlanType && job.planType
           && job.sub2apiPlanType !== job.planType && (
