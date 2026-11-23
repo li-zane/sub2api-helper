@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 
 const output = await fs.mkdtemp(path.join(os.tmpdir(), 'helper-priority-console-'));
 const account = { id: 42, name: 'priority@example.test', platform: 'openai', type: 'oauth', status: 'active', schedulable: true,
-  priority: 9, concurrency: 3, created_at: '2026-11-01T00:00:00Z', group_ids: [], extra: {},
+  priority: 9, concurrency: 3, rate_multiplier: 1.5, created_at: '2026-11-01T00:00:00Z', group_ids: [], extra: {},
   credentials: { email: 'priority@example.test', plan_type: 'free', access_token: 'fixture-access', chatgpt_account_id: 'fixture-account' } };
 let child, headers, logs = '', answer = '最终答案：21', samples = 0;
 const writes = [];
@@ -103,49 +103,63 @@ try {
   assert.equal(state.sub2apiPriority, 7); assert.equal(state.modelFingerprint.prioritySyncPending, false); assert.equal(state.modelFingerprint.prioritySyncError, null);
   console.log('FINGERPRINT_PRIORITY_HTTP_PASS settings validation; real sampler to mock pool; date rule precedence/no repeat writes; restart; disable restores date baseline; manual priority ownership; task preservation; zero; mismatch restores; status sync');
 
-  const concurrency = { enabled: true, matchedFirstTrip: 12, mismatchedFirstTrip: 6, matchedLongTerm: 0 };
-  const priority = { enabled: true, matchedFirstTrip: 0, mismatchedFirstTrip: 4, matchedLongTerm: 2 };
-  const planPolicy = { concurrency, priority };
+  const concurrency = { enabled: true, matchedLongTerm: 0, mismatchedLongTerm: 6 };
+  const priority = { enabled: true, matchedLongTerm: 2, mismatchedLongTerm: 4 };
+  const rotation = { priority: 15, rateMultiplier: 0.75 };
+  const planPolicy = { concurrency, priority, rotation };
   config.priority = 7;
   config.concurrency = 3;
   const savePolicies = policies => api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: policies } });
-  await api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: { free: { ...planPolicy, priority: { ...priority, matchedFirstTrip: -1 } } } } }, 400);
-  await api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: { free: { ...planPolicy, concurrency: { ...concurrency, mismatchedFirstTrip: 10001 } } } } }, 400);
+  await api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: { free: { ...planPolicy, priority: { ...priority, matchedLongTerm: -1 } } } } }, 400);
+  await api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: { free: { ...planPolicy, rotation: { ...rotation, rateMultiplier: 0.1234567 } } } } }, 400);
+  const migrated = await savePolicies({ free: {
+    concurrency: { enabled: true, matchedFirstTrip: 12, matchedLongTerm: 0, mismatchedFirstTrip: 6 },
+    priority: { enabled: true, matchedFirstTrip: 2, matchedLongTerm: null, mismatchedFirstTrip: 4 },
+  } });
+  assert.deepEqual(migrated.config.fingerprintPoolPolicies.free, { concurrency, priority, rotation: { priority: null, rateMultiplier: null } });
   const saved = await savePolicies({ free: planPolicy, plus: { concurrency: { enabled: false, value: 10 }, priority: { ...priority, enabled: false } } });
   assert.deepEqual(saved.profiles.find(profile => profile.id === saved.activeProfileId).fingerprintPoolPolicies.free, planPolicy);
   assert.equal(saved.config.fingerprintPoolPolicies.plus.concurrency.enabled, false);
   const note = text => api(`/api/jobs/${job.id}/remark`, { remark: text });
-  const waitForNumbers = (p, c) => waitFor(async () => {
-    await api('/api/sub2api/account-status?refresh=1');
-    return account.priority === p && (c === undefined || account.concurrency === c);
-  });
-  await note('[车次] 头车, [时效] 长效。');
+  const waitForNumbers = async (p, c, rate = 1.5) => {
+    try {
+      await waitFor(async () => {
+        await api('/api/sub2api/account-status?refresh=1');
+        return account.priority === p && account.concurrency === c && account.rate_multiplier === rate;
+      });
+    } catch (error) {
+      assert.deepEqual([account.priority, account.concurrency, account.rate_multiplier], [p, c, rate], error.message);
+    }
+  };
+  await note('[车次] 二车, [时效] 长效。');
   await waitForNumbers(4, 6);
   answer = '最终答案：21'; await runCheck(job);
-  await waitForNumbers(0, 12);
-  await note('[车次] 二车, [时效] 长效。');
+  await waitForNumbers(2, 0);
+  await note('[车次] 头车, [时效] 长效。');
   await waitForNumbers(2, 0);
   await note('[车次] 二车, [时效] 轮转。');
-  await waitForNumbers(7, 3);
+  await waitForNumbers(15, 3, 0.75);
   await note('[车次] 头车, [时效] 长效。');
-  await waitForNumbers(0, 12);
-  await savePolicies({ free: { concurrency: { ...concurrency, matchedFirstTrip: null }, priority } });
-  await waitForNumbers(0, 0);
-
-  // A legacy PlanType's single concurrency value still applies to a pass
-  // without a tier, and its original shape survives an API round trip.
-  const legacyConcurrency = { enabled: true, value: 8 };
-  const legacy = await savePolicies({ free: { concurrency: legacyConcurrency, priority } });
-  assert.deepEqual(legacy.config.fingerprintPoolPolicies.free.concurrency, legacyConcurrency);
-  await note('[车次] 二车, [时效] 轮转。');
-  await waitForNumbers(7, 8);
-
-  await savePolicies({ free: { concurrency: { ...concurrency, enabled: false }, priority: { ...priority, enabled: false } } });
+  await waitForNumbers(2, 0);
+  await note('[车次] 头车。');
   await waitForNumbers(7, 3);
+
+  const legacyConcurrency = { enabled: true, value: 8 };
+  const legacy = await savePolicies({ free: { ...planPolicy, concurrency: legacyConcurrency } });
+  assert.deepEqual(legacy.config.fingerprintPoolPolicies.free.concurrency, legacyConcurrency);
+  await note('[时效] 长效。');
+  await waitForNumbers(2, 8);
+
+  await api('/api/model-fingerprint/settings', { settings: { ...policy, models: ['other-fixture-model'], enabledPlanTypes: [] } });
+  await note('[时效] 轮转。');
+  await waitForNumbers(15, 3, 0.75);
+  assert.equal((await api('/api/jobs')).jobs.find(item => item.id === job.id).modelFingerprint.result, null);
   await stop(); await start();
-  const restoredPolicies = (await api('/api/sub2api/settings')).config.fingerprintPoolPolicies.free;
-  assert.deepEqual(restoredPolicies, { concurrency: { ...concurrency, enabled: false }, priority: { ...priority, enabled: false } });
-  console.log('FINGERPRINT_POOL_POLICY_HTTP_PASS both ladders; first-trip pass/fail, long-term pass, blank fallthrough, zero, profile defaults, legacy and restart');
+  assert.deepEqual((await api('/api/sub2api/settings')).config.fingerprintPoolPolicies.free.rotation, rotation);
+  await waitForNumbers(15, 3, 0.75);
+  await note('[时效] 长效。');
+  await waitForNumbers(7, 3);
+  console.log('FINGERPRINT_POOL_POLICY_HTTP_PASS long-term pass/fail, trip-independent selection, rotation without a verdict, decimal rate, restored defaults, migration and restart');
 } finally {
   await stop(); pool.closeAllConnections(); await new Promise(resolve => pool.close(resolve)); await fs.rm(output, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }

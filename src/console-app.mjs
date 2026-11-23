@@ -69,7 +69,7 @@ import { SubscriptionHistory } from "./subscription-history.mjs";
 import { createSubscriptionHistorySync } from "./subscription-history-sync.mjs";
 import { normalizeAccountCost, restoredAccountCost } from "../shared/account-pricing.mjs";
 import { TAG_OPTION_KEYS, readAccountTags, patchAccountTags, writeAccountTags } from "../shared/account-tags.mjs";
-import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolNumber, isLegacyFingerprintConcurrency } from "../shared/fingerprint-pool-policy.mjs";
+import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolNumber, isLegacyFingerprintConcurrency, longTermPolicyValues, parsePoolRateMultiplier } from "../shared/fingerprint-pool-policy.mjs";
 import { createAccountTagCatalog } from "./account-tag-catalog.mjs";
 import { OverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService } from "./model-fingerprint.mjs";
@@ -550,17 +550,26 @@ export function createConsoleApp(options = {}) {
       return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && (sub2ApiAccountSchedulable(a) === true || manual && a.status === "active" && overloadCooldown.ownsPause(sub2ApiAccountEmail(a), a.id)) && !limited.has(sub2ApiAccountEmail(a))).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
     },
     getAccount: readFingerprintAccount, getPoolAccount: getSub2ApiAccount, sample: fingerprintSampler,
+    getPoolNumberJobs: () => listUniqueJobs().filter(job => !job.deleted && !isActive(job.status))
+      .map(job => ({ email: job.email, planType: getJobPlanType(job) || "unknown" })),
     getPoolNumberPolicy: (email, planType, field, verdict) => {
       const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
       const type = normalizePlanType(planType).toLowerCase();
       if (!config || !type) return null;
       const binding = resolveSub2ApiProfileBinding(type);
       const policies = binding ? sub2ApiProfiles.get(binding)?.fingerprintPoolPolicies : config.fingerprintPoolPolicies;
-      if (!policies || !Object.hasOwn(policies, type)) return null;
-      const policy = policies[type];
       const job = findJobByEmail(email);
       const tags = readAccountTags(job?.remark, job?.accountTagsCleared);
-      return { enabled: policy[field].enabled, value: fingerprintPoolNumber(policy, field, verdict, tags) };
+      const policy = policies && Object.hasOwn(policies, type) ? policies[type] : null;
+      if (tags.validity === "轮转" || field === "rate_multiplier") {
+        const value = fingerprintPoolNumber(policy || DEFAULT_FINGERPRINT_POOL_POLICY, field, verdict, tags);
+        return { enabled: value !== null, value, independent: true };
+      }
+      if (!policy) return null;
+      return {
+        enabled: policy[field].enabled && tags.validity === "长效",
+        value: fingerprintPoolNumber(policy, field, verdict, tags),
+      };
     },
     getPoolNumberDefaults: async (email, id, planType) => {
       const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
@@ -582,6 +591,7 @@ export function createConsoleApp(options = {}) {
     updateGroups: async (config, id, ids) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ group_ids: ids.map(Number) }) }),
     updateConcurrency: async (config, id, concurrency) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ concurrency }) }),
     updatePriority: async (config, id, priority) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ priority }) }),
+    updateRateMultiplier: async (config, id, rate_multiplier) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ rate_multiplier }) }),
     onChange: invalidateSub2ApiAccountStatusCache,
   });
   async function recoverFingerprintAuthorization(email, failure) {
@@ -5425,12 +5435,22 @@ export function createConsoleApp(options = {}) {
           continue;
         }
         const ladder = { enabled: section.enabled };
+        const values = longTermPolicyValues(section);
         for (const [tier, tierLabel] of Object.entries(FINGERPRINT_POOL_TIERS)) {
-          ladder[tier] = parseOptionalSub2ApiInteger(section[tier], tierLabel + label, 0, 10000);
+          ladder[tier] = parseOptionalSub2ApiInteger(values[tier], tierLabel + label, 0, 10000);
         }
         normalized[field] = ladder;
       }
-      policies[type] = normalized;
+      const rotation = Object.hasOwn(policy, "rotation") ? policy.rotation : DEFAULT_FINGERPRINT_POOL_POLICY.rotation;
+      if (!rotation || typeof rotation !== "object" || Array.isArray(rotation)) throw httpError(400, "轮转规则格式无效");
+      const rateMultiplier = parsePoolRateMultiplier(rotation.rateMultiplier);
+      if (rotation.rateMultiplier != null && rotation.rateMultiplier !== "" && rateMultiplier === null) {
+        throw httpError(400, "轮转计费倍率须为 0–1000000，最多 6 位小数");
+      }
+      policies[type] = {
+        ...normalized,
+        rotation: { priority: parseOptionalSub2ApiInteger(rotation.priority, "轮转优先级", 0, 10000), rateMultiplier },
+      };
     }
     return policies;
   }
@@ -6777,7 +6797,7 @@ export function createConsoleApp(options = {}) {
 
   async function refreshPoolRuleAfterRemark(job, previousTags) {
     const currentTags = readAccountTags(job.remark, job.accountTagsCleared);
-    if (previousTags.trip !== currentTags.trip || previousTags.validity !== currentTags.validity) {
+    if (previousTags.validity !== currentTags.validity) {
       await modelFingerprint.refreshPoolNumbers(job.email);
     }
   }

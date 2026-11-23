@@ -337,9 +337,15 @@
 
 .fpp-ladder-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
   align-items: start;
+}
+
+.fpp-rotation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
 }
 
 .fpp-step-tile {
@@ -350,43 +356,11 @@
   min-width: 0;
 }
 
-.fpp-step-tile:not(:last-child)::after {
-  content: "›";
-  position: absolute;
-  top: 34px;
-  right: -10px;
-  color: var(--subtle, #64748b);
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1;
-  pointer-events: none;
-}
-
 .fpp-step-head {
   display: flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
-}
-
-.fpp-step-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--accent-soft, rgba(0, 113, 227, 0.12));
-  color: var(--accent-ink, #0058b0);
-  font-size: 11px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-}
-
-.fpp-step-badge.is-muted {
-  background: rgba(100, 116, 139, 0.16);
-  color: var(--muted, #475569);
 }
 
 .fpp-step-label {
@@ -441,9 +415,6 @@
     gap: 10px;
   }
 
-  .fpp-step-tile:not(:last-child)::after {
-    content: none;
-  }
 }
 
 /* Narrow / Mobile Container Width: < 380px */
@@ -464,7 +435,8 @@
     flex: 0 0 auto;
   }
 
-  .fpp-ladder-grid {
+  .fpp-ladder-grid,
+  .fpp-rotation-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
   }
