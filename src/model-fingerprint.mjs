@@ -564,6 +564,14 @@ export class ModelFingerprintService {
     if (!entry?.[pendingKey] || !update) return;
     const legacyPolicy = this.settings[descriptor.setting];
     const configured = this.getPoolNumberPolicy?.(email, planType, field, result?.status);
+    // A skipped case leaves the observed value and its existing ownership intact.
+    if (configured?.skip) {
+      entry[pendingKey] = false;
+      entry[errorKey] = null;
+      await this.persist();
+      this.onChange();
+      return;
+    }
     const enabled = configured ? configured.enabled : Boolean(legacyPolicy?.enabled && this.effective(email, planType).enabled);
     const value = configured ? configured.value : result?.status === "match" ? legacyPolicy?.value : null;
     const definitive = result?.status === "match" || result?.status === "mismatch";

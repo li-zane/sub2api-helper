@@ -1,10 +1,7 @@
-import { FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, ROTATION_POOL_FIELDS, isLegacyFingerprintConcurrency, longTermPolicyValues, parsePoolRateMultiplier } from "../../shared/fingerprint-pool-policy.mjs";
+import { FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolTierValues, parsePoolRateMultiplier } from "../../shared/fingerprint-pool-policy.mjs";
 
 export const POOL_STEP_FIELDS = Object.keys(FINGERPRINT_POOL_TIERS);
 const poolFields = Object.keys(FINGERPRINT_POOL_FIELDS);
-const rotationFields = Object.keys(ROTATION_POOL_FIELDS);
-const parseRotationField = (field, value) => field === "rateMultiplier" ? parsePoolRateMultiplier(value) : parseIntegerInRange(value);
-const mapRotation = read => Object.fromEntries(rotationFields.map(field => [field, read(field)]));
 
 export function normalizePlanTypeKey(value) {
   return String(value ?? "").trim().toLowerCase().slice(0, 128);
@@ -29,20 +26,17 @@ function mapPoolTiers(readTier) {
 }
 
 export function createDefaultPolicyDraft() {
-  return { ...mapPoolSections(() => ({ enabled: false, ...mapPoolTiers(() => "") })), rotation: mapRotation(() => "") };
+  return { ...mapPoolSections(() => ({ enabled: false, ...mapPoolTiers(() => "") })), rotation: { rateMultiplier: "" } };
 }
 
 export function normalizeFingerprintPoolPolicyEntry(raw) {
   const sections = mapPoolSections(field => {
     const section = raw?.[field] || {};
     const enabled = section.enabled === true;
-    if (field === "concurrency" && isLegacyFingerprintConcurrency(section)) {
-      return { enabled, value: parseIntegerInRange(section.value) ?? 10 };
-    }
-    const values = longTermPolicyValues(section);
+    const values = fingerprintPoolTierValues(section, field, raw?.rotation);
     return { enabled, ...mapPoolTiers(key => parseIntegerInRange(values[key])) };
   });
-  return { ...sections, rotation: mapRotation(field => parseRotationField(field, raw?.rotation?.[field])) };
+  return { ...sections, rotation: { rateMultiplier: parsePoolRateMultiplier(raw?.rotation?.rateMultiplier) } };
 }
 
 export function normalizeFingerprintPoolPoliciesMap(rawPolicies) {
@@ -62,10 +56,7 @@ export function policyToDraft(policy) {
     enabled: normalized[field].enabled,
     ...mapPoolTiers(key => String(normalized[field][key] ?? "")),
   }));
-  draft.rotation = mapRotation(field => String(normalized.rotation[field] ?? ""));
-  if (isLegacyFingerprintConcurrency(normalized.concurrency)) {
-    draft.legacyConcurrencyValue = normalized.concurrency.value;
-  }
+  draft.rotation = { rateMultiplier: String(normalized.rotation.rateMultiplier ?? "") };
   return draft;
 }
 
@@ -94,45 +85,33 @@ export function togglePolicyDraftSwitch(currentDraft, field, enabled) {
 export function validatePolicyDraft(draft) {
   const errors = {};
   let firstErrorField = null;
-  let firstErrorMessage = "";
+  const integerError = "留空或输入 0–10000 的整数";
+  function checkInput(input, value, parse, message) {
+    const text = String(value ?? "").trim();
+    if (!draft?.__badInputs?.[input] && (!text || parse(text) !== null)) return;
+    errors[input] = message;
+    firstErrorField ??= input;
+  }
   for (const field of poolFields) {
     if (!draft?.[field]?.enabled) continue;
     for (const key of POOL_STEP_FIELDS) {
-      const input = `${field}.${key}`;
-      const text = String(draft[field][key] ?? "").trim();
-      if (!draft.__badInputs?.[input] && (!text || parseIntegerInRange(text) !== null)) continue;
-      errors[input] = "留空或输入 0–10000 的整数";
-      if (!firstErrorField) {
-        firstErrorField = input;
-        firstErrorMessage = errors[input];
-      }
+      checkInput(`${field}.${key}`, draft[field][key], parseIntegerInRange, integerError);
     }
   }
-  for (const field of rotationFields) {
-    const input = `rotation.${field}`;
-    const text = String(draft?.rotation?.[field] ?? "").trim();
-    if (!draft?.__badInputs?.[input] && (!text || parseRotationField(field, text) !== null)) continue;
-    errors[input] = field === "rateMultiplier" ? "留空或输入 0–1000000，最多 6 位小数" : "留空或输入 0–10000 的整数";
-    if (!firstErrorField) {
-      firstErrorField = input;
-      firstErrorMessage = errors[input];
-    }
-  }
-  return { valid: firstErrorField === null, errors, firstErrorField, firstErrorMessage };
+  checkInput("rotation.rateMultiplier", draft?.rotation?.rateMultiplier, parsePoolRateMultiplier,
+    "留空或输入 0–1000000，最多 6 位小数");
+  return { valid: firstErrorField === null, errors, firstErrorField, firstErrorMessage: errors[firstErrorField] ?? "" };
 }
 
 export function draftToPolicy(draft) {
   const sections = mapPoolSections(field => {
     const enabled = draft?.[field]?.enabled === true;
-    if (field === "concurrency" && Number.isInteger(draft?.legacyConcurrencyValue)) {
-      return { enabled, value: draft.legacyConcurrencyValue };
-    }
     return {
       enabled,
       ...mapPoolTiers(key => draft?.__badInputs?.[`${field}.${key}`] ? null : parseIntegerInRange(draft?.[field]?.[key])),
     };
   });
-  return { ...sections, rotation: mapRotation(field => parseRotationField(field, draft?.rotation?.[field])) };
+  return { ...sections, rotation: { rateMultiplier: parsePoolRateMultiplier(draft?.rotation?.rateMultiplier) } };
 }
 
 export function resolveProfilePlanTypes({

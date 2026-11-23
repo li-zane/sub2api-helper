@@ -337,15 +337,13 @@
 
 .fpp-ladder-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   align-items: start;
 }
 
-.fpp-rotation-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+.fpp-rotation-rate {
+  max-width: 240px;
 }
 
 .fpp-step-tile {
@@ -375,23 +373,6 @@
   min-width: 0;
 }
 
-.fpp-fallback-block {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 36px;
-  padding: 0 8px;
-  border: 1px dashed var(--line-strong, #cbd5e1);
-  border-radius: var(--radius-xs, 7px);
-  background: var(--surface-muted, #f1f5f9);
-  color: var(--muted, #475569);
-  font-size: 11.5px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .fpp-footnote-row {
   display: flex;
   flex-wrap: wrap;
@@ -401,11 +382,6 @@
   font-size: 12px;
   line-height: 1.4;
   color: var(--muted, #475569);
-}
-
-.fpp-all-empty-hint {
-  color: var(--amber-ink, #b45309);
-  font-weight: 500;
 }
 
 /* Medium Container Width: 380px - 559px */
@@ -435,8 +411,7 @@
     flex: 0 0 auto;
   }
 
-  .fpp-ladder-grid,
-  .fpp-rotation-grid {
+  .fpp-ladder-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
   }
@@ -448,17 +423,12 @@
     gap: 4px 10px;
   }
 
-  .fpp-step-control {
-    width: 100%;
+  .fpp-rotation-rate {
+    max-width: none;
   }
 
-  .fpp-fallback-block {
-    min-height: 38px;
-    height: 38px;
-    padding-inline: 4px;
-    white-space: normal;
-    text-align: center;
-    line-height: 1.2;
+  .fpp-step-control {
+    width: 100%;
   }
 
   .fpp-step-input {

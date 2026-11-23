@@ -79,18 +79,22 @@ async (page) => {
     const free=panel.getByRole('tab',{name:/^Free\b/i}),plus=panel.getByRole('tab',{name:/^Plus\b/i});
     const save=d.getByRole('button',{name:'保存配置',exact:true});
     const card=panel.getByRole('tabpanel');
-    const placement=()=>card.locator('.fpp-pane > legend').allTextContents();
+    const checkTierOrder=async()=>{
+      const order=await card.locator('.fpp-ladder-grid').evaluateAll(grids=>grids.map(grid=>
+        [...grid.children].map(tile=>tile.querySelector('.fpp-step-label').childNodes[0].textContent.trim()).join(',')));
+      check(order.length===2&&order.every(tiers=>tiers==='不降智轮转,不降智长效,降智轮转,降智长效'),'four mutually exclusive cases are missing');
+    };
     const firstConcurrency=panel.getByRole('spinbutton',{name:/不降智长效\s*并发/});
     const firstPriority=panel.getByRole('spinbutton',{name:/不降智长效\s*优先级/});
     const concurrencySwitch=panel.getByRole('switch',{name:/分级并发/});
     const prioritySwitch=panel.getByRole('switch',{name:/分级优先级/});
     await free.click();
-    check((await placement()).join(',')==='轮转设置,分级并发,分级优先级','rotation settings are not the first policy section');
-    await panel.getByText(/沿用旧版不降智长效并发 10/).waitFor();
+    await checkTierOrder();
+    check(await firstConcurrency.inputValue()==='10','legacy concurrency was not migrated into the matching case');
     await prioritySwitch.click();
     await firstPriority.fill('0');
     await save.click();await d.waitFor({state:'detached'});
-    check(poolConfig.profiles[0].fingerprintPoolPolicies.free.concurrency.value===10,'editing priority replaced legacy concurrency');
+    check(poolConfig.profiles[0].fingerprintPoolPolicies.free.concurrency.matchedLongTerm===10,'editing priority replaced legacy concurrency');
     await open();await free.click();
     await firstConcurrency.fill('-1');
     await plus.click();
@@ -99,9 +103,20 @@ async (page) => {
     check(await free.getAttribute('aria-selected')==='true'&&await firstConcurrency.getAttribute('aria-invalid')==='true','invalid concurrency in other tab was not selected');
     check(await firstConcurrency.evaluate(el=>document.activeElement===el),'invalid concurrency field did not receive focus');
     await firstConcurrency.fill('0');
-    const rotatingPriority=panel.getByRole('spinbutton',{name:/轮转\s*优先级/});
+    const rotatingPriority=panel.getByRole('spinbutton',{name:/^不降智轮转\s*优先级/});
+    const rotatingConcurrency=panel.getByRole('spinbutton',{name:/^不降智轮转\s*并发/});
+    const degradedRotationPriority=panel.getByRole('spinbutton',{name:/^降智轮转\s*优先级/});
+    const degradedRotationConcurrency=panel.getByRole('spinbutton',{name:/^降智轮转\s*并发/});
     const rotatingRate=panel.getByRole('spinbutton',{name:/轮转\s*计费倍率/});
     await rotatingPriority.fill('15');
+    await firstConcurrency.fill('-1');
+    await rotatingConcurrency.fill('1.5');
+    await save.click();
+    check(await rotatingConcurrency.getAttribute('aria-invalid')==='true'&&await rotatingConcurrency.evaluate(el=>document.activeElement===el),'first invalid tier did not receive focus');
+    await firstConcurrency.fill('0');
+    await rotatingConcurrency.fill('5');
+    await degradedRotationConcurrency.fill('6');
+    check(await degradedRotationPriority.getAttribute('placeholder')==='跳过'&&await degradedRotationPriority.inputValue()==='','empty case is not displayed as skip');
     await rotatingRate.fill('1.2345678');
     await save.click();
     check(await rotatingRate.getAttribute('aria-invalid')==='true','invalid fractional rate was accepted');
@@ -109,7 +124,7 @@ async (page) => {
     await panel.getByRole('spinbutton',{name:/^降智长效\s*并发/}).fill('9');
     await card.screenshot({path:evidence+'/tiered-policy-desktop.png'});
     await page.setViewportSize({width:375,height:812});
-    check((await placement())[0]==='轮转设置','rotation settings are not first on mobile');
+    await checkTierOrder();
     const grids=panel.locator('.fpp-ladder-grid');
     await grids.first().evaluate(el=>new Promise(resolve=>requestAnimationFrame(resolve)));
     check(await grids.evaluateAll(els=>els.length===2&&els.every(el=>{
@@ -118,17 +133,17 @@ async (page) => {
     })),'policy grids are clipped by the mobile modal');
     check(await grids.locator('.fpp-step-label').evaluateAll(labels=>labels.every(label=>label.scrollWidth<=label.clientWidth+1)),
       'tier labels are clipped on mobile');
-    check(await grids.locator('.fpp-fallback-block').evaluateAll(blocks=>blocks.every(block=>block.scrollWidth<=block.clientWidth+1)),
-      'fallback text is clipped on mobile');
     await card.screenshot({path:evidence+'/tiered-policy-mobile.png'});
     check(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'policy controls overflow on mobile');
     await save.click();await d.waitFor({state:'detached'});
     const policy=poolConfig.profiles[0].fingerprintPoolPolicies.free;
     check(policy.concurrency.enabled&&policy.concurrency.matchedLongTerm===0&&policy.concurrency.mismatchedLongTerm===9&&policy.concurrency.value===undefined,'concurrency tiers or legacy migration did not save');
     check(policy.priority.enabled&&policy.priority.matchedLongTerm===0&&policy.priority.mismatchedLongTerm===null,'zero/blank tier did not save');
-    check(policy.rotation.priority===15&&policy.rotation.rateMultiplier===1.25,'rotation settings did not save');
+    check(policy.concurrency.matchedRotation===5&&policy.concurrency.mismatchedRotation===6&&policy.priority.matchedRotation===15&&policy.priority.mismatchedRotation===null,'rotation cases did not save independently');
+    check(policy.rotation.rateMultiplier===1.25,'rotation billing rate did not save');
     await open();await free.click();
     check(await rotatingRate.inputValue()==='1.25','saved rate did not reopen');
+    check(await rotatingConcurrency.inputValue()==='5','saved rotation concurrency did not reopen');
     check(await firstConcurrency.inputValue()==='0'&&await firstPriority.inputValue()==='0','saved tiers did not reopen');
     await page.keyboard.press('Escape');
     await page.setViewportSize({width:1480,height:1000});

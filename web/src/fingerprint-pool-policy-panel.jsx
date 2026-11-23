@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useMemo, useRef } from "react";
-import { FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, ROTATION_POOL_FIELDS } from "../../shared/fingerprint-pool-policy.mjs";
+import { FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS } from "../../shared/fingerprint-pool-policy.mjs";
 import { formatPlanTypeLabel } from "./plan-type-label.mjs";
 import {
   POOL_STEP_FIELDS,
@@ -20,21 +20,11 @@ function getTabStatusSummary({ draft, residual, hasError }) {
   return parts.join("、");
 }
 
-function PoolPolicyLadder({ field, section, errors, legacyValue, planLabel, locked, onToggle, onUpdate, onInputRef }) {
+function PoolPolicyLadder({ field, section, errors, planLabel, locked, onToggle, onUpdate, onInputRef }) {
   const baseId = useId();
   const label = FINGERPRINT_POOL_FIELDS[field];
   const title = `分级${label}`;
   const footnoteId = `${baseId}-footnote`;
-  const statusId = `${baseId}-status`;
-  const allEmpty = POOL_STEP_FIELDS.every(tier => !section[tier]);
-  let status = "";
-  if (section.enabled) {
-    if (Number.isInteger(legacyValue)) {
-      status = `沿用旧版不降智长效并发 ${legacyValue}${locked ? "" : " · 编辑任一级后启用分级"}`;
-    } else if (allEmpty) {
-      status = "两项均留空，长效账号采用 PlanType 默认";
-    }
-  }
 
   return (
     <fieldset className="fpp-pane" aria-labelledby={`${baseId}-legend`}>
@@ -56,9 +46,10 @@ function PoolPolicyLadder({ field, section, errors, legacyValue, planLabel, lock
 
       <div className="fpp-ladder-grid">
         {POOL_STEP_FIELDS.map(tier => {
+          const inputKey = `${field}.${tier}`;
           const inputId = `${baseId}-${tier}`;
           const errorId = `${inputId}-error`;
-          const error = errors[`${field}.${tier}`];
+          const error = errors[inputKey];
           return (
             <div className="fpp-step-tile" key={tier}>
               <div className="fpp-step-head">
@@ -68,7 +59,7 @@ function PoolPolicyLadder({ field, section, errors, legacyValue, planLabel, lock
               </div>
               <div className="fpp-step-control">
                 <input
-                  ref={element => onInputRef(tier, element)}
+                  ref={element => onInputRef(inputKey, element)}
                   id={inputId}
                   type="number"
                   inputMode="numeric"
@@ -78,9 +69,9 @@ function PoolPolicyLadder({ field, section, errors, legacyValue, planLabel, lock
                   placeholder="跳过"
                   disabled={locked || !section.enabled}
                   value={section[tier]}
-                  onChange={event => onUpdate(tier, event)}
+                  onChange={event => onUpdate(field, tier, event)}
                   aria-invalid={error ? "true" : undefined}
-                  aria-describedby={[footnoteId, status && statusId, error && errorId].filter(Boolean).join(" ")}
+                  aria-describedby={error ? `${footnoteId} ${errorId}` : footnoteId}
                   className={`fpp-number-input fpp-step-input${error ? " is-invalid" : ""}`}
                 />
               </div>
@@ -89,60 +80,40 @@ function PoolPolicyLadder({ field, section, errors, legacyValue, planLabel, lock
           );
         })}
 
-        <div className="fpp-step-tile">
-          <div className="fpp-step-head">
-            <span className="fpp-step-label">PlanType 默认</span>
-          </div>
-          <div className="fpp-step-control">
-            <div className="fpp-fallback-block">{field === "priority" ? "兜底 · 含导入日期" : "兜底 · 方案并发"}</div>
-          </div>
-        </div>
       </div>
 
       <div className="fpp-footnote-row">
-        <span id={footnoteId}>仅对长效账号生效 · 留空用默认 · 0 有效</span>
-        {status && <span id={statusId} className="fpp-all-empty-hint" aria-live="polite">{status}</span>}
+        <span id={footnoteId}>按检测结果和时效命中一项，留空跳过，0 有效</span>
       </div>
     </fieldset>
   );
 }
 
-function RotationPoolPolicy({ values, errors, locked, onUpdate, onInputRef }) {
+function RotationRatePolicy({ value, error, locked, onUpdate, onInputRef }) {
   const id = useId();
   return (
     <fieldset className="fpp-pane">
-      <legend className="sr-only">轮转设置</legend>
-      <div className="fpp-ladder-header"><span className="fpp-pane-title" aria-hidden="true">轮转设置</span></div>
-      <div className="fpp-rotation-grid">
-        {Object.entries(ROTATION_POOL_FIELDS).map(([field, label]) => {
-          const inputId = `${id}-${field}`;
-          const error = errors[`rotation.${field}`];
-          const isRate = field === "rateMultiplier";
-          return (
-            <div className="fpp-step-tile" key={field}>
-              <label htmlFor={inputId} className="fpp-step-label"><span className="sr-only">轮转</span>{label}</label>
-              <div className="fpp-step-control">
-                <input
-                  ref={element => onInputRef(field, element)}
-                  id={inputId}
-                  className={`fpp-number-input fpp-step-input${error ? " is-invalid" : ""}`}
-                  type="number"
-                  inputMode={isRate ? "decimal" : "numeric"}
-                  min={0} max={isRate ? 1000000 : 10000} step={isRate ? 0.000001 : 1}
-                  placeholder="沿用默认"
-                  disabled={locked}
-                  value={values[field]}
-                  onChange={event => onUpdate(field, event)}
-                  aria-invalid={error ? "true" : undefined}
-                  aria-describedby={error ? `${inputId}-error` : undefined}
-                />
-              </div>
-              {error && <div className="fpp-inline-error" id={`${inputId}-error`} role="alert">{error}</div>}
-            </div>
-          );
-        })}
+      <legend className="sr-only">轮转计费</legend>
+      <div className="fpp-step-tile fpp-rotation-rate">
+        <label htmlFor={id} className="fpp-step-label">轮转计费倍率</label>
+        <div className="fpp-step-control">
+          <input
+            ref={element => onInputRef("rotation.rateMultiplier", element)}
+            id={id}
+            className={`fpp-number-input fpp-step-input${error ? " is-invalid" : ""}`}
+            type="number"
+            inputMode="decimal"
+            min={0} max={1000000} step={0.000001}
+            placeholder="沿用默认"
+            disabled={locked}
+            value={value}
+            onChange={event => onUpdate("rotation", "rateMultiplier", event)}
+            aria-invalid={error ? "true" : undefined}
+            aria-describedby={error ? `${id}-error` : undefined}
+          />
+        </div>
+        {error && <div className="fpp-inline-error" id={`${id}-error`} role="alert">{error}</div>}
       </div>
-      <div className="fpp-footnote-row">按轮转标签生效，留空沿用默认</div>
     </fieldset>
   );
 }
@@ -267,7 +238,6 @@ export function FingerprintPoolPolicyPanel({
     const currentDraft = meta?.draft || createDefaultPolicyDraft();
     onChangeDraft?.(planKey, {
       ...currentDraft,
-      legacyConcurrencyValue: field === "concurrency" ? undefined : currentDraft.legacyConcurrencyValue,
       [field]: {
         ...currentDraft[field],
         [tier]: event.target.value,
@@ -300,6 +270,12 @@ export function FingerprintPoolPolicyPanel({
   const activeTabId = `${baseId}-tab-${activeTab.key}`;
   const activePanelId = `${baseId}-panel-${activeTab.key}`;
   const isResidual = Boolean(activeTab.residual);
+  const updateActiveInput = (section, field, event) => updateTierValue(activeTab.key, section, field, event);
+  const setActiveInputRef = (field, element) => {
+    const key = `${activeTab.key}:${field}`;
+    if (element) inputRefs.current.set(key, element);
+    else inputRefs.current.delete(key);
+  };
 
   return (
     <section className={`fpp-section${disabled ? " is-disabled" : ""}`} aria-label="按 PlanType 配置指纹分池策略">
@@ -428,35 +404,26 @@ export function FingerprintPoolPolicyPanel({
           </div>
         )}
 
-        <RotationPoolPolicy
-          values={activeDraft.rotation}
-          errors={activeErrors}
-          locked={disabled || isResidual}
-          onUpdate={(field, event) => updateTierValue(activeTab.key, "rotation", field, event)}
-          onInputRef={(field, element) => {
-            const key = `${activeTab.key}:rotation.${field}`;
-            if (element) inputRefs.current.set(key, element);
-            else inputRefs.current.delete(key);
-          }}
-        />
         {Object.keys(FINGERPRINT_POOL_FIELDS).map(field => (
           <PoolPolicyLadder
             key={field}
             field={field}
             section={activeDraft[field]}
             errors={activeErrors}
-            legacyValue={field === "concurrency" ? activeDraft.legacyConcurrencyValue : undefined}
             planLabel={activeLabel}
             locked={disabled || isResidual}
             onToggle={() => updateSectionSwitch(activeTab.key, field, !activeDraft[field].enabled)}
-            onUpdate={(tier, event) => updateTierValue(activeTab.key, field, tier, event)}
-            onInputRef={(tier, element) => {
-              const key = `${activeTab.key}:${field}.${tier}`;
-              if (element) inputRefs.current.set(key, element);
-              else inputRefs.current.delete(key);
-            }}
+            onUpdate={updateActiveInput}
+            onInputRef={setActiveInputRef}
           />
         ))}
+        <RotationRatePolicy
+          value={activeDraft.rotation.rateMultiplier}
+          error={activeErrors["rotation.rateMultiplier"]}
+          locked={disabled || isResidual}
+          onUpdate={updateActiveInput}
+          onInputRef={setActiveInputRef}
+        />
       </div>
     </section>
   );

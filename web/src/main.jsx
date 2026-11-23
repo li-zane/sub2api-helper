@@ -2970,7 +2970,7 @@ function App() {
                   headerTip={(
                     <HelpTip title="按 PlanType 指纹分池策略" label="查看按 PlanType 指纹分池策略说明">
                       <div>为当前方案服务的可选 PlanType 分别设置指纹检测后的并发与分级优先级。</div>
-                      <div>分级顺序：1. 不降智头车 › 2. 降智头车 › 3. 不降智长效 › 4. PlanType 默认（含下方导入日期优先级）。0 为有效整数，留空自动跳过至下一级。</div>
+                      <div>按检测结果和时效标签匹配一项。命中项留空时跳过本次调整，0 为有效整数。</div>
                       {(fpSettings?.matchedConcurrency?.enabled || fpSettings?.matchedPriority?.enabled) &&
                         <div>旧规则会继续用于尚未保存独立设置的 PlanType。保存该类型的独立设置后，以本页开关为准。</div>}
                     </HelpTip>

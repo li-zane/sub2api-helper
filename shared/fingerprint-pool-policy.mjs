@@ -1,15 +1,16 @@
 export const FINGERPRINT_POOL_FIELDS = Object.freeze({ concurrency: "并发", priority: "优先级" });
 export const FINGERPRINT_POOL_TIERS = Object.freeze({
+  matchedRotation: "不降智轮转",
   matchedLongTerm: "不降智长效",
+  mismatchedRotation: "降智轮转",
   mismatchedLongTerm: "降智长效",
 });
-export const ROTATION_POOL_FIELDS = Object.freeze({ priority: "优先级", rateMultiplier: "计费倍率" });
 
-const DEFAULT_LADDER = Object.freeze({ enabled: false, matchedLongTerm: null, mismatchedLongTerm: null });
+const DEFAULT_LADDER = Object.freeze({ enabled: false, ...Object.fromEntries(Object.keys(FINGERPRINT_POOL_TIERS).map(key => [key, null])) });
 export const DEFAULT_FINGERPRINT_POOL_POLICY = Object.freeze({
   concurrency: DEFAULT_LADDER,
   priority: DEFAULT_LADDER,
-  rotation: Object.freeze({ priority: null, rateMultiplier: null }),
+  rotation: Object.freeze({ rateMultiplier: null }),
 });
 
 export function isLegacyFingerprintConcurrency(section) {
@@ -17,11 +18,15 @@ export function isLegacyFingerprintConcurrency(section) {
     && !Object.hasOwn(section, "matchedFirstTrip") && !Object.hasOwn(section, "mismatchedFirstTrip");
 }
 
-export function longTermPolicyValues(section) {
-  if (Object.hasOwn(section, "mismatchedLongTerm")) return section;
+export function fingerprintPoolTierValues(section, field, rotation) {
+  const oldLongTerm = !Object.hasOwn(section, "mismatchedLongTerm");
+  const legacyConcurrency = field === "concurrency" && isLegacyFingerprintConcurrency(section) ? section.value : null;
+  const legacyRotation = rotation?.[field];
   return {
-    matchedLongTerm: section.matchedLongTerm ?? section.matchedFirstTrip,
-    mismatchedLongTerm: section.mismatchedFirstTrip,
+    matchedRotation: Object.hasOwn(section, "matchedRotation") ? section.matchedRotation : legacyRotation,
+    matchedLongTerm: oldLongTerm ? section.matchedLongTerm ?? section.matchedFirstTrip ?? legacyConcurrency : section.matchedLongTerm,
+    mismatchedRotation: Object.hasOwn(section, "mismatchedRotation") ? section.mismatchedRotation : legacyRotation,
+    mismatchedLongTerm: oldLongTerm ? section.mismatchedFirstTrip : section.mismatchedLongTerm,
   };
 }
 
@@ -38,17 +43,10 @@ export function parsePoolRateMultiplier(value) {
 }
 
 export function fingerprintPoolNumber(policy, field, verdict, tags) {
-  if (tags?.validity === "轮转") {
-    if (field === "priority") return policy.rotation?.priority ?? null;
-    if (field === "rate_multiplier") return policy.rotation?.rateMultiplier ?? null;
-  }
-  if (tags?.validity !== "长效" || field === "rate_multiplier") return null;
-  const section = policy[field];
-  if (!section.enabled) return null;
-  if (field === "concurrency" && isLegacyFingerprintConcurrency(section)) {
-    return verdict === "match" ? section.value : null;
-  }
-  if (verdict === "match") return section.matchedLongTerm ?? null;
-  if (verdict === "mismatch") return section.mismatchedLongTerm ?? null;
-  return null;
+  const validity = tags?.validity;
+  if (field === "rate_multiplier") return validity === "轮转" ? policy.rotation?.rateMultiplier ?? null : null;
+  if (!policy[field]?.enabled || (verdict !== "match" && verdict !== "mismatch")) return null;
+  const prefix = verdict === "match" ? "matched" : "mismatched";
+  const suffix = validity === "轮转" ? "Rotation" : validity === "长效" ? "LongTerm" : null;
+  return suffix ? policy[field][prefix + suffix] ?? null : null;
 }

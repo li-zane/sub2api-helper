@@ -69,7 +69,7 @@ import { SubscriptionHistory } from "./subscription-history.mjs";
 import { createSubscriptionHistorySync } from "./subscription-history-sync.mjs";
 import { normalizeAccountCost, restoredAccountCost } from "../shared/account-pricing.mjs";
 import { TAG_OPTION_KEYS, readAccountTags, patchAccountTags, writeAccountTags } from "../shared/account-tags.mjs";
-import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolNumber, isLegacyFingerprintConcurrency, longTermPolicyValues, parsePoolRateMultiplier } from "../shared/fingerprint-pool-policy.mjs";
+import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolNumber, fingerprintPoolTierValues, isLegacyFingerprintConcurrency, parsePoolRateMultiplier } from "../shared/fingerprint-pool-policy.mjs";
 import { createAccountTagCatalog } from "./account-tag-catalog.mjs";
 import { OverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService } from "./model-fingerprint.mjs";
@@ -561,15 +561,14 @@ export function createConsoleApp(options = {}) {
       const job = findJobByEmail(email);
       const tags = readAccountTags(job?.remark, job?.accountTagsCleared);
       const policy = policies && Object.hasOwn(policies, type) ? policies[type] : null;
-      if (tags.validity === "轮转" || field === "rate_multiplier") {
+      if (field === "rate_multiplier") {
         const value = fingerprintPoolNumber(policy || DEFAULT_FINGERPRINT_POOL_POLICY, field, verdict, tags);
         return { enabled: value !== null, value, independent: true };
       }
-      if (!policy) return null;
-      return {
-        enabled: policy[field].enabled && tags.validity === "长效",
-        value: fingerprintPoolNumber(policy, field, verdict, tags),
-      };
+      if (!policy) return tags.validity === "轮转" ? { enabled: false, value: null } : null;
+      const enabled = policy[field].enabled && (tags.validity === "长效" || tags.validity === "轮转");
+      const value = fingerprintPoolNumber(policy, field, verdict, tags);
+      return { enabled, value, skip: enabled && value === null };
     },
     getPoolNumberDefaults: async (email, id, planType) => {
       const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
@@ -5425,32 +5424,28 @@ export function createConsoleApp(options = {}) {
         throw httpError(400, "PlanType 调度规则格式无效");
       }
       const normalized = {};
+      const rotation = Object.hasOwn(policy, "rotation") ? policy.rotation : DEFAULT_FINGERPRINT_POOL_POLICY.rotation;
+      if (!rotation || typeof rotation !== "object" || Array.isArray(rotation)) throw httpError(400, "轮转规则格式无效");
       for (const [field, label] of Object.entries(FINGERPRINT_POOL_FIELDS)) {
         const section = Object.hasOwn(policy, field) ? policy[field] : DEFAULT_FINGERPRINT_POOL_POLICY[field];
         if (typeof section?.enabled !== "boolean") throw httpError(400, `分级${label}开关必须为布尔值`);
         if (field === "concurrency" && isLegacyFingerprintConcurrency(section)) {
-          const value = parseOptionalSub2ApiInteger(section.value, "旧版不降智账号并发", 0, 10000);
-          if (value === null) throw httpError(400, "请填写旧版不降智账号并发");
-          normalized[field] = { enabled: section.enabled, value };
-          continue;
+          if (parseOptionalSub2ApiInteger(section.value, "旧版不降智账号并发", 0, 10000) === null) {
+            throw httpError(400, "请填写旧版不降智账号并发");
+          }
         }
         const ladder = { enabled: section.enabled };
-        const values = longTermPolicyValues(section);
+        const values = fingerprintPoolTierValues(section, field, rotation);
         for (const [tier, tierLabel] of Object.entries(FINGERPRINT_POOL_TIERS)) {
           ladder[tier] = parseOptionalSub2ApiInteger(values[tier], tierLabel + label, 0, 10000);
         }
         normalized[field] = ladder;
       }
-      const rotation = Object.hasOwn(policy, "rotation") ? policy.rotation : DEFAULT_FINGERPRINT_POOL_POLICY.rotation;
-      if (!rotation || typeof rotation !== "object" || Array.isArray(rotation)) throw httpError(400, "轮转规则格式无效");
       const rateMultiplier = parsePoolRateMultiplier(rotation.rateMultiplier);
       if (rotation.rateMultiplier != null && rotation.rateMultiplier !== "" && rateMultiplier === null) {
         throw httpError(400, "轮转计费倍率须为 0–1000000，最多 6 位小数");
       }
-      policies[type] = {
-        ...normalized,
-        rotation: { priority: parseOptionalSub2ApiInteger(rotation.priority, "轮转优先级", 0, 10000), rateMultiplier },
-      };
+      policies[type] = { ...normalized, rotation: { rateMultiplier } };
     }
     return policies;
   }
