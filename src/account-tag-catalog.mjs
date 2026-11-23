@@ -61,7 +61,7 @@ export function createAccountTagCatalog(file) {
       const options = sets(DEFAULT_TAG_OPTIONS);
       const removed = sets(saved.removed);
       for (const key of catalogKeys) {
-        for (const value of saved[key]) options[key].add(value);
+        for (const value of saved[key] ?? []) options[key].add(value);
       }
       for (const job of jobs) {
         if (job.deleted) continue;

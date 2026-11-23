@@ -108,11 +108,20 @@ try {
     await fs.writeFile(path.join(dir, "sub2api-import-oauth.json"), JSON.stringify({ type: "sub2api-data", accounts: [{ name: jobEmail, platform: "openai", type: "oauth", credentials: { email: jobEmail }, extra: { email: jobEmail } }] }));
   }
   await fs.writeFile(path.join(output, "sub2api-settings.json"), JSON.stringify(config));
+  await fs.writeFile(path.join(output, "account-tag-options.json"), JSON.stringify({ merchants: ["旧商家"], trips: ["旧车次"] }));
   await start();
   await refresh();
   assert.equal((await localJob()).remark, "原有备注", "first pool sync imports complete notes");
   const tags = (patch, expected) => post("/api/jobs/" + id + "/tags", patch, expected);
-  const tagOptions = async () => (await fetch(base + "/api/account-tag-options", { headers })).json();
+  const tagOptions = async () => {
+    const response = await fetch(base + "/api/account-tag-options", { headers });
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json();
+  };
+  const legacyOptions = await tagOptions();
+  assert(legacyOptions.merchants.includes("旧商家"));
+  assert(legacyOptions.trips.includes("旧车次"));
+  assert.deepEqual(legacyOptions.validities, ["长效", "轮转"]);
   async function removeTagOption(field, value, expected = 200) {
     const response = await fetch(base + "/api/account-tag-options", {
       method: "DELETE", headers, body: JSON.stringify({ field, value }),
@@ -143,9 +152,11 @@ try {
   assert.equal(records[1].notes, manual + "后补的文字");
   await stop(); await start();
   assert.deepEqual((await localJob()).accountTags, { merchant: "", trip: "", validity: "", stopAt: "" });
-  assert((await tagOptions()).merchants.includes("新商家"));
-  assert((await tagOptions()).trips.includes("夜班车"));
-  assert.deepEqual((await tagOptions()).validities, ["长效", "轮转"]);
+  const rememberedOptions = await tagOptions();
+  assert(["旧商家", "新商家"].every(value => rememberedOptions.merchants.includes(value)));
+  assert(["旧车次", "夜班车"].every(value => rememberedOptions.trips.includes(value)));
+  assert.deepEqual(rememberedOptions.validities, ["长效", "轮转"]);
+  console.log("PASS: legacy catalogs without validity options retain saved merchants and trips through updates and restart");
   const withOptions = await tags({ merchant: "康神", trip: "夜班车", validity: "长效" });
   assert(!(await removeTagOption("merchant", "康神")).merchants.includes("康神"));
   assert(!(await removeTagOption("trip", "夜班车")).trips.includes("夜班车"));
