@@ -157,5 +157,8 @@ export class SubscriptionHistory {
     if (!record) return null;
     return subscriptionCredentialText(record.loginEmail || record.email, record.credentials);
   }
+  emailForId(id) {
+    return [...this.records.values()].find(record => record.id === id)?.email ?? null;
+  }
   flush() { return this.writes; }
 }

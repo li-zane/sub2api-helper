@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { OperationsBook } from "../src/operations-book.mjs";
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "helper-subscription-http-"));
 const id = n => `11111111-1111-4111-8111-${String(n).padStart(12, "0")}`;
@@ -31,6 +32,18 @@ async function start() {
 }
 async function stop() { if (child?.exitCode === null) { const done = new Promise(r => child.once("exit", r)); child.kill("SIGTERM"); await done; } }
 try {
+  const book = new OperationsBook(path.join(temp, "helper-operations.sqlite"));
+  book.open();
+  book.recordQuality("history-1@example.test", "2026-11-02T00:00:00Z", "match", { id: "a", method: "fingerprint" });
+  book.recordQuality("history-1@example.test", "2026-11-03T00:00:00Z", "mismatch", { id: "b", method: "candy", source: "scheduled" });
+  book.close();
+  await fs.writeFile(path.join(temp, "model-fingerprint.json"), JSON.stringify({
+    version: 1,
+    accounts: { "history-1@example.test": { recentResults: [
+      { id: "c", checkedAt: "2026-11-04T00:00:00Z", status: "error", method: "fingerprint", source: "manual" },
+      { id: "b", checkedAt: "2026-11-03T00:00:00Z", status: "mismatch", method: "candy", source: "scheduled" },
+    ] } },
+  }));
   for (const [n, plan] of [[1, "team"], [2, "free"], [3, "free"], [4, null]]) {
     const dir = path.join(temp, id(n)); await fs.mkdir(dir);
     await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email: `history-${n}@example.test`, status: "completed", plan_type: plan,
@@ -49,6 +62,21 @@ try {
   assert.equal((await api("/api/subscription-history", { authenticated: false })).status, 403);
   assert.equal(first.data.total, 2); assert.equal(first.data.records.length, 2);
   let account = first.data.records.find(r => r.email === "history-1@example.test");
+  const qualityRoute = `/api/subscription-history/${account.id}/quality`;
+  assert.deepEqual(account.quality.timeline.map(item => item.status), ["match", "mismatch"]);
+  assert.equal(account.quality.currentStatus, "mismatch");
+  assert.equal(account.quality.lastCheckedAt, "2026-11-04T00:00:00.000Z");
+  assert.equal((await api(qualityRoute, { authenticated: false })).status, 403);
+  assert.equal((await api(`${qualityRoute}?before=bad`)).status, 400);
+  assert.equal((await api(`/api/subscription-history/${"f".repeat(32)}/quality`)).status, 404);
+  assert.deepEqual((await api(qualityRoute)).data, {
+    records: [
+      { id: "c", at: "2026-11-04T00:00:00.000Z", status: "error", method: "fingerprint", source: "manual" },
+      { id: "b", at: "2026-11-03T00:00:00.000Z", status: "mismatch", method: "candy", source: "scheduled" },
+      { id: "a", at: "2026-11-02T00:00:00.000Z", status: "match", method: "fingerprint", source: null },
+    ],
+    nextBefore: null,
+  });
   assert.equal(account.accountCostCny, 12.34); assert.equal(account.remark, "原备注"); assert.equal(account.profitCents, null);
   assert.equal(account.lastChange, null); assert.equal(account.accountBanned, false);
   assert.equal((await api("/api/subscription-history/seen", { body: { changes: [] }, authenticated: false })).status, 403);

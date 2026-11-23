@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Check, CircleAlert, Copy, History, KeyRound, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, Copy, History, KeyRound, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
 import { notify } from "./toast-events.mjs";
 import { compactDateTime, displayDateTime } from "./display-time.mjs";
@@ -54,12 +54,119 @@ export function parseProfitCents(profitCents, userCostUsd, poolPriceMultiplier, 
   return accountProfitCents(userCostUsd, poolPriceMultiplier ?? 1, accountCostCny ?? 0);
 }
 
-function qualityLabel(q={}) {
-  const span=m=>m<60?m+" 分钟":Number((m/60).toFixed(1))+" 小时";
-  if(q.kind==="normal")return "未降智";
-  if(q.kind==="degraded")return q.minutesAfterJoin==null?"已观测到降智":"加入 "+span(q.minutesAfterJoin)+" 后观测到降智";
-  if(q.kind==="recovered")return q.minutesToRecovery==null?"已恢复":"降智 "+span(q.minutesToRecovery)+" 后恢复";
-  return "未检测";
+const QUALITY_LABELS = { normal: "未降智", degraded: "降智", recovered: "已恢复" };
+const CHECK_LABELS = { match: "未降智", mismatch: "降智", unknown: "结果未确认", error: "检测失败" };
+const CHECK_METHODS = { fingerprint: "指纹", candy: "糖果题" };
+const CHECK_SOURCES = { manual: "手动", scheduled: "定时", import: "导入后" };
+
+function qualityLabel(quality) {
+  return QUALITY_LABELS[quality?.kind] || (quality?.lastCheckedAt ? "尚无确认状态" : "未检测");
+}
+
+function QualityCheckLog({ recordId, request }) {
+  const [records, setRecords] = useState([]);
+  const [nextBefore, setNextBefore] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(null);
+  const inFlight = useRef(null);
+
+  const read = useCallback(async (before) => {
+    if (inFlight.current) return;
+    const controller = new AbortController();
+    inFlight.current = controller;
+    setLoading(true);
+    setFailed(null);
+    try {
+      const base = `/api/subscription-history/${encodeURIComponent(recordId)}/quality`;
+      const url = before ? `${base}?before=${encodeURIComponent(before)}` : base;
+      const data = await request(url, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      setRecords(previous => before ? [...previous, ...data.records] : data.records);
+      setNextBefore(data.nextBefore);
+    } catch {
+      if (!controller.signal.aborted) setFailed({ before });
+    } finally {
+      if (inFlight.current === controller) {
+        inFlight.current = null;
+        setLoading(false);
+      }
+    }
+  }, [recordId, request]);
+
+  useEffect(() => {
+    void read(null);
+    return () => {
+      inFlight.current?.abort();
+      inFlight.current = null;
+    };
+  }, [read]);
+
+  return (
+    <div className="sub-quality-logs" aria-busy={loading}>
+      {records.length > 0 && (
+        <ul aria-label="逐次检测记录">
+          {records.map(record => (
+            <li key={record.id}>
+              <span className={`sub-quality-verdict is-${record.status}`}>{CHECK_LABELS[record.status]}</span>
+              <time dateTime={record.at}>{displayDateTime(record.at)}</time>
+              <span>{[CHECK_METHODS[record.method], CHECK_SOURCES[record.source]].filter(Boolean).join(" · ") || "来源未记录"}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {loading && <span role="status">正在读取检测记录…</span>}
+      {failed && (
+        <div role="alert">读取检测记录失败 <button type="button" className="sub-quality-link" onClick={() => void read(failed.before)}>重试</button></div>
+      )}
+      {!loading && !failed && !records.length && <p>暂无逐次检测记录</p>}
+      {!loading && !failed && nextBefore && (
+        <button type="button" className="sub-quality-link" onClick={() => void read(nextBefore)}>加载更早记录</button>
+      )}
+    </div>
+  );
+}
+
+function QualityDrawer({ id, record, request, onClose }) {
+  const [showChecks, setShowChecks] = useState(false);
+  const quality = record.quality;
+  const timeline = quality?.timeline || [];
+  const heading = `${id}-title`;
+  return (
+    <section id={id} className="sub-quality-drawer" aria-labelledby={heading}>
+      <div className="sub-quality-drawer-head">
+        <h3 id={heading}>降智状态变化</h3>
+        <button type="button" className="sub-quality-link" onClick={onClose}>收起降智历史</button>
+      </div>
+      {quality?.lastCheckedAt && <p className="sub-quality-meta">最近检测 <time dateTime={quality.lastCheckedAt}>{displayDateTime(quality.lastCheckedAt)}</time></p>}
+      {timeline.length ? (
+        <ol className="sub-quality-timeline" aria-label="降智状态时间线">
+          {timeline.map((event, index) => {
+            const label = event.status === "mismatch" ? "观测到降智" : event.previousStatus === "mismatch" ? "观测到恢复" : "确认未降智";
+            const prior = timeline[index - 1];
+            const minutes = event.previousStatus === "mismatch" && prior
+              ? Math.floor((Date.parse(event.at) - Date.parse(prior.at)) / 60_000) : null;
+            const interval = minutes === null ? null : minutes < 1 ? "不足 1 分钟" :
+              minutes < 60 ? `${minutes} 分钟` : `${(minutes / 60).toFixed(1)} 小时`;
+            return (
+              <li key={`${event.at}:${index}`} className={`is-${event.status}${event.method ? "" : " is-legacy"}`}>
+                <strong>{label}</strong>
+                <time dateTime={event.at}>{displayDateTime(event.at)}</time>
+                {(event.method || interval) && (
+                  <span>{[CHECK_METHODS[event.method], interval && `距本段首次观测到降智 ${interval}`].filter(Boolean).join(" · ")}</span>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      ) : <p className="sub-quality-meta">暂无确认的降智状态</p>}
+      {timeline.some(event => !event.method) && <p className="sub-quality-meta">较早记录可能只保留状态变化</p>}
+      <button type="button" className="sub-quality-link" aria-expanded={showChecks}
+        aria-controls={showChecks ? `${id}-checks` : undefined} onClick={() => setShowChecks(value => !value)}>
+        {showChecks ? "收起逐次检测" : "查看逐次检测"}
+      </button>
+      {showChecks && <div id={`${id}-checks`}><QualityCheckLog recordId={record.id} request={request} /></div>}
+    </section>
+  );
 }
 export function profitTone(cents) {
   if (cents === null) return "unknown";
@@ -213,6 +320,7 @@ export function SubscriptionHistoryDialog({
   const [copiedId, setCopiedId] = useState(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState(null);
   const [highlightedChanges, setHighlightedChanges] = useState({});
+  const [expandedQualityId, setExpandedQualityId] = useState(null);
 
   const openRef = useRef(open);
   openRef.current = open;
@@ -277,6 +385,7 @@ export function SubscriptionHistoryDialog({
     setCopiedId(null);
     setLastUpdatedAt(null);
     setHighlightedChanges({});
+    setExpandedQualityId(null);
 
     if (!token || typeof request !== "function") {
       if (token) {
@@ -517,7 +626,7 @@ export function SubscriptionHistoryDialog({
       </div>
 
       {hasLoaded&&<div className="sub-outcomes" role="group" aria-label="历史订阅检测概览">
-        {[["normal","未降智"],["degraded","观测降智"],["recovered","已恢复"],["unknown","未检测"]].map(([k,v])=><div key={k} className={"sub-outcome "+k}>
+        {[["normal","未降智"],["degraded","观测降智"],["recovered","已恢复"],["unknown","未确认"]].map(([k,v])=><div key={k} className={"sub-outcome "+k}>
           <span>{v}</span><strong>{records.filter(r=>(r.quality?.kind||"unknown")===k).length}</strong></div>)}
       </div>}
       <div className="sub-history-toolbar">
@@ -639,9 +748,23 @@ export function SubscriptionHistoryDialog({
                 const pTone = planTone(status.rawPlan);
                 const change = record.lastChange;
                 const isUnread = change && (change.unread || highlightedChanges[record.id] === change.revision);
+                const drawerId = `${titleId}-quality-${record.id}`;
+                const qualityOpen = expandedQualityId === record.id;
+                const qualityClass = `sub-quality ${record.quality?.kind || "unknown"}`;
+                const hasQuality = Boolean(record.quality?.lastCheckedAt || record.quality?.timeline?.length);
+                const closeQuality = () => {
+                  document.getElementById(`${drawerId}-trigger`)?.focus();
+                  setExpandedQualityId(null);
+                };
 
                 return (
-                  <div className={`sub-history-row${isUnread ? " is-unread" : ""}`} role="listitem" key={record.id}>
+                  <div className={`sub-history-row${isUnread ? " is-unread" : ""}`} role="listitem" key={record.id} onKeyDown={event => {
+                    if (qualityOpen && event.key === "Escape") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      closeQuality();
+                    }
+                  }}>
                     <div className="sub-history-col-account">
                       <button
                         type="button"
@@ -659,9 +782,14 @@ export function SubscriptionHistoryDialog({
                           {record.remark}
                         </span>
                       )}
-                      <span className={`sub-quality ${record.quality?.kind || "unknown"}`} title={record.quality?.at?"检测记录："+displayDateTime(record.quality.at):"暂无有效检测记录"}>
-                        {qualityLabel(record.quality)}
-                      </span>
+                      {hasQuality ? (
+                        <button type="button" id={`${drawerId}-trigger`} className={`${qualityClass} sub-quality-trigger`}
+                          aria-label={`${record.email} 降智历史 ${qualityLabel(record.quality)}`}
+                          aria-expanded={qualityOpen} aria-controls={qualityOpen ? drawerId : undefined}
+                          onClick={() => setExpandedQualityId(qualityOpen ? null : record.id)}>
+                          {qualityLabel(record.quality)} <ChevronDown aria-hidden="true" size={12} />
+                        </button>
+                      ) : <span className={qualityClass}>{qualityLabel(record.quality)}</span>}
                       {timeInfo.label && (
                         <span className="sub-history-time" title={timeInfo.title || undefined}>
                           {timeInfo.label}
@@ -738,6 +866,7 @@ export function SubscriptionHistoryDialog({
                         </span>
                       </button>
                     </div>
+                    {qualityOpen && <QualityDrawer id={drawerId} record={record} request={request} onClose={closeQuality} />}
                   </div>
                 );
               })}

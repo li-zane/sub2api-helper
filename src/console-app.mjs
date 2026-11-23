@@ -525,7 +525,7 @@ export function createConsoleApp(options = {}) {
     return (options.accountChatSampler || fingerprintSampler)(t.c,record,model,prompt,signal,{messages,upstreamModel:true});
   }});
   const modelFingerprint = new ModelFingerprintService({
-    onVerdict:(email,at,status)=>book.recordQuality(email,at,status),
+    onVerdict: (email, at, status, round) => book.recordQuality(email, at, status, round),
     dispatchPaused,
     isBlocked: (email, { manual = false } = {}) => {
       if (!manual && inspectionPaused(email)) return true;
@@ -2004,6 +2004,7 @@ export function createConsoleApp(options = {}) {
     readJson, sendJson, httpError, queryJobs, normalizeEmailFilter,
     syncCompletedOutputs, ensureSubscriptionHistoryFresh, subscriptionHistory,
     qualityFor:(email,joined)=>book.quality(email,findJobByEmail(email)?.createdAt || joined),
+    qualityPageFor: (email, before) => book.qualityPage(email, before),
     getPriceMultiplier: () => consoleSettings.current.poolPriceMultiplier, maxBatchJobs: MAX_BATCH_JOBS,
   });
 
@@ -11594,7 +11595,11 @@ export function createConsoleApp(options = {}) {
     await overloadCooldown.load();
     await accountSessionResets.load();
     await modelFingerprint.load();
-    for(const [email,entry] of modelFingerprint.accounts) for(const r of [...modelFingerprint.latestRounds(entry)].reverse())book.recordQuality(email,r.checkedAt,r.status);
+    for (const [email, entry] of modelFingerprint.accounts) {
+      for (const round of modelFingerprint.latestRounds(entry).reverse()) {
+        book.recordQuality(email, round.checkedAt, round.status, round);
+      }
+    }
     await syncCompletedOutputs(true);
     for (const job of jobs.values()) {
       try {

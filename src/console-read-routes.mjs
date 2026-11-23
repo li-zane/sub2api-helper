@@ -1,6 +1,7 @@
 import { normalizeJobFilters } from "./job-list-query.mjs";
 
 const SUBSCRIPTION_RECORD = /^\/api\/subscription-history\/([a-f0-9]{32})\/credentials$/;
+const SUBSCRIPTION_QUALITY = /^\/api\/subscription-history\/([a-f0-9]{32})\/quality$/;
 const JOB_FILTER_PARAMS = [
   "search", "lockedOnly", "accountType", "status", "planType", "sub2apiPool",
   "sub2apiEnabled", "overload", "fingerprint", "webSession", "summary",
@@ -15,7 +16,7 @@ function pageNumber(value) {
 export function createConsoleReadRoutes({
   readJson, sendJson, httpError, queryJobs, normalizeEmailFilter,
   syncCompletedOutputs, ensureSubscriptionHistoryFresh, subscriptionHistory,
-  getPriceMultiplier, qualityFor, maxBatchJobs,
+  getPriceMultiplier, qualityFor, qualityPageFor, maxBatchJobs,
 }) {
   return async function handleReadRoute(req, res, url) {
     const { pathname, searchParams } = url;
@@ -55,6 +56,14 @@ export function createConsoleReadRoutes({
       await ensureSubscriptionHistoryFresh();
       const acknowledged = await subscriptionHistory.markSeen(changes);
       sendJson(res, 200, { acknowledged });
+      return true;
+    }
+
+    const subscriptionQuality = method === "GET" && SUBSCRIPTION_QUALITY.exec(pathname);
+    if (subscriptionQuality) {
+      const email = subscriptionHistory.emailForId(subscriptionQuality[1]);
+      if (!email) throw httpError(404, "历史订阅账号不存在");
+      sendJson(res, 200, qualityPageFor(email, searchParams.get("before")));
       return true;
     }
 

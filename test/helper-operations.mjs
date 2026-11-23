@@ -125,6 +125,29 @@ try {
   assert.equal(b.quality(acct, added).minutesAfterJoin, 15);
   b.recordQuality(acct, "2026-01-02T17:15:00Z", "match");
   assert.equal(b.quality(acct, added).minutesToRecovery, 60);
+  const repeatedAt = "2026-01-02T18:00:00.000Z";
+  b.db.prepare("INSERT INTO quality VALUES(?,?,?)").run(acct, "2026-01-02T15:40:00.000Z", "match");
+  for (let n = 0; n < 52; n++) {
+    b.recordQuality(acct, repeatedAt, "unknown", { id: `inconclusive-${n}`, method: "candy", source: "manual" });
+  }
+  b.recordQuality(acct, repeatedAt, "mismatch", { id: "degraded-again", method: "fingerprint", source: "scheduled" });
+  b.recordQuality(acct, repeatedAt, "error", { id: "unavailable", method: "fingerprint", source: "scheduled" });
+  b.recordQuality(acct, repeatedAt, "error", { id: "unavailable" });
+  assert.equal(b.quality(acct, added).currentStatus, "mismatch");
+  assert.equal(b.quality(acct, added).lastCheckedAt, repeatedAt);
+  b.close();
+  b.open();
+  const quality = b.quality(acct, added);
+  assert.deepEqual(quality.timeline.map(item => [item.previousStatus,item.status]), [[null,"match"],["match","mismatch"],["mismatch","match"],["match","mismatch"]]);
+  assert.equal(quality.timeline[0].at, "2026-01-02T15:40:00.000Z");
+  assert.equal(quality.timeline.at(-1).method, "fingerprint");
+  const recent = b.qualityPage(acct);
+  const earlier = b.qualityPage(acct, recent.nextBefore);
+  assert.equal(recent.records.length, 50);
+  assert.equal(earlier.nextBefore, null);
+  assert.equal(new Set([...recent.records, ...earlier.records].map(row => row.id)).size, 60);
+  assert.deepEqual(recent.records.slice(0, 2).map(row => row.status), ["error", "mismatch"]);
+  assert.throws(() => b.qualityPage(acct, "wrong"), /分页参数无效/);
   let finish, captured;
   const gate = new Promise((r) => (finish = r)),
     target = { pool: ns, id: "7" };

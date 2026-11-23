@@ -1,5 +1,5 @@
 async (page) => {
-  const evidence = "__UI_TEST_EVIDENCE_DIR__", results = [], errors = [], credentialCalls = [], unexpected = [];
+  const evidence = "__UI_TEST_EVIDENCE_DIR__", results = [], errors = [], credentialCalls = [], qualityCalls = [], unexpected = [];
   const check = (value, message) => { if (!value) throw Error(message); };
   const test = async (name, run) => { try { await run(); results.push({ name, passed: true }); } catch (error) { results.push({ name, passed: false, error: error.message }); } };
   page.on('pageerror', error => errors.push(error.message));
@@ -9,8 +9,14 @@ async (page) => {
   });
   const fixture = { id: 'a'.repeat(32), email: 'history-long-alias+subscription@example.test', remark: '回归测试备注', accountCostCny: 12.34,
     userCostUsd: 10, poolPriceMultiplier: 7, profitCents: '5766', profitDisplay: '￥57.66', planType: 'business', lastPaidPlanType: 'business',
-    firstSubscribedAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-15T00:00:00Z', present: true, canCopyCredentials: true };
-  let records = [fixture], failure = false, reads = 0, responseDelay = 0;
+    firstSubscribedAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-15T00:00:00Z', present: true, canCopyCredentials: true,
+    quality: { kind: 'degraded', currentStatus: 'mismatch', lastCheckedAt: '2026-11-06T00:00:00Z', timeline: [
+      { at: '2026-11-02T00:00:00Z', status: 'match', previousStatus: null, method: null },
+      { at: '2026-11-03T00:00:00Z', status: 'mismatch', previousStatus: 'match', method: 'fingerprint' },
+      { at: '2026-11-04T00:00:00Z', status: 'match', previousStatus: 'mismatch', method: 'candy' },
+      { at: '2026-11-05T00:00:00Z', status: 'mismatch', previousStatus: 'match', method: 'fingerprint' },
+    ] } };
+  let records = [fixture], failure = false, qualityFailure = true, reads = 0, responseDelay = 0;
   await page.route('**/api/subscription-history', async route => {
     reads++;
     if (responseDelay) await new Promise(resolve => setTimeout(resolve, responseDelay));
@@ -21,6 +27,18 @@ async (page) => {
     credentialCalls.push(route.request().url());
     check(Boolean(route.request().headers()['x-console-token']), 'credential copy lacks console authentication');
     await route.fulfill({ json: { text: 'history@example.test----fixture-password----ABCDEFGHIJKLMNOP' } });
+  });
+  await page.route(/\/api\/subscription-history\/[a-f0-9]+\/quality(?:\?|$)/, async route => {
+    const before = new URL(route.request().url()).searchParams.get('before');
+    qualityCalls.push(before);
+    check(Boolean(route.request().headers()['x-console-token']), 'quality request lacks console authentication');
+    if (qualityFailure) return route.fulfill({ status: 503, json: { error: 'fixture unavailable' } });
+    await route.fulfill({ json: before ? {
+      records: [{ id: 'old', at: '2026-11-02T00:00:00Z', status: 'match', method: null, source: null }], nextBefore: null,
+    } : {
+      records: [{ id: 'latest', at: '2026-11-06T00:00:00Z', status: 'error', method: 'candy', source: 'scheduled' }],
+      nextBefore: '2026-11-06T00:00:00.000Z|9',
+    } });
   });
   await page.reload(); await page.waitForFunction(() => document.querySelectorAll('tr.job-row').length > 0);
   const button = page.getByRole('button', { name: '历史订阅', exact: true });
@@ -48,6 +66,37 @@ async (page) => {
     const footer = await dialog.locator('.sub-history-footer').boundingBox();
     const close = await dialog.getByRole('button', { name: '关闭', exact: true }).boundingBox();
     check(footer && close && Math.abs(footer.x + footer.width - close.x - close.width) <= 1, 'footer close button is not right aligned');
+  });
+  await test('quality-timeline-preserves-transitions-with-lazy-details', async () => {
+    const trigger = dialog.getByRole('button', { name: `${fixture.email} 降智历史 降智`, exact: true });
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    const timeline = dialog.getByRole('list', { name: '降智状态时间线' });
+    await timeline.waitFor();
+    const transitions = await timeline.locator('strong').allTextContents();
+    check(transitions.join('|') === '确认未降智|观测到降智|观测到恢复|观测到降智', 'timeline lost a transition');
+    check(qualityCalls.length === 0, 'summary opened the paginated log eagerly');
+    await page.screenshot({ path: evidence + '/subscription-quality-desktop.png' });
+    await dialog.getByRole('button', { name: '查看逐次检测' }).click();
+    const retry = dialog.getByRole('button', { name: '重试', exact: true });
+    await retry.waitFor(); qualityFailure = false; await retry.click();
+    const log = dialog.getByRole('list', { name: '逐次检测记录' });
+    await log.getByText('检测失败', { exact: true }).waitFor();
+    await dialog.getByRole('button', { name: '加载更早记录' }).click();
+    await log.getByText('来源未记录', { exact: true }).waitFor();
+    check(qualityCalls.join(',') === ',,2026-11-06T00:00:00.000Z|9', 'retry or pagination cursor was wrong');
+    check(await trigger.getAttribute('aria-expanded') === 'true', 'inconclusive round changed the summary');
+    await page.setViewportSize({ width: 320, height: 820 });
+    const region = dialog.getByRole('region', { name: '降智状态变化' });
+    const fits = await region.evaluate(node => node.scrollWidth <= node.clientWidth + 1);
+    check(fits, 'quality drawer clips at 320px');
+    await region.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: evidence + '/subscription-quality-mobile.png' });
+    await dialog.getByRole('button', { name: '收起逐次检测' }).focus();
+    await page.keyboard.press('Escape');
+    await timeline.waitFor({ state: 'detached' });
+    check(await trigger.evaluate(node => document.activeElement === node), 'drawer did not return keyboard focus');
+    await page.setViewportSize({ width: 1440, height: 1000 });
   });
   await test('copy-email-and-latest-credentials-on-demand', async () => {
     await dialog.getByRole('button', { name: `复制邮箱 ${fixture.email}`, exact: true }).click();

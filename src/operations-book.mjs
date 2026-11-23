@@ -15,12 +15,19 @@ export const cents = (v) => Math.round(normalizeAccountCost(v) * 100);
 const iso = (time) =>
   Number.isFinite(Date.parse(time)) ? new Date(time).toISOString() : null;
 const failure = (status, msg) => Object.assign(Error(msg), { status });
+const QUALITY_PAGE_SIZE = 50;
+const QUALITY_STATUSES = new Set(["match", "mismatch", "unknown", "error"]);
+const QUALITY_METHODS = new Set(["fingerprint", "candy"]);
+const QUALITY_SOURCES = new Set(["manual", "scheduled", "import"]);
+
 export class OperationsBook {
   constructor(file, now = () => Date.now()) {
     this.file = file;
     this.now = now;
+    this.qualitySummaries = new Map();
   }
   open() {
+    this.qualitySummaries.clear();
     const db = (this.db = new DatabaseSync(this.file));
     chmodSync(this.file, 0o600);
     db.exec("PRAGMA busy_timeout=3000; PRAGMA journal_mode=WAL;");
@@ -29,6 +36,16 @@ export class OperationsBook {
       CREATE TABLE IF NOT EXISTS ips(pool TEXT NOT NULL,ip TEXT NOT NULL,added TEXT,cost INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(pool,ip));
       CREATE TABLE IF NOT EXISTS pauses(account TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS quality(account TEXT NOT NULL,at TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(account,at));
+      CREATE TABLE IF NOT EXISTS quality_observations(
+        account TEXT NOT NULL, id TEXT NOT NULL, at TEXT NOT NULL, status TEXT NOT NULL,
+        method TEXT, source TEXT, PRIMARY KEY(account,id)
+      );
+      CREATE INDEX IF NOT EXISTS quality_observations_account_time ON quality_observations(account,at);
+      INSERT OR IGNORE INTO quality_observations(account,id,at,status)
+        SELECT q.account, 'legacy:' || q.at || ':' || q.status, q.at, q.status
+        FROM quality q WHERE q.status IN ('match','mismatch') AND NOT EXISTS (
+          SELECT 1 FROM quality_observations o WHERE o.account=q.account AND o.at=q.at AND o.status=q.status
+        );
       CREATE TABLE IF NOT EXISTS days(day TEXT PRIMARY KEY,sampled TEXT,complete INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS period_close(day TEXT PRIMARY KEY,pool TEXT NOT NULL,rate REAL NOT NULL,closed TEXT);
       CREATE TABLE IF NOT EXISTS expenses(day TEXT NOT NULL,kind TEXT NOT NULL,entity TEXT NOT NULL,cents INTEGER NOT NULL,PRIMARY KEY(kind,entity));
@@ -136,46 +153,92 @@ export class OperationsBook {
       )
       .run(day, kind, entity, price);
   }
-  recordQuality(account, at, status) {
-    if (!iso(at) || !["match", "mismatch"].includes(status)) return;
-    // Compress equal consecutive observations; retain transitions indefinitely.
-    const t = iso(at),
-      key = account.toLowerCase();
-    const prev = this.db
-      .prepare(
-        "SELECT status FROM quality WHERE account=? AND at<=? ORDER BY at DESC LIMIT 1",
-      )
-      .get(key, t);
-    if (prev?.status !== status)
-      this.db
-        .prepare("INSERT OR IGNORE INTO quality VALUES(?,?,?)")
-        .run(key, t, status);
+  recordQuality(account, at, status, round = {}) {
+    const time = iso(at);
+    if (!time || !QUALITY_STATUSES.has(status)) return;
+    const key = account.toLowerCase();
+    const legacyId = `legacy:${time}:${status}`;
+    const id = typeof round.id === "string" && round.id.trim() ? round.id : legacyId;
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(
+        "INSERT OR IGNORE INTO quality_observations VALUES(?,?,?,?,?,?)",
+      ).run(key, id, time, status, QUALITY_METHODS.has(round.method) ? round.method : null,
+        QUALITY_SOURCES.has(round.source) ? round.source : null);
+      if (id !== legacyId) {
+        this.db.prepare("DELETE FROM quality_observations WHERE account=? AND id=?").run(key, legacyId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.qualitySummaries.delete(key);
   }
+
+  qualityPage(account, before = null) {
+    const key = account.toLowerCase();
+    let rows;
+    if (before === null) {
+      rows = this.db.prepare(
+        "SELECT rowid, id, at, status, method, source FROM quality_observations WHERE account=? ORDER BY at DESC, rowid DESC LIMIT ?",
+      ).all(key, QUALITY_PAGE_SIZE + 1);
+    } else {
+      const [time, row] = before.split("|");
+      const rowid = Number(row);
+      if (before !== `${time}|${rowid}` || iso(time) !== time || !Number.isSafeInteger(rowid) || rowid < 1) {
+        throw failure(400, "降智检测记录分页参数无效");
+      }
+      rows = this.db.prepare(
+        "SELECT rowid, id, at, status, method, source FROM quality_observations WHERE account=? AND (at,rowid)<(?,?) ORDER BY at DESC, rowid DESC LIMIT ?",
+      ).all(key, time, rowid, QUALITY_PAGE_SIZE + 1);
+    }
+    const visible = rows.slice(0, QUALITY_PAGE_SIZE);
+    const last = visible.at(-1);
+    return {
+      records: visible.map(({ id, at, status, method, source }) => ({ id, at, status, method, source })),
+      nextBefore: rows.length > QUALITY_PAGE_SIZE ? `${last.at}|${last.rowid}` : null,
+    };
+  }
+
   quality(account, joined) {
-    const rows = this.db
-      .prepare(
-        "SELECT at,status FROM quality WHERE account=? ORDER BY at DESC LIMIT 2",
-      )
-      .all(account.toLowerCase());
-    const [last, prev] = rows;
-    if (!last) return { kind: "unknown" };
+    const key = account.toLowerCase();
+    let summary = this.qualitySummaries.get(key);
+    if (!summary) {
+      const timeline = this.db.prepare(`
+        SELECT at, status, previousStatus, method FROM (
+          SELECT at, status, method, rowid,
+            LAG(status) OVER (ORDER BY at,rowid) AS previousStatus
+          FROM quality_observations WHERE account=? AND status IN ('match','mismatch')
+        ) WHERE previousStatus IS NULL OR previousStatus <> status ORDER BY at,rowid
+      `).all(key);
+      const lastCheckedAt = this.db.prepare(
+        "SELECT at FROM quality_observations WHERE account=? ORDER BY at DESC, rowid DESC LIMIT 1",
+      ).get(key)?.at ?? null;
+      summary = { timeline, currentStatus: timeline.at(-1)?.status ?? null, lastCheckedAt };
+      this.qualitySummaries.set(key, summary);
+    }
+    const last = summary.timeline.at(-1), prev = summary.timeline.at(-2);
+    if (!last) return { ...summary, kind: "unknown" };
     const elapsed = (a, b) =>
       iso(a) && iso(b) && Date.parse(b) >= Date.parse(a)
         ? Math.floor((Date.parse(b) - Date.parse(a)) / 60000)
         : null;
     if (last.status === "mismatch")
       return {
+        ...summary,
         kind: "degraded",
         at: last.at,
         minutesAfterJoin: elapsed(joined, last.at),
       };
     if (prev?.status === "mismatch")
       return {
+        ...summary,
         kind: "recovered",
         at: last.at,
         minutesToRecovery: elapsed(prev.at, last.at),
       };
-    return { kind: "normal", at: last.at };
+    return { ...summary, kind: "normal", at: last.at };
   }
   recordIncome(
     day,

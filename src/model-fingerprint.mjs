@@ -406,7 +406,7 @@ export class ModelFingerprintService {
           controller.signal.throwIfAborted();
         }
         this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), identities, routingIdentities, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: aggregateFingerprint(results), models: results });
-        this.onVerdict(email,entry.result.checkedAt,entry.result.status);
+        this.onVerdict(email, entry.result.checkedAt, entry.result.status, entry.result);
         if (importRunId) entry.lastImportRunId = importRunId;
         // A completed candy answer consumes its one scheduled turn even when
         // unscorable. Transport/auth failures keep the slot for the next check.
@@ -425,7 +425,7 @@ export class ModelFingerprintService {
           const detail = fingerprintFailure(error);
           entry.lastError = detail.message;
           this.recordResult(entry, { signature, backend, method, sequencePosition:step.position, usage:aggregateRequestUsage(results), checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: "error", models: results, error: entry.lastError, failure: detail });
-          this.onVerdict(email,entry.result.checkedAt,entry.result.status);
+          this.onVerdict(email, entry.result.checkedAt, entry.result.status, entry.result);
         if (importRunId) entry.lastImportRunId = importRunId;
           await this.persist();
         });
