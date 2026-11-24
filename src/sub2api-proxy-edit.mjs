@@ -52,6 +52,20 @@ export function createProxyEditor({ request }) {
 
   return {
     async get(config, id) { return publicEdit(config, await read(config, id)); },
+    async renameForInventory(config, node, name, addressOf) {
+      const id = Number(node.id);
+      const observed = await read(config, id);
+      if (addressOf(observed) !== addressOf(node) || observed.name !== node.name)
+        throw error(409, '代理已变化，下一轮重新匹配');
+      if (observed.name === name) return;
+      await mutate(config, id, { revision: revision(config, observed) }, '改名', async () => {
+        const payload = await request(config, `/api/v1/admin/proxies/${id}`, {
+          method: 'PUT', timeoutMs: 30_000, body: JSON.stringify({ name }),
+        });
+        const saved = payload?.data ?? payload;
+        if (Number(saved?.id) !== id || saved.name !== name) throw error(502, '代理改名待重新核对');
+      });
+    },
     async update(config, id, body) {
       return mutate(config, id, body, '修改', async current => {
         const merged = { ...connection(current), ...Object.fromEntries(

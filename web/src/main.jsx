@@ -102,6 +102,7 @@ const ChatDialog=deferredDialog("账号对话测试",()=>import("./ops-dialogs.j
 const ProxyPolicyDialog=deferredDialog("代理分配与成本",()=>import("./ops-dialogs.jsx").then(m=>m.ProxyPolicyDialog));
 const SubscriptionHistoryDialog = deferredDialog("历史订阅", () => import("./subscription-history.jsx").then(m => m.SubscriptionHistoryDialog));
 const ProxyCreateDialog = deferredDialog("新增代理", () => import("./proxy-create-dialog.jsx").then(m => m.ProxyCreateDialog));
+import { IproyalPatrol, IproyalBalance } from "./iproyal-patrol.jsx";
 const ProxyEditDialog = deferredDialog("编辑代理", () => import("./proxy-edit-dialog.jsx").then(m => m.ProxyEditDialog));
 const BoundIpDialog = deferredDialog("切换绑定 IP", () => import("./bound-ip-dialog.jsx").then(m => m.BoundIpDialog));
 const AccountLogDialog = deferredDialog("账号日志", () => import("./account-log-dialog.jsx").then(m => m.AccountLogDialog));
@@ -2398,6 +2399,7 @@ function App() {
             </div>
 
             <div className="proxy-dialog-body">
+              <IproyalPatrol request={proxyDialogRequest} />
               <div className="proxy-mode-banner">
                 <div className="proxy-mode-content">
                   <div className="proxy-mode-icon-wrap">
@@ -6597,6 +6599,7 @@ function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, o
           <div className="proxy-management-node-row">
             <div className="proxy-management-node-info" title={description}>
               <span className="proxy-management-node-name">{node.name}</span>
+              <IproyalBalance record={node.iproyal} />
               {protocol && <span className="proxy-management-protocol">{protocol}</span>}
               {showEndpoint && <span className="proxy-management-endpoint">{[endpoint, `#${node.id}`].filter(Boolean).join(" · ")}</span>}
             </div>

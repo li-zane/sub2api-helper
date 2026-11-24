@@ -9,6 +9,14 @@ async page => {
     { id: 9, name: 'Solo node', protocol: 'https', host: 'solo.test', port: 8443, ipAddress: '203.0.113.9', username: '', hasPassword: false, accountCount: 0 },
   ];
   nodes.forEach(node => { node.status = 'active'; });
+  nodes[0].iproyal = { status: 'matched', order: '987', gb_balance: 0, at: Date.now() };
+  let patrolEnabled = false;
+  await page.route('**/api/iproyal/patrol', route => {
+    if (route.request().method() === 'PUT') patrolEnabled = route.request().postDataJSON().enabled;
+    return route.fulfill({ json: { enabled: patrolEnabled, running: false, message: '' } });
+  });
+  await page.route('**/api/iproyal/test-connection', route =>
+    route.fulfill({ json: { ipCount: 3, orderCount: 2, bandwidthChecked: true } }));
   let reject = false, failRead = false, rejectDelete = false, rejectStatus = false;
   const revision = (id, status = 'active') => String(id).repeat(63).slice(0, 63) + (status === 'active' ? 'a' : 'b');
   await page.route(/\/api\/sub2api\/(?:settings|monitor)$/, route => route.fulfill({ json: {
@@ -59,6 +67,18 @@ async page => {
   await page.locator('tbody .job-row').first().waitFor();
   await page.getByRole('region', { name: '代理 IP 配置', exact: true }).getByRole('button', { name: '配置', exact: true }).click();
   const parent = page.getByRole('dialog', { name: '代理 IP 配置与检测', exact: true });
+  await test('IPRoyal connection check, patrol switch and zero balance', async () => {
+    const section = parent.getByRole('region', { name: 'IPRoyal 巡检', exact: true });
+    await section.getByRole('button', { name: '测试连接' }).click();
+    await section.getByText(/已验证余额读取/).waitFor();
+    const toggle = section.getByRole('switch');
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/iproyal/patrol') && r.request().method() === 'PUT'), toggle.check()]);
+    check(patrolEnabled, 'patrol was not enabled');
+    await section.getByRole('button', { name: '立即巡检' }).click();
+    await toggle.uncheck();
+    await parent.getByText(/剩余 0\.00 GB/).waitFor();
+    await page.screenshot({ path: evidence + '/iproyal-patrol.png' });
+  });
   const ip = parent.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true });
   const dialog = page.getByRole('dialog', { name: '编辑代理', exact: true });
   await test('click-ip-opens-editor-and-loads-current-connection-without-password', async () => {

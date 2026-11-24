@@ -85,6 +85,7 @@ import { accountHealth } from "./account-health.mjs";
 import { AccountSessionResets, sessionResetPending, sessionResetBlocksAutomation, resetCredentialUpdate, normalizeSessionResetDelay } from "./account-session-reset.mjs";
 import { createProxyImporter, listAllSub2ApiProxies } from "./sub2api-proxy-create.mjs";
 import { createProxyEditor } from "./sub2api-proxy-edit.mjs";
+import { addressOf, createIproyalPatrol, dashboardSource } from "./iproyal-patrol.mjs";
 import { poolAccountError } from "../web/src/pool-account-error.mjs";
 
 export function createConsoleApp(options = {}) {
@@ -193,6 +194,19 @@ export function createConsoleApp(options = {}) {
     options.outputRoot || process.env.ONBOARDING_OUTPUT_ROOT || path.join(WORKSPACE_ROOT, "tmp", "chatgpt-onboarding-console"),
   );
   const projectUpdates=options.projectUpdates || createProjectUpdates();
+  const iproyal = createIproyalPatrol({
+    root: OUTPUT_ROOT,
+    source: options.iproyalSource ?? (() => dashboardSource(process.env.IPROYAL_CREDENTIALS_FILE)),
+    target: () => sub2ApiSettingsConfig?.adminApiKey
+      ? { key: monitorBackendIdentity(sub2ApiSettingsConfig), config: sub2ApiSettingsConfig } : null,
+    canRun: () => !shuttingDown && !dispatchPaused(),
+    list: async ({config}) => normalizeSub2ApiProxyList(await listAllSub2ApiProxies(requestSub2Api, config)),
+    rename: async ({config}, node, name) => {
+      await sub2ApiProxyEditor.renameForInventory(config, node, name, addressOf);
+      sub2ApiProxyStateCache.delete(`${monitorBackendIdentity(config)}:${node.id}`);
+      invalidateSub2ApiAccountStatusCache();
+    },
+  });
   const accountTagCatalog = createAccountTagCatalog(path.join(OUTPUT_ROOT, "account-tag-options.json"));
   const cliUaSettings = createCliUaSettings({ root: path.join(OUTPUT_ROOT, "codex-cli-profiles"),
     getConfig: () => sub2ApiSettingsConfig, ...(options.cliUaProbe ? { probe: options.cliUaProbe } : {}) });
@@ -700,7 +714,7 @@ export function createConsoleApp(options = {}) {
 
     if (req.method === "GET" && requestUrl.pathname === "/api/release-drain") {
       const busyJobs = [...jobs.values()].filter(j => !j.deleted && (isActive(j.status) || j.autoTaskStatus === "running")).length;
-      const busyWorkers = chatStore.work.size + Number(Boolean(financeWork)) + admittedWrites + emailJobLocks.size + activeWebSessionChecks + manualWebSessionCheckOperations.size
+      const busyWorkers = chatStore.work.size + Number(Boolean(financeWork)) + Number(iproyal.status().running) + admittedWrites + emailJobLocks.size + activeWebSessionChecks + manualWebSessionCheckOperations.size
         + sessionResetStarts.size + poolRefreshOperations.size + sub2ApiAutoRepairPromises.size + accountSecurityChecks.size
         + modelFingerprint.inFlight.size + modelFingerprint.runningTasks.size + accountDataSyncOperations.size
         + [webSessionMonitor.running, modelFingerprint.ticking, overloadMonitor.running, overloadCooldown.running, sub2ApiMonitorPromise].filter(Boolean).length;
@@ -1232,9 +1246,25 @@ export function createConsoleApp(options = {}) {
       return;
     }
 
+    if (req.method === "POST" && requestUrl.pathname === "/api/iproyal/test-connection") {
+      sendJson(res, 200, await iproyal.checkConnection());
+      return;
+    }
+    if (requestUrl.pathname === "/api/iproyal/patrol") {
+      if (req.method === "GET") sendJson(res, 200, iproyal.status());
+      else if (req.method === "PUT") sendJson(res, 200, await iproyal.configure((await readJson(req)).enabled));
+      else if (req.method === "POST") {
+        if (!iproyal.status().enabled) throw httpError(409, "请先开启 IPRoyal 巡检");
+        void iproyal.run();
+        sendJson(res, 202, iproyal.status());
+      } else throw httpError(405, "不支持的请求方法");
+      return;
+    }
+
     if (req.method === "POST" && requestUrl.pathname === "/api/sub2api/proxies") {
       const body = await readJson(req);
       const result = await importSub2ApiProxies(sub2ApiSettingsConfig, body);
+      void iproyal.run();
       // Refresh cached choices independently; creation results must survive a read failure.
       try { await listSub2ApiProxies(); } catch {}
       sendJson(res, 200, result);
@@ -1313,6 +1343,7 @@ export function createConsoleApp(options = {}) {
         groups: groupPayload,
         proxies: [...proxiesById.values()].map((proxy) => ({
           ...publicSub2ApiProxy(proxy),
+          iproyal: iproyal.lookup(monitorBackendIdentity(config), addressOf(proxy)),
           ...book.policy(poolKey(config),proxy.id,proxyIpKey(proxy)),
           accountCount: proxyCounts.get(proxyIpKey(proxy)) || 0,
           availableForBinding: Boolean(proxy.url) && !isSub2ApiProxyExpired(proxy) && !book.isBlocked(poolKey(config),proxy.id),
@@ -11524,6 +11555,7 @@ export function createConsoleApp(options = {}) {
     shutdownPromise = (async () => {
       shuttingDown = true;
       clearTimeout(financeTimer);
+      await iproyal.stop();
       await Promise.allSettled([financeWork, chatStore.stop()].filter(Boolean));
       clearTimeout(startupDispatchTimer);
       loginTimeouts.close();
@@ -11602,6 +11634,7 @@ export function createConsoleApp(options = {}) {
     await consoleSettings.load();
     await loadPlanTypeLabelMapping();
     await loadSub2ApiSettingsConfiguration();
+    await iproyal.load();
     await loadSub2ApiMonitorConfiguration();
     await usageSnapshots.load().catch(() => console.error("[usage-cache] 用量快照暂不可读，等待上游同步恢复；其他功能继续运行。"));
     await subscriptionHistory.load();
@@ -11713,6 +11746,7 @@ export function createConsoleApp(options = {}) {
       webSessionMonitor.start();
       scheduleAccountDataSync();
       scheduleFinance();
+      iproyal.start();
       dispatchStarted = true;
     };
     await startDispatch();
