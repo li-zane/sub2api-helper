@@ -1343,7 +1343,7 @@ export function createConsoleApp(options = {}) {
         groups: groupPayload,
         proxies: [...proxiesById.values()].map((proxy) => ({
           ...publicSub2ApiProxy(proxy),
-          iproyal: iproyal.lookup(monitorBackendIdentity(config), addressOf(proxy)),
+          iproyal: iproyal.lookup(monitorBackendIdentity(config), addressOf(proxy)) ?? undefined,
           ...book.policy(poolKey(config),proxy.id,proxyIpKey(proxy)),
           accountCount: proxyCounts.get(proxyIpKey(proxy)) || 0,
           availableForBinding: Boolean(proxy.url) && !isSub2ApiProxyExpired(proxy) && !book.isBlocked(poolKey(config),proxy.id),
