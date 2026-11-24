@@ -29,6 +29,13 @@ try {
   assert(b.isBlocked(ns, 12));
   assert(!b.isBlocked(ns, 13));
   assert.equal(b.policy(ns, 13, "test-ip").ipCostCny, 3.81);
+  b.savePolicy(ns, 12, "test-ip", added, { ipCostCny: 4.5 });
+  assert(b.isBlocked(ns, 12), 'cost synchronization must preserve manual pause');
+  assert.equal(b.policy(ns, 13, "test-ip").ipCostCny, 4.5, 'shared exit IP cost');
+  b.savePolicy(ns, 13, "test-ip", added, { allocationPaused: true });
+  assert.equal(b.policy(ns, 13, "test-ip").ipCostCny, 4.5, 'participation change preserves cost');
+  assert.throws(() => b.savePolicy(ns, 12, "test-ip", added, {}), /分配状态/);
+  b.savePolicy(ns, 13, "test-ip", added, { allocationPaused: false, ipCostCny: 3.81 });
   b.pause(acct, true);
   b.close();
   b = new OperationsBook(file, () => now);

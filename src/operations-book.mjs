@@ -113,34 +113,37 @@ export class OperationsBook {
       .run(pool, ip, at);
   }
   savePolicy(pool, id, ip, created, body) {
-    if (typeof body.allocationPaused !== "boolean" || !ip)
+    const hasPause = Object.hasOwn(body, "allocationPaused"), hasCost = Object.hasOwn(body, "ipCostCny");
+    if (!ip || (!hasPause && !hasCost) || (hasPause && typeof body.allocationPaused !== "boolean"))
       throw failure(400, "缺少代理 IP 或分配状态");
     let price;
     try {
-      price = cents(body.ipCostCny);
+      if (hasCost) price = cents(body.ipCostCny);
     } catch {
       throw failure(400, "IP 成本必须为有效的非负人民币金额，最多两位小数");
     }
     this.db.exec("BEGIN");
     try {
       this.seeIp(pool, ip, created);
-      this.db
+      if (hasCost) this.db
         .prepare("UPDATE ips SET cost=? WHERE pool=? AND ip=?")
         .run(price, pool, ip);
-      this.db
+      if (hasPause) this.db
         .prepare("INSERT OR REPLACE INTO proxy_rules VALUES(?,?,?)")
         .run(pool, id, +body.allocationPaused);
       const row = this.db
         .prepare("SELECT added FROM ips WHERE pool=? AND ip=?")
         .get(pool, ip);
-      this.expense("ip", pool + ":" + ip, row.added, price);
+      if (hasCost) this.expense("ip", pool + ":" + ip, row.added, price);
       this.db.exec("COMMIT");
     } catch (e) {
       this.db.exec("ROLLBACK");
       throw e;
     }
-    if (body.allocationPaused) this.blocked.add(pool + ":" + id);
-    else this.blocked.delete(pool + ":" + id);
+    if (hasPause) {
+      if (body.allocationPaused) this.blocked.add(pool + ":" + id);
+      else this.blocked.delete(pool + ":" + id);
+    }
     return this.policy(pool, id, ip);
   }
   expense(kind, entity, added, price) {

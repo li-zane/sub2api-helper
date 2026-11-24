@@ -1,19 +1,24 @@
 async page => {
-  const evidence = "__UI_TEST_EVIDENCE_DIR__", results = [], errors = [], writes = [], reads = [], deletes = [], statusWrites = [];
+  const evidence = "__UI_TEST_EVIDENCE_DIR__", results = [], errors = [], consoleIssues = [], writes = [], reads = [], deletes = [], statusWrites = [], policyWrites = [];
   const check = (value, message) => { if (!value) throw Error(message); };
   const test = async (name, run) => { try { await run(); results.push({ name, passed: true }); } catch (e) { results.push({ name, passed: false, error: e.message }); } };
   page.setDefaultTimeout(7000); page.on('pageerror', e => errors.push(e.message));
+  page.on('console', m => {
+    if (['error', 'warning'].includes(m.type()) && !/Failed to load resource:.*status of (409|502)/.test(m.text())) consoleIssues.push(m.text());
+  });
   const nodes = [
     { id: 7, name: 'HTTP node', protocol: 'http', host: 'one.test', port: 8080, ipAddress: '203.0.113.7', username: 'saved-user', hasPassword: true, accountCount: 3 },
     { id: 8, name: 'SOCKS node', protocol: 'socks5h', host: 'two.test', port: 1080, ipAddress: '203.0.113.7', username: '', hasPassword: false, accountCount: 3 },
     { id: 9, name: 'Solo node', protocol: 'https', host: 'solo.test', port: 8443, ipAddress: '203.0.113.9', username: '', hasPassword: false, accountCount: 0 },
   ];
-  nodes.forEach(node => { node.status = 'active'; });
+  nodes.forEach(node => { node.status = 'active'; node.allocationPaused = false; node.ipCostCny = 3.8; });
   nodes[0].iproyal = { status: 'matched', order: '987', gb_balance: 0, at: Date.now() };
-  let patrolEnabled = false;
+  let patrolEnabled = false, rejectPolicy = false;
+  const patrolSettings = { enabled: false, intervalMinutes: 5, autoPause: false, thresholdGbPerIp: 10, syncCost: false, usdToCny: null };
+  const settingsWrites = [];
   await page.route('**/api/iproyal/patrol', route => {
-    if (route.request().method() === 'PUT') patrolEnabled = route.request().postDataJSON().enabled;
-    return route.fulfill({ json: { enabled: patrolEnabled, running: false, message: '' } });
+    if (route.request().method() === 'PUT') { const patch = route.request().postDataJSON(); settingsWrites.push(patch); Object.assign(patrolSettings, patch); patrolEnabled = patrolSettings.enabled; }
+    return route.fulfill({ json: { ...patrolSettings, running: false, message: '' } });
   });
   await page.route('**/api/iproyal/test-connection', route =>
     route.fulfill({ json: { ipCount: 3, orderCount: 2, bandwidthChecked: true } }));
@@ -29,6 +34,16 @@ async page => {
     const { includeInactiveProxies } = route.request().postDataJSON();
     const proxies = nodes.filter(node => includeInactiveProxies || node.status === 'active');
     return route.fulfill({ json: { proxies: proxies.map(({ username, hasPassword, ...node }) => node), groups: [], directAccountCount: 1 } });
+  });
+  await page.route(/\/api\/sub2api\/proxies\/\d+\/allocation$/, async route => {
+    const id = Number(new URL(route.request().url()).pathname.split('/').at(-2));
+    const node = nodes.find(n => n.id === id), patch = route.request().postDataJSON();
+    policyWrites.push({ id, patch });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    if (rejectPolicy) return route.fulfill({ status: 502, json: { error: '分配成本保存失败' } });
+    if (Object.hasOwn(patch, 'ipCostCny')) nodes.filter(n => n.ipAddress === node.ipAddress).forEach(n => { n.ipCostCny = Number(patch.ipCostCny); });
+    if (Object.hasOwn(patch, 'allocationPaused')) node.allocationPaused = patch.allocationPaused;
+    return route.fulfill({ json: { ip: node.ipAddress, ipCostCny: node.ipCostCny, ipAddedAt: null, allocationPaused: node.allocationPaused } });
   });
   await page.route(/\/api\/sub2api\/proxies\/\d+$/, async route => {
     const request = route.request(), id = Number(new URL(request.url()).pathname.split('/').at(-1));
@@ -71,13 +86,62 @@ async page => {
     const section = parent.getByRole('region', { name: 'IPRoyal 巡检', exact: true });
     await section.getByRole('button', { name: '测试连接' }).click();
     await section.getByText(/已验证余额读取/).waitFor();
-    const toggle = section.getByRole('switch');
+    const toggle = section.getByRole('switch', { name: 'IPRoyal 巡检', exact: true });
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/iproyal/patrol') && r.request().method() === 'PUT'), toggle.check()]);
     check(patrolEnabled, 'patrol was not enabled');
     await section.getByRole('button', { name: '立即巡检' }).click();
     await toggle.uncheck();
     await parent.getByText(/剩余 0\.00 GB/).waitFor();
     await page.screenshot({ path: evidence + '/iproyal-patrol.png' });
+  });
+  await test('patrol settings save interval, order threshold and exchange rate while preserving dirty draft', async () => {
+    const section = parent.getByRole('region', { name: 'IPRoyal 巡检', exact: true });
+    await section.getByLabel('巡检间隔（分钟）', { exact: true }).fill('13');
+    await section.getByRole('switch', { name: '流量达到阈值时暂停新分配', exact: true }).check();
+    await section.getByLabel('单 IP 剩余流量阈值（GB）', { exact: true }).fill('12');
+    await section.getByRole('switch', { name: '巡检同步 IP 成本', exact: true }).check();
+    await section.getByLabel('美元兑人民币汇率', { exact: true }).fill('7.2');
+    await page.waitForResponse(r => r.url().endsWith('/api/iproyal/patrol') && r.request().method() === 'GET', { timeout: 13000 });
+    check(await section.getByLabel('巡检间隔（分钟）', { exact: true }).inputValue() === '13', 'poll erased unsaved settings');
+    await section.getByRole('button', { name: '保存巡检设置', exact: true }).click();
+    await section.getByText('巡检已关闭', { exact: true }).waitFor();
+    check(patrolSettings.intervalMinutes === 13 && patrolSettings.autoPause && patrolSettings.thresholdGbPerIp === 12 && patrolSettings.syncCost && patrolSettings.usdToCny === 7.2, 'settings fields lost');
+    check(await section.getByRole('button', { name: '保存巡检设置', exact: true }).isDisabled(), 'saved settings remain dirty');
+    await page.screenshot({ path: evidence + '/iproyal-settings-desktop.png' });
+    await page.setViewportSize({ width: 375, height: 812 });
+    await section.getByLabel('巡检间隔（分钟）', { exact: true }).scrollIntoViewIfNeeded();
+    check(await section.evaluate(el => el.scrollWidth <= el.clientWidth + 1), 'mobile settings overflow horizontally');
+    await page.screenshot({ path: evidence + '/iproyal-settings-mobile.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  });
+  await test('allocation and shared IP cost edit inline, failure keeps draft and controls remain independent', async () => {
+    const card = parent.locator('.proxy-management-card').filter({ has: page.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true }) });
+    const toggle = card.getByRole('switch', { name: '参与分配 · HTTP node · #7', exact: true });
+    await toggle.click();
+    await page.waitForFunction(() => document.querySelector('[aria-label="参与分配 · HTTP node · #7"]')?.getAttribute('aria-checked') === 'false');
+    const cost = card.getByLabel('IP 成本（元）· 203.0.113.7', { exact: true });
+    check(await card.getByRole('dialog').count() === 0, 'policy editor opened a dialog');
+    check(await card.locator('input[type="number"]').count() === 1, 'duplicate costs for shared IP');
+    await cost.fill('5.25'); rejectPolicy = true;
+    await card.getByRole('button', { name: '保存成本', exact: true }).click();
+    await card.getByRole('alert').getByText('分配成本保存失败', { exact: true }).waitFor();
+    check(await cost.inputValue() === '5.25', 'failure erased cost draft');
+    rejectPolicy = false; await card.getByRole('button', { name: '保存成本', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.proxy-cost-control button')?.disabled && !document.querySelector('.proxy-cost-control input')?.disabled);
+    check(nodes[0].allocationPaused && nodes[1].ipCostCny === 5.25 && !nodes[1].allocationPaused, 'cost or node pause leaked across policies');
+    check(Object.keys(policyWrites.at(-1).patch).join() === 'ipCostCny', 'cost save overwrote manual policy');
+    await toggle.click();
+    await page.waitForFunction(() => document.querySelector('[aria-label="参与分配 · HTTP node · #7"]')?.getAttribute('aria-checked') === 'true');
+    nodes[0].iproyal = { ...nodes[0].iproyal, autoAllocationPaused: true, thresholdGb: 50, ipCount: 5, costSyncEnabled: true, cost: { usdPerIp: 2.43, days: 30 } };
+    await parent.getByRole('button', { name: '读取代理', exact: true }).click();
+    await card.getByText('自动暂停分配', { exact: false }).waitFor();
+    check(await toggle.isDisabled() && await cost.isDisabled(), 'automatic controls are editable');
+    check(await card.getByRole('switch', { name: /^代理启用状态 · HTTP node/ }).isEnabled(), 'allocation gate changed node enablement');
+    nodes[0].iproyal.autoAllocationPaused = false; nodes[0].iproyal.costSyncEnabled = false;
+    await parent.getByRole('button', { name: '读取代理', exact: true }).click();
+    await toggle.waitFor();
+    await page.waitForFunction(() => !document.querySelector('[aria-label="参与分配 · HTTP node · #7"]')?.disabled);
+    check(await cost.inputValue() === '5.25', 'refresh lost confirmed cost');
   });
   const ip = parent.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true });
   const dialog = page.getByRole('dialog', { name: '编辑代理', exact: true });
@@ -136,9 +200,9 @@ async page => {
   });
   await test('list switches one shared-IP node in place and preserves its previous state on failure', async () => {
     const card = parent.locator('.proxy-management-card').filter({ has: page.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true }) });
-    const toggle = card.getByRole('switch', { name: /Updated SOCKS/ });
-    const sibling = card.getByRole('switch', { name: /HTTP node/ });
-    check(await card.getByRole('switch').count() === 2, 'shared IP does not have independent node switches');
+    const toggle = card.getByRole('switch', { name: /^代理启用状态 · Updated SOCKS/ });
+    const sibling = card.getByRole('switch', { name: /^代理启用状态 · HTTP node/ });
+    check(await card.getByRole('switch', { name: /^代理启用状态/ }).count() === 2, 'shared IP does not have independent node switches');
     await card.getByText('全部启用', { exact: true }).waitFor();
     check(await toggle.getAttribute('aria-checked') === 'true', 'active node switch starts unchecked');
     rejectStatus = true;
@@ -235,6 +299,9 @@ async page => {
       'delete targeted the wrong node or skipped version checking');
     check(await parent.getByText('Updated SOCKS', { exact: true }).count() === 0, 'deleted node is still rendered');
     check(errors.length === 0, errors.join('; '));
+    check(consoleIssues.length === 0, consoleIssues.join('; '));
   });
-  return { passed: results.filter(result => result.passed).length, total: results.length, results };
+  return { passed: results.filter(result => result.passed).length, total: results.length, results,
+    metrics: { url: page.url(), title: await page.title(), viewports: ['1440x1000', '375x812'], pageErrors: errors.length, consoleIssues,
+      browser: 'Browser plugin not available; repository Playwright CLI' } };
 }

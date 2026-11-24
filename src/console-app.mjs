@@ -200,11 +200,21 @@ export function createConsoleApp(options = {}) {
     target: () => sub2ApiSettingsConfig?.adminApiKey
       ? { key: monitorBackendIdentity(sub2ApiSettingsConfig), config: sub2ApiSettingsConfig } : null,
     canRun: () => !shuttingDown && !dispatchPaused(),
-    list: async ({config}) => normalizeSub2ApiProxyList(await listAllSub2ApiProxies(requestSub2Api, config)),
+    list: async ({config}) => {
+      const nodes = normalizeSub2ApiProxyList(await listAllSub2ApiProxies(requestSub2Api, config));
+      for (const node of nodes) book.seeIp(poolKey(config), proxyIpKey(node), node.created_at || node.createdAt);
+      return nodes;
+    },
     rename: async ({config}, node, name) => {
       await sub2ApiProxyEditor.renameForInventory(config, node, name, addressOf);
       sub2ApiProxyStateCache.delete(`${monitorBackendIdentity(config)}:${node.id}`);
       invalidateSub2ApiAccountStatusCache();
+    },
+    syncCost: async ({config}, node, ipCostCny) => {
+      const change = accountProxyAssignmentPromise.catch(() => {}).then(() =>
+        book.savePolicy(poolKey(config), node.id, proxyIpKey(node), node.created_at || node.createdAt, { ipCostCny }));
+      accountProxyAssignmentPromise = change;
+      await change;
     },
   });
   const accountTagCatalog = createAccountTagCatalog(path.join(OUTPUT_ROOT, "account-tag-options.json"));
@@ -212,6 +222,7 @@ export function createConsoleApp(options = {}) {
     getConfig: () => sub2ApiSettingsConfig, ...(options.cliUaProbe ? { probe: options.cliUaProbe } : {}) });
   const book = new OperationsBook(path.join(OUTPUT_ROOT, "helper-operations.sqlite"));
   const poolKey = config => String(config?.baseUrl || "").trim().replace(/\/+$/, "");
+  const allocationBlocked = (config, id) => book.isBlocked(poolKey(config), id) || iproyal.isBlocked(monitorBackendIdentity(config), id);
   const inspectionPaused = email => book.paused(accountLoginEmails.key(email));
   let financeWork, financeTimer;
   function refreshFinance(settle=false) {
@@ -1252,7 +1263,7 @@ export function createConsoleApp(options = {}) {
     }
     if (requestUrl.pathname === "/api/iproyal/patrol") {
       if (req.method === "GET") sendJson(res, 200, iproyal.status());
-      else if (req.method === "PUT") sendJson(res, 200, await iproyal.configure((await readJson(req)).enabled));
+      else if (req.method === "PUT") sendJson(res, 200, await iproyal.configure(await readJson(req)));
       else if (req.method === "POST") {
         if (!iproyal.status().enabled) throw httpError(409, "请先开启 IPRoyal 巡检");
         void iproyal.run();
@@ -1346,7 +1357,7 @@ export function createConsoleApp(options = {}) {
           iproyal: iproyal.lookup(monitorBackendIdentity(config), addressOf(proxy)) ?? undefined,
           ...book.policy(poolKey(config),proxy.id,proxyIpKey(proxy)),
           accountCount: proxyCounts.get(proxyIpKey(proxy)) || 0,
-          availableForBinding: Boolean(proxy.url) && !isSub2ApiProxyExpired(proxy) && !book.isBlocked(poolKey(config),proxy.id),
+          availableForBinding: Boolean(proxy.url) && !isSub2ApiProxyExpired(proxy) && !allocationBlocked(config,proxy.id),
         })),
         directAccountCount,
         directIp: directPublicIp.peek(),
@@ -6474,7 +6485,7 @@ export function createConsoleApp(options = {}) {
     for (const proxyId of proxyIds) {
       if (shuttingDown) return;
       const target = await resolveSub2ApiProxyFallback(config, proxyId);
-      if (target === proxyId || book.isBlocked(poolKey(config),Number(target))) continue;
+      if (target === proxyId || allocationBlocked(config,Number(target))) continue;
       for (const account of accounts) {
         const accountId = normalizeSub2ApiAccountId(account?.id);
         if (accountSyncBlocked(account)) continue;
@@ -6758,7 +6769,7 @@ export function createConsoleApp(options = {}) {
     }
     if (consoleSettings.current.accountProxyMode !== "sub2api") {
       const fields=sub2ApiProxyFields(accountConfig);
-      if(fields.proxy_id && book.isBlocked(poolKey(accountConfig.baseUrl?accountConfig:sub2ApiSettingsConfig),Number(fields.proxy_id))
+      if(fields.proxy_id && allocationBlocked(accountConfig.baseUrl?accountConfig:sub2ApiSettingsConfig,Number(fields.proxy_id))
          && Number(remoteAccount.proxy_id)!==Number(fields.proxy_id) && Number(findJobByEmail(email)?.assignedProxyId)!==Number(fields.proxy_id)) throw httpError(409,"方案代理已停止新分配");
       return fields;
     }
@@ -7953,7 +7964,7 @@ export function createConsoleApp(options = {}) {
     if (mode === "fixed") {
       const proxyId = normalizeStoredProxyId(jobSub2ApiProxyConfig(job)?.proxyId);
       const proxy = (await listSub2ApiProxies()).find((item) => item.id === proxyId);
-      if (book.isBlocked(poolKey(sub2ApiSettingsConfig),proxyId) && Number(job.assignedProxyId)!==proxyId) throw httpError(409,"此代理已停止新分配");
+      if (allocationBlocked(sub2ApiSettingsConfig,proxyId) && Number(job.assignedProxyId)!==proxyId) throw httpError(409,"此代理已停止新分配");
       if (!proxy?.url || isSub2ApiProxyExpired(proxy)) throw httpError(409, "当前方案指定的代理已失效，原绑定保持不变");
       return proxy;
     }
@@ -7983,7 +7994,7 @@ export function createConsoleApp(options = {}) {
   }
 
   async function saveJobProxyBinding(job, proxy) {
-    if(proxy && book.isBlocked(poolKey(sub2ApiSettingsConfig),proxy.id) && Number(job.assignedProxyId)!==proxy.id) {
+    if(proxy && allocationBlocked(sub2ApiSettingsConfig,proxy.id) && Number(job.assignedProxyId)!==proxy.id) {
       const state=getSub2ApiAccountStatusForJob(job);if(!(state.proxyIds||[]).map(Number).includes(proxy.id))throw httpError(409,"此代理已停止新分配，原绑定保持不变");
     }
     job.authorizationProxySelected = true;
@@ -8024,7 +8035,7 @@ export function createConsoleApp(options = {}) {
     }
     const operation = accountProxyAssignmentPromise.catch(() => {}).then(async () => {
       const proxy = proxyId ? (await listSub2ApiProxies(config)).find(item => item.id === proxyId) : null;
-      if (proxyId && book.isBlocked(poolKey(config),proxyId) && !previous.includes(proxyId)) throw httpError(409,"所选代理已停用新分配");
+      if (proxyId && allocationBlocked(config,proxyId) && !previous.includes(proxyId)) throw httpError(409,"所选代理已停用新分配");
       if (proxyId && (!proxy?.url || isSub2ApiProxyExpired(proxy))) throw httpError(409, "所选代理已不可用，请重新选择");
       if (monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiSettingsConfig)) throw httpError(409, "号池后端已变化，请重新选择");
       await revokeAllAccountSessions({ ...job, proxyUrl: proxy?.url || null, fixedProxy: true });
@@ -8246,7 +8257,7 @@ export function createConsoleApp(options = {}) {
         const previousIp = previousProxy ? proxyIpKey(previousProxy) : null;
         const alternatives = [...ipGroups.values()].filter((group) => !reassign || !previousIp || group.ip !== previousIp);
         if (reassign && previousIp && !alternatives.length) throw httpError(409, `${account.email} 当前 Sub2API 代理没有不同的出口 IP`);
-        const allow=p=>!book.isBlocked(poolKey(config),p.id);
+        const allow=p=>!allocationBlocked(config,p.id);
         const candidates = alternatives.filter(g=>g.proxies.some(allow));
         if(!candidates.length)throw httpError(409,"没有允许新分配的代理；现有绑定保持不变");
         candidates.sort((left, right) => left.accountCount - right.accountCount || left.ip.localeCompare(right.ip));

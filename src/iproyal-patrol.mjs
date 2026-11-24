@@ -2,8 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
+import { IPROYAL_DEFAULTS, iproyalSettings } from '../shared/iproyal-settings.mjs';
 
-const FIVE_MINUTES = 300_000;
 const DAY = 86_400_000;
 const fault = (status, message) => Object.assign(new Error(message), { status, patrolMessage: message });
 const safeMessage = e => e?.patrolMessage || '巡检失败，请检查网络、凭据文件和号池连接';
@@ -66,6 +66,17 @@ export async function dashboardSource(file, fetchImpl = fetch) {
       if (!fields.every(k => Number.isFinite(v?.[k]) && v[k] >= 0)) throw fault(502, 'IPRoyal 流量响应缺少有效数值');
       return Object.fromEntries(fields.map(k => [k, v[k]]));
     },
+    async orderCost(order) {
+      if (!/^[1-9]\d*$/.test(order)) throw fault(400, '订单号无效');
+      const v = await get(order);
+      const quantity = v?.order_product?.quantity;
+      const days = v?.order_product?.product_plan?.duration;
+      const amount = v?.amount_with_vat ?? v?.amount;
+      if (String(v?.id) !== order || !Number.isInteger(quantity) || quantity < 1 ||
+          typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0 ||
+          !Number.isInteger(days) || days < 1) throw fault(502, 'IPRoyal 订单价格或周期格式无效');
+      return { amountUsd: amount, quantity, days, usdPerIp: amount / quantity };
+    },
   };
 }
 
@@ -84,7 +95,7 @@ export function indexInventory(rows, slots) {
     for (const ip of [...ips].sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))) {
       assigned[ip] ??= next++;
       const name = ips.size === 1 ? order : order + '-' + assigned[ip];
-      index[ip] = Object.hasOwn(index, ip) ? { ambiguous: true } : { order, name };
+      index[ip] = Object.hasOwn(index, ip) ? { ambiguous: true } : { order, name, ipCount: ips.size };
     }
   }
   return index;
@@ -101,29 +112,41 @@ async function save(file, data) {
     await fs.rename(temp, file);
   } finally { await fs.rm(temp, { force: true }); }
 }
-const empty = key => ({ key, checked: {}, orders: {}, slots: {}, inventoryAt: 0 });
+const empty = key => ({ key, checked: {}, orders: {}, slots: {}, inventoryAt: 0, nodeIps: {} });
 
-export function createIproyalPatrol({ root, source, target, canRun, list, rename, now = Date.now }) {
+export function createIproyalPatrol({ root, source, target, canRun, list, rename, syncCost = async () => {},
+  now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
   const cacheFile = path.join(root, 'iproyal-cache.json');
   const settingsFile = path.join(root, 'iproyal-settings.json');
-  let enabled = false, closed = false, work, timer, settingsQueue = Promise.resolve();
+  let settings = { ...IPROYAL_DEFAULTS }, closed = false, started = false, generation = 0, work, timer, nextRunAt = null, settingsQueue = Promise.resolve();
   let cache = empty(''), message = '', lastRun = 0;
-  const valid = key => enabled && !closed && canRun() && target()?.key === key;
-  const status = () => ({ enabled, running: Boolean(work), message, lastRun, intervalMinutes: 5 });
+  const valid = (key, revision) => settings.enabled && !closed && canRun() && target()?.key === key && revision === generation;
+  const status = () => ({ ...settings, running: Boolean(work), message, lastRun, nextRunAt });
+  function schedule() {
+    clearTimer(timer);
+    nextRunAt = null;
+    if (!started || closed || !settings.enabled) return;
+    nextRunAt = now() + settings.intervalMinutes * 60000;
+    timer = setTimer(() => { void run(); }, settings.intervalMinutes * 60000);
+    timer.unref?.();
+  }
   async function inspect() {
     const context = target();
     if (!context) throw fault(409, '请先保存 Sub2API 后端配置');
     const { key } = context;
+    const revision = generation;
+    const config = { ...settings };
     const api = await source();
     const nodes = await list(context);
-    if (!valid(key)) return;
+    if (!valid(key, revision)) return;
     const state = cache.key === key ? structuredClone(cache) : empty(key);
     const ips = [...new Set(nodes.map(addressOf).filter(Boolean))];
     let failures = 0;
     let firstError = '';
     const recordFailure = e => { failures++; firstError ||= safeMessage(e); };
     let inventoryFailed = false;
-    const needsInventory = state.source !== api.identity || !state.inventoryAt ||
+    const needsInventory = state.source !== api.identity || !state.inventoryAt || !state.nodeIps ||
+      Object.values(state.checked).some(v => v && !v.ambiguous && !v.ipCount) ||
       now() - state.inventoryAt >= DAY || ips.some(ip => !Object.hasOwn(state.checked, ip));
     if (needsInventory) {
       try {
@@ -142,30 +165,46 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
     const orders = new Set(Object.values(state.checked).map(v => v?.order).filter(Boolean));
     state.orders = Object.fromEntries(Object.entries(state.orders).filter(([id]) => orders.has(id)));
     for (const order of orders) {
-      if (!valid(key)) return;
-      try { state.orders[order] = { ...await api.bandwidth(order), at: now(), stale: false }; }
+      if (!valid(key, revision)) return;
+      try { state.orders[order] = { ...state.orders[order], ...await api.bandwidth(order), at: now(), stale: false }; }
       catch (e) {
         state.orders[order] = { ...state.orders[order], stale: true };
         recordFailure(e);
       }
+      if (api.orderCost) {
+        try { state.orders[order] = { ...state.orders[order], cost: await api.orderCost(order), costAt: now(), costStale: false }; }
+        catch (e) { state.orders[order].costStale = true; recordFailure(e); }
+      }
     }
-    if (!valid(key)) return;
+    if (!valid(key, revision)) return;
+    state.nodeIps = Object.fromEntries(nodes.map(node => [node.id, addressOf(node)]));
     // Commit the mapping before names are changed, so a restart reuses slots.
     await save(cacheFile, state);
     cache = state;
+    const costIps = new Set();
     for (const node of nodes) {
-      if (!valid(key)) return;
+      if (!valid(key, revision)) return;
       const link = state.checked[addressOf(node)];
-      if (inventoryFailed || !link?.order || state.orders[link.order]?.stale || node.name === link.name) continue;
-      try { await rename(context, node, link.name); }
-      catch { recordFailure(fault(502, '部分节点改名待重试')); }
+      if (inventoryFailed || !link?.order) continue;
+      const usage = state.orders[link.order];
+      if (config.syncCost && usage.cost && !usage.costStale && !costIps.has(addressOf(node))) {
+        try {
+          await syncCost(context, node, Math.round(usage.cost.usdPerIp * config.usdToCny * 100) / 100);
+          costIps.add(addressOf(node));
+        } catch { recordFailure(fault(502, '部分 IP 成本同步待重试')); }
+      }
+      if (!valid(key, revision)) return;
+      if (!usage.stale && node.name !== link.name) {
+        try { await rename(context, node, link.name); }
+        catch { recordFailure(fault(502, '部分节点改名待重试')); }
+      }
     }
     lastRun = now();
     message = failures ? `${failures} 项待重试 · ${firstError}` : `已查验 ${ips.length} 个 IP，${orders.size} 笔匹配订单`;
   }
   function run() {
-    if (!enabled || closed || !canRun()) return Promise.resolve();
-    if (!work) work = inspect().catch(e => { lastRun = now(); message = safeMessage(e); }).finally(() => { work = null; });
+    if (!settings.enabled || closed || !canRun()) { schedule(); return Promise.resolve(); }
+    if (!work) work = inspect().catch(e => { lastRun = now(); message = safeMessage(e); }).finally(() => { work = null; schedule(); });
     return work;
   }
   return {
@@ -180,30 +219,42 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
       } catch (e) { throw fault(e?.status || 502, safeMessage(e)); }
     },
     async load() {
-      enabled = (await readState(settingsFile, {})).enabled === true;
+      settings = iproyalSettings(await readState(settingsFile, {}));
       cache = await readState(cacheFile, empty(''));
     },
-    start() { timer = setInterval(run, FIVE_MINUTES); timer.unref(); void run(); },
-    async stop() { closed = true; clearInterval(timer); await Promise.allSettled([work, settingsQueue]); },
+    start() { if (started) return; started = true; void run(); },
+    async stop() { closed = true; clearTimer(timer); await Promise.allSettled([work, settingsQueue]); },
     configure(value) {
-      if (typeof value !== 'boolean') throw fault(400, '巡检开关需要布尔值');
       const next = settingsQueue.then(async () => {
-        if (value && !target()) throw fault(409, '请先保存 Sub2API 后端配置');
-        if (value) await source();
-        await save(settingsFile, { enabled: value });
-        enabled = value;
-        if (enabled) void run(); else await work;
+        const changed = iproyalSettings(typeof value === 'boolean' ? { enabled: value } : value, settings);
+        if (changed.enabled && !target()) throw fault(409, '请先保存 Sub2API 后端配置');
+        if (changed.enabled) await source();
+        await save(settingsFile, changed);
+        settings = changed;
+        generation++;
+        schedule();
+        await work;
+        if (settings.enabled) void run();
         return status();
       });
       settingsQueue = next.catch(() => {});
       return next;
     },
     lookup(key, ip) {
-      if (!enabled || cache.key !== key || !Object.hasOwn(cache.checked, ip)) return null;
+      if (!settings.enabled || cache.key !== key || !Object.hasOwn(cache.checked, ip)) return null;
       const link = cache.checked[ip];
       if (!link || link.ambiguous) return { status: link ? 'ambiguous' : 'unmatched' };
       const usage = cache.orders[link.order];
-      return { status: 'matched', order: link.order, ...usage, stale: !usage?.at || usage.stale || now() - usage.at > 2 * FIVE_MINUTES };
+      const thresholdGb = settings.thresholdGbPerIp * link.ipCount;
+      return { status: 'matched', order: link.order, ...usage, ipCount: link.ipCount, thresholdGb,
+        autoAllocationPaused: settings.autoPause && Number.isFinite(thresholdGb) && Number.isFinite(usage?.gb_balance) && usage.gb_balance <= thresholdGb,
+        costSyncEnabled: settings.syncCost,
+        stale: !usage?.at || usage.stale || now() - usage.at > 2 * settings.intervalMinutes * 60000 };
+    },
+    isBlocked(key, id) {
+      if (!settings.enabled || !settings.autoPause || cache.key !== key) return false;
+      const ip = cache.nodeIps?.[id], link = cache.checked[ip], usage = cache.orders[link?.order];
+      return Boolean(link?.ipCount && Number.isFinite(usage?.gb_balance) && usage.gb_balance <= settings.thresholdGbPerIp * link.ipCount);
     },
   };
 }

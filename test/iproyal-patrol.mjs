@@ -27,6 +27,11 @@ try {
       return Response.json({ data: page === 1 ? rows.slice(0, 2) : rows.slice(2),
         meta: { total: inventoryFails ? 8 : 3, current_page: page, last_page: 2 } });
     }
+    if (!u.pathname.endsWith('/bandwidth')) {
+      const order = Number(u.pathname.split('/').at(-1));
+      return Response.json({ id: order, amount: 10, amount_with_vat: 12.15,
+        order_product: { quantity: order === 901 ? 2 : 1, product_plan: { duration: 30, price: 1.8 } } });
+    }
     const order = u.pathname.split('/').at(-2);
     calls.push(order);
     if (broken && order === '902') return new Response('', { status: 401 });
@@ -58,6 +63,7 @@ try {
   assert.deepEqual(calls, ['page1', 'page2', '901', '902']);
   assert.deepEqual(nodes.map(n => n.name), ['901-2', '901-1', '902', 'keep']);
   assert.equal(patrol.lookup('pool', rows[2].ip).gb_balance, 0);
+  assert.equal(patrol.lookup('pool', rows[0].ip).cost.usdPerIp, 6.075);
   assert.equal(patrol.lookup('other', rows[2].ip), null);
   assert.equal(patrol.lookup('pool', nodes[3].host).status, 'unmatched');
   assert(!/never-cache-this|fixture-only|fixture=x/.test(await fs.readFile(path.join(root, 'iproyal-cache.json'), 'utf8')));
@@ -81,7 +87,8 @@ try {
   const pair = rows.slice(0, 2).map(r => ({ ip: r.ip, order: '901' }));
   const original = indexInventory(pair, slots);
   const added = indexInventory([{ ip: '192.0.2.1', order: '901' }, ...pair.reverse()], slots);
-  assert.deepEqual(added['192.0.2.2'], original['192.0.2.2']);
+  assert.equal(added['192.0.2.2'].name, original['192.0.2.2'].name);
+  assert.equal(added['192.0.2.2'].ipCount, 3);
   assert.equal(added['192.0.2.1'].name, '901-3');
   assert(indexInventory([...pair, { ip: rows[0].ip, order: '999' }], slots)[rows[0].ip].ambiguous);
   await patrol.configure(false);

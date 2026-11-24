@@ -61,7 +61,7 @@
     "test:oauth-sms": "node test/smsbower-balance.mjs && node test/console-smsbower-balance-smoke.mjs && node test/sms-settings.mjs && node test/oauth-login-continuation.mjs && node test/workspace-login-continuation.mjs && node test/console-oauth-sms-smoke.mjs && node test/console-oauth-sms-real-smoke.mjs",
     "test:pool-groups": "node test/sub2api-group-references.mjs && node test/console-deleted-groups-smoke.mjs && node test/console-upload-pipeline-smoke.mjs --deleted-group",
     "test:console-token": "node test/console-app-lifecycle.mjs && node test/console-token-recovery.mjs && node test/console-token-recovery-smoke.mjs",
-    "test:proxy-edit": "node test/console-proxy-edit-smoke.mjs && node test/iproyal-patrol.mjs && node test/iproyal-http.mjs",
+    "test:proxy-edit": "node test/console-proxy-edit-smoke.mjs && node test/iproyal-patrol.mjs && node test/iproyal-controls.mjs && node test/iproyal-http.mjs",
     "codex:build": "node tools/codex-cli/build.mjs",
     "test:codex-cli": "node test/codex-cli-callback.mjs && node test/codex-cli-runtime-cleanup.mjs && node test/codex-cli-oauth.mjs",
     "codex:check": "node tools/codex-cli/check.mjs"

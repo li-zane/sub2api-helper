@@ -4604,6 +4604,35 @@ dialog.batch-dialog::backdrop {
   gap: 5px 7px;
 }
 
+.proxy-management-node-row { flex-wrap: wrap; }
+.proxy-management-node-info { width: 100%; }
+.proxy-management-node-controls { display: flex; width: 100%; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: space-between; }
+.proxy-allocation-control { display: flex; flex-direction: column; align-items: flex-end; min-width: 0; }
+.proxy-allocation-control small { font-size: 11px; color: var(--muted); }
+.proxy-cost-control { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+.proxy-cost-control label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.proxy-cost-control input { width: 100px; min-height: 36px; }
+.proxy-cost-control small { color: var(--muted); font-size: 11px; }
+.iproyal-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin-top: 12px; }
+.iproyal-settings-form label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.iproyal-settings-form input:not([type="checkbox"]) { width: 100%; min-width: 0; min-height: 36px; }
+.iproyal-settings-form input:not([type="checkbox"]), .proxy-cost-control input {
+  border: 1px solid var(--line-strong); border-radius: 8px; padding: 7px 10px;
+  color: var(--ink); background: var(--surface); font: inherit;
+}
+.iproyal-settings-form input:focus-visible, .proxy-cost-control input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.iproyal-settings-form input:disabled, .proxy-cost-control input:disabled { color: var(--muted); background: var(--surface-subtle); }
+.iproyal-settings-form .iproyal-check { flex-direction: row; align-items: center; }
+.iproyal-settings-form > small, .iproyal-settings-actions { grid-column: 1 / -1; }
+.iproyal-settings-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .iproyal-settings-form { grid-template-columns: minmax(0, 1fr); }
+  .iproyal-settings-form input:not([type="checkbox"]), .iproyal-settings-form .iproyal-check { min-height: 44px; }
+  .proxy-management-node-row { flex-wrap: wrap; }
+  .proxy-management-node-controls { width: 100%; justify-content: space-between; }
+  .proxy-cost-control input { min-height: 44px; }
+}
+
 .proxy-management-group-status {
   border-radius: 999px;
   padding: 2px 7px;

@@ -99,9 +99,9 @@ const TaskSettingsDialog = deferredDialog("任务设置", () => import("./task-s
 const ProjectUpdateDialog=deferredDialog("版本与更新",()=>import("./project-update-dialog.jsx").then(m=>m.ProjectUpdateDialog));
 const FinanceDialog=deferredDialog("每日收支",()=>import("./ops-dialogs.jsx").then(m=>m.FinanceDialog));
 const ChatDialog=deferredDialog("账号对话测试",()=>import("./ops-dialogs.jsx").then(m=>m.ChatDialog));
-const ProxyPolicyDialog=deferredDialog("代理分配与成本",()=>import("./ops-dialogs.jsx").then(m=>m.ProxyPolicyDialog));
 const SubscriptionHistoryDialog = deferredDialog("历史订阅", () => import("./subscription-history.jsx").then(m => m.SubscriptionHistoryDialog));
 const ProxyCreateDialog = deferredDialog("新增代理", () => import("./proxy-create-dialog.jsx").then(m => m.ProxyCreateDialog));
+import { ProxyAllocationControl, ProxyCostControl } from "./proxy-card-controls.jsx";
 import { IproyalPatrol, IproyalBalance } from "./iproyal-patrol.jsx";
 const ProxyEditDialog = deferredDialog("编辑代理", () => import("./proxy-edit-dialog.jsx").then(m => m.ProxyEditDialog));
 const BoundIpDialog = deferredDialog("切换绑定 IP", () => import("./bound-ip-dialog.jsx").then(m => m.BoundIpDialog));
@@ -155,7 +155,7 @@ function App() {
   const [sessionActionError, setSessionActionError] = useState("");
   const logoutRunningRef = useRef(false);
   const [updatesOpen,setUpdatesOpen]=useState(false);
-  const [financeOpen,setFinanceOpen]=useState(false),[chatJob,setChatJob]=useState(null),[policyGroup,setPolicyGroup]=useState(null);
+  const [financeOpen,setFinanceOpen]=useState(false),[chatJob,setChatJob]=useState(null);
   const [subscriptionHistoryOpen, setSubscriptionHistoryOpen] = useState(false);
   const [subscriptionHistoryTotal, setSubscriptionHistoryTotal] = useState(null);
   const {
@@ -588,6 +588,15 @@ function App() {
     } finally {
       setProxyDistributionLoading(false);
     }
+  }
+
+  function acceptProxyPolicy(node, policy) {
+    proxyDistributionVersion.current += 1;
+    setAccountProxyDistribution(current => current.map(proxy => {
+      const sameIp = (proxy.ipAddress || `${proxy.host}:${proxy.port}`) === (node.ipAddress || `${node.host}:${node.port}`);
+      return { ...proxy, ...(sameIp ? { ipCostCny: policy.ipCostCny, ipAddedAt: policy.ipAddedAt } : {}),
+        ...(proxy.id === node.id ? { allocationPaused: policy.allocationPaused } : {}) };
+    }));
   }
 
   async function setManagedProxyStatus(node, status) {
@@ -2399,7 +2408,7 @@ function App() {
             </div>
 
             <div className="proxy-dialog-body">
-              <IproyalPatrol request={proxyDialogRequest} />
+              <IproyalPatrol request={proxyDialogRequest} onUpdated={() => { void refreshAccountProxyDistribution().catch(() => {}); }} />
               <div className="proxy-mode-banner">
                 <div className="proxy-mode-content">
                   <div className="proxy-mode-icon-wrap">
@@ -2450,7 +2459,7 @@ function App() {
                     <div className="proxy-distribution-container" aria-label="代理 IP 账号分配">
                       <div className="proxy-distribution-grid">
                         {proxyDistributionByIp(accountProxyDistribution).map((proxy) => (
-                          <ProxyManagementCard onPolicy={setPolicyGroup} key={proxy.ipAddress} group={proxy} changes={proxyStatusChanges}
+                          <ProxyManagementCard request={proxyDialogRequest} onPolicySaved={acceptProxyPolicy} key={proxy.ipAddress} group={proxy} changes={proxyStatusChanges}
                             editDisabled={proxySettingsSaving} onEdit={setEditingProxies} onToggle={setManagedProxyStatus} />
                         ))}
                         <div className={`proxy-segment-bar unassigned ${accountProxyDirectCount > 0 ? "has-unassigned" : ""}`}>
@@ -2568,9 +2577,6 @@ function App() {
       {updatesOpen&&<ProjectUpdateDialog request={proxyDialogRequest} onClose={()=>setUpdatesOpen(false)}/>}
       {financeOpen&&<FinanceDialog request={proxyDialogRequest} onClose={()=>setFinanceOpen(false)}/>}
       {chatJob&&<ChatDialog key={chatJob.id} job={chatJob} request={proxyDialogRequest} onClose={()=>setChatJob(null)}/>}
-      {policyGroup&&<ProxyPolicyDialog nodes={policyGroup} request={proxyDialogRequest} onSaved={()=>{
-        void refreshAccountProxyDistribution().catch(e=>notify(e.message,{tone:"error"}));notify("已保存分配和成本，原有绑定未变");
-      }} onClose={()=>setPolicyGroup(null)}/>}
       {subscriptionHistoryOpen && (
         <SubscriptionHistoryDialog
           open={subscriptionHistoryOpen}
@@ -6567,7 +6573,7 @@ function proxyDistributionByIp(proxies) {
   return [...groups.values()];
 }
 
-function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, onPolicy }) {
+function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, request, onPolicySaved }) {
   const { ipAddress, nodes, names, accountCount, activeNodeCount, inactiveNodeCount } = group;
   const allActive = activeNodeCount === nodes.length;
   const allInactive = inactiveNodeCount === nodes.length;
@@ -6579,8 +6585,7 @@ function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, o
         <span>{ipAddress}</span><Pencil size={12} aria-hidden="true" />
       </button>
       <div className="proxy-management-meta">
-        <button type="button" className="secondary-button" onClick={()=>onPolicy(nodes)} disabled={editDisabled} title="按节点管理新分配；同一出口只计一份成本">分配与成本</button>
-        {nodes.some(n=>n.allocationPaused)&&<small>已停分配 {nodes.filter(n=>n.allocationPaused).length}/{nodes.length}</small>}
+        {nodes.some(n=>n.allocationPaused || n.iproyal?.autoAllocationPaused)&&<small>已停分配 {nodes.filter(n=>n.allocationPaused || n.iproyal?.autoAllocationPaused).length}/{nodes.length}</small>}
         <span className={`proxy-management-group-status ${allActive ? "all-active" : allInactive ? "all-inactive" : "mixed"}`}>{groupStatus}</span>
         <span className={`segment-count-pill ${accountCount > 0 ? "has-count" : "zero-count"}`}>{accountCount} 个 OAuth 账号</span>
       </div>
@@ -6603,6 +6608,8 @@ function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, o
               {protocol && <span className="proxy-management-protocol">{protocol}</span>}
               {showEndpoint && <span className="proxy-management-endpoint">{[endpoint, `#${node.id}`].filter(Boolean).join(" · ")}</span>}
             </div>
+            <div className="proxy-management-node-controls">
+              <ProxyAllocationControl node={node} request={request} onSaved={onPolicySaved} disabled={editDisabled} />
             <button type="button" role="switch" className="proxy-management-switch"
               aria-label={`代理启用状态 · ${description} · ${ipAddress}`} aria-checked={enabled}
               aria-busy={Boolean(pending)} aria-disabled={Boolean(pending) || !known}
@@ -6612,12 +6619,14 @@ function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, o
                 <span className="proxy-management-switch-thumb">{pending && <LoaderCircle size={10} className="spin" />}</span>
               </span>
             </button>
+            </div>
           </div>
           <span className="sr-only" role="status">{node.name} · {statusText}</span>
           {error && <p className="proxy-management-node-error" role="alert"><CircleAlert size={14} />{error}</p>}
         </li>;
       })}
     </ul>
+    <ProxyCostControl node={nodes[0]} request={request} onSaved={onPolicySaved} disabled={editDisabled} />
     <span className="sr-only">{names.join("、")} · {ipAddress} · {accountCount} 个 OAuth 账号</span>
   </div>;
 }
