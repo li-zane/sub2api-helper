@@ -89,35 +89,6 @@ function PoolPolicyLadder({ field, section, errors, planLabel, locked, onToggle,
   );
 }
 
-function RotationRatePolicy({ value, error, locked, onUpdate, onInputRef }) {
-  const id = useId();
-  return (
-    <fieldset className="fpp-pane">
-      <legend className="sr-only">轮转计费</legend>
-      <div className="fpp-step-tile fpp-rotation-rate">
-        <label htmlFor={id} className="fpp-step-label">轮转计费倍率</label>
-        <div className="fpp-step-control">
-          <input
-            ref={element => onInputRef("rotation.rateMultiplier", element)}
-            id={id}
-            className={`fpp-number-input fpp-step-input${error ? " is-invalid" : ""}`}
-            type="number"
-            inputMode="decimal"
-            min={0} max={1000000} step={0.000001}
-            placeholder="沿用默认"
-            disabled={locked}
-            value={value}
-            onChange={event => onUpdate("rotation", "rateMultiplier", event)}
-            aria-invalid={error ? "true" : undefined}
-            aria-describedby={error ? `${id}-error` : undefined}
-          />
-        </div>
-        {error && <div className="fpp-inline-error" id={`${id}-error`} role="alert">{error}</div>}
-      </div>
-    </fieldset>
-  );
-}
-
 export function FingerprintPoolPolicyPanel({
   activeProfile,
   profiles = [],
@@ -417,13 +388,6 @@ export function FingerprintPoolPolicyPanel({
             onInputRef={setActiveInputRef}
           />
         ))}
-        <RotationRatePolicy
-          value={activeDraft.rotation.rateMultiplier}
-          error={activeErrors["rotation.rateMultiplier"]}
-          locked={disabled || isResidual}
-          onUpdate={updateActiveInput}
-          onInputRef={setActiveInputRef}
-        />
       </div>
     </section>
   );

@@ -10,7 +10,6 @@ const DEFAULT_LADDER = Object.freeze({ enabled: false, ...Object.fromEntries(Obj
 export const DEFAULT_FINGERPRINT_POOL_POLICY = Object.freeze({
   concurrency: DEFAULT_LADDER,
   priority: DEFAULT_LADDER,
-  rotation: Object.freeze({ rateMultiplier: null }),
 });
 
 export function isLegacyFingerprintConcurrency(section) {
@@ -30,21 +29,9 @@ export function fingerprintPoolTierValues(section, field, rotation) {
   };
 }
 
-export function isPoolRateMultiplier(value) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1_000_000;
-}
-
-export function parsePoolRateMultiplier(value) {
-  if (!["string", "number"].includes(typeof value)) return null;
-  const text = String(value).trim();
-  if (!/^\d+(?:\.\d{1,6})?$/.test(text)) return null;
-  const number = Number(text);
-  return isPoolRateMultiplier(number) ? number : null;
-}
-
 export function fingerprintPoolNumber(policy, field, verdict, tags) {
   const validity = tags?.validity;
-  if (field === "rate_multiplier") return validity === "轮转" ? policy.rotation?.rateMultiplier ?? null : null;
+  if (!Object.hasOwn(FINGERPRINT_POOL_FIELDS, field)) return null;
   if (!policy[field]?.enabled || (verdict !== "match" && verdict !== "mismatch")) return null;
   const prefix = verdict === "match" ? "matched" : "mismatched";
   const suffix = validity === "轮转" ? "Rotation" : validity === "长效" ? "LongTerm" : null;

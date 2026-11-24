@@ -22,6 +22,8 @@
 
 可选择启用 `matchedConcurrency: { enabled: true, value: 10 }`（默认关闭）。最近一轮无论执行指纹还是糖果，本轮全部指定模型通过即可应用独立并发；明确不通过、关闭选项或移除套餐时恢复逐条号池记录保存的原并发；证据不足或请求失败保留现值。同步失败会持久化重试，无需额外发起检测。手动或外部修改并发不会被旧结果覆盖，下一轮真实通过后可再应用；后端隔离，重新授权不覆盖已应用的独立并发。
 
+按 PlanType 指纹分池策略提供轮转/长效账号在通过和未通过检测时的分级并发与优先级。轮转计费倍率已移除，旧配置中的 `rotation.rateMultiplier` 在读取、保存时丢弃，指纹巡检不再修改账号的计费倍率。旧版 `rotation.concurrency` 和 `rotation.priority` 仍迁移到对应的轮转档位。
+
 ## 样本不足与重试
 
 指纹数字样本按 SDK 原规则校验，至少需要 `max(80, ceil(期望数量 × 0.55))` 个有效数字。HTTP 200、流结束但数字不足，分类为 `SHORT_OUTPUT`；流未完成为 `INCOMPLETE`，其中输出预算耗尽会附带 `max_output_tokens`。指纹和糖果共用降智检测设置中的“检测失败重试”：`failureRetries` 控制额外重试次数（默认 1，范围 0–5；0 关闭），`failureRetryDelaySeconds` 控制重试间隔（默认 5 秒，范围 1–300）。旧版 `candyRetries` 与 `candyRetryDelaySeconds` 配置自动迁移，保留已设置的数值。

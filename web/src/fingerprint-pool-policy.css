@@ -342,10 +342,6 @@
   align-items: start;
 }
 
-.fpp-rotation-rate {
-  max-width: 240px;
-}
-
 .fpp-step-tile {
   position: relative;
   display: flex;
@@ -421,10 +417,6 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: center;
     gap: 4px 10px;
-  }
-
-  .fpp-rotation-rate {
-    max-width: none;
   }
 
   .fpp-step-control {

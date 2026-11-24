@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { draftToPolicy, policyToDraft, validatePolicyDraft } from '../web/src/fingerprint-pool-policy.mjs';
 
 const output = await fs.mkdtemp(path.join(os.tmpdir(), 'helper-priority-console-'));
 const account = { id: 42, name: 'priority@example.test', platform: 'openai', type: 'oauth', status: 'active', schedulable: true,
@@ -106,30 +107,36 @@ try {
   const concurrency = { enabled: true, matchedRotation: 5, matchedLongTerm: 0, mismatchedRotation: 8, mismatchedLongTerm: 6 };
   const priority = { enabled: true, matchedRotation: 15, matchedLongTerm: 2, mismatchedRotation: 18, mismatchedLongTerm: 4 };
   const rotation = { rateMultiplier: 0.75 };
-  const planPolicy = { concurrency, priority, rotation };
+  const planPolicy = { concurrency, priority };
+  const cleanDraft = policyToDraft({ ...planPolicy, rotation });
+  assert.equal(cleanDraft.rotation, undefined);
+  const oldDraft = { ...cleanDraft, rotation: { rateMultiplier: 'retired-invalid-value' } };
+  assert.equal(validatePolicyDraft(oldDraft).valid, true, 'retired rate must not block draft validation');
+  assert.equal(draftToPolicy(oldDraft).rotation, undefined);
   config.priority = 7;
   config.concurrency = 3;
   const savePolicies = policies => api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: policies } });
   await api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: { free: { ...planPolicy, priority: { ...priority, matchedLongTerm: -1 } } } } }, 400);
   await api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: { free: { ...planPolicy, concurrency: { ...concurrency, matchedRotation: 1.5 } } } } }, 400);
-  await api('/api/sub2api/settings', { config: { ...config, fingerprintPoolPolicies: { free: { ...planPolicy, rotation: { ...rotation, rateMultiplier: 0.1234567 } } } } }, 400);
+  const oldRate = await savePolicies({ free: { ...planPolicy, rotation: { rateMultiplier: 0.1234567 } } });
+  assert.deepEqual(oldRate.config.fingerprintPoolPolicies.free, planPolicy, "retired rate field must be discarded");
   const migrated = await savePolicies({ free: {
     concurrency: { enabled: true, matchedFirstTrip: 12, matchedLongTerm: 0, mismatchedFirstTrip: 6 },
     priority: { enabled: true, matchedFirstTrip: 2, matchedLongTerm: null, mismatchedFirstTrip: 4 },
   } });
   assert.deepEqual(migrated.config.fingerprintPoolPolicies.free, {
     concurrency: { ...concurrency, matchedRotation: null, mismatchedRotation: null },
-    priority: { ...priority, matchedRotation: null, mismatchedRotation: null }, rotation: { rateMultiplier: null },
+    priority: { ...priority, matchedRotation: null, mismatchedRotation: null },
   });
   const legacyRotation = { concurrency: 9, priority: 12, rateMultiplier: rotation.rateMultiplier };
-  const saved = await savePolicies({ free: planPolicy, plus: { concurrency: { enabled: false, value: 10 },
+  const saved = await savePolicies({ free: { ...planPolicy, rotation }, plus: { concurrency: { enabled: false, value: 10 },
     priority: { enabled: true, matchedRotation: null }, rotation: legacyRotation } });
   assert.deepEqual(saved.profiles.find(profile => profile.id === saved.activeProfileId).fingerprintPoolPolicies.free, planPolicy);
   const migratedPlus = saved.config.fingerprintPoolPolicies.plus;
   assert.deepEqual(migratedPlus.concurrency, { enabled: false, matchedRotation: 9, matchedLongTerm: 10, mismatchedRotation: 9, mismatchedLongTerm: null });
   assert.equal(migratedPlus.priority.matchedRotation, null, 'explicit skip must defeat legacy rotation migration');
   assert.equal(migratedPlus.priority.mismatchedRotation, 12);
-  assert.deepEqual(migratedPlus.rotation, rotation);
+  assert.equal(migratedPlus.rotation, undefined);
   const note = text => api(`/api/jobs/${job.id}/remark`, { remark: text });
   const waitForNumbers = async (p, c, rate = 1.5) => {
     try {
@@ -148,19 +155,19 @@ try {
   await note('[车次] 头车, [时效] 长效。');
   await waitForNumbers(2, 0);
   await note('[车次] 二车, [时效] 轮转。');
-  await waitForNumbers(15, 5, 0.75);
+  await waitForNumbers(15, 5);
   answer = '最终答案：22'; await runCheck(job);
-  await waitForNumbers(18, 8, 0.75);
+  await waitForNumbers(18, 8);
   const skipped = { ...planPolicy, priority: { ...priority, mismatchedRotation: null }, concurrency: { ...concurrency, mismatchedRotation: null } };
   const writesBeforeSkip = writes.length;
   await savePolicies({ free: skipped });
   await runCheck(job);
-  await waitForNumbers(18, 8, 0.75);
+  await waitForNumbers(18, 8);
   assert.deepEqual(writes.slice(writesBeforeSkip).filter(body => 'priority' in body || 'concurrency' in body), [], 'blank matched cases must not update either number');
   await savePolicies({ free: { ...skipped, concurrency: { ...concurrency, mismatchedRotation: 0 } } });
-  await waitForNumbers(18, 0, 0.75);
+  await waitForNumbers(18, 0);
   await savePolicies({ free: planPolicy });
-  await waitForNumbers(18, 8, 0.75);
+  await waitForNumbers(18, 8);
   await note('[车次] 头车, [时效] 长效。');
   await waitForNumbers(4, 6);
   answer = '最终答案：21'; await runCheck(job);
@@ -177,14 +184,23 @@ try {
 
   await api('/api/model-fingerprint/settings', { settings: { ...policy, models: ['other-fixture-model'], enabledPlanTypes: [] } });
   await note('[时效] 轮转。');
-  await waitForNumbers(2, 8, 0.75);
+  await waitForNumbers(2, 8);
   assert.equal((await api('/api/jobs')).jobs.find(item => item.id === job.id).modelFingerprint.result, null);
-  await stop(); await start();
-  assert.deepEqual((await api('/api/sub2api/settings')).config.fingerprintPoolPolicies.free.rotation, rotation);
-  await waitForNumbers(2, 8, 0.75);
+  await stop();
+  const stateFile = path.join(output, 'model-fingerprint.json');
+  const persistedState = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  const savedEntry = persistedState.accounts[account.credentials.email];
+  savedEntry.rate_multiplierSyncPending = true;
+  savedEntry.rate_multiplierOverrides = { 42: { baseValue: 2, appliedValue: 1.5,
+    backend: savedEntry.concurrencyOverrides?.[42]?.backend, independent: true } };
+  await fs.writeFile(stateFile, JSON.stringify(persistedState));
+  await start();
+  assert.equal((await api('/api/sub2api/settings')).config.fingerprintPoolPolicies.free.rotation, undefined);
+  await waitForNumbers(2, 8);
   await note('');
   await waitForNumbers(7, 3);
-  console.log('FINGERPRINT_POOL_POLICY_HTTP_PASS four exclusive cases, blank cases never write, no current verdict skips, zero, independent billing rate, migration and restart');
+  assert(writes.every(body => !Object.hasOwn(body, 'rate_multiplier')), 'fingerprint policies must not write billing multipliers');
+  console.log('FINGERPRINT_POOL_POLICY_HTTP_PASS four exclusive cases, blank cases never write, no current verdict skips, zero, retired billing rate ignored, migration and restart');
 } finally {
   await stop(); pool.closeAllConnections(); await new Promise(resolve => pool.close(resolve)); await fs.rm(output, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }

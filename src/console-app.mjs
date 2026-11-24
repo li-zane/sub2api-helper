@@ -69,7 +69,7 @@ import { SubscriptionHistory } from "./subscription-history.mjs";
 import { createSubscriptionHistorySync } from "./subscription-history-sync.mjs";
 import { normalizeAccountCost, restoredAccountCost } from "../shared/account-pricing.mjs";
 import { TAG_OPTION_KEYS, readAccountTags, patchAccountTags, writeAccountTags } from "../shared/account-tags.mjs";
-import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolNumber, fingerprintPoolTierValues, isLegacyFingerprintConcurrency, parsePoolRateMultiplier } from "../shared/fingerprint-pool-policy.mjs";
+import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolNumber, fingerprintPoolTierValues, isLegacyFingerprintConcurrency } from "../shared/fingerprint-pool-policy.mjs";
 import { createAccountTagCatalog } from "./account-tag-catalog.mjs";
 import { OverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService } from "./model-fingerprint.mjs";
@@ -586,10 +586,6 @@ export function createConsoleApp(options = {}) {
       const job = findJobByEmail(email);
       const tags = readAccountTags(job?.remark, job?.accountTagsCleared);
       const policy = policies && Object.hasOwn(policies, type) ? policies[type] : null;
-      if (field === "rate_multiplier") {
-        const value = fingerprintPoolNumber(policy || DEFAULT_FINGERPRINT_POOL_POLICY, field, verdict, tags);
-        return { enabled: value !== null, value, independent: true };
-      }
       if (!policy) return tags.validity === "轮转" ? { enabled: false, value: null } : null;
       const enabled = policy[field].enabled && (tags.validity === "长效" || tags.validity === "轮转");
       const value = fingerprintPoolNumber(policy, field, verdict, tags);
@@ -615,7 +611,6 @@ export function createConsoleApp(options = {}) {
     updateGroups: async (config, id, ids) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ group_ids: ids.map(Number) }) }),
     updateConcurrency: async (config, id, concurrency) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ concurrency }) }),
     updatePriority: async (config, id, priority) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ priority }) }),
-    updateRateMultiplier: async (config, id, rate_multiplier) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ rate_multiplier }) }),
     onChange: invalidateSub2ApiAccountStatusCache,
   });
   async function recoverFingerprintAuthorization(email, failure) {
@@ -5466,8 +5461,7 @@ export function createConsoleApp(options = {}) {
         throw httpError(400, "PlanType 调度规则格式无效");
       }
       const normalized = {};
-      const rotation = Object.hasOwn(policy, "rotation") ? policy.rotation : DEFAULT_FINGERPRINT_POOL_POLICY.rotation;
-      if (!rotation || typeof rotation !== "object" || Array.isArray(rotation)) throw httpError(400, "轮转规则格式无效");
+      const rotation = policy.rotation && typeof policy.rotation === "object" && !Array.isArray(policy.rotation) ? policy.rotation : {};
       for (const [field, label] of Object.entries(FINGERPRINT_POOL_FIELDS)) {
         const section = Object.hasOwn(policy, field) ? policy[field] : DEFAULT_FINGERPRINT_POOL_POLICY[field];
         if (typeof section?.enabled !== "boolean") throw httpError(400, `分级${label}开关必须为布尔值`);
@@ -5483,11 +5477,7 @@ export function createConsoleApp(options = {}) {
         }
         normalized[field] = ladder;
       }
-      const rateMultiplier = parsePoolRateMultiplier(rotation.rateMultiplier);
-      if (rotation.rateMultiplier != null && rotation.rateMultiplier !== "" && rateMultiplier === null) {
-        throw httpError(400, "轮转计费倍率须为 0–1000000，最多 6 位小数");
-      }
-      policies[type] = { ...normalized, rotation: { rateMultiplier } };
+      policies[type] = normalized;
     }
     return policies;
   }

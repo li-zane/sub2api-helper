@@ -1,8 +1,9 @@
 async (page) => {
-  const evidence="__UI_TEST_EVIDENCE_DIR__",results=[],errors=[],saves=[],detailReads=[];
+  const evidence="__UI_TEST_EVIDENCE_DIR__",results=[],errors=[],consoleIssues=[],saves=[],detailReads=[];
   const check=(ok,message)=>{if(!ok)throw Error(message);};
   const test=async(name,fn)=>{try{await fn();results.push({name,passed:true});}catch(error){await page.screenshot({path:evidence+'/failure-'+results.length+'.png'});const dialogs=await page.locator('dialog[open]').evaluateAll(els=>els.map(e=>({name:e.getAttribute('aria-label'),modal:e.matches(':modal'),html:e.outerHTML.slice(0,300)})));results.push({name,passed:false,error:error.message+' dialogs='+JSON.stringify(dialogs)});await page.keyboard.press('Escape');await page.keyboard.press('Escape');}};
   page.setDefaultTimeout(7000);page.on('pageerror',e=>errors.push(e.message));
+  page.on('console',m=>{if(['error','warning'].includes(m.type()))consoleIssues.push(m.text());});
   const defaults=()=>({models:[{model:'fixture-model',expected:'fixture-model'}],intervalMinutes:10,maxConcurrentAccounts:3,minProbability:.8,enabledPlanTypes:[],groupPolicies:{plus:{'2':'verified'}},matchedConcurrency:{enabled:false,value:10},testSequence:{first:'fingerprint',fingerprint:1,candy:4}});
   const profiles=[{id:'business',name:'Business Premium',planTypes:['Self_Serve_Business_Prolite','business_disabled'],groupIds:['1','2','3','4','5']},{id:'free',name:'Free',planTypes:['free'],groupIds:['1','2']},{id:'plus',name:'Plus',planTypes:['plus'],groupIds:['2']}],groups=['Default','GPT 高级分组','GPT 标准分组','测试','指纹一致'].map((name,i)=>({id:String(i+1),name}));
   let freezeJobs=false;const waitingJobs=[];
@@ -19,7 +20,7 @@ async (page) => {
   }await route.fulfill({json:{settings,profiles,groups:groupsUnavailable?[]:groups,groupsError:groupsUnavailable?'fixture-group-catalog-failed':null,runtime:{activeAccounts:0,queuedAccounts:0,maxConcurrentAccounts:3}}});});
   await page.route('**/api/model-fingerprint/reference',r=>r.fulfill({json:{models:[],builtAt:null}}));
   await page.route('**/api/task-settings',async route=>{if(route.request().method()==='GET'){const r=await route.fetch();const data=await r.json();data.settings.modelFingerprint=settings;data.settings.monitoring={...data.settings.monitoring,fingerprintScanIntervalSeconds:77};await route.fulfill({json:data});}else{const body=route.request().postDataJSON();saves.push({kind:'task',value:body});await route.fulfill({json:{settings:{...body,default:3,current:body.maxActiveJobs,max:20}}});}});
-  let poolConfig={baseUrl:'https://fixture.test',profiles:[{id:'default',name:'默认方案',fingerprintPoolPolicies:{free:{concurrency:{enabled:true,value:10}}}}],activeProfileId:'default',planTypeBindings:{free:'default',plus:'default'}};
+  let poolConfig={baseUrl:'https://fixture.test',profiles:[{id:'default',name:'默认方案',fingerprintPoolPolicies:{free:{concurrency:{enabled:true,value:10},rotation:{rateMultiplier:1.25}}}}],activeProfileId:'default',planTypeBindings:{free:'default',plus:'default'}};
   for(const path of ['**/api/sub2api/settings','**/api/sub2api/monitor'])await page.route(path,r=>{
     if(r.request().method()==='POST') poolConfig=r.request().postDataJSON().config;
     return r.fulfill({json:{hasAdminApiKey:true,config:poolConfig,profiles:poolConfig.profiles,
@@ -107,7 +108,7 @@ async (page) => {
     const rotatingConcurrency=panel.getByRole('spinbutton',{name:/^不降智轮转\s*并发/});
     const degradedRotationPriority=panel.getByRole('spinbutton',{name:/^降智轮转\s*优先级/});
     const degradedRotationConcurrency=panel.getByRole('spinbutton',{name:/^降智轮转\s*并发/});
-    const rotatingRate=panel.getByRole('spinbutton',{name:/轮转\s*计费倍率/});
+    check(await panel.getByRole('spinbutton').count()===8,'pool policy must contain only concurrency and priority tiers');
     await rotatingPriority.fill('15');
     await firstConcurrency.fill('-1');
     await rotatingConcurrency.fill('1.5');
@@ -117,10 +118,6 @@ async (page) => {
     await rotatingConcurrency.fill('5');
     await degradedRotationConcurrency.fill('6');
     check(await degradedRotationPriority.getAttribute('placeholder')==='跳过'&&await degradedRotationPriority.inputValue()==='','empty case is not displayed as skip');
-    await rotatingRate.fill('1.2345678');
-    await save.click();
-    check(await rotatingRate.getAttribute('aria-invalid')==='true','invalid fractional rate was accepted');
-    await rotatingRate.fill('1.25');
     await panel.getByRole('spinbutton',{name:/^降智长效\s*并发/}).fill('9');
     await card.screenshot({path:evidence+'/tiered-policy-desktop.png'});
     await page.setViewportSize({width:375,height:812});
@@ -140,9 +137,9 @@ async (page) => {
     check(policy.concurrency.enabled&&policy.concurrency.matchedLongTerm===0&&policy.concurrency.mismatchedLongTerm===9&&policy.concurrency.value===undefined,'concurrency tiers or legacy migration did not save');
     check(policy.priority.enabled&&policy.priority.matchedLongTerm===0&&policy.priority.mismatchedLongTerm===null,'zero/blank tier did not save');
     check(policy.concurrency.matchedRotation===5&&policy.concurrency.mismatchedRotation===6&&policy.priority.matchedRotation===15&&policy.priority.mismatchedRotation===null,'rotation cases did not save independently');
-    check(policy.rotation.rateMultiplier===1.25,'rotation billing rate did not save');
+    check(!Object.hasOwn(policy,'rotation'),'retired rotation billing was saved');
     await open();await free.click();
-    check(await rotatingRate.inputValue()==='1.25','saved rate did not reopen');
+    check(await panel.getByRole('spinbutton').count()===8,'retired billing control reappeared');
     check(await rotatingConcurrency.inputValue()==='5','saved rotation concurrency did not reopen');
     check(await firstConcurrency.inputValue()==='0'&&await firstPriority.inputValue()==='0','saved tiers did not reopen');
     await page.keyboard.press('Escape');
@@ -199,5 +196,8 @@ async (page) => {
   await test('compact-mobile-history-and-modal-keyboard',async()=>{
     const d=page.getByRole('dialog');await page.setViewportSize({width:375,height:812});check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'history horizontal overflow');check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'page overflow');await page.screenshot({path:evidence+'/candy-history-mobile.png'});await page.keyboard.press('Escape');check(await d.count()===0,'Escape close failed');check(errors.length===0,errors.join('; '));
   });
-  freezeJobs=false;for(const release of waitingJobs.splice(0))release();await page.unrouteAll({behavior:'wait'});return {passed:results.filter(r=>r.passed).length,total:results.length,results};
+  check(consoleIssues.length===0,consoleIssues.join('; '));check((await page.title()).includes('Helper'),'wrong page identity');
+  check(await page.locator('vite-error-overlay').count()===0,'framework overlay');
+  const metrics={url:page.url(),title:await page.title(),viewports:['1480x1000','375x812'],pageErrors:errors.length,consoleIssues,browser:'Browser plugin not available; repository Playwright CLI'};
+  freezeJobs=false;for(const release of waitingJobs.splice(0))release();await page.unrouteAll({behavior:'wait'});return {passed:results.filter(r=>r.passed).length,total:results.length,results,metrics};
 }

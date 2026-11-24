@@ -4,7 +4,6 @@ import crypto from "node:crypto";
 import { generateChallenges, loadDetector, parseNumbers } from "lmfpd-sdk";
 import { setTimeout as delay } from "node:timers/promises";
 import { fingerprintFailure, fingerprintRecovery } from "./model-fingerprint-request.mjs";
-import { isPoolRateMultiplier } from "../shared/fingerprint-pool-policy.mjs";
 import { CANDY_PROMPT, CANDY_PROMPT_SHA256, gradeCandy, DEFAULT_TEST_SEQUENCE, normalizeTestSequence, sequenceStep, aggregateRequestUsage } from "./candy-test.mjs";
 
 const invalid = message => Object.assign(new Error(message), { status: 400 });
@@ -13,7 +12,6 @@ const isPoolInteger = value => Number.isInteger(value) && value >= 0 && value <=
 const poolNumberPolicies = {
   concurrency: { setting: "matchedConcurrency", label: "并发", update: "updateConcurrency", valid: isPoolInteger },
   priority: { setting: "matchedPriority", label: "优先级", update: "updatePriority", valid: isPoolInteger },
-  rate_multiplier: { label: "计费倍率", update: "updateRateMultiplier", valid: isPoolRateMultiplier },
 };
 const poolNumberFields = Object.keys(poolNumberPolicies);
 const HISTORY_WINDOW_MS = 60 * 60_000;
@@ -99,10 +97,10 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ onVerdict = () => {}, dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateRateMultiplier, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolNumberJobs, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
+  constructor({ onVerdict = () => {}, dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolNumberJobs, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
     this.dispatchPaused = dispatchPaused;
     this.onVerdict = onVerdict;
-    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateRateMultiplier, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolNumberJobs, getPoolAccount, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
+    Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolNumberJobs, getPoolAccount, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
     this.manualChecks = new Set();
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
     this.detectorLoader = detectorLoader || (() => loadDetector({ source: "https://lm.ikale.io/data/", cache: path.join(path.dirname(filePath), "model-fingerprint-data.bin") }));
@@ -459,7 +457,6 @@ export class ModelFingerprintService {
     await this.reconcileGroupsLocked(email, planType, targets, revision);
     await this.reconcileConcurrencyLocked(email, planType, targets, revision);
     await this.reconcilePoolNumberLocked(email, planType, targets, revision, "priority");
-    await this.reconcilePoolNumberLocked(email, planType, targets, revision, "rate_multiplier");
   }
   async reconcileGroupsLocked(email, planType, targets, revision) {
     if (this.isBlocked(email)) return;
@@ -528,7 +525,7 @@ export class ModelFingerprintService {
     for (const entry of entries) {
       if (!entry) continue;
       for (const field of poolNumberFields) {
-        if (Object.keys(entry[`${field}Overrides`] || {}).length || (entry.result && field !== "rate_multiplier")) {
+        if (Object.keys(entry[`${field}Overrides`] || {}).length || entry.result) {
           entry[`${field}SyncPending`] = true;
         }
       }

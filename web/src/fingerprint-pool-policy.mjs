@@ -1,4 +1,4 @@
-import { FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolTierValues, parsePoolRateMultiplier } from "../../shared/fingerprint-pool-policy.mjs";
+import { FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolTierValues } from "../../shared/fingerprint-pool-policy.mjs";
 
 export const POOL_STEP_FIELDS = Object.keys(FINGERPRINT_POOL_TIERS);
 const poolFields = Object.keys(FINGERPRINT_POOL_FIELDS);
@@ -26,7 +26,7 @@ function mapPoolTiers(readTier) {
 }
 
 export function createDefaultPolicyDraft() {
-  return { ...mapPoolSections(() => ({ enabled: false, ...mapPoolTiers(() => "") })), rotation: { rateMultiplier: "" } };
+  return mapPoolSections(() => ({ enabled: false, ...mapPoolTiers(() => "") }));
 }
 
 export function normalizeFingerprintPoolPolicyEntry(raw) {
@@ -36,7 +36,7 @@ export function normalizeFingerprintPoolPolicyEntry(raw) {
     const values = fingerprintPoolTierValues(section, field, raw?.rotation);
     return { enabled, ...mapPoolTiers(key => parseIntegerInRange(values[key])) };
   });
-  return { ...sections, rotation: { rateMultiplier: parsePoolRateMultiplier(raw?.rotation?.rateMultiplier) } };
+  return sections;
 }
 
 export function normalizeFingerprintPoolPoliciesMap(rawPolicies) {
@@ -56,7 +56,6 @@ export function policyToDraft(policy) {
     enabled: normalized[field].enabled,
     ...mapPoolTiers(key => String(normalized[field][key] ?? "")),
   }));
-  draft.rotation = { rateMultiplier: String(normalized.rotation.rateMultiplier ?? "") };
   return draft;
 }
 
@@ -98,8 +97,6 @@ export function validatePolicyDraft(draft) {
       checkInput(`${field}.${key}`, draft[field][key], parseIntegerInRange, integerError);
     }
   }
-  checkInput("rotation.rateMultiplier", draft?.rotation?.rateMultiplier, parsePoolRateMultiplier,
-    "留空或输入 0–1000000，最多 6 位小数");
   return { valid: firstErrorField === null, errors, firstErrorField, firstErrorMessage: errors[firstErrorField] ?? "" };
 }
 
@@ -111,7 +108,7 @@ export function draftToPolicy(draft) {
       ...mapPoolTiers(key => draft?.__badInputs?.[`${field}.${key}`] ? null : parseIntegerInRange(draft?.[field]?.[key])),
     };
   });
-  return { ...sections, rotation: { rateMultiplier: parsePoolRateMultiplier(draft?.rotation?.rateMultiplier) } };
+  return sections;
 }
 
 export function resolveProfilePlanTypes({
