@@ -23,12 +23,46 @@ export function fingerprintRecovery(detail) {
     || ["invalid_api_key", "invalid_token", "token_expired"].includes(detail.upstreamCode))) return "authorization";
   return null;
 }
-function upstreamFailure(event, httpStatus = null) {
-  const error = event?.error || event?.response?.error || {};
+function upstreamFailure(event, httpStatus = null, chat = null) {
+  const error = event?.error || event?.response?.error || event?.detail || event || {};
   const raw = `${error.code || ""} ${error.type || ""} ${error.message || ""}`;
   const upstreamCode = ["usage_limit_reached", "rate_limit_exceeded", "insufficient_quota", "server_error", "server_is_overloaded", "overloaded", "service_unavailable_error", "invalid_api_key", "token_expired", "invalid_token", "account_deactivated", "account_suspended", "account_banned", "user_deactivated", "user_deleted", "model_not_found"].find(code => error.code === code || error.type === code) || null;
   const code = /account_(?:deactivated|suspended|banned)|user_(?:deactivated|deleted)|account has been deactivated/i.test(raw) ? "BANNED" : /overload/i.test(raw) ? "OVERLOADED" : /usage.limit|rate.limit|quota|limit.*reached/i.test(raw) || httpStatus === 429 ? "QUOTA" : /expired|invalid.*token|unauthoriz/i.test(raw) || [401, 403].includes(httpStatus) ? "AUTH" : httpStatus >= 500 ? "UPSTREAM" : httpStatus ? "HTTP" : "INCOMPLETE";
-  return failure(code, { httpStatus, upstreamCode, retryable: ["OVERLOADED", "UPSTREAM", "INCOMPLETE"].includes(code) });
+  const result = failure(code, { httpStatus, upstreamCode, retryable: ["OVERLOADED", "UPSTREAM", "INCOMPLETE"].includes(code) });
+  if (chat) {
+    const errorCode = [error.code, error.type].find(value => typeof value === "string" && /^[a-z0-9_.-]{1,80}$/i.test(value) && !value.includes(chat.token));
+    const message = typeof error === "string" ? error : error.message;
+    result.chatMessage = [httpStatus >= 400 ? `HTTP ${httpStatus}` : "上游错误", errorCode, chat.clean(message) || result.message].filter(Boolean).join(" · ");
+  }
+  return result;
+}
+
+function cleanChatError(message, token, proxy) {
+  if (typeof message !== "string") return "";
+  let clean = message;
+  const secrets = [token, proxy];
+  if (proxy) {
+    try {
+      const url = new URL(proxy);
+      if (url.password) secrets.push(url.password, decodeURIComponent(url.password));
+    } catch {}
+  }
+  for (const secret of secrets) if (secret) clean = clean.split(secret).join("[已隐藏]");
+  return clean.replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [已隐藏]")
+    .replace(/\b(?:sk-[\w-]{12,}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, "[已隐藏]")
+    .replace(/((?:password|access_token|refresh_token|api_key|authorization)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)/gi, "$1[已隐藏]")
+    .replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 1000);
+}
+
+const pngHeader = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+function imageOutput(item) {
+  if (item?.type !== "image_generation_call" || typeof item.result !== "string" || item.result.length > 12 * 1024 * 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(item.result)) return null;
+  const bytes = Buffer.from(item.result, "base64");
+  if (bytes.length > 8 * 1024 * 1024 || bytes.length < 12) return null;
+  if (bytes.subarray(0, 8).equals(pngHeader)) return { mime: "image/png", bytes };
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return { mime: "image/jpeg", bytes };
+  if (bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") return { mime: "image/webp", bytes };
+  return null;
 }
 
 function proxyUrl(proxy) {
@@ -78,12 +112,13 @@ function sampleUsage(value) {
   if (inputTokens === null && outputTokens === null && n(value.total_tokens) === null) return null;
   return {inputTokens, outputTokens, cachedInputTokens:n(value.input_tokens_details?.cached_tokens ?? value.prompt_tokens_details?.cached_tokens), reasoningTokens:n(value.output_tokens_details?.reasoning_tokens ?? value.completion_tokens_details?.reasoning_tokens), totalTokens:n(value.total_tokens) ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null)};
 }
-export function extractFingerprintSample(text) {
+export function extractFingerprintSample(text, { chat = null } = {}) {
   let deltas = '', completed = null, streaming = false;
+  let image = null;
   const done = new Map();
   const metadata = response => ({usage:sampleUsage(response?.usage), finishStatus:response?.status || 'completed'});
   const partialError = event => {
-    const error = withPartialReply(upstreamFailure(event), replyText(event.response || event) || deltas || [...done.values()].join(''));
+    const error = withPartialReply(upstreamFailure(event, null, chat), replyText(event.response || event) || deltas || [...done.values()].join(''));
     const reason = event.response?.incomplete_details?.reason || event.incomplete_details?.reason;
     if (['max_output_tokens','content_filter'].includes(reason)) error.incompleteReason = reason;
     error.fingerprintMetadata = metadata(event.response || event);
@@ -101,23 +136,30 @@ export function extractFingerprintSample(text) {
     if (event.type === 'response.output_text.delta') deltas += event.delta || '';
     if (event.choices?.[0]?.delta?.content) deltas += event.choices[0].delta.content;
     if (event.type === 'response.output_text.done') done.set(`${event.output_index ?? 0}:${event.content_index ?? 0}`,event.text || '');
+    if (chat && event.type === 'response.output_item.done' && !image) image = imageOutput(event.item);
     if (event.type === 'response.completed') completed = event.response || {};
     if (['response.failed','response.incomplete','error'].includes(event.type)) throw partialError(event);
   }
   if (streaming && !completed) throw withPartialReply(failure('INCOMPLETE',{retryable:true}),deltas || [...done.values()].join(''));
   if (!completed) { try { completed = JSON.parse(text); } catch {} }
   if (completed?.error || completed?.status && completed.status !== 'completed') throw partialError(completed);
+  if (chat && !image && Array.isArray(completed?.output)) {
+    for (const item of completed.output) {
+      image = imageOutput(item);
+      if (image) break;
+    }
+  }
   const snapshot = replyText(completed);
   const output = snapshot || [...done.values()].join('') || deltas;
-  if (typeof output !== 'string' || !output.trim()) throw failure('EMPTY',{retryable:true});
-  return {text:output,...metadata(completed),completionSource:snapshot?'completed':done.size?'text_done':'delta'};
+  if ((typeof output !== 'string' || !output.trim()) && !image) throw failure('EMPTY',{retryable:true});
+  return {text: typeof output === 'string' ? output : '', ...(image ? { image } : {}), ...metadata(completed),completionSource:snapshot?'completed':done.size?'text_done':'delta'};
 }
 export const extractFingerprintReply = text => extractFingerprintSample(text).text;
 
 // Direct account-specific sampling avoids the admin /test route's hard-coded "hi".
 // Credentials stay on this server; the reference detector only receives local text.
 export function createFingerprintSampler({ getAccount, getProxies, transportFactory = () => new TlsFingerprintTransport({ profile: "chrome146", rotateProxySessions: false, sameProxyRiskRetries: 0, cloudflareSolver: false }), testUrl } = {}) {
-  return async (config, account, model, prompt, signal, { onMetadata, messages, upstreamModel = false } = {}) => {
+  return async (config, account, model, prompt, signal, { onMetadata, messages, upstreamModel = false, accountChat = false, generateImage = false } = {}) => {
     let credentialAccount = account;
     if (account.parent_account_id != null) credentialAccount = await getAccount(config, account.parent_account_id);
     const credentials = credentialAccount.credentials || {};
@@ -131,6 +173,10 @@ export function createFingerprintSampler({ getAccount, getProxies, transportFact
     }
     const mapped = (account.credentials?.model_mapping || credentials.model_mapping)?.[model];
     const body = { model: !upstreamModel && typeof mapped === "string" ? mapped : model, input: messages || [{ role: "user", content: [{ type: "input_text", text: prompt }] }], stream: true, store: false, instructions: "" };
+    if (accountChat && generateImage) {
+      body.tools = [{ type: "image_generation" }];
+      body.tool_choice = { type: "image_generation" };
+    }
     if (!oauth) body.max_output_tokens = 8192;
     const base = String(credentials.base_url || "https://api.openai.com").replace(/\/$/, "");
     const url = testUrl || (oauth ? "https://chatgpt.com/backend-api/codex/responses" : base.endsWith("/v1") ? `${base}/responses` : `${base}/v1/responses`);
@@ -141,6 +187,7 @@ export function createFingerprintSampler({ getAccount, getProxies, transportFact
       const id = credentials.chatgpt_account_id || credentials.account_id;
       if (id) headers["chatgpt-account-id"] = String(id);
     }
+    const chat = accountChat ? { token, clean: message => cleanChatError(message, token, proxyUrl) } : null;
     const transport = transportFactory(); const abort = () => { void transport.close(); };
     signal.addEventListener("abort", abort, { once: true });
     try {
@@ -150,9 +197,10 @@ export function createFingerprintSampler({ getAccount, getProxies, transportFact
       const text = await response.text();
       if (!response.ok) {
         let event; try { event = JSON.parse(text); } catch {}
-        throw upstreamFailure(event, response.status);
+        if (!event && chat && response.headers?.get?.("content-type")?.startsWith("text/plain")) event = { error: text };
+        throw upstreamFailure(event, response.status, chat);
       }
-      try { const sample = extractFingerprintSample(text); onMetadata?.({usage:sample.usage,finishStatus:sample.finishStatus,completionSource:sample.completionSource}); return sample.text; }
+      try { const sample = extractFingerprintSample(text, { chat }); onMetadata?.({usage:sample.usage,finishStatus:sample.finishStatus,completionSource:sample.completionSource}); return chat ? sample : sample.text; }
       catch (error) {
         if (error.fingerprintMetadata) onMetadata?.(error.fingerprintMetadata);
         if (error.fingerprintFailure && error.httpStatus == null) error.httpStatus = response.status;

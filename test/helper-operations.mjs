@@ -169,6 +169,7 @@ try {
   });
   const body = {
     id: randomUUID(),
+    conversationId: randomUUID(),
     model: "chat-test",
     question: "first question",
   };
@@ -194,6 +195,14 @@ try {
     ["user", "assistant", "user"],
   );
   assert.equal(captured[1].content, "fixture answer");
+  const nextConversation = randomUUID();
+  await chat.start(acct, target, { ...body, id: randomUUID(), conversationId: nextConversation, question: "independent question" });
+  await chat.work.get(acct)?.done;
+  assert.deepEqual(captured, [{ role: "user", content: "independent question" }]);
+  assert.equal(chat.conversation(acct, ns, "7", body.conversationId).turns.length, 2);
+  assert.equal(chat.conversation(acct, ns, "7", null).conversationId, nextConversation);
+  assert.deepEqual(chat.conversation(acct, ns, "8", nextConversation).turns, []);
+  assert.deepEqual(chat.conversation(acct, "other-pool", "7", nextConversation).turns, []);
   assert.deepEqual(chat.list("other@example.test"), []);
   await assert.rejects(
     chat.start(acct, target, { ...body, id: randomUUID(), model: "made-up" }),
@@ -213,6 +222,8 @@ try {
     b.db.prepare("SELECT state FROM chats WHERE id=?").get(id).state,
     "interrupted",
   );
+  const reopened = new AccountTestChat(b, {});
+  assert.equal(reopened.conversation(acct, ns, "7", "legacy").turns[0].state, "interrupted");
   console.log(
     "HELPER_OPS_PASS durable policies, Shanghai inventory and settlement, partial finance, quality transitions, background conversation, idempotency and restart",
   );

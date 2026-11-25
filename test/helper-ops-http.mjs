@@ -115,6 +115,7 @@ try {
       ],
     }),
   );
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j9FcAAAAASUVORK5CYII=";
   app = createConsoleApp({
     production: true,
     outputRoot: root,
@@ -127,6 +128,14 @@ try {
       assert.equal(m, "text-b");
       assert.equal(opts.upstreamModel, true);
       assert.equal(opts.messages.at(-1).content, q);
+      if (q === "rate limited") {
+        assert.equal(a.schedulable, false);
+        throw Object.assign(new Error("private error"), { chatMessage: "HTTP 429 · usage_limit_reached · Try again later" });
+      }
+      if (q === "draw a pelican") {
+        assert.equal(opts.generateImage, true);
+        return { text: "", image: { mime: "image/png", bytes: Buffer.from(png, "base64") } };
+      }
       await pending;
       return "answer to " + q;
     },
@@ -220,6 +229,41 @@ try {
   }
   assert.equal(t.answer, "answer to fixture question");
   assert.equal(sampled, 1);
+  const chatPath = `/api/jobs/${id}/chat`;
+  const conversationId = crypto.randomUUID();
+  remote.schedulable = false;
+  remote.rate_limit_reset_at = new Date(Date.now() + 3_600_000).toISOString();
+  remote.extra.codex_7d_used_percent = 100;
+  assert.equal((await api(catalogPath, { remoteId: "3" })).code, 200, "quota and scheduling flags must not block catalog");
+  failSync = true;
+  assert.equal((await api(catalogPath, { remoteId: "3" })).code, 502);
+  const chatQuery = `${chatPath}?remoteId=3&conversationId=${conversationId}`;
+  async function completedTurn(question, extra = {}) {
+    const turnId = crypto.randomUUID();
+    const result = await api(chatPath, { id: turnId, conversationId, remoteId: "3", model: "text-b", manualModel: true, question, ...extra });
+    assert.equal(result.code, 202, JSON.stringify(result));
+    for (let i = 0; i < 50; i++) {
+      const listed = (await api(chatQuery)).data;
+      const turn = listed.turns.find(row => row.id === turnId);
+      if (turn && !listed.busy) return turn;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.fail("test turn did not finish");
+  }
+  const rateLimited = await completedTurn("rate limited");
+  assert.equal(rateLimited.state, "failed");
+  assert.equal(rateLimited.error, "HTTP 429 · usage_limit_reached · Try again later");
+  const picture = await completedTurn("draw a pelican", { generateImage: true });
+  assert.equal(picture.state, "completed");
+  assert.equal(picture.imageType, "image/png");
+  assert(!JSON.stringify(picture).includes(png), "polling must not repeat the image bytes");
+  const picturePath = `${chatPath}/images/${picture.id}`;
+  assert.equal((await fetch(base + picturePath)).status, 403);
+  assert.deepEqual((await api(picturePath)).data, { mime: "image/png", base64: png });
+  assert.equal((await api(`${chatPath}/images/${rateLimited.id}`)).code, 404);
+  assert.equal((await api(`${chatPath}?remoteId=99&conversationId=${conversationId}`)).data.turns.length, 0);
+  assert.equal(sampled, 3, "each explicit send reaches only the original account once");
+  failSync = false;
   const fin = await api("/api/finance/daily", {});
   assert.equal(fin.code, 200);
   assert.equal(fin.data.ipCostCents, 350);

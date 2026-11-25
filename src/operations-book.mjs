@@ -54,6 +54,12 @@ export class OperationsBook {
       CREATE INDEX IF NOT EXISTS chats_account ON chats(account,created);
       UPDATE chats SET state='interrupted',error='服务重启中断了本轮；未自动重发' WHERE state='running';
     `);
+    const chatColumns = new Set(db.prepare("PRAGMA table_info(chats)").all().map(({ name }) => name));
+    if (!chatColumns.has("conversation")) db.exec("ALTER TABLE chats ADD COLUMN conversation TEXT");
+    if (!chatColumns.has("image_requested")) db.exec("ALTER TABLE chats ADD COLUMN image_requested INTEGER NOT NULL DEFAULT 0");
+    if (!chatColumns.has("image_type")) db.exec("ALTER TABLE chats ADD COLUMN image_type TEXT");
+    if (!chatColumns.has("image")) db.exec("ALTER TABLE chats ADD COLUMN image BLOB");
+    db.exec("CREATE INDEX IF NOT EXISTS chats_conversation ON chats(account,pool,remote,conversation,created)");
     this.blocked = new Set(
       db
         .prepare("SELECT pool,id FROM proxy_rules WHERE blocked=1")

@@ -41,3 +41,24 @@ const streamError = createFingerprintSampler({transportFactory:()=>({configure:a
 await assert.rejects(streamError({}, {...account,proxy_id:0},'model','prompt',new AbortController().signal),error=>fingerprintFailure(error).code==='OVERLOADED'&&fingerprintFailure(error).httpStatus===200);
 assert(!JSON.stringify(fingerprintFailure(new Error('private-token'))).includes('private-token'));
 console.log("PASS: HTTP/SSE quota, auth, overload, timeout diagnostics and secret-free errors");
+
+const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j9FcAAAAASUVORK5CYII=";
+const imageItem = {type:"image_generation_call", status:"completed", result:png};
+const sse = (...events) => events.map(event => "data: " + JSON.stringify(event) + "\n\n").join("");
+let upstream = { ok:true, status:200, text:async()=>sse({type:"response.output_item.done",item:imageItem},{type:"response.completed",response:{}}) };
+const chatSample = createFingerprintSampler({transportFactory:()=>({configure:async()=>{},close:async()=>{},request:async(_method,_url,opts)=>{sent=JSON.parse(opts.body); return upstream;}})});
+const runChat = generateImage => chatSample({}, {...account, proxy_id:0}, "gpt-test", "draw a pelican", new AbortController().signal, {accountChat:true, generateImage});
+const generated = await runChat(true);
+assert.equal(generated.image.mime,"image/png");
+assert.equal(generated.image.bytes.toString("base64"),png);
+assert.equal(generated.text,"");
+assert.deepEqual(sent.tools,[{type:"image_generation"}]);
+assert.deepEqual(sent.tool_choice,{type:"image_generation"});
+upstream.text = async()=>sse({type:"response.completed",response:{output:[imageItem]}});
+assert.equal((await runChat(false)).image.mime,"image/png");
+assert(!Object.hasOwn(sent,"tools"));
+upstream = {ok:false,status:429,text:async()=>JSON.stringify({detail:{type:"usage_limit_reached",message:"Try again later. Bearer token"}})};
+await assert.rejects(runChat(false), error => error.chatMessage === "HTTP 429 · usage_limit_reached · Try again later. Bearer [已隐藏]");
+upstream = {ok:true,status:200,text:async()=>sse({type:"error",code:"unsupported_tool",message:"This model does not support image generation"})};
+await assert.rejects(runChat(true), error => error.chatMessage === "上游错误 · unsupported_tool · This model does not support image generation");
+console.log("ACCOUNT_CHAT_UPSTREAM_PASS HTTP and SSE details, secret redaction, opt-in image tool, image-only replies and completion snapshot");

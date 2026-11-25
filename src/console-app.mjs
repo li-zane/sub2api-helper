@@ -73,7 +73,7 @@ import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_P
 import { createAccountTagCatalog } from "./account-tag-catalog.mjs";
 import { OverloadCooldown } from "./overload-cooldown.mjs";
 import { ModelFingerprintService } from "./model-fingerprint.mjs";
-import { createFingerprintSampler, createFingerprintAccountReader } from "./model-fingerprint-request.mjs";
+import { createFingerprintSampler, createFingerprintAccountReader, fingerprintFailure } from "./model-fingerprint-request.mjs";
 import { WebSessionMonitor } from "./web-session-monitor.mjs";
 import { JobStore } from "./job-store.mjs";
 import { createConsoleLifecycle } from "./console-lifecycle.mjs";
@@ -529,6 +529,15 @@ export function createConsoleApp(options = {}) {
   }
   const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprintAccount, getProxies: listSub2ApiProxies,
     testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
+  function assertChatAccount(config, record, id, email) {
+    if (config !== sub2ApiSettingsConfig) throw httpError(409, "号池配置已变更，请重新打开对话");
+    if (String(record?.id) !== id || record.platform !== "openai" || record.type !== "oauth" || sub2ApiAccountEmail(record) !== email)
+      throw httpError(409, "号池账号身份已变更，请重新选择");
+    // Dispatch flags describe normal pool traffic. A pinned diagnostic request
+    // can report the actual upstream limit without changing pool scheduling.
+    if (!["active", "error"].includes(record.status) || accountAutomationBlocked(email) || sessionResetAutomationPaused(email))
+      throw httpError(409, "该账号已停用、封禁或正在进行会话维护");
+  }
   async function chatTarget(job,requested) {
     const c=sub2ApiSettingsConfig;
     if(!c?.adminApiKey || accountAutomationBlocked(job.email))throw httpError(409,"该账号或号池不可用");
@@ -537,23 +546,22 @@ export function createConsoleApp(options = {}) {
     const id=String(requested || (ids.length===1?ids[0]:""));
     if(!ids.includes(id))throw httpError(409,"请选择该账号对应的号池 OAuth ID");
     const current=await getSub2ApiAccount(c,id);
-    if(current?.platform!=="openai" || current.type!=="oauth" || sub2ApiAccountEmail(current)!==job.email.toLowerCase()
-       || current.status!=="active" || sub2ApiAccountSchedulable(current)!==true || accountRateLimit(current).limited
-       || usageRestricted(normalizeSub2ApiUsage(current)) || sessionResetAutomationPaused(job.email) || overloadCooldown.isPaused(job.email))
-      throw httpError(409,"号池账号已变更、暂停、限流或不可用");
-    if (c !== sub2ApiSettingsConfig) throw httpError(409,"号池配置已变更，请重新打开对话");
+    assertChatAccount(c, current, id, job.email.toLowerCase());
     return {id,account:job.email.toLowerCase(),pool:poolKey(c),c};
   }
-  async function readChatRecord(t) {
-    const record=await readFingerprintAccount(t.c,t.id);
-    if(String(record?.id)!==t.id || record?.type!=="oauth" || record.platform!=="openai" || sub2ApiAccountEmail(record)!==t.account
-      || record.status!=="active" || sub2ApiAccountSchedulable(record)!==true || accountRateLimit(record).limited || usageRestricted(normalizeSub2ApiUsage(record)) || accountAutomationBlocked(t.account) || overloadCooldown.isPaused(t.account) || sessionResetAutomationPaused(t.account) || t.c!==sub2ApiSettingsConfig)throw Error("账号状态已变更");
-    return record;
-  }
   const chatModels = createChatCatalog({ identity: monitorBackendIdentity, request: requestSub2Api });
-  const chatStore=new AccountTestChat(book,{catalog:async (target)=>(await chatModels(target)).models,send:async(t,model,prompt,signal,messages)=>{
-    const record=await readChatRecord(t);
-    return (options.accountChatSampler || fingerprintSampler)(t.c,record,model,prompt,signal,{messages,upstreamModel:true});
+  const chatStore=new AccountTestChat(book,{catalog:async (target)=>(await chatModels(target)).models,send:async(t,model,prompt,signal,messages,generateImage)=>{
+    const record=await readFingerprintAccount(t.c,t.id);
+    try { assertChatAccount(t.c, record, t.id, t.account); }
+    catch (error) { throw Object.assign(error, { chatMessage: error.message }); }
+    try {
+      return await (options.accountChatSampler || fingerprintSampler)(t.c, record, model, prompt, signal, {
+        messages, upstreamModel: true, accountChat: true, generateImage,
+      });
+    } catch (error) {
+      if (error?.chatMessage) throw error;
+      throw Object.assign(new Error("Account chat request failed"), { chatMessage: fingerprintFailure(error).message });
+    }
   }});
   const modelFingerprint = new ModelFingerprintService({
     onVerdict: (email, at, status, round) => book.recordQuality(email, at, status, round),
@@ -800,11 +808,27 @@ export function createConsoleApp(options = {}) {
       } else policy=book.policy(ns,id,ip);
       sendJson(res,200,{ip,...policy});return;
     }
-    const chatAction=/^\/api\/jobs\/([a-f0-9-]+)\/chat(?:\/(models))?$/.exec(requestUrl.pathname);
+    const chatAction=/^\/api\/jobs\/([a-f0-9-]+)\/chat(?:\/(models|images\/([a-f0-9-]{36})))?$/.exec(requestUrl.pathname);
     if(chatAction && ["GET","POST"].includes(req.method)){
       const job=jobs.get(chatAction[1]);if(!job || job.deleted)throw httpError(404,"账号不存在");
       const account=job.email.toLowerCase();
-      if(req.method==="GET" && !chatAction[2]){sendJson(res,200,{turns:chatStore.list(account)});return;}
+      if (chatAction[3]) {
+        if (req.method !== "GET") throw httpError(405, "仅可读取对话图片");
+        const entry = chatStore.image(account, poolKey(sub2ApiSettingsConfig), chatAction[3]);
+        if (!entry) throw httpError(404, "对话图片不存在");
+        sendJson(res, 200, { mime: entry.mime, base64: Buffer.from(entry.image).toString("base64") });
+        return;
+      }
+      if (req.method === "GET" && !chatAction[2]) {
+        const remote = requestUrl.searchParams.get("remoteId");
+        if (remote === null) sendJson(res, 200, { turns: chatStore.list(account) });
+        else {
+          if (!/^[1-9]\d{0,18}$/.test(remote)) throw httpError(400, "无效的号池账号 ID");
+          const selected = requestUrl.searchParams.get("conversationId");
+          sendJson(res, 200, chatStore.conversation(account, poolKey(sub2ApiSettingsConfig), remote, selected));
+        }
+        return;
+      }
       const body=req.method==="POST"?await readJson(req):{};
       const target=await chatTarget(job,body.remoteId || requestUrl.searchParams.get("remoteId"));
       if(chatAction[2]){

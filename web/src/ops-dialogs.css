@@ -139,11 +139,55 @@
   overflow-wrap: anywhere;
   margin: 4px 0 10px;
 }
+.ops-chat-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ops-chat-controls label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+.ops-chat-controls select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 7px;
+}
+.ops-chat-image {
+  display: block;
+  margin: 8px 0 12px;
+  min-height: 20px;
+}
+img.ops-chat-image, .ops-chat-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 24vh;
+  object-fit: contain;
+  border-radius: 6px;
+}
+.ops-chat-image-choice {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: auto;
+  white-space: nowrap;
+}
+.ops-chat-image-choice input { width: auto; }
 .ops-prompt {
   display: grid;
 }
 .ops-prompt textarea {
   resize: vertical;
+}
+.ops-dialog .ops-prompt textarea {
+  min-height: 78px;
 }
 .ops-end {
   justify-content: flex-end;

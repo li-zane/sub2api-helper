@@ -182,19 +182,62 @@ export function FinanceDialog({ request, onClose }) {
   );
 }
 export function ChatDialog({ job, request, onClose }) {
-  const title = useId(),
-    ids = (
+  const ids = (
       job.sub2apiAccountIds?.length
         ? job.sub2apiAccountIds
         : [job.sub2apiAccountId]
     )
       .filter(Boolean)
       .map(String);
-  const [remote, setRemote] = useState(ids[0] || ""),
-    [models, setModels] = useState([]),
+  const [remote, setRemote] = useState(ids[0] || "");
+  return <ChatConversation key={remote} {...{ job, request, onClose, ids, remote, setRemote }} />;
+}
+
+function ChatImage({ endpoint, turn, request }) {
+  const [preview, setPreview] = useState(null);
+  const location = useRef(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) return;
+      observer.disconnect();
+      request(`${endpoint}/images/${turn.id}`, { signal: controller.signal })
+        .then(({ mime, base64 }) => {
+          if (mime === turn.imageType && ["image/png", "image/jpeg", "image/webp"].includes(mime)) {
+            setPreview({ src: `data:${mime};base64,${base64}` });
+          } else setPreview({ error: "图片格式不受支持" });
+        })
+        .catch(() => { if (!controller.signal.aborted) setPreview({ error: "对话图片加载失败" }); });
+    });
+    observer.observe(location.current);
+    return () => { observer.disconnect(); controller.abort(); };
+  }, [endpoint, request, turn.id, turn.imageType]);
+  return <div className="ops-chat-image" ref={location}>
+    {preview?.src ? <img src={preview.src} alt="对话生成的图片" />
+      : <small role={preview?.error ? "alert" : "status"}>{preview?.error || "图片待加载…"}</small>}
+  </div>;
+}
+
+function chatSvgPreview(answer) {
+  if (!answer || answer.length > 100000) return null;
+  const svg = answer.match(/^\s*```(?:svg|xml|html)?[ \t]*\r?\n\s*(<svg\b[\s\S]*?<\/svg\s*>)\s*```/mi)?.[1]
+    || answer.match(/^\s*(<svg\b[\s\S]*?<\/svg\s*>)\s*$/i)?.[1];
+  // SVG is loaded in the browser's image-only context. Never embed it as HTML,
+  // an iframe, or a navigable document.
+  if (!svg) return null;
+  const src = /^<svg\b[^>]*\sxmlns\s*=/i.test(svg) ? svg : svg.replace(/^<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(src.toWellFormed())}`;
+}
+
+function ChatConversation({ job, request, onClose, ids, remote, setRemote }) {
+  const title = useId();
+  const [models, setModels] = useState([]),
     [model, setModel] = useState(""),
+    [manualModel, setManualModel] = useState(""),
+    [generateImage, setGenerateImage] = useState(false),
     [question, setQuestion] = useState(""),
-    [turns, setTurns] = useState([]),
+    [selection, setSelection] = useState(null),
+    [view, setView] = useState(null),
     [err, setErr] = useState(""),
     [catalogError, setCatErr] = useState(""),
     [catalogWarning, setCatalogWarning] = useState(false),
@@ -207,6 +250,9 @@ export function ChatDialog({ job, request, onClose }) {
     alive = useRef(true),
     transcript = useRef(null);
   const endpoint = "/api/jobs/" + job.id + "/chat";
+  const conversation = selection ?? view?.conversationId ?? null;
+  const turns = view?.conversationId === conversation ? view.turns : [];
+  const chosenModel = models.length ? model : manualModel.trim();
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -215,8 +261,6 @@ export function ChatDialog({ job, request, onClose }) {
   }, []);
   useEffect(() => {
     let gone = false;
-    setModels([]);
-    setModel("");
     setCatErr("");
     setCatalogWarning(false);
     setLoadingModels(Boolean(remote));
@@ -231,26 +275,29 @@ export function ChatDialog({ job, request, onClose }) {
             setCatalogWarning(r.hasWarnings === true);
             // The native list can start with a review-only model. Let the
             // operator choose rather than selecting it for a conversation.
-            setModel(r.models.length === 1 ? r.models[0] : "");
+            setModel(previous => r.models.includes(previous) ? previous : r.models.length === 1 ? r.models[0] : "");
           }
         })
         .catch((e) => {
-          if (!gone) setCatErr(e.message);
+          if (!gone) { setModels([]); setCatErr(e.message); }
         }).finally(()=>{if(!gone)setLoadingModels(false);});
     return () => {
       gone = true;
     };
   }, [remote, endpoint, request, catalogRevision]);
   useEffect(() => {
+    if (!remote) return;
     let gone = false,
       timer;
+    const query = new URLSearchParams({ remoteId: remote });
+    if (selection) query.set("conversationId", selection);
     async function read() {
       let again = false;
       try {
-        const r = await request(endpoint);
+        const r = await request(`${endpoint}?${query}`);
         if (!gone) {
-          setTurns(r.turns);
-          again = r.turns.some((t) => t.state === "running");
+          setView(r);
+          again = r.busy || r.turns.some((t) => t.state === "running");
         }
       } catch (e) {
         if (!gone) setErr(e.message);
@@ -264,33 +311,38 @@ export function ChatDialog({ job, request, onClose }) {
       gone = true;
       clearTimeout(timer);
     };
-  }, [endpoint, request, reload]);
+  }, [endpoint, remote, request, reload, selection]);
   useEffect(() => {
     if (transcript.current)
       transcript.current.scrollTop = transcript.current.scrollHeight;
   }, [turns]);
   async function submit(e) {
     e.preventDefault();
-    if (busy.current || !question.trim() || !model) return;
+    if (busy.current || !question.trim() || !chosenModel || !remote) return;
     busy.current = true;
     setPosting(true);
     setErr("");
-    const sig = JSON.stringify([remote, model, question]);
+    const sig = JSON.stringify([remote, chosenModel, question, generateImage, !models.length]);
     if (pending.current?.sig !== sig)
-      pending.current = { sig, id: newRequestId() };
+      pending.current = { sig, id: newRequestId(), conversationId: conversation && conversation !== "legacy" ? conversation : newRequestId() };
+    const turn = pending.current;
     try {
       await request(endpoint, {
         method: "POST",
         body: JSON.stringify({
-          id: pending.current.id,
+          id: turn.id,
+          conversationId: turn.conversationId,
           remoteId: remote,
-          model,
+          model: chosenModel,
+          manualModel: !models.length,
+          generateImage,
           question,
         }),
       });
       pending.current = null;
       if (alive.current) {
         setQuestion("");
+        setSelection(turn.conversationId);
         setReload((x) => x + 1);
       }
     } catch (e) {
@@ -303,7 +355,13 @@ export function ChatDialog({ job, request, onClose }) {
       if (alive.current) setPosting(false);
     }
   }
-  const running = turns.some((t) => t.state === "running");
+  function selectConversation(id) {
+    pending.current = null;
+    setErr("");
+    setQuestion("");
+    setSelection(id);
+  }
+  const running = view?.busy || turns.some((t) => t.state === "running");
   return (
     <AccessibleDialog
       className="batch-dialog ops-dialog"
@@ -321,7 +379,7 @@ export function ChatDialog({ job, request, onClose }) {
         <div className="ops-toolbar">
           <label>
             号池 ID{" "}
-            <select value={remote} onChange={(e) => setRemote(e.target.value)}>
+            <select value={remote} disabled={posting} onChange={(e) => setRemote(e.target.value)}>
               {ids.map((id) => (
                 <option key={id}>{id}</option>
               ))}
@@ -329,7 +387,7 @@ export function ChatDialog({ job, request, onClose }) {
           </label>
           <label>
             模型{" "}
-            <select
+            {models.length || loadingModels ? <select
               value={model}
               disabled={!models.length}
               onChange={(e) => setModel(e.target.value)}
@@ -338,7 +396,8 @@ export function ChatDialog({ job, request, onClose }) {
               {models.map((m) => (
                 <option key={m}>{m}</option>
               ))}
-            </select>
+            </select> : <input value={manualModel} disabled={!remote} maxLength={200} spellCheck={false}
+              onChange={e => setManualModel(e.target.value)} placeholder="输入上游模型 ID" />}
           </label>
         </div>
         <small>
@@ -348,13 +407,23 @@ export function ChatDialog({ job, request, onClose }) {
         <button type="button" className="secondary-button" disabled={loadingModels||!remote} onClick={()=>setCatalogRevision(v=>v+1)}><RefreshCw size={13}/>刷新上游模型</button></div>
         {catalogWarning && <p role="status">Sub2API 返回了目录提示；详情请查看该账号的「获取上游模型」结果。</p>}
         {catalogError && <p role="alert">{catalogError}</p>}
+        <div className="ops-chat-controls">
+          <label>对话{" "}<select value={conversation || ""} disabled={posting || !remote} onChange={e => selectConversation(e.target.value)}>
+            {!(view?.conversations || []).some(item => item.id === conversation) && <option value={conversation || ""}>新对话</option>}
+            {(view?.conversations || []).map(item => <option key={item.id} value={item.id}>{item.id === "legacy" ? "旧版记录" : beijingTime(item.created)}</option>)}
+          </select></label>
+          <button type="button" className="secondary-button" disabled={posting || !remote} onClick={() => selectConversation(newRequestId())}>新建对话</button>
+        </div>
+        {conversation === "legacy" && <small>从旧版记录发送消息会开启独立的新对话。</small>}
         <div className="ops-transcript" ref={transcript} aria-label="对话记录">
           {!turns.length ? (
             <div className="ops-empty">
               暂无对话。发送第一条消息后可以关闭窗口。
             </div>
           ) : (
-            turns.map((t) => (
+            turns.map((t) => {
+              const svg = !t.imageType && chatSvgPreview(t.answer);
+              return (
               <article key={t.id}>
                 <small>
                   {t.model} · #{t.remote} · {beijingTime(t.created)}
@@ -362,13 +431,15 @@ export function ChatDialog({ job, request, onClose }) {
                 <b>你</b>
                 <p>{t.question}</p>
                 <b>回答</b>
-                <p role={t.state === "running" ? "status" : undefined}>
-                  {t.answer ||
-                    t.error ||
-                    (t.state === "running" ? "正在后台生成…" : "未返回文本")}
-                </p>
+                {t.answer && (svg ? <details><summary>回答原文</summary><p>{t.answer}</p></details> : <p>{t.answer}</p>)}
+                {t.imageType && <ChatImage endpoint={endpoint} turn={t} request={request} />}
+                {svg && <img className="ops-chat-image" src={svg} alt="对话生成的 SVG 预览" />}
+                {!t.answer && !t.imageType && <p role={t.error ? "alert" : t.state === "running" ? "status" : undefined}>
+                  {t.error || (t.state === "running" ? "正在后台生成…" : "未返回文本")}
+                </p>}
               </article>
-            ))
+              );
+            })
           )}
         </div>
         {err && <p role="alert">{err}</p>}
@@ -384,6 +455,7 @@ export function ChatDialog({ job, request, onClose }) {
             />
           </label>
           <div className="ops-end">
+            <label className="ops-chat-image-choice"><input type="checkbox" checked={generateImage} disabled={posting} onChange={e => setGenerateImage(e.target.checked)} /> 生成图片</label>
             <button
               type="button"
               className="secondary-button"
@@ -393,7 +465,7 @@ export function ChatDialog({ job, request, onClose }) {
             </button>
             <button
               className="primary-button"
-              disabled={posting || running || !model || !question.trim()}
+              disabled={posting || running || loadingModels || !remote || !chosenModel || !question.trim()}
             >
               <Send size={14} />
               发送
