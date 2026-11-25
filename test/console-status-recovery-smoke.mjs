@@ -5,11 +5,17 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { createCredentialStore } from "../src/credential-store.mjs";
+for (const source of ['status', 'quota401']) {
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "helper-status-recovery-")), trace = path.join(root, "attempts.jsonl");
 let child, headers, logs = "", filteredLists = 0, fullLists = 0, incomplete = false, status = "active", firstErrorSnapshotAt = null;
+let quotaUnauthorized = false;
 const email = "immediate@example.test", id = "11111111-1111-4111-8111-111111111111";
 const remote = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture"); res.setHeader("content-type", "application/json");
+  if (url.pathname.endsWith('/quota/refresh') && quotaUnauthorized) {
+    res.statusCode = 401;
+    return res.end(JSON.stringify({ code: 'OPENAI_QUOTA_UPSTREAM_ERROR', message: 'upstream returned 401: token_revoked' }));
+  }
   if (url.pathname === "/api/v1/admin/accounts") {
     if (status === "error" && firstErrorSnapshotAt === null) firstErrorSnapshotAt = Date.now();
     if (url.searchParams.has("status")) filteredLists++; else fullLists++;
@@ -42,6 +48,18 @@ try {
   await post("/api/sub2api/monitor", { config, enabled: true });
   await get("/api/sub2api/account-status?refresh=1"); await wait(async () => !(await get("/api/sub2api/monitor")).running);
   assert.equal((await attempts()).length, 0);
+  if (source === 'quota401') {
+    quotaUnauthorized = true;
+    await get(`/api/jobs/${id}/usage?refresh=1`);
+    await wait(async () => (await attempts()).length === 1);
+    assert.equal(status, 'active', 'provider 401 fixture unexpectedly marked the pool row as error');
+    await wait(async () => ['failed', 'completed'].includes((await job()).status));
+    await get(`/api/jobs/${id}/usage?refresh=1`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal((await attempts()).length, 1, 'quota401 repair ignored retry cooldown');
+    console.log('QUOTA_AUTH_RECOVERY_HTTP_PASS active pool upstream401 queues OAuth; no error-row prerequisite; failed-repair cooldown deduplicates');
+    continue;
+  }
   const beforeLists = fullLists, started = Date.now(); status = "error";
   // A normal scheduled status refresh alone must authorize; never call monitor/check.
   await wait(async () => (await attempts()).length === 1);
@@ -77,4 +95,5 @@ try {
 } finally {
   if (child?.exitCode === null) { const ended = new Promise(r => child.once("exit", r)); child.kill("SIGTERM"); await ended; }
   remote.closeAllConnections(); await new Promise(r => remote.close(r)); await fs.rm(root, { recursive: true, force: true });
+}
 }

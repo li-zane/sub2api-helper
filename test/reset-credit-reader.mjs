@@ -41,3 +41,19 @@ const prior = calls.length; blocked.clear(); value = 7;
 assert.equal((await reader({ ...config, adminApiKey: "other-backend" }, [1])).get("1").resetCredits.availableCount, 7);
 assert.equal(calls.length, prior + 1, "backend credentials isolate the cache");
 console.log("RESET_CREDIT_READER_PASS independent TTL; failed-attempt throttle; unknown/zero; blocked/manual; dedup; dynamic concurrency; backend isolation; no redemption");
+
+const authFailures = [];
+const authReader = createResetCreditsReader({
+  request: async () => { throw Object.assign(Error('upstream returned 401: token_revoked'), { remoteStatus: 401, remoteCode: 'OPENAI_QUOTA_UPSTREAM_ERROR' }); },
+  onAuthorizationFailure: async (cfg, id, error) => authFailures.push({ cfg, id, status: error.remoteStatus }),
+});
+await authReader(config, [7]);
+assert.equal(authFailures.length, 1, 'quota upstream 401 did not notify authorization recovery');
+await authReader(config, [7]);
+assert.equal(authFailures.length, 1, 'cached failed query repeated authorization recovery');
+const adminReader = createResetCreditsReader({
+  request: async () => { throw Object.assign(Error('administrator unauthorized'), { remoteStatus: 401, remoteCode: 'UNAUTHORIZED' }); },
+  onAuthorizationFailure: async () => assert.fail('administrator API 401 triggered account login'),
+});
+await adminReader(config, [7]);
+console.log('RESET_CREDIT_AUTH_PASS upstream401 recovery signal; failed-query throttle; admin401 excluded');

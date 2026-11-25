@@ -4222,7 +4222,7 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
           >
             {submitting ? <LoaderCircle className="spin" size={13} /> : <CodexIcon size={13} />}
           </button>
-          {!terminal && (
+          {(job.canCancel ?? !terminal) && (
             <button type="button" className="icon-button danger" onClick={cancel}
               disabled={rowBusy} title="取消任务" aria-label="取消任务">
               <Ban size={13} />

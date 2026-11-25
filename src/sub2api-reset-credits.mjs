@@ -23,7 +23,7 @@ export function normalizeResetCredits(value, { cached = false, now = Date.now() 
 export function createResetCreditsReader({ request, normalize = payload => {
   const data = payload?.data ?? payload;
   return { resetCredits: normalizeResetCredits(data?.rate_limit_reset_credits) };
-}, getSettings = () => ({ ttlMs: 900_000, concurrency: 4 }), isBlocked = () => false, now = Date.now }) {
+}, getSettings = () => ({ ttlMs: 900_000, concurrency: 4 }), isBlocked = () => false, onAuthorizationFailure = async () => {}, now = Date.now }) {
   let backend = "", cache = new Map(), inflight = new Map();
   const limited = limitPoolRequests(async (config, id, task, currentCache) => {
     if (!task.manual && isBlocked(id)) return null;
@@ -34,7 +34,10 @@ export function createResetCreditsReader({ request, normalize = payload => {
       if (!value || typeof value !== "object") throw Error("Invalid quota response");
       value = { ...value, resetCreditsObserved: true, resetCreditsFetchedAt: new Date(now()).toISOString(),
         resetCreditsStale: !value.resetCredits };
-    } catch {
+    } catch (error) {
+      // A provider 401 is distinct from an invalid administrator API key.
+      if (error?.remoteStatus === 401 && error.remoteCode === 'OPENAI_QUOTA_UPSTREAM_ERROR')
+        await Promise.resolve().then(() => onAuthorizationFailure(config, id, error)).catch(() => {});
       value = { resetCredits: currentCache.get(id)?.value?.resetCredits || null,
         resetCreditsObserved: true, resetCreditsFetchedAt: new Date(now()).toISOString(), resetCreditsStale: true };
     }

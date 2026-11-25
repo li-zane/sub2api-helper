@@ -8,19 +8,22 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { seedWebSession } from "./account-web-fixture.mjs";
 
-for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSION_RESET_SCENARIO] : ["manual-proxy", "manual-direct", "automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "oauth-failure", "proxy-changed", "sync-retry", "queued", "automation-paused", "local-oauth", "oauth-retry", "banned", "batch-default", "batch-delay", "batch-direct", "batch-cancel", "batch-mixed", "manual-disabled", "manual-disable-during-reset", "single-delay", "manual-logout-failure", "pause-failure", "restore-failure", "multi-sync-failure", "multi-original-off", "multi-restore-failure", "legacy-delay"])) {
+for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSION_RESET_SCENARIO] : ["manual-proxy", "manual-direct", "automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "oauth-failure", "proxy-changed", "sync-retry", "sync-cancel", "sync-cancel-running", "quota-resume", "queued", "automation-paused", "local-oauth", "oauth-retry", "banned", "batch-default", "batch-delay", "batch-direct", "batch-cancel", "batch-mixed", "manual-disabled", "manual-disable-during-reset", "single-delay", "manual-logout-failure", "pause-failure", "restore-failure", "multi-sync-failure", "multi-original-off", "multi-restore-failure", "legacy-delay"])) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "helper-reset-http-")), email = "reset@example.test";
   const id = "11111111-1111-4111-8111-111111111111", dir = path.join(temp, id), trace = path.join(temp, "trace.jsonl");
   const automatic = ["automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "automation-paused"].includes(scenario), direct = ["manual-direct", "batch-direct"].includes(scenario);
   const batch = scenario.startsWith("batch-"), delayed = ["batch-delay", "batch-cancel", "single-delay", "legacy-delay", "automatic-logout-first"].includes(scenario);
   const multi = scenario.startsWith("multi-"), disabled = ["manual-disabled", "manual-disable-during-reset"].includes(scenario);
   let failPause = scenario === "pause-failure", failRestore = ["restore-failure", "multi-restore-failure"].includes(scenario);
-  let child, headers, logs = "", logouts = 0, updates = 0, creates = 0, failSync = scenario === "sync-retry";
+  let child, headers, logs = "", logouts = 0, updates = 0, creates = 0, failSync = ["sync-retry", "sync-cancel"].includes(scenario), cacheClears = 0;
   let webExpired = false, webProbes = 0;
+  let releaseClear;
+  const clearGate = scenario === 'sync-cancel-running' ? new Promise(resolve => { releaseClear = resolve; }) : null;
   const webAccessToken = `web.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
   const mutations = [], row = { id: 7, platform: "openai", type: "oauth", name: email, status: "active", schedulable: !automatic && scenario !== "manual-disabled",
     proxy_id: direct ? 0 : 3, group_ids: [91], priority: 17, credentials: { email, access_token: "old", refresh_token: "old-refresh", plan_type: "plus", custom: "retain" } };
   const proxy = { id: 3, name: "Original", protocol: "http", host: "fixed.fixture", port: 8080, ip_address: "198.51.100.3", status: "active" };
+  if (scenario === 'quota-resume') row.extra = { codex_7d_used_percent: 100, codex_7d_reset_at: new Date(Date.now() + 86400000).toISOString(), auto_reset_credit_enabled: true };
   const second = { ...structuredClone(row), id: 8, schedulable: scenario !== "multi-original-off" };
   const rows = multi ? [row, second] : [row];
   let failSecondSync = scenario === "multi-sync-failure";
@@ -56,6 +59,7 @@ for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSIO
     if (url.pathname === "/api/v1/admin/accounts") return json(res, { data: { items: rows, total: rows.length, pages: 1 } });
     if (url.pathname === "/api/v1/admin/proxies/all") return json(res, [proxy]);
     if (url.pathname === "/api/v1/admin/accounts/batch") { creates++; return json(res, {}); }
+    if (url.pathname === '/api/v1/admin/accounts/7/clear-error') { cacheClears++; if (cacheClears === 1 && clearGate) await clearGate; return json(res, { data: row }); }
     const matching = /^\/api\/v1\/admin\/accounts\/(\d+)(\/schedulable)?$/.exec(url.pathname);
     const target = matching && rows.find(a => a.id === Number(matching[1]));
     if (target && matching[2]) {
@@ -361,6 +365,29 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
           assert.equal(row.schedulable, true, "retry lost ownership of the original pause");
         }
       } else {
+        if (scenario.startsWith('sync-cancel')) {
+          await wait(async () => scenario === 'sync-cancel' ? Boolean((await job()).poolRefreshError) : cacheClears === 1, 'sync did not reach cancellation stage');
+          assert.equal((await job()).canCancel, true, 'completed OAuth hid pending synchronization cancellation');
+          const cancelStarted = Date.now();
+          assert.equal((await api(`/api/jobs/${id}/cancel`, {})).status, 200);
+          assert(Date.now() - cancelStarted < 5000, 'cancel waited for the blocked upstream request');
+          releaseClear?.();
+          const canceled = await job();
+          assert.equal(canceled.status, 'canceled'); assert.equal(canceled.poolRefreshAction, null);
+          assert.equal(canceled.poolRefreshReady, false); assert.equal(canceled.sessionReset.status, 'failed');
+          assert.equal(canceled.canCancel, false); assert.equal(row.schedulable, false);
+          const canceledOutput = await fs.readFile(output, 'utf8');
+          await stop(); failSync = false; await start();
+          assert.equal((await job()).poolRefreshAction, null, 'restart revived canceled sync');
+          assert.equal(updates, scenario === 'sync-cancel' ? 0 : 1);
+          assert.equal((await api(`/api/jobs/${id}/authorize`, {})).status, 200);
+          await wait(async () => (await job()).sessionReset?.status === 'completed', 'saved credentials did not resume without new login');
+          assert.equal(logouts, 1); assert.equal(updates, scenario === 'sync-cancel' ? 1 : 2); assert.equal(cacheClears, scenario === 'sync-cancel' ? 1 : 2);
+          assert.equal(await fs.readFile(output, 'utf8'), canceledOutput, 'sync continuation repeated OAuth');
+          assert.equal(row.schedulable, true);
+          console.log('SESSION_RESET_HTTP_PASS sync-cancel durable cancellation, original pause, saved credentials continuation, no repeat OAuth');
+          continue;
+        }
         if (["sync-retry", "multi-sync-failure", "restore-failure", "multi-restore-failure"].includes(scenario)) {
           await wait(async () => Boolean((await job()).poolRefreshError), "sync failure was not surfaced");
           assert(rows.every(a => a.schedulable === false), "partial update or uncertain restore left an account enabled");
@@ -379,6 +406,7 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
           assert((await api(logPath)).data.entries.some(e => e.id === failedSync.id && e.status === "failed"), "success erased the failed attempt");
         }
         await wait(async () => (await job()).sessionReset?.status === "completed", "reset did not complete");
+        if (scenario === 'quota-resume') assert.equal(cacheClears, 1, 'active OAuth account retained the stale runtime token');
         if (automatic) await wait(async () => row.schedulable, "cooldown did not resume after reset");
         if (scenario === 'automatic-logout-first') {
           await wait(async () => (await job()).overloadAutoCooldown.operation?.status === 'completed', 'recent operation did not record recovery');
@@ -419,6 +447,7 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
   } catch (error) {
     throw new Error(`Session reset scenario ${scenario} failed\n${logs}\n${await fs.readFile(trace, "utf8").catch(() => "")}`, { cause: error });
   } finally {
+    releaseClear?.();
     await fs.writeFile(gate, "continue").catch(() => {}); await stop();
     official.closeAllConnections(); pool.closeAllConnections(); await Promise.all([new Promise(r => official.close(r)), new Promise(r => pool.close(r))]);
     await fs.rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

@@ -354,6 +354,12 @@ export function createConsoleApp(options = {}) {
     getSettings: () => ({ ttlMs: consoleSettings.current.monitoringSettings.resetCreditsIntervalSeconds * 1000, concurrency: consoleSettings.current.monitoringSettings.resetCreditsConcurrency }),
     isBlocked: id => sessionResetPoolIdPaused(id) || [...sub2ApiAccountStatusCache.accounts].some(([email, account]) => account.accountIds?.map(String).includes(String(id)) && (inspectionPaused(email) || accountAutomationBlocked(email))),
     normalize: payload => normalizeSub2ApiUsagePayload(payload, { resetCreditsRefreshed: true }),
+    onAuthorizationFailure: (config, id) => {
+      // Provider reads can hold the email lock. Queue recovery without awaiting
+      // that lock from inside the read itself.
+      void recoverQuotaAuthorization(config, id).catch(error => console.warn('[quota] 授权恢复失败：' + error.message));
+      return Promise.resolve();
+    },
     request: (...args) => shuttingDown
       ? Promise.reject(new Error("Service is shutting down")) : requestSub2Api(...args),
   });
@@ -613,7 +619,7 @@ export function createConsoleApp(options = {}) {
     updatePriority: async (config, id, priority) => requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ priority }) }),
     onChange: invalidateSub2ApiAccountStatusCache,
   });
-  async function recoverFingerprintAuthorization(email, failure) {
+  async function recoverFingerprintAuthorization(email, failure, source = 'fingerprint') {
     return withEmailJobLock(email, async () => {
       const job = findJobByEmail(email);
       if (!job || shuttingDown || accountAutomationBlocked(email) || sessionResetAutomationPaused(email)) return;
@@ -638,12 +644,21 @@ export function createConsoleApp(options = {}) {
       if (!accounts.length) return;
       const operation = createSub2ApiAutoRepairOperation(config, accounts, snapshotSub2ApiProfileState());
       await forceReloginJob(job, {}, { autoRepair: operation, webSessionMonitorRepair: true });
-      appendJobLog(job, "[fingerprint] 检测凭据已失效，已加入共享授权修复队列；先验证 Web，再恢复 OAuth。\n");
+      appendJobLog(job, `[${source}] 检测凭据已失效，已加入共享授权修复队列；先验证 Web，再恢复 OAuth。\n`);
       await saveJobMetadata(job);
     });
   }
   function fingerprintGroupIds(config, account, groups, currentAccount = null) {
     return modelFingerprint.filterGroups(sub2ApiAccountEmail(account), extractPlanTypeFromAccount(account, { preferJwt: false }) || "unknown", config.profileId || "default", groups, currentAccount);
+  }
+  async function recoverQuotaAuthorization(config, id) {
+    if (shuttingDown || !sub2ApiMonitorConfig?.enabled
+      || monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiMonitorConfig)) return;
+    const listing = await listSub2ApiAccounts(config, { withMeta: true });
+    if (!listing.complete) return;
+    const account = listing.accounts.find(a => String(a.id) === String(id) && a.platform === 'openai' && a.type === 'oauth');
+    if (!account || sub2ApiPermanentAccountFailure(account)) return;
+    await recoverFingerprintAuthorization(sub2ApiAccountEmail(account), { code: 'AUTH', httpStatus: 401, upstreamCode: 'token_revoked' }, 'quota');
   }
 
   const { host: requestedHost, port: requestedPort } = options;
@@ -1862,6 +1877,9 @@ export function createConsoleApp(options = {}) {
       return;
     }
     if (req.method === "POST" && action === "cancel") {
+      job.poolRefreshCancellationRequested = true;
+      job.poolRefreshAbortController?.abort();
+      clearPoolRefreshTimer(job);
       await withEmailJobLock(job.email, () => cancelJob(job));
       sendJson(res, 200, { job: publicJob(job) });
       return;
@@ -2766,6 +2784,20 @@ export function createConsoleApp(options = {}) {
     if (automatic && automaticLoginBlocked(job, "oauth")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
     await automationBlockWrites.get(job.email.toLowerCase());
     if (!canForceRelogin(job)) throw httpError(409, "账号封禁或任务正在进行中，暂不能授权");
+    const reset = accountSessionResets.get(job.email);
+    if (!automatic && reset?.status === 'failed' && reset.poolPauseActive && job.resultSaved
+      && Date.parse(job.completedAt) > Date.parse(reset.logoutCompletedAt)) {
+      // Continue the saved OAuth result on its original route after a canceled
+      // sync; do not create another Web/Codex session.
+      job.poolRefreshCancellationRequested = false;
+      await accountSessionResets.save(job.email, { status: 'syncing', error: null });
+      beginPoolRefresh(job, 'session-reset');
+      job.status = 'completed'; job.poolRefreshReady = true;
+      appendJobLog(job, '[session-reset] 使用已保存的新凭据继续号池同步，不重复登录或登出。\n');
+      await saveJobMetadata(job);
+      await synchronizePoolRefresh(job);
+      return;
+    }
     const saved = job.resultSaved ? await privateJsonIfPresent(job.outputPath) : null;
     const refreshToken = saved?.type === "sub2api-data" && saved.accounts?.[0]?.credentials?.refresh_token;
     if (typeof refreshToken === "string" && refreshToken.trim()) {
@@ -3184,7 +3216,7 @@ export function createConsoleApp(options = {}) {
       const config = sub2ApiSettingsConfig, attempted = [];
       const current = () => {
         const state = accountSessionResets.get(job.email);
-        if (state?.id !== expected.id || !sessionResetPending(state) || accountAutomationBlocked(job.email))
+        if (state?.id !== expected.id || !sessionResetPending(state) || accountAutomationBlocked(job.email) || job.poolRefreshCancellationRequested)
           throw Error("一键重登已停止，号池保持暂停");
         return state;
       };
@@ -3194,8 +3226,10 @@ export function createConsoleApp(options = {}) {
           current();
           if (!(state.resumeAccountIds || []).includes(String(account.id)) || overloadCooldown.isPaused(job.email)
             || overloadCooldown.isManuallyDisabled(job.email, account.id, config)) continue;
-          if (account.status !== "active" || accountRateLimit(account).limited || usageRestricted(normalizeSub2ApiUsage(account)))
-            throw Error("新凭据已保存，但号池仍有错误或用量限制，继续保持暂停");
+          // Restore scheduling opt-in; Sub2API still gates serving by quota and
+          // rate limits, and its auto-reset worker requires this opt-in.
+          if (account.status !== "active")
+            throw Error("新凭据已保存，但号池仍有错误，继续保持暂停");
           attempted.push(account.id);
           await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(account.id)}/schedulable`, {
             method: "POST", body: JSON.stringify({ schedulable: true }),
@@ -3400,6 +3434,13 @@ export function createConsoleApp(options = {}) {
       }
       try { await ensureSessionResetPoolPaused(job); }
       catch (error) { await accountSessionResets.fail(email, error); continue; }
+      if (state.status === 'failed' && state.error === '用户取消了会话重建' && job.poolRefreshAction === 'session-reset') {
+        // Older versions canceled the reset record but left its retry intent.
+        job.status = 'canceled'; job.poolRefreshAction = null; job.poolRefreshReady = false;
+        job.poolRefreshDueAt = null; job.poolRefreshError = null; job.poolRefreshFailure = null;
+        job.poolRefreshRecovery = null; clearPoolRefreshTimer(job);
+        await saveJobMetadata(job);
+      }
       if (!sessionResetPending(state)) continue;
       if (state.status === "logging_out") {
         await accountSessionResets.fail(email, "服务重启中断了登出请求，远端结果待确认，请手动检查后重试"); continue;
@@ -3438,11 +3479,12 @@ export function createConsoleApp(options = {}) {
     const payload = await buildSub2ApiUploadPayload([job]);
     const local = payload.accounts.find(a => sub2ApiAccountEmail(a) === job.email.toLowerCase());
     for (const id of state.accountIds) {
+      if (job.poolRefreshCancellationRequested) throw Error('会话重建已取消');
       const response = await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`), remote = response?.data || response;
       if (sub2ApiAccountEmail(remote) !== job.email.toLowerCase() || (normalizeStoredProxyId(remote.proxy_id) || 0) !== state.proxyId)
         throw Error("号池账号身份或 IP 绑定已变化，已停止覆盖");
-      await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(resetCredentialUpdate(local, remote)) });
-      await recoverSub2ApiAuthorization(config, id, job.email, { recoveryJob: job });
+      await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(resetCredentialUpdate(local, remote)), signal: job.poolRefreshAbortController?.signal });
+      await recoverSub2ApiAuthorization(config, id, job.email, { recoveryJob: job, freshCredentials: true });
     }
     invalidateSub2ApiAccountStatusCache();
     await finishSessionResetPoolPause(job, state);
@@ -4987,9 +5029,25 @@ export function createConsoleApp(options = {}) {
       return;
     }
     const operation = job.logOperation;
-    try { return await cancelJobRun(job); }
+    try {
+      if (!isActive(job.status) && (activeSessionReset(job) || job.poolRefreshAction)) {
+        const completedReset = job.poolRefreshAction === 'session-reset' && accountSessionResets.get(job.email)?.status === 'completed';
+        job.status = completedReset ? 'completed' : 'canceled';
+        job.prompt = completedReset ? '号池同步已经完成' : '号池同步已取消，已保存的授权仍然保留，号池保持暂停';
+        touch(job);
+      } else await cancelJobRun(job);
+    }
     finally {
       if (!shuttingDown && activeSessionReset(job)) await accountSessionResets.fail(job.email, "用户取消了会话重建");
+      if (!shuttingDown) {
+        job.poolRefreshCancellationRequested = true;
+        job.poolRefreshAbortController?.abort();
+        clearPoolRefreshTimer(job);
+        job.poolRefreshAction = null; job.poolRefreshReady = false;
+        job.poolRefreshDueAt = null; job.poolRefreshRecovery = null;
+        job.poolRefreshError = null; job.poolRefreshFailure = null;
+        await saveJobMetadata(job);
+      }
       if (operation) finishAccountLogOperation(job, operation, "canceled");
     }
   }
@@ -5057,10 +5115,11 @@ export function createConsoleApp(options = {}) {
   }
 
   async function cancelAllJobs() {
-    const activeJobs = [...jobs.values()].filter((job) => isActive(job.status));
+    const activeJobs = [...jobs.values()].filter((job) => isActive(job.status) || activeSessionReset(job) || job.poolRefreshAction);
     if (!activeJobs.length) return 0;
     queueSchedulingPaused = true;
     try {
+      for (const job of activeJobs) { job.poolRefreshCancellationRequested = true; job.poolRefreshAbortController?.abort(); clearPoolRefreshTimer(job); }
       await Promise.all(activeJobs.map((job) => withEmailJobLock(job.email, () => cancelJob(job))));
       await Promise.all(activeJobs.map((job) => saveJobMetadata(job)));
     } finally {
@@ -5245,7 +5304,7 @@ export function createConsoleApp(options = {}) {
         if (dayPriorities.has(dated)) accountUpdate.priority = dayPriorities.get(dated);
         await writePoolAccount(accountConfig, remoteAccount, accountUpdate);
         const recoveryJob = downloadable.find(job => job.email.toLowerCase() === email);
-        if (recoverAuthorization && (remoteAccount.status === "error" || recoveryJob?.poolRefreshRecovery)) await recoverSub2ApiAuthorization(accountConfig, accountId, email, { recoveryJob });
+        if (recoverAuthorization) await recoverSub2ApiAuthorization(accountConfig, accountId, email, { recoveryJob, freshCredentials: true });
         updatedCount++; updatedAccountIds.push(accountId);
       };
       const accountsToCreate = [];
@@ -5827,7 +5886,7 @@ export function createConsoleApp(options = {}) {
   }
 
   async function performSub2ApiRequest(config, endpoint, options = {}) {
-    const { timeoutMs = 120_000, ...fetchOptions } = options;
+    const { timeoutMs = 120_000, signal: requestSignal, ...fetchOptions } = options;
     const controller = new AbortController();
     sub2ApiRequestControllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -5835,7 +5894,7 @@ export function createConsoleApp(options = {}) {
       const response = await fetch(`${config.baseUrl}${endpoint}`, {
         ...fetchOptions,
         redirect: "manual",
-        signal: controller.signal,
+        signal: requestSignal ? AbortSignal.any([controller.signal, requestSignal]) : controller.signal,
         headers: {
           accept: "application/json",
           "content-type": "application/json",
@@ -8964,6 +9023,7 @@ export function createConsoleApp(options = {}) {
       sub2apiAccountId: sub2ApiStatus.accountId,
       sub2apiAccountIds: sub2ApiStatus.accountIds,
       canDownload: Boolean(job.resultSaved),
+      canCancel: isActive(job.status) || Boolean(activeSessionReset(job) || job.poolRefreshAction),
       sub2apiPlanType: sub2ApiStatus.planType,
       canRetry: !blocked && ["failed", "mfa_failed", "canceled", "reauth_required", "resume_available"].includes(job.status),
       canResume: canResumeAuthorization(job),
@@ -9331,6 +9391,7 @@ export function createConsoleApp(options = {}) {
 
   function beginPoolRefresh(job, action, dueAt = null) {
     clearPoolRefreshTimer(job);
+    job.poolRefreshCancellationRequested = false;
     job.poolRefreshAction = action;
     job.poolRefreshDueAt = dueAt;
     job.poolRefreshError = null;
@@ -9352,7 +9413,7 @@ export function createConsoleApp(options = {}) {
 
   function schedulePoolRefresh(job, delayMs) {
     clearPoolRefreshTimer(job);
-    if (shuttingDown || job.deleted || accountAutomationBlocked(job.email) || !job.poolRefreshAction) return;
+    if (shuttingDown || job.deleted || job.poolRefreshCancellationRequested || accountAutomationBlocked(job.email) || !job.poolRefreshAction) return;
     const timer = setTimeout(() => {
       poolRefreshTimers.delete(job.id);
       if (shuttingDown || job.deleted || jobs.get(job.id) !== job || !job.poolRefreshAction) return;
@@ -9422,7 +9483,7 @@ export function createConsoleApp(options = {}) {
 
   // Only call after fresh OAuth credentials have been accepted by the backend.
   // Serialize with manual scheduling and automatic cooldown changes for this email.
-  async function recoverSub2ApiAuthorization(config, accountId, email, { monitorRepair = false, recoveryJob = null } = {}) {
+  async function recoverSub2ApiAuthorization(config, accountId, email, { monitorRepair = false, recoveryJob = null, freshCredentials = false } = {}) {
     return overloadCooldown.lock(email.toLowerCase(), async () => {
       if (accountAutomationBlocked(email)) return;
       const response = await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`);
@@ -9432,18 +9493,22 @@ export function createConsoleApp(options = {}) {
       const authError = account.status === "error"
         && /token|oauth|\b401\b|unauthoriz|invalid_grant|认证|授权|凭据/i.test(String(account.error_message || account.last_error || ""));
       const recoveryKey = `${monitorBackendIdentity(config)}:${accountId}`;
-      const pending = recoveryJob?.poolRefreshRecovery?.[recoveryKey] === true;
+      const intent = recoveryJob?.poolRefreshRecovery?.[recoveryKey];
+      const pending = intent === true || typeof intent?.schedulable === 'boolean';
       // A durable intent covers partial clear-error success across retries/restarts.
-      if (!monitorRepair && !authError && !pending) return;
-      const schedulable = !sessionResetAutomationPaused(email) && !overloadCooldown.isPaused(email)
+      if (!freshCredentials && !monitorRepair && !authError && !pending) return;
+      const keepDisabled = intent?.schedulable === false || freshCredentials && !monitorRepair && !authError && !pending
+        && sub2ApiAccountSchedulable(account) === false;
+      const schedulable = !keepDisabled && !sessionResetAutomationPaused(email) && !overloadCooldown.isPaused(email)
         && !overloadCooldown.isManuallyDisabled(email, accountId, config);
       if (recoveryJob) {
-        recoveryJob.poolRefreshRecovery = { ...recoveryJob.poolRefreshRecovery, [recoveryKey]: true };
+        recoveryJob.poolRefreshRecovery = { ...recoveryJob.poolRefreshRecovery, [recoveryKey]: schedulable ? true : { schedulable: false } };
         await saveJobMetadata(recoveryJob);
       }
-      await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/clear-error`, { method: "POST", body: "{}" });
-      await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/schedulable`, {
-        method: "POST", body: JSON.stringify({ schedulable }),
+      const signal = recoveryJob?.poolRefreshAbortController?.signal;
+      await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/clear-error`, { method: "POST", body: "{}", signal });
+      if (sub2ApiAccountSchedulable(account) !== schedulable) await requestSub2Api(config, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/schedulable`, {
+        method: "POST", body: JSON.stringify({ schedulable }), signal,
       });
       if (recoveryJob) {
         delete recoveryJob.poolRefreshRecovery[recoveryKey];
@@ -9455,12 +9520,14 @@ export function createConsoleApp(options = {}) {
 
   async function synchronizePoolRefresh(job) {
     const action = normalizePoolRefreshAction(job.poolRefreshAction);
-    if (!action || !job.poolRefreshReady || job.status !== "completed" || shuttingDown || job.deleted) return null;
+    if (!action || !job.poolRefreshReady || job.status !== "completed" || shuttingDown || job.deleted || job.poolRefreshCancellationRequested) return null;
+    const abort = job.poolRefreshAbortController = new AbortController();
     try {
       const config = sub2ApiSettingsConfig;
       if (!config?.baseUrl || !config?.adminApiKey) throw new Error("尚未配置 Sub2API 后端和管理员 API Key");
       if (action === "session-reset") await synchronizeSessionResetCredentials(job);
       else await uploadJobsToSub2Api([job], config, snapshotSub2ApiProfileState(), { recoverAuthorization: true });
+      if (job.poolRefreshCancellationRequested) return false;
       job.poolRefreshAction = null;
       job.poolRefreshRecovery = null;
       job.poolRefreshDueAt = null;
@@ -9475,13 +9542,14 @@ export function createConsoleApp(options = {}) {
       await resumePostAuthorizationAfterSync(job);
       return true;
     } catch (error) {
+      if (job.poolRefreshCancellationRequested) return false;
       recordPoolRefreshFailure(job, "sync", error);
       if (action === "session-reset" && activeSessionReset(job)) await accountSessionResets.save(job.email, { error: job.poolRefreshError });
       touch(job);
       await saveJobMetadata(job);
       schedulePoolRefresh(job, 60_000);
       return false;
-    }
+    } finally { if (job.poolRefreshAbortController === abort) job.poolRefreshAbortController = null; }
   }
 
   function sanitizeLog(text) {
