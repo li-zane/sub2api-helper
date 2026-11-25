@@ -47,6 +47,14 @@ const sub2 = http.createServer(async (req, res) => {
   const body = await readBody(req);
   const url = new URL(req.url || "/", sub2Url);
   res.setHeader("content-type", "application/json");
+  const control = /^\/api\/v1\/admin\/accounts\/(\d+)\/(clear-error|schedulable)$/.exec(url.pathname);
+  if (control) {
+    const account = accounts.find(account => account.id === Number(control[1]));
+    assert(account, 'pool control targeted a missing fixture account');
+    if (control[2] === 'clear-error') { account.status = 'active'; account.error_message = ''; }
+    else account.schedulable = JSON.parse(body || '{}').schedulable;
+    return send(res, 200, { data: account });
+  }
   if (url.pathname === "/api/v1/admin/proxies/all") return send(res, 200, proxies);
   if (url.pathname === "/api/v1/admin/proxies") return send(res, 200, { data: { items: proxies, total: proxies.length } });
   const proxyMatch = /^\/api\/v1\/admin\/proxies\/(\d+)$/.exec(url.pathname);

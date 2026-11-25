@@ -38,6 +38,14 @@ const pool = http.createServer(async (req, res) => {
   const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
   const url = new URL(req.url, poolBase);
   poolRequests.push({ path: url.pathname, method: req.method, body });
+  const control = /^\/api\/v1\/admin\/accounts\/(\d+)\/(clear-error|schedulable)$/.exec(url.pathname);
+  if (control) {
+    const account = accounts.find(account => account.id === Number(control[1]));
+    assert(account, 'pool control targeted a missing fixture account');
+    if (control[2] === 'clear-error') { account.status = 'active'; account.error_message = ''; }
+    else account.schedulable = body.schedulable;
+    return send(res, 200, { data: account });
+  }
   if (url.pathname === "/api/v1/admin/openai/generate-auth-url") {
     const id = `pool-session-${++sequence}`;
     const state = `pool-state-${sequence}`;

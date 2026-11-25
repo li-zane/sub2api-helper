@@ -34,6 +34,14 @@ const remote = http.createServer(async (req, res) => {
   if (url.pathname === "/api/v1/admin/proxies/all") return send(res, proxiesAvailable ? proxies : []);
   if (url.pathname.startsWith("/api/v1/admin/proxies/")) return send(res, { data: proxies.find((item) => item.id === Number(url.pathname.split("/").at(-1))) });
   if (url.pathname === "/api/v1/admin/groups/all") return send(res, []);
+  const control = /^\/api\/v1\/admin\/accounts\/(\d+)\/(clear-error|schedulable)$/.exec(url.pathname);
+  if (control) {
+    const account = accounts.find(account => account.id === Number(control[1]));
+    assert(account, 'pool control targeted a missing fixture account');
+    if (control[2] === 'clear-error') { account.status = 'active'; account.error_message = ''; }
+    else account.schedulable = body.schedulable;
+    return send(res, { data: account });
+  }
   if (url.pathname === "/api/v1/admin/accounts" && req.method === "GET") return send(res, { data: { items: accounts, total: accounts.length, pages: 1 } });
   if (url.pathname === "/api/v1/admin/accounts/batch") {
     for (const account of body.accounts) accounts.push({ ...account, id: 100 + accounts.length });
@@ -41,6 +49,7 @@ const remote = http.createServer(async (req, res) => {
   }
   if (/\/api\/v1\/admin\/accounts\/\d+$/.test(url.pathname)) {
     const account = accounts.find((item) => item.id === Number(url.pathname.split("/").at(-1)));
+    if (req.method === 'GET') return send(res, { data: account });
     if (account) Object.assign(account, body);
     return send(res, { success: true });
   }
