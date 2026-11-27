@@ -484,7 +484,7 @@ function App() {
   const historicalSubscriptionCount = typeof stats.historicalSubscriptions === "number"
     ? stats.historicalSubscriptions
     : (subscriptionHistoryTotal ?? 0);
-  const unreadSubscriptionPlanChanges = stats.historicalSubscriptionUnreadPlanChanges ?? 0;
+  const unreadSubscriptionChanges = stats.historicalSubscriptionUnreadChanges ?? stats.historicalSubscriptionUnreadPlanChanges ?? 0;
 
   const activeCredentialJob = credentialJob
     ? jobs.find((job) => job.id === credentialJob.id) || credentialJob
@@ -1763,9 +1763,9 @@ function App() {
             <button
               type="button"
               className={`summary-pill telemetry-history-pill ${subscriptionHistoryOpen ? "is-open" : ""}`}
-              title={`查看历史订阅账号（共 ${historicalSubscriptionCount} 条）${unreadSubscriptionPlanChanges > 0 ? `，${unreadSubscriptionPlanChanges} 个账号有未读的订阅变化` : ""}`}
+              title={`查看历史订阅账号（共 ${historicalSubscriptionCount} 条）${unreadSubscriptionChanges > 0 ? `，${unreadSubscriptionChanges} 个账号有未读的账号变化（套餐 / 封禁 / 解除封禁）` : ""}`}
               aria-label="历史订阅"
-              aria-describedby={unreadSubscriptionPlanChanges > 0 ? "subscription-change-notice" : undefined}
+              aria-describedby={unreadSubscriptionChanges > 0 ? "subscription-change-notice" : undefined}
               aria-haspopup="dialog"
               aria-expanded={subscriptionHistoryOpen}
               disabled={!token}
@@ -1774,7 +1774,7 @@ function App() {
               <History size={12} aria-hidden="true" />
               <span>历史订阅</span>
               <strong>{historicalSubscriptionCount}</strong>
-              {unreadSubscriptionPlanChanges > 0 && <span id="subscription-change-notice" className="subscription-change-dot" role="status" aria-label={`${unreadSubscriptionPlanChanges} 个账号有未读的订阅变化`} />}
+              {unreadSubscriptionChanges > 0 && <span id="subscription-change-notice" className="subscription-change-dot" role="status" aria-label={`${unreadSubscriptionChanges} 个账号有未读的账号变化（套餐 / 封禁 / 解除封禁）`} />}
             </button>
           </div>
 

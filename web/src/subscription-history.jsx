@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, CircleAlert, Copy, History, KeyRound, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
+import { CustomSelect } from "./custom-select.jsx";
 import { notify } from "./toast-events.mjs";
 import { compactDateTime, displayDateTime } from "./display-time.mjs";
 import { useDisplayTimeZone } from "./use-display-time.jsx";
@@ -10,6 +11,13 @@ import "./subscription-history.css";
 
 const REFRESH_INTERVAL_MS = 5_000;
 const COPIED_BADGE_DURATION_MS = 1_800;
+const CHANGE_FILTERS = [
+  { value: "all", label: "全部账号" },
+  { value: "unread", label: "本次未读变化" },
+  { value: "1", label: "最近 24 小时变化" },
+  { value: "7", label: "最近 7 天变化" },
+  { value: "30", label: "最近 30 天变化" },
+];
 const FREE_PLAN_VALUES = new Set(["free", "free_plan", "chatgptfreeplan"]);
 const NON_SUBSCRIPTION_PLANS = new Set(["free", "free_plan", "chatgptfreeplan", "unknown", "null", "undefined", "none", "n/a"]);
 
@@ -316,6 +324,7 @@ export function SubscriptionHistoryDialog({
   const [hasLoaded, setHasLoaded] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [changeFilter, setChangeFilter] = useState("all");
   const [copyingId, setCopyingId] = useState(null);
   const [copiedId, setCopiedId] = useState(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState(null);
@@ -385,6 +394,8 @@ export function SubscriptionHistoryDialog({
     setCopiedId(null);
     setLastUpdatedAt(null);
     setHighlightedChanges({});
+    setSearch("");
+    setChangeFilter("all");
     setExpandedQualityId(null);
 
     if (!token || typeof request !== "function") {
@@ -476,10 +487,22 @@ export function SubscriptionHistoryDialog({
     };
   }, [open, token, request, clearCopiedTimer]);
 
-  const filteredRecords = useMemo(
-    () => records.filter((record) => matchesSubscriptionSearch(record, search)),
-    [records, search],
-  );
+  const filteredRecords = useMemo(() => {
+    const now = Date.parse(lastUpdatedAt) || Date.now();
+    const visible = records.filter(record => {
+      if (!matchesSubscriptionSearch(record, search)) return false;
+      if (changeFilter === "all") return true;
+      const change = record.lastChange;
+      if (!change) return false;
+      if (changeFilter === "unread") return change.unread || highlightedChanges[record.id] === change.revision;
+      const at = Date.parse(change.at);
+      return Number.isFinite(at) && at <= now && at >= now - Number(changeFilter) * 86_400_000;
+    });
+    // General sync/financial updates must not move an account into recent changes.
+    if (changeFilter !== "all") visible.sort((a, b) =>
+      (Date.parse(b.lastChange.at) || 0) - (Date.parse(a.lastChange.at) || 0) || a.id.localeCompare(b.id));
+    return visible;
+  }, [records, search, changeFilter, highlightedChanges, lastUpdatedAt]);
 
   useEffect(() => {
     if (!open || !hasLoaded || loadedEpochRef.current !== epochRef.current) return;
@@ -495,7 +518,7 @@ export function SubscriptionHistoryDialog({
     const pending = changes.filter(change => !acknowledged.has(`${change.id}:${change.revision}`));
     for (const change of pending) acknowledged.add(`${change.id}:${change.revision}`);
     const epoch = epochRef.current;
-    // Only rendered, search-visible records are acknowledged; GET never consumes notices.
+    // Only records visible under both filters are acknowledged; GET never consumes notices.
     for (let offset = 0; offset < pending.length; offset += 500) {
       const batch = pending.slice(offset, offset + 500);
       const controller = new AbortController();
@@ -653,11 +676,15 @@ export function SubscriptionHistoryDialog({
             </button>
           )}
         </div>
+        <div className="sub-history-change-filter">
+          <CustomSelect aria-label="账号变化筛选" aria-describedby={`${titleId}-change-hint`}
+            value={changeFilter} onChange={event => setChangeFilter(event.target.value)} options={CHANGE_FILTERS} />
+        </div>
         <div className="sub-history-meta" aria-live="polite">
           <span>
             {!hasLoaded
               ? (loading ? "加载中…" : "未加载")
-              : normalizedSearch
+              : normalizedSearch || changeFilter !== "all"
                 ? `匹配 ${filteredRecords.length} / ${records.length} 条`
                 : `共 ${totalCount} 条`}
           </span>
@@ -671,6 +698,11 @@ export function SubscriptionHistoryDialog({
           )}
         </div>
       </div>
+      <p className="sub-history-filter-hint" id={`${titleId}-change-hint`}>
+        变化包含套餐变化、封禁及解除封禁。{changeFilter === "unread"
+          ? "本次看到的新变化会保留至关闭弹窗，按变化时间从新到旧排列。"
+          : changeFilter !== "all" ? "按变化时间从新到旧排列，已读变化仍可查看。" : "可筛选本次未读或最近变化的账号。"}
+      </p>
 
       {error && hasLoaded && (
         <div className="sub-history-inline-error" role="alert">
@@ -709,9 +741,11 @@ export function SubscriptionHistoryDialog({
           <div className="sub-history-state">
             <Search size={22} className="sub-history-state-icon" aria-hidden="true" />
             <strong>没有匹配的记录</strong>
-            <span>未找到邮箱或备注包含“{normalizedSearch}”的历史订阅账号。</span>
-            <button type="button" className="secondary-button compact-button" onClick={() => setSearch("")}>
-              清空搜索
+            <span>{changeFilter === "all"
+              ? `未找到邮箱或备注包含“${normalizedSearch}”的历史订阅账号。`
+              : `当前变化范围${normalizedSearch ? `内没有邮箱或备注包含“${normalizedSearch}”的账号` : "内暂无账号"}。`}</span>
+            <button type="button" className="secondary-button compact-button" onClick={() => { setSearch(""); setChangeFilter("all"); }}>
+              清除筛选
             </button>
           </div>
         ) : (

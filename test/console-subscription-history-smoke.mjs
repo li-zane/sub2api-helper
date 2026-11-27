@@ -89,6 +89,7 @@ try {
   assert(!JSON.stringify(first.data).includes("fixture-access"), "list leaked OAuth credentials");
   assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptions, 2);
   assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadPlanChanges, 0);
+  assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadChanges, 0);
   assert.equal((await api(`/api/subscription-history/${account.id}/credentials`, { authenticated: false })).status, 403);
   let copied = await api(`/api/subscription-history/${account.id}/credentials`);
   assert.equal(copied.status, 200); assert.equal(copied.headers.get("cache-control"), "no-store");
@@ -118,6 +119,7 @@ try {
   const filtered = (await api("/api/jobs?search=no-such-account")).data;
   assert.equal(filtered.jobs.length, 0);
   assert.equal(filtered.stats.historicalSubscriptionUnreadPlanChanges, 1, "badge must include accounts hidden by filters");
+  assert.equal(filtered.stats.historicalSubscriptionUnreadChanges, 1);
   const seen = await api("/api/subscription-history/seen", { body: { changes: [{ id: account.id, revision: downgrade.revision }] } });
   assert.equal(seen.status, 200); assert.equal(seen.data.acknowledged, 1); assert.equal(seen.headers.get("cache-control"), "no-store");
   assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadPlanChanges, 0);
@@ -125,6 +127,7 @@ try {
   await stop(); await start();
   account = (await api("/api/subscription-history")).data.records.find(r => r.id === account.id);
   assert.equal(account.lastChange.unread, false, "acknowledgement was lost on restart");
+  assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadChanges, 0);
   assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadPlanChanges, 0);
   await stop();
   const bannedMeta = JSON.parse(await fs.readFile(meta, "utf8"));
@@ -133,7 +136,16 @@ try {
   account = (await api("/api/subscription-history")).data.records.find(r => r.id === account.id);
   assert.equal(account.accountBanned, true); assert.deepEqual(account.lastChange.types, ["banned"]); assert.equal(account.lastChange.unread, true);
   assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadPlanChanges, 0, "ban alone must not light plan badge");
+  assert.equal((await api("/api/jobs?search=no-such-account")).data.stats.historicalSubscriptionUnreadChanges, 1, "ban must light global account badge");
   assert.equal((await api("/api/subscription-history/seen", { body: { changes: [{ id: account.id, revision: downgrade.revision }] } })).data.acknowledged, 0);
+  await api("/api/subscription-history/seen", { body: { changes: [{ id: account.id, revision: account.lastChange.revision }] } });
+  assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadChanges, 0);
+  await stop();
+  Object.assign(bannedMeta, { status: "completed", auto_repair_blocked: false, auto_repair_blocked_reason: "" });
+  await fs.writeFile(meta, JSON.stringify(bannedMeta)); await start();
+  account = (await api("/api/subscription-history")).data.records.find(r => r.id === account.id);
+  assert.equal(account.accountBanned, false); assert.deepEqual(account.lastChange.types, ["recovered"]);
+  assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadChanges, 1, "recovery must light badge");
   const ban = account.lastChange;
   assert.equal((await api("/api/jobs/delete-batch", { body: { ids: [id(1)] } })).status, 200);
   account = (await api("/api/subscription-history")).data.records.find(r => r.id === account.id);
@@ -142,6 +154,7 @@ try {
   assert.equal((await api(`/api/subscription-history/${account.id}/credentials`)).data.text, `history-1@example.test----fixture-new-password----${secret}`);
   await stop(); await start();
   assert.equal((await api("/api/subscription-history")).data.total, 3);
+  assert.equal((await api("/api/jobs")).data.stats.historicalSubscriptionUnreadChanges, 1, "removed account notification must survive restart");
   assert.equal((await api(`/api/subscription-history/${"a".repeat(32)}/credentials`)).status, 404);
-  console.log("SUBSCRIPTION_HISTORY_HTTP_PASS auth; paid-only/backfill; live cost/remark/credential updates; no secret list; global plan badge across filters; ack clears badge across restart; ban-only no badge; downgrade/ban notices; ack validation/idempotence/stale guard; delete retention; no-store copy/ack");
+  console.log("SUBSCRIPTION_HISTORY_HTTP_PASS auth; paid-only/backfill; live cost/remark/credential updates; no secret list; global account badge across filters; ack clears badge across restart; plan/ban/recovery badges; ack validation/idempotence/stale guard; delete retention; no-store copy/ack");
 } finally { await stop(); await fs.rm(temp, { recursive: true, force: true }); }

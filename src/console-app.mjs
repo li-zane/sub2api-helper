@@ -2151,7 +2151,8 @@ export function createConsoleApp(options = {}) {
     readRow: readJobListRow, isCheckingSession: job => activeWebSessionCheckAccounts.has(job.email.toLowerCase()),
     matchesMonitoring: matchesMonitoringFilters, toSelection: publicSelectionJob, toDetail: publicJobDetails,
     historyStats: () => ({ historicalSubscriptions: subscriptionHistory.size,
-      historicalSubscriptionUnreadPlanChanges: subscriptionHistory.unreadPlanChangeCount }),
+      historicalSubscriptionUnreadPlanChanges: subscriptionHistory.unreadPlanChangeCount,
+      historicalSubscriptionUnreadChanges: subscriptionHistory.unreadChangeCount }),
     taskSettings: publicTaskSettings,
   });
 

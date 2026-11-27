@@ -63,6 +63,13 @@ export class SubscriptionHistory {
   }
   has(email) { return this.records.has(emailKey(email)); }
   get size() { return this.records.size; }
+  get unreadChangeCount() {
+    let count = 0;
+    for (const record of this.records.values()) {
+      if (record.lastChange?.revision > (record.lastSeenChangeRevision || 0)) count++;
+    }
+    return count;
+  }
   get unreadPlanChangeCount() {
     let count = 0;
     for (const record of this.records.values()) {

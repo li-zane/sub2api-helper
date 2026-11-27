@@ -14,6 +14,7 @@ const read = () => store.list(7)[0];
 try {
   await reconcile({}); assert.equal(read().lastChange ?? null, null, "initial paid account is not a subscription change");
   assert.equal(store.unreadPlanChangeCount, 0, "initial subscription must not light the badge");
+  assert.equal(store.unreadChangeCount, 0);
   now = "2026-11-16T01:00:00Z";
   await reconcile({ planType: "free" });
   const first = read();
@@ -21,6 +22,7 @@ try {
   assert.equal(first.lastChange.at, now); assert.equal(first.lastChange.unread, true);
   assert.deepEqual(first.lastChange.types, ["subscription"]);
   assert.equal(store.unreadPlanChangeCount, 1);
+  assert.equal(store.unreadChangeCount, 1);
   assert.equal(first.lastChange.fromPlanType, "team"); assert.equal(first.lastChange.toPlanType, "free");
   const revision = first.lastChange.revision;
   assert.equal(store.list(7)[0].lastChange.unread, true, "GET/list silently consumed a change");
@@ -28,17 +30,22 @@ try {
   await reconcile({ planType: "Free", remark: "updated", userCostUsd: 2 });
   assert.equal(read().lastChange.revision, revision); assert.equal(read().lastChange.at, first.lastChange.at);
   assert.equal(read().updatedAt, now, "financial changes must still sync");
+  assert.equal(store.unreadChangeCount, 1, "ordinary sync changed the notification count");
   assert.equal(await store.markSeen([{ id: first.id, revision }]), 1);
   assert.equal(read().lastChange.unread, false);
   assert.equal(store.unreadPlanChangeCount, 0);
   const restored = new SubscriptionHistory(file, { now: () => now }); await restored.load();
   assert.equal(restored.list(7)[0].lastChange.unread, false, "read state did not survive restart");
   assert.equal(restored.unreadPlanChangeCount, 0);
+  assert.equal(restored.unreadChangeCount, 0);
   now = "2026-11-16T03:00:00Z";
   await reconcile({ planType: "free", accountBanned: true });
   const banned = read(); assert.equal(banned.accountBanned, true); assert.equal(banned.lastChange.unread, true);
   assert.deepEqual(banned.lastChange.types, ["banned"]); assert.equal(banned.lastChange.at, now);
   assert.equal(store.unreadPlanChangeCount, 0, "ban alone must not light the plan-change badge");
+  assert.equal(store.unreadChangeCount, 1, "ban alone must light the account-change badge");
+  const banReload = new SubscriptionHistory(file); await banReload.load();
+  assert.equal(banReload.unreadChangeCount, 1, "ban badge did not survive restart");
   assert(banned.lastChange.revision > revision);
   assert.equal(await store.markSeen([{ id: banned.id, revision }]), 0, "old acknowledgement consumed a newer ban");
   assert.equal(await store.markSeen([{ id: banned.id, revision: banned.lastChange.revision + 1 }]), 0, "future acknowledgement consumed an unseen change");
@@ -48,6 +55,7 @@ try {
   await reconcile({ planType: null, accountBanned: true });
   assert.equal(read().planType.toLowerCase(), "free"); assert.equal(read().lastChange.at, banAt, "unknown plan created a false transition");
   await store.reconcile([], []); assert.equal(read().present, false); assert.equal(read().lastChange.at, banAt);
+  assert.equal(store.unreadChangeCount, 1, "removal lost unread badge");
   await store.markSeen([{ id: banned.id, revision: banned.lastChange.revision }]);
   now = "2026-11-16T05:00:00Z";
   await reconcile({ planType: "plus", accountBanned: false });
@@ -57,6 +65,7 @@ try {
   await Promise.all([reconcile({ planType: "business", accountBanned: false }), store.markSeen([{ id: recovered.id, revision: recovered.lastChange.revision }])]);
   assert.equal(read().lastChange.toPlanType, "business"); assert.equal(read().lastChange.unread, true);
   assert.equal(store.unreadPlanChangeCount, 1, "multiple changes to one account must count once");
+  assert.equal(store.unreadChangeCount, 1);
   // Failed persistence must not publish an acknowledgement or lose a change.
   const beforeFailure = JSON.stringify(read());
   const blocked = path.join(dir, "blocked"); await fs.writeFile(blocked, "fixture"); store.file = path.join(blocked, "history.json");
@@ -90,7 +99,13 @@ try {
   const migratedRecord = migrated.list(7)[0];
   await migrated.markSeen([{ id: migratedRecord.id, revision: migratedRecord.lastChange.revision }]);
   assert.equal(migrated.unreadPlanChangeCount, 0);
+  assert.equal(migrated.unreadChangeCount, 0);
+  await reconcile({ planType: "business", accountBanned: false });
+  assert.deepEqual(read().lastChange.types, ["recovered"]);
+  assert.equal(store.unreadChangeCount, 1, "recovery alone must light the badge");
+  assert.equal(store.unreadPlanChangeCount, 0);
   await store.reconcile([{ email: "new-banned@example.test", planType: "plus", accountBanned: true }], [initial.email, "new-banned@example.test"]);
   assert.equal(store.list(7).find(r => r.email === "new-banned@example.test").lastChange.unread, true);
-  console.log("SUBSCRIPTION_NOTICES_PASS plan/ban/recovery timestamps; persistent plan badge across later bans/restarts; legacy badge migration; exact read acknowledgements; no financial/case/unknown noise; stale/future/concurrent ack guards; failed-write retention; deletion retention");
+  assert.equal(store.unreadChangeCount, 2, "distinct changed accounts must count separately");
+  console.log("SUBSCRIPTION_NOTICES_PASS plan/ban/recovery badges and timestamps; restart persistence; legacy compatibility; exact read acknowledgements; no financial/case/unknown noise; stale/future/concurrent ack guards; failed-write retention; deletion retention; unique account counts");
 } finally { await fs.rm(dir, { recursive: true, force: true }); }

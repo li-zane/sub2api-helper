@@ -23,6 +23,7 @@ async (page) => {
     if (!['/api/jobs', '/api/jobs/query'].includes(new URL(route.request().url()).pathname)) { await route.continue(); return; }
     const response = await route.fetch(), data = await response.json();
     data.stats.historicalSubscriptionUnreadPlanChanges = unreadPlanChanges();
+    data.stats.historicalSubscriptionUnreadChanges = records.filter(record => record.lastChange?.unread).length;
     await route.fulfill({ response, json: data });
   });
   await page.route('**/api/subscription-history', async route => {
@@ -66,7 +67,7 @@ async (page) => {
   await test('unread-plan-dot-appears-before-opening-without-history-polling', async () => {
     await badge.waitFor();
     check(reads === 0 && acknowledgements.length === 0, 'badge loads or acknowledges history before opening');
-    check((await button.getAttribute('title')).includes('1 个账号有未读的订阅变化'), 'badge tooltip has no count');
+    check((await button.getAttribute('title')).includes('1 个账号有未读的账号变化'), 'badge tooltip has no count');
     check(await badge.getAttribute('role') === 'status', 'badge lacks an accessible status');
     const bounds = await button.boundingBox(), dotBounds = await badge.boundingBox();
     check(dotBounds && bounds && dotBounds.x >= bounds.x && dotBounds.x + dotBounds.width <= bounds.x + bounds.width && dotBounds.y >= bounds.y, 'badge is outside the history button');
@@ -106,7 +107,7 @@ async (page) => {
     await close(); records[0].accountBanned = true;
     records[0].lastChange = { ...records[0].lastChange, revision: 2, at: '2026-11-16T02:00:00Z', types: ['banned'], unread: true };
     await page.waitForResponse(response => new URL(response.url()).pathname === '/api/jobs');
-    check(await badge.count() === 0, 'ban-only notice lights the plan-change badge');
+    await badge.waitFor();
     await open(); await row(fixture.email).getByText('已封禁', { exact: true }).waitFor();
     await until(() => records[0].lastChange.unread === false);
     check(await row(fixture.email).evaluate(el => el.classList.contains('is-unread')), 'new ban did not highlight again');
@@ -162,6 +163,78 @@ async (page) => {
     check(await row(fixture.email).evaluate(el => el.classList.contains('is-unread')), 'concurrent ban is not red on first view');
     check(await row(fixture.email).locator('time').getAttribute('datetime') === '2026-11-16T05:00:00Z', 'concurrent ban shows stale timestamp');
     await badge.waitFor({ state: 'hidden' });
+  });
+  await test('recovery-alone-lights-badge-before-opening', async () => {
+    await close(); records[0].accountBanned = false;
+    records[0].lastChange = { ...records[0].lastChange, revision: 6, at: new Date().toISOString(), types: ['recovered'], unread: true };
+    await badge.waitFor(); await open();
+    await until(() => records[0].lastChange.unread === false);
+    check((await row(fixture.email).locator('.sub-history-change').innerText()).includes('封禁解除'), 'recovery label missing');
+    await badge.waitFor({ state: 'hidden' });
+  });
+  const selectChanges = async label => {
+    await dialog.getByRole('combobox', { name: '账号变化筛选', exact: true }).click();
+    await page.getByRole('option', { name: label, exact: true }).click();
+  };
+  const visibleEmails = () => dialog.locator('.sub-history-email-text').allTextContents();
+  await test('recent-change-windows-sort-and-compose-with-search-without-reading-hidden-rows', async () => {
+    await selectChanges('最近 24 小时变化');
+    const atHoursAgo = hours => new Date(Date.now() - hours * 3600000).toISOString();
+    // Deliberately unsorted, and recently synced even when no meaningful change exists.
+    records = [72, 5, 480, 1, 960, null].map((hours, index) => ({
+      ...fixture, id: String(index + 1).repeat(32), email: `recent-${index}@example.test`, remark: `筛选测试 ${index}`,
+      updatedAt: atHoursAgo(0), lastChange: hours === null ? null : {
+        ...fixture.lastChange, at: atHoursAgo(hours), unread: true,
+      },
+    }));
+    await refresh(); await row(records[3].email).waitFor();
+    check(JSON.stringify(await visibleEmails()) === JSON.stringify([records[3].email, records[1].email]), '24h filter/order incorrect');
+    await until(() => !records[1].lastChange.unread && !records[3].lastChange.unread);
+    check(records[0].lastChange.unread && records[2].lastChange.unread && records[4].lastChange.unread, 'time-hidden change consumed');
+    await badge.waitFor();
+    const search = dialog.getByRole('searchbox', { name: '搜索邮箱或备注', exact: true });
+    await search.fill('筛选测试 1');
+    check(JSON.stringify(await visibleEmails()) === JSON.stringify([records[1].email]), 'search and date filters did not intersect');
+    await search.fill('筛选测试 0');
+    await dialog.getByText('没有匹配的记录', { exact: true }).waitFor();
+    check(records[0].lastChange.unread, 'search revealed an out-of-range change');
+    await search.fill('');
+    await selectChanges('最近 7 天变化');
+    check(JSON.stringify(await visibleEmails()) === JSON.stringify([records[3].email, records[1].email, records[0].email]), '7d filter/order incorrect');
+    await until(() => !records[0].lastChange.unread);
+    await selectChanges('最近 30 天变化');
+    check((await visibleEmails()).length === 4 && (await visibleEmails())[3] === records[2].email, '30d filter/order incorrect');
+    await until(() => !records[2].lastChange.unread);
+    check(records[4].lastChange.unread, 'older than 30d was consumed');
+    await page.screenshot({ path: evidence + '/subscription-recent-desktop.png' });
+    await page.setViewportSize({ width: 375, height: 812 });
+    check(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth + 1), 'recent filter causes mobile overflow');
+    const filter = dialog.getByRole('combobox', { name: '账号变化筛选', exact: true });
+    const box = await filter.boundingBox(); check(box && box.x >= 0 && box.x + box.width <= 375, 'mobile filter leaves viewport');
+    await filter.click(); await page.getByRole('option', { name: '最近 30 天变化', exact: true }).waitFor();
+    await page.getByRole('listbox', { name: '账号变化筛选', exact: true }).evaluate(async el => {
+      await Promise.all(el.getAnimations().map(animation => animation.finished.catch(() => {})));
+    });
+    await page.screenshot({ path: evidence + '/subscription-recent-mobile.png' });
+    await page.keyboard.press('Escape');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  });
+  await test('visit-unread-filter-survives-ack-and-resets-on-reopen', async () => {
+    await selectChanges('本次未读变化');
+    await row(records[4].email).waitFor();
+    await until(() => !records[4].lastChange.unread);
+    await refresh();
+    check((await visibleEmails()).length === 5, 'read acknowledgement made visit changes disappear');
+    check(await row(records[5].email).count() === 0, 'ordinary sync appears as a change');
+    await badge.waitFor({ state: 'hidden' });
+    await close(); await button.click(); await row(records[0].email).waitFor();
+    await selectChanges('本次未读变化');
+    await dialog.getByText('没有匹配的记录', { exact: true }).waitFor();
+    check((await visibleEmails()).length === 0, 'reopen kept previous visit unread membership');
+    await dialog.getByRole('button', { name: '清除筛选', exact: true }).click();
+    check((await visibleEmails()).length === 6, 'clear filters did not restore all records');
+    await selectChanges('最近 7 天变化');
+    check((await visibleEmails()).length === 3, 'read changes cannot be revisited by time');
   });
   await test('close-stops-history-polling-and-runtime-stays-healthy', async () => {
     await close(); const closedReads = reads; await page.waitForTimeout(5500);

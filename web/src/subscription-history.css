@@ -124,11 +124,47 @@ dialog.batch-dialog.subscription-history-dialog {
 /* Search & Summary Bar */
 .subscription-history-dialog .sub-history-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
   flex-shrink: 0;
+}
+
+.subscription-history-dialog .sub-history-change-filter {
+  flex: 0 0 170px;
+  min-width: 0;
+}
+
+.subscription-history-dialog .sub-history-change-filter .custom-select-container {
+  width: 100%;
+  min-width: 0;
+}
+
+.subscription-history-dialog .sub-history-change-filter .custom-select-trigger {
+  height: 34px;
+  background: var(--sh-input-bg);
+  color: var(--sh-ink);
+  border-color: var(--sh-line-strong);
+}
+
+.subscription-history-dialog .sub-history-change-filter .custom-select-dropdown {
+  background: var(--sh-surface);
+}
+
+.subscription-history-dialog .sub-history-filter-hint {
+  margin: -4px 0 12px;
+  color: var(--sh-muted);
+  font-size: 11px;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .subscription-history-dialog .sub-history-change-filter {
+    flex: 0 0 auto;
+  }
 }
 
 .subscription-history-dialog .sub-history-search-box {
