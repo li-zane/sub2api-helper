@@ -19,7 +19,7 @@ const failure = (status, msg) => Object.assign(Error(msg), { status });
 const QUALITY_PAGE_SIZE = 50;
 const QUALITY_STATUSES = new Set(["match", "mismatch", "unknown", "error"]);
 const QUALITY_METHODS = new Set(["fingerprint", "candy", "regex"]);
-const QUALITY_SOURCES = new Set(["manual", "scheduled", "import"]);
+const QUALITY_SOURCES = new Set(["manual", "scheduled", "import", "overload_resume"]);
 
 export class OperationsBook {
   constructor(file, now = () => Date.now()) {

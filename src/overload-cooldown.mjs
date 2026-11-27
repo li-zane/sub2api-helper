@@ -18,13 +18,20 @@ export function normalizeOverloadCooldown(value = DEFAULT_OVERLOAD_COOLDOWN) {
   if (Object.hasOwn(value, "reauthorizeAfterCooldown") && typeof value.reauthorizeAfterCooldown !== "boolean") throw new Error("冷却后重建会话开关必须为布尔值");
   // Omit the optional default for backwards-compatible saved rule objects.
   if (Object.hasOwn(value, "reauthorizeAfterCooldown")) settings.reauthorizeAfterCooldown = value.reauthorizeAfterCooldown;
+  for (const key of ["longTerm", "rotating"]) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (typeof value[key] !== "boolean") throw new Error("账号类型冷却开关必须为布尔值");
+    settings[key] = value[key];
+  }
   return settings;
 }
 
 export class OverloadCooldown {
-  constructor({ dispatchPaused = () => false, retryBlocked = false, filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, afterPause = null, beforeResume = () => ({ status: "completed" }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  constructor({ dispatchPaused = () => false, retryBlocked = false, getValidity = () => null, onResume = async () => {}, filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, afterPause = null, beforeResume = () => ({ status: "completed" }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
     this.dispatchPaused = dispatchPaused;
     this.retryBlocked = retryBlocked;
+    this.getValidity = getValidity;
+    this.onResume = onResume;
     Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, isCountBlocked, onChange, onNeedCounts, afterPause, beforeResume, now, setTimer, clearTimer });
     this.request = limitPoolRequests(request, () => this.getMonitoringSettings().concurrency);
     this.accounts = new Map();
@@ -167,23 +174,33 @@ export class OverloadCooldown {
     email = email.toLowerCase();
     return this.lock(email, async () => {
       const entry = this.accounts.get(email);
+      const isOverloadResume = enabled === true && entry?.backend === this.backendIdentity(this.getConfig())
+        && Boolean(entry.resumeAccountIds?.length || entry.operation?.status === "manual_paused");
+      if (isOverloadResume) await this.onResume(email, {
+        id: entry.operation?.id || `${entry.backend}:${entry.coolingUntil}`, backend: entry.backend, manual: true,
+      });
       if (typeof enabled === "boolean") {
         const backend = this.backendIdentity(this.getConfig());
         const manualScheduling = structuredClone(entry?.manualScheduling || {});
         manualScheduling[backend] = { ...manualScheduling[backend], ...Object.fromEntries(accountIds.map(id => [String(id), enabled])) };
         await this.update(email, { enabled: entry?.enabled === true, manualScheduling });
       }
+      // Keep automatic recovery ownership until a manual enable succeeds.
+      const result = enabled === true ? await action() : undefined;
       if (entry && (!entry.resumeAccountIds?.length || entry.backend === this.backendIdentity(this.getConfig()))) {
         const removed = new Set(accountIds.map(String));
         const remaining = (entry.resumeAccountIds || []).filter(id => !removed.has(id));
-        await this.update(email, { resumeAccountIds: remaining, ...(remaining.length ? {} : { phase: "idle", coolingUntil: null }), lastResumedAt: new Date(this.now()).toISOString(), lastError: null });
+        await this.update(email, { resumeAccountIds: remaining, ...(remaining.length ? {} : { phase: "idle", coolingUntil: null }), lastResumedAt: new Date(this.now()).toISOString(), lastError: null,
+          ...(isOverloadResume && !remaining.length ? { operation: null, windowCount: null, historyCount: null, windowCountMinutes: null,
+            historyCountMinutes: null, windowStart: null, windowEnd: null, lastCheckedAt: null, triggerReason: null,
+            resetRequestId: null, logoutBeforeCooldown: false, restrictionPaused: false } : {}) });
       }
-      const result = await action();
+      const otherResult = enabled === true ? undefined : await action();
       const current = this.accounts.get(email);
       if (current?.operation && current.operation.id === entry?.operation?.id && !current.resumeAccountIds?.length) {
         await this.update(email, { operation: this.finishOperation(current.operation, enabled === false ? "manual_paused" : "completed", "manual") });
       }
-      return result;
+      return enabled === true ? result : otherResult;
     });
   }
 
@@ -266,7 +283,12 @@ export class OverloadCooldown {
 
   countTargets() {
     return [...this.accounts].filter(([email, entry]) => entry.enabled && !entry.resumeAccountIds?.length
-      && !this.isBlocked(email) && !this.isCountBlocked(email)).map(([email]) => email);
+      && this.typeAllowed(email) && !this.isBlocked(email) && !this.isCountBlocked(email)).map(([email]) => email);
+  }
+
+  typeAllowed(email) {
+    const type = this.getValidity(email), rule = this.getSettings(email);
+    return type === "长效" ? rule.longTerm !== false : type === "轮转" ? rule.rotating !== false : true;
   }
 
   async observeCounts(email, { config, accountIds, point, points, sampledAt, windowMinutes }) {
@@ -275,7 +297,7 @@ export class OverloadCooldown {
       await this.lock(email, async () => {
         const entry = this.accounts.get(email), settings = this.getSettings(email), backend = this.backendIdentity(config);
         const { bucketMs } = overloadGrid(settings.windowMinutes), start = Date.parse(point?.start), end = Date.parse(point?.end);
-        if (this.stopped || this.dispatchPaused() || !entry?.enabled || entry.resumeAccountIds?.length || this.isBlocked(email) || this.isCountBlocked(email)
+        if (this.stopped || this.dispatchPaused() || !entry?.enabled || !this.typeAllowed(email) || entry.resumeAccountIds?.length || this.isBlocked(email) || this.isCountBlocked(email)
           || backend !== this.backendIdentity(this.getConfig()) || settings.windowMinutes !== windowMinutes
           || !Number.isFinite(sampledAt) || sampledAt > this.now() || start !== Math.floor(this.now() / bucketMs) * bucketMs
           || end - start !== bucketMs || sampledAt < start || sampledAt >= end
@@ -371,6 +393,9 @@ export class OverloadCooldown {
         await this.update(email, { phase: "refreshing", lastError: result.error || null });
         return;
       }
+    }
+    if (previous.resumeAccountIds.some(id => records.some(record => String(record.id) === id))) {
+      await this.onResume(email, { id: previous.operation?.id || `${previous.backend}:${previous.coolingUntil}`, backend: previous.backend, manual: false });
     }
     let entry = await this.update(email, { phase: "resuming" });
     for (const id of [...entry.resumeAccountIds]) {

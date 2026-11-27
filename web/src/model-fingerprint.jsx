@@ -764,7 +764,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
                   )}
                   <span className="node-meta-sep">·</span>
                   <span className="node-source-tag">
-                    {record.source === "import" ? "导入后检测" : record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "历史结果"}
+                    {record.source === "overload_resume" ? "过载手动恢复后检测" : record.source === "import" ? "导入后检测" : record.source === "manual" ? "手动检测" : record.source === "scheduled" ? "自动检测" : "历史结果"}
                   </span>
                   {record.durationMs != null && <>
                     <span className="node-meta-sep">·</span>
@@ -901,6 +901,9 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
         return <button key={round ? `${round.checkedAt}-${index}` : `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
       })}
     </div>
+    {state.assumedDegraded && <span className="fingerprint-cooldown-note" role="status" title="过载恢复后暂按降智规则分配，原检测记录保留；新的有效检测结果会更新该状态">
+      按降智处理 · {state.assumedDegraded.recheckPending ? "等待重新检测" : "等待有效检测结果"}
+    </span>}
     {job.degradationCooldown?.paused && <span className="fingerprint-cooldown-note" role="status"
       title={job.degradationCooldown.lastError || "保持 IP 和登录状态，到期直接恢复本次暂停的账号"}>
       {job.degradationCooldown.lastError ? "降智冷却 · 等待重试" : job.degradationCooldown.phase === "resuming" ? "降智冷却 · 正在恢复" : `降智冷却至 ${displayDateTime(job.degradationCooldown.coolingUntil)}`}

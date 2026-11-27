@@ -27,7 +27,7 @@ async page => {
     check(await pool.locator('#monitor-overloadIntervalSeconds').inputValue()==='60','count sync default or grouping incorrect');
     check(await pool.locator('#monitor-overloadConcurrency').inputValue()==='100','count concurrency not under pool sync');
     check(await section.getByRole('heading',{name:'自动冷却',exact:true}).count()===1,'cooldown heading missing');
-    check(await section.locator('input').count()===5,'cooldown inputs missing or count sync duplicated');
+    check(await section.locator('input').count()===7,'cooldown inputs missing or count sync duplicated');
     check(await d.getByRole('heading',{name:'过载监控',exact:true}).count()===0,'old overload section remains');
     check(await d.getByRole('checkbox',{name:'自动开启过载统计',exact:true}).isChecked(),'preset switch renamed incorrectly');
     check(!await section.locator('#monitor-overloadCooldownConcurrency').isVisible(),'advanced options not collapsed');

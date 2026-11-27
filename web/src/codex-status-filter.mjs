@@ -13,6 +13,7 @@ export function overloadFilterValue(detection, cooldown) {
 }
 
 export function fingerprintFilterValue(state) {
+  if (state?.assumedDegraded) return "mismatch";
   if (state?.enabled !== true) return null;
   const records = [...(state?.recentResults || []), state?.result, state?.previousResult]
     .filter(record => record && Number.isFinite(Date.parse(record.checkedAt)))

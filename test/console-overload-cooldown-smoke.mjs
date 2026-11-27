@@ -85,6 +85,19 @@ try {
   assert.equal((await post("/api/task-settings", { overloadAutoCooldown: rule })).status, 200);
   assert.equal((await post("/api/task-settings", { overloadAutoCooldown: { threshold: 0 } })).status, 400);
   assert.deepEqual((await get("/api/task-settings")).settings.overloadAutoCooldown, rule);
+  for (const types of [{ longTerm: "false" }, { rotating: 1 }]) {
+    assert.equal((await post("/api/task-settings", { overloadAutoCooldown: types })).status, 400);
+  }
+  await post("/api/task-settings", { overloadAutoCooldown: { longTerm: false, rotating: true } });
+  await post(`/api/jobs/${jobId}/remark`, { remark: "[时效] 长效。" });
+  assert.deepEqual((await get("/api/task-settings")).settings.overloadAutoCooldown, { ...rule, longTerm: false, rotating: true });
+  // No sample target is admitted for the disabled type, even when the account opts in.
+  await post(`/api/jobs/${jobId}/overload-auto-cooldown`, { enabled: true });
+  assert.equal((await job()).overloadAutoCooldown.phase, "idle");
+  assert.equal(records[0].schedulable, true);
+  await post(`/api/jobs/${jobId}/overload-auto-cooldown`, { enabled: false });
+  await post(`/api/jobs/${jobId}/remark`, { remark: "[时效] 轮转。" });
+  Object.assign(rule, { longTerm: false, rotating: true });
   assert.equal((await post(`/api/jobs/${jobId}/overload-auto-cooldown`, { enabled: "yes" })).status, 400);
   assert.equal((await fetch(`${base}/api/jobs/${jobId}/overload-auto-cooldown`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"enabled":true}' })).status, 403);
   const before = await job();

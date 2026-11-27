@@ -8,17 +8,28 @@ import { spawn } from "node:child_process";
 import { OVERLOAD_MESSAGE, recentIntervals } from "../src/overload-monitor.mjs";
 
 const serve = process.argv.includes("--serve");
-const scenarios = serve ? ["manual"] : ["manual", "automatic", "failure"];
+const scenarios = serve ? ["manual"] : ["manual", "automatic", "failure", "manual-check", "manual-check-error"];
 for (const scenario of scenarios) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "helper-count-resume-"));
   const email = "cooling-resume@example.test", id = "11111111-1111-4111-8111-111111111111";
   const initial = Date.now(), oldAt = Math.floor(initial / 900_000) * 900_000 - 2_580_000;
   const before = recentIntervals(oldAt).map((p, i) => ({ ...p, count: i === 5 ? 5 : 0, requestCount: i === 5 ? 9 : 0 }));
   const record = { id: 7, name: email, platform: "openai", type: "oauth", status: "active", schedulable: false, credentials: { email, plan_type: "plus" } };
+  const checkResume = scenario.startsWith("manual-check");
+  if (checkResume) record.credentials.access_token = "fixture-access";
+  let samples = 0, releaseSample;
+  const heldSample = new Promise(resolve => { releaseSample = resolve; });
   let child, headers, logs = "", countReads = 0, fail = scenario === "failure";
   const mutations = [];
   const remote = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://fixture"); res.setHeader("content-type", "application/json");
+    if (url.pathname === "/responses") {
+      samples++; await heldSample;
+      if (scenario.endsWith("error")) { res.statusCode = 503; return res.end('{"error":{"message":"fixture outage"}}'); }
+      res.setHeader("content-type", "text/event-stream");
+      return res.end('data: {"type":"response.completed","response":{"status":"completed","output":[{"content":[{"type":"output_text","text":"<final_answer>21</final_answer>"}]}]}}\n\n');
+    }
+    if (url.pathname === "/api/v1/admin/accounts/7") return res.end(JSON.stringify({ data: record }));
     if (url.pathname === "/api/v1/admin/accounts") return res.end(JSON.stringify({ data: { items: [record], total: 1, pages: 1 } }));
     if (url.pathname.endsWith("/all")) return res.end("[]");
     if (url.pathname.endsWith("/schedulable")) {
@@ -61,9 +72,12 @@ for (const scenario of scenarios) {
     await fs.writeFile(path.join(root, id, "job-meta.json"), JSON.stringify({ version: 1, email, status: "completed", pool_only: true, result_saved: false, created_at: new Date(initial - 86400000).toISOString() }));
     await fs.writeFile(path.join(root, "sub2api-settings.json"), JSON.stringify({ version: 2, config, profiles: [{ id: "default", name: "default", groupIds: [] }], activeProfileId: "default" }));
     await fs.writeFile(path.join(root, "task-settings.json"), JSON.stringify({ version: 4, maxActiveJobs: 4, overloadAutoCooldown: { windowMinutes: 15, threshold: 3, cooldownMinutes: 30 }, monitoring: { overloadIntervalSeconds: 86400, accountStatusIntervalSeconds: 3600, usageTotalsIntervalSeconds: 3600 } }));
+    if (checkResume) await fs.writeFile(path.join(root, "model-fingerprint.json"), JSON.stringify({ version: 1, accounts: {}, settings: {
+      models: ["fixture"], enabledPlanTypes: [], failureRetries: 0, testSequence: { first: "candy", candy: 1, fingerprint: 0 },
+    } }));
     await fs.writeFile(path.join(root, "overload-monitor.json"), JSON.stringify({ version: 2, backend, accounts: { [email]: { enabled: true, revision: 1, points: before, requestPoints: before, updatedAt: new Date(oldAt).toISOString(), overloadUpdatedAt: new Date(oldAt).toISOString(), requestUpdatedAt: new Date(oldAt).toISOString() } } }));
     await fs.writeFile(path.join(root, "overload-cooldown.json"), JSON.stringify({ version: 1, accounts: { [email]: { enabled: true, backend, phase: "cooling", resumeAccountIds: ["7"], coolingUntil: new Date(initial + (scenario === "automatic" ? 2500 : 3600000)).toISOString() } } }));
-    child = spawn(process.execPath, ["src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: root, LOCALAPPDATA: root, TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(root, "credentials"), TOSUB2_MAC_CREDENTIAL_ROOT: path.join(root, "credentials"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), SUB2API_MONITOR_ENABLED: "0" } });
+    child = spawn(process.execPath, ["src/console-server.mjs", "--host", "127.0.0.1", "--port", String(port)], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_ENV: "test", ONBOARDING_OUTPUT_ROOT: root, LOCALAPPDATA: root, TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(root, "credentials"), TOSUB2_MAC_CREDENTIAL_ROOT: path.join(root, "credentials"), TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), SUB2API_MONITOR_ENABLED: "0", TOSUB2_FINGERPRINT_TEST_URL: config.baseUrl + "/responses" } });
     child.stdout.on("data", b => { logs += b; }); child.stderr.on("data", b => { logs += b; });
     await wait(async () => { try { const b = await fetch(base + "/api/bootstrap").then(r => r.json()); headers = { "x-console-token": b.token, "content-type": "application/json" }; return Boolean(b.token); } catch { return false; } }, "startup timeout");
     await api("/api/sub2api/account-status?refresh=1");
@@ -95,9 +109,22 @@ for (const scenario of scenarios) {
       assert.equal(d.points.find(p => p.start === before.at(-1).start).requestCount, 9);
       assert.equal(fresh.overloadAutoCooldown.phase, "idle"); assert.equal(fresh.overloadAutoCooldown.coolingUntil, null);
       assert.equal(fresh.overloadAutoCooldown.enabled, true); assert.deepEqual(mutations, [true]);
+      assert(fresh.modelFingerprint.assumedDegraded, "resume did not default to degraded handling");
+      if (scenario !== "automatic") assert.equal(fresh.overloadAutoCooldown.operation, null, "manual enable kept the old cooldown record");
+      if (checkResume) {
+        try { await wait(() => samples === 1, "manual resume did not launch a fresh check with auto checks disabled"); }
+        catch (error) { throw Error(error.message + "\n" + JSON.stringify((await job()).modelFingerprint)); }
+        releaseSample();
+        await wait(async () => (await job()).modelFingerprint.result?.source === "overload_resume", "fresh check did not finish");
+        const state = (await job()).modelFingerprint;
+        assert.equal(state.result.status, scenario.endsWith("error") ? "error" : "match");
+        assert.equal(Boolean(state.assumedDegraded), scenario.endsWith("error"));
+        assert.equal(samples, 1);
+      }
       console.log("COUNT_RESUME_PASS " + scenario + " immediate=true current_bucket=true history_preserved=true cooldown_not_restarted=true");
     }
   } finally {
+    releaseSample();
     if (child?.exitCode === null) { const ended = new Promise(r => child.once("exit", r)); child.kill("SIGTERM"); await ended; }
     remote.closeAllConnections(); await new Promise(r => remote.close(r)); await fs.rm(root, { recursive: true, force: true });
   }

@@ -175,10 +175,43 @@ export class ModelFingerprintService {
     return { ...sequenceStep(testSequence, saved?.signature === signature ? saved.index : 0), signature };
   }
   groupResult(email, planType) {
+    if (this.assumedDegraded(email)) return { status: "mismatch", assumed: true, signature: this.signature(email, planType) };
     // The final stage decides this round. Preliminary failures never override
     // a completed fallback, and earlier rounds never override this result.
     const result = this.accounts.get(label(email))?.result;
     return result?.signature === this.signature(email, planType) ? result : null;
+  }
+  assumedDegraded(email) {
+    const marker = this.accounts.get(label(email))?.overloadResume;
+    return marker?.backend === this.getContext().backend ? marker : null;
+  }
+  async markOverloadResume(email, { id, backend, manual }) {
+    email = label(email);
+    if (backend !== this.getContext().backend) throw Error("后端已变更，过载恢复等待重试");
+    await this.mutate(async () => {
+      const previous = this.accounts.get(email);
+      if (previous?.lastOverloadResumeId === id) {
+        if (manual && previous.overloadResume && !previous.overloadResume.manualRequested) {
+          const marker = previous.overloadResume;
+          previous.overloadResume = { ...marker, recheckPending: true, manualRequested: true };
+          try { await this.persist(); } catch (error) { previous.overloadResume = marker; throw error; }
+        }
+        return;
+      }
+      this.invalidateAccount(email);
+      const entry = structuredClone(previous || { override: normalizeFingerprintOverride() });
+      entry.overloadResume = { id, backend, at: new Date(this.now()).toISOString(), recheckPending: manual === true, manualRequested: manual === true };
+      entry.lastOverloadResumeId = id;
+      entry.poolNumberVerdict = "mismatch";
+      entry.groupSyncPending = entry.concurrencySyncPending = entry.prioritySyncPending = true;
+      for (const field of poolNumberFields) for (const guard of Object.values(entry[`${field}ManualEdits`] || {})) {
+        if (guard.backend === backend && guard.verdict !== "mismatch") guard.invalidated = true;
+      }
+      this.accounts.set(email, entry);
+      try { await this.persist(); }
+      catch (error) { if (previous) this.accounts.set(email, previous); else this.accounts.delete(email); throw error; }
+    });
+    this.onChange();
   }
   signature(email, planType, includePrecheck = true) {
     const { models, minProbability, precheck } = this.effective(email, planType);
@@ -192,7 +225,7 @@ export class ModelFingerprintService {
     const effective = this.effective(email, planType), queued = this.queued.has(email);
     const config = { ...effective, precheck: { enabled: effective.precheck.enabled, model: effective.precheck.model } };
     const { signature: _signature, index: _index, ...sequence } = this.sequence(email, planType);
-    return { ...config, sequence, runningMethod: this.active.has(email) ? entry?.activeMethod : null, override: entry?.override || { enabled: null, models: null, intervalMinutes: null, testSequence: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status, method }) => ({ checkedAt, status, method: method || 'fingerprint' })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? roundSummary(entry?.result) : null, previousResult: !current ? roundSummary(entry?.result) : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncPending: Boolean(entry?.groupSyncPending), groupSyncError: entry?.groupSyncError || null, concurrencySyncPending: Boolean(entry?.concurrencySyncPending), concurrencySyncError: entry?.concurrencySyncError || null, prioritySyncPending: Boolean(entry?.prioritySyncPending), prioritySyncError: entry?.prioritySyncError || null };
+    return { ...config, sequence, assumedDegraded: this.assumedDegraded(email) ? { ...this.assumedDegraded(email), backend: undefined } : null, runningMethod: this.active.has(email) ? entry?.activeMethod : null, override: entry?.override || { enabled: null, models: null, intervalMinutes: null, testSequence: null }, phase: this.active.has(email) ? "running" : queued ? "queued" : "idle", queuePosition: queued ? [...this.queued.keys()].indexOf(email) + 1 : null, recentResults: this.latestRounds(entry).map(({ checkedAt, status, method }) => ({ checkedAt, status, method: method || 'fingerprint' })), historyCountLastHour: this.recentHistory(entry).length, lastAttemptAt: entry?.lastAttemptAt || null, result: current ? roundSummary(entry?.result) : null, previousResult: !current ? roundSummary(entry?.result) : null, nextCheckAt: entry?.nextCheckAt || null, lastError: entry?.lastError || null, groupSyncPending: Boolean(entry?.groupSyncPending), groupSyncError: entry?.groupSyncError || null, concurrencySyncPending: Boolean(entry?.concurrencySyncPending), concurrencySyncError: entry?.concurrencySyncError || null, prioritySyncPending: Boolean(entry?.prioritySyncPending), prioritySyncError: entry?.prioritySyncError || null };
   }
   latestRounds(entry) {
     const records = new Map();
@@ -210,6 +243,7 @@ export class ModelFingerprintService {
   historyRecord(result) { return { id: result.id, method: result.method || 'fingerprint', ...(result.precheck ? { precheck: result.precheck } : {}), sequencePosition: result.sequencePosition, usage: result.usage, transcriptVersion: result.transcriptVersion, requestCount: result.requestCount, checkedAt: result.checkedAt, status: result.status, models: result.models, error: result.error || null, failure: result.failure || null, durationMs: result.durationMs ?? null, source: result.source || "legacy", legacy: !result.models?.every(m => ['candy', 'regex'].includes(m.method) || m.probabilityStatus || m.status === "error") }; }
   recordResult(entry, result) {
     if (["match", "mismatch"].includes(result.status)) {
+      if (entry.overloadResume?.backend === (result.backend ?? this.getContext().backend)) delete entry.overloadResume;
       for (const field of Object.keys(poolNumberPolicies)) for (const guard of Object.values(entry[`${field}ManualEdits`] || {})) {
         if (guard.backend === (result.backend ?? this.getContext().backend) && guard.verdict !== result.status) guard.invalidated = true;
       }
@@ -274,7 +308,7 @@ export class ModelFingerprintService {
   filterGroups(email, planType, profileId, groups, currentAccount = null) {
     const rules = this.settings.groupPolicies[profileId] || {};
     const evidence = this.groupResult(email, planType);
-    const result = currentAccount && evidence?.routingIdentities?.[currentAccount.id] === fingerprintRoutingIdentity(currentAccount) ? evidence : null;
+    const result = evidence?.assumed ? evidence : currentAccount && evidence?.routingIdentities?.[currentAccount.id] === fingerprintRoutingIdentity(currentAccount) ? evidence : null;
     const existing = new Set((currentAccount?.group_ids || []).map(String));
     return groups.filter(id => rules[String(id)] !== "verified" || result?.status === "match" || result?.status !== "mismatch" && existing.has(String(id)));
   }
@@ -387,7 +421,7 @@ export class ModelFingerprintService {
       return {...common(),status:'error',error:detail.message,failure:detail,samplingComplete:false,completedSamples:outputs.length,samples:method === 'fingerprint' ? outputs.map(o=>({expected:o.expected_count,count:parseNumbers(o.text).length})) : []};
     }
   }
-  async perform(email, planType, { manual = false, importRunId } = {}) {
+  async perform(email, planType, { manual = false, importRunId, overloadResumeId } = {}) {
     email = label(email);
     if (this.isBlocked(email, { manual })) return this.snapshot(email, planType);
     if (this.active.has(email)) return this.snapshot(email, planType);
@@ -395,7 +429,7 @@ export class ModelFingerprintService {
     if (!config.models.length) throw invalid("请先设置至少一个检测模型");
     const enabled = importRunId ? this.accounts.get(email)?.override?.enabled !== false : config.enabled;
     if (!manual && !enabled) return this.snapshot(email, planType);
-    const source = importRunId ? "import" : manual ? "manual" : "scheduled";
+    const source = overloadResumeId ? "overload_resume" : importRunId ? "import" : manual ? "manual" : "scheduled";
     const context = this.getContext(), backend = context.backend, signature = this.signature(email, planType), revision = this.revision, startedAt = this.now(), step = this.sequence(email,planType);
     let method = config.precheck.enabled ? 'regex' : step.method, precheck = null;
     if (!context.config?.baseUrl || !context.config?.adminApiKey) throw Object.assign(new Error("请先配置 Sub2API"), { status: 409 });
@@ -469,12 +503,13 @@ export class ModelFingerprintService {
         const sequenceAdvanced = results.length > 0 && results.every(r => r.samplingComplete || method === 'candy' && r.responseComplete);
         if (precheck) precheck.sequenceAdvanced = sequenceAdvanced;
         this.recordResult(entry, { signature, backend, method, ...(precheck ? { precheck } : {}), sequencePosition:method === 'regex' && !sequenceAdvanced ? null : step.position, usage:aggregateRequestUsage(roundModels({precheck,models:results})), identities, routingIdentities, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: aggregateFingerprint(results), models: results });
+        if (overloadResumeId && entry.overloadResume?.id === overloadResumeId) entry.overloadResume.recheckPending = false;
         this.onVerdict(email, entry.result.checkedAt, entry.result.status, entry.result);
         if (importRunId) entry.lastImportRunId = importRunId;
         if (sequenceAdvanced) entry.sequenceCursor = {signature:step.signature,index:(step.index+1)%step.total};
         entry.concurrencySyncPending = true;
         entry.prioritySyncPending = true;
-        entry.groupSyncPending = ["match", "mismatch"].includes(entry.result.status);
+        entry.groupSyncPending = Boolean(this.assumedDegraded(email)) || ["match", "mismatch"].includes(entry.result.status);
         entry.groupSyncError = null;
         await this.persist();
         completedRound = entry.result;
@@ -487,6 +522,7 @@ export class ModelFingerprintService {
           const detail = fingerprintFailure(error);
           entry.lastError = detail.message;
           this.recordResult(entry, { signature, backend, method, ...(precheck ? { precheck } : {}), sequencePosition:method === 'regex' ? null : step.position, usage:aggregateRequestUsage(roundModels({precheck,models:results})), checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: "error", models: results, error: entry.lastError, failure: detail });
+          if (overloadResumeId && entry.overloadResume?.id === overloadResumeId) entry.overloadResume.recheckPending = false;
           this.onVerdict(email, entry.result.checkedAt, entry.result.status, entry.result);
         if (importRunId) entry.lastImportRunId = importRunId;
           await this.persist();
@@ -526,7 +562,7 @@ export class ModelFingerprintService {
       for (const target of targets) {
         const account = await this.getAccount(context.config, target.id);
         if (this.isBlocked(email) || revision !== this.revision || context.backend !== this.getContext().backend || result.signature !== this.signature(email, planType)) return;
-        if (result.identities?.[target.id] !== fingerprintAccountIdentity(account)) { entry.groupSyncPending = false; entry.groupSyncError = "账号凭据或代理已变更，请重新检测"; await this.persist(); return; }
+        if (!result.assumed && result.identities?.[target.id] !== fingerprintAccountIdentity(account)) { entry.groupSyncPending = false; entry.groupSyncError = "账号凭据或代理已变更，请重新检测"; await this.persist(); return; }
         const profileId = target.profileId, profile = context.profiles.find(p => p.id === profileId);
         if (!profile) continue;
         const rules = this.settings.groupPolicies[profileId] || {};
@@ -690,7 +726,7 @@ export class ModelFingerprintService {
           continue;
         }
         if (!actionable || !descriptor.valid(value)) continue;
-        if (!configured?.independent && result.identities?.[target.id] !== fingerprintAccountIdentity(account)) continue;
+        if (!configured?.independent && !result.assumed && result.identities?.[target.id] !== fingerprintAccountIdentity(account)) continue;
         if (current === value && (!owned || !owned.pending && Boolean(owned.independent) === Boolean(configured?.independent))) continue;
         const intent = { planType: state.planType, baseValue: owned?.baseValue ?? current, appliedValue: value, previousValue: current, backend: context.backend, independent: Boolean(configured?.independent), pending: true };
         overrides[target.id] = intent;
@@ -822,6 +858,11 @@ export class ModelFingerprintService {
         }
         const email = label(job.email);
         await this.reconcile(email, job.planType, targetsByEmail.get(email) || []);
+      }
+      const resumed = this.assumedDegraded(job.email);
+      if (resumed?.recheckPending && state.models.length) {
+        const task = this.run(job.email, job.planType, { manual: true, overloadResumeId: resumed.id });
+        void task.catch(() => {}); scheduled.push(task); continue;
       }
       if (job.importCheckPending || !state.enabled || !state.models.length) continue;
       if (!state.nextCheckAt || Date.parse(state.nextCheckAt) <= this.now()) { const task = this.run(job.email, job.planType); void task.catch(() => {}); scheduled.push(task); }

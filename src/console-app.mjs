@@ -512,6 +512,8 @@ export function createConsoleApp(options = {}) {
 
   const overloadCooldown = new OverloadCooldown({
     dispatchPaused,
+    getValidity: email => { const job = findJobByEmail(email); return readAccountTags(job?.remark || "", job?.accountTagsCleared).validity; },
+    onResume: (email, event) => modelFingerprint.markOverloadResume(email, event),
     getMonitoringSettings: () => ({ intervalMs: consoleSettings.current.monitoringSettings.overloadIntervalSeconds * 1000, concurrency: consoleSettings.current.monitoringSettings.overloadCooldownConcurrency }),
     isBlocked: email => accountAutomationBlocked(email) || sessionResetAutomationPaused(email),
     isCountBlocked: email=>inspectionPaused(email) || degradationCooldown.isPaused(email) || codexChecksBlocked(email),
@@ -525,7 +527,7 @@ export function createConsoleApp(options = {}) {
     },
     request: requestSub2Api,
     onChange: invalidateSub2ApiAccountStatusCache,
-    onNeedCounts: () => overloadMonitor.trigger(),
+    onNeedCounts: () => { overloadMonitor.trigger(); wakeOverloadResumeChecks(); },
     afterPause: prepareCooldownSessionReset,
     beforeResume: prepareCooldownSessionReset,
     listAccounts: async config => {
@@ -619,7 +621,8 @@ export function createConsoleApp(options = {}) {
       catch { console.error("[degradation-cooldown] 冷却状态保存失败，等待后续检测重试"); }
     },
     dispatchPaused,
-    isBlocked: (email, { manual = false } = {}) => {
+    isBlocked: (email, { manual = false, overloadResumeId } = {}) => {
+      if (overloadResumeId && (overloadCooldown.isPaused(email) || degradationCooldown.isPaused(email))) return true;
       if (!manual && (inspectionPaused(email) || degradationCooldown.isPaused(email))) return true;
       if (manual && manualFingerprintAllowed(findJobByEmail(email))) return false;
       if (codexChecksBlocked(email)) return true;
@@ -1614,7 +1617,7 @@ export function createConsoleApp(options = {}) {
       // Resume the charts immediately, after publishing the successful pool
       // switch. Otherwise the admission gate sees the pre-enable cache and the
       // last pre-cooldown chart remains frozen until the next statistics tick.
-      if (body.enabled) overloadMonitor.trigger();
+      if (body.enabled) { overloadMonitor.trigger(); wakeOverloadResumeChecks(); }
       sendJson(res, 200, { status: publicSub2ApiAccountStatusEntry(nextEntry) });
       return;
     }
@@ -8156,6 +8159,16 @@ export function createConsoleApp(options = {}) {
     if (proxy && job.resultSaved && sub2ApiSettingsConfig) {
       book.proxyActivity.noteBinding(monitorBackendIdentity(sub2ApiSettingsConfig), proxyIpKey(proxy), accountLoginEmails.key(job.email));
     }
+  }
+
+  function wakeOverloadResumeChecks() {
+    if (![...modelFingerprint.accounts.keys()].some(email => modelFingerprint.assumedDegraded(email))) return;
+    // Pause/resume callbacks invalidate the old account cache. Refill it before
+    // the fingerprint scheduler enumerates enabled jobs for policy sync/recheck.
+    void loadSub2ApiAccountStatus({ forceRefresh: true }).then(() => {
+      if (modelFingerprint.ticking) void modelFingerprint.ticking.then(() => modelFingerprint.trigger());
+      else modelFingerprint.trigger();
+    }).catch(() => {});
   }
 
   function rotationEligible(job, settings, locked = false) {

@@ -65,7 +65,7 @@ export function parseProfitCents(profitCents, userCostUsd, poolPriceMultiplier, 
 const QUALITY_LABELS = { normal: "未降智", degraded: "降智", recovered: "已恢复" };
 const CHECK_LABELS = { match: "未降智", mismatch: "降智", unknown: "结果未确认", error: "检测失败" };
 const CHECK_METHODS = { fingerprint: "指纹", candy: "糖果题", regex: "前置正则" };
-const CHECK_SOURCES = { manual: "手动", scheduled: "定时", import: "导入后" };
+const CHECK_SOURCES = { manual: "手动", scheduled: "定时", import: "导入后", overload_resume: "过载手动恢复后" };
 
 function qualityLabel(quality) {
   return QUALITY_LABELS[quality?.kind] || (quality?.lastCheckedAt ? "尚无确认状态" : "未检测");

@@ -39,6 +39,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
   const [monitoring, setMonitoring] = useState(() => Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(settings.monitoring?.[field.key] ?? DEFAULT_MONITORING[field.key])])));
   const [overloadRule, setOverloadRule] = useState(() => ({ windowMinutes: String(settings.overloadAutoCooldown?.windowMinutes || 15), threshold: String(settings.overloadAutoCooldown?.threshold || 10), cooldownMinutes: String(settings.overloadAutoCooldown?.cooldownMinutes || 60) }));
   const [resetAfterCooldown, setResetAfterCooldown] = useState(settings.overloadAutoCooldown?.reauthorizeAfterCooldown === true);
+  const [cooldownTypes, setCooldownTypes] = useState(() => ({ longTerm: settings.overloadAutoCooldown?.longTerm !== false, rotating: settings.overloadAutoCooldown?.rotating !== false }));
   const [webMonitor, setWebMonitor] = useState(() => ({ enabled: settings.webSessionMonitor?.enabled === true, autoRelogin: settings.webSessionMonitor?.autoRelogin !== false, intervalMinutes: String(settings.webSessionMonitor?.intervalMinutes || 15), retryMinutes: String(settings.webSessionMonitor?.retryMinutes || 60) }));
   const [accountProxyMode, setAccountProxyMode] = useState(() => ["sub2api", "plan"].includes(settings.accountProxyMode) ? settings.accountProxyMode : "global");
   const [rotation, setRotation] = useState(() => ({ ...DEFAULT_PROXY_ROTATION, ...settings.proxyRotation }));
@@ -75,6 +76,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
     setPriceMultiplier(String(DEFAULT_POOL_PRICE_MULTIPLIER));
     setOverloadRule({ windowMinutes: "15", threshold: "10", cooldownMinutes: "60" });
     setResetAfterCooldown(false);
+    setCooldownTypes({ longTerm: true, rotating: true });
     setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" });
     setMonitoring(Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(field.default)])));
     setAccountProxyMode("global");
@@ -108,6 +110,9 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
     const overloadAutoCooldown = Object.fromEntries(Object.entries(overloadRule).map(([key, value]) => [key, Number(value)]));
     if (resetAfterCooldown || Object.hasOwn(settings.overloadAutoCooldown || {}, "reauthorizeAfterCooldown"))
       overloadAutoCooldown.reauthorizeAfterCooldown = resetAfterCooldown;
+    for (const key of ["longTerm", "rotating"]) {
+      if (!cooldownTypes[key] || Object.hasOwn(settings.overloadAutoCooldown || {}, key)) overloadAutoCooldown[key] = cooldownTypes[key];
+    }
     if (!Number.isInteger(overloadAutoCooldown.windowMinutes) || overloadAutoCooldown.windowMinutes < 1 || overloadAutoCooldown.windowMinutes > 1440
       || !Number.isInteger(overloadAutoCooldown.threshold) || overloadAutoCooldown.threshold < 1 || overloadAutoCooldown.threshold > 100000
       || !Number.isInteger(overloadAutoCooldown.cooldownMinutes) || overloadAutoCooldown.cooldownMinutes < 1 || overloadAutoCooldown.cooldownMinutes > 43200) {
@@ -355,7 +360,13 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
               <span>{field.label}</span><div><input id={`overload-rule-${field.key}`} type="number" min={1} max={field.max} step="1" value={overloadRule[field.key]} disabled={saving} onChange={event => setOverloadRule(current => ({ ...current, [field.key]: event.target.value }))} /><span>{field.unit}</span></div>
             </label>)}
           </div>
+          <div className="task-auto-action-options">
+            <label className="task-auto-action-option"><input type="checkbox" checked={cooldownTypes.longTerm} disabled={saving} onChange={e => setCooldownTypes(current => ({ ...current, longTerm: e.target.checked }))} /><span>长效账号过载后冷却</span></label>
+            <label className="task-auto-action-option"><input type="checkbox" checked={cooldownTypes.rotating} disabled={saving} onChange={e => setCooldownTypes(current => ({ ...current, rotating: e.target.checked }))} /><span>轮转账号过载后冷却</span></label>
+          </div>
+          <div className="task-auto-empty">类型按账号“时效”标签识别，两个开关默认开启；未设置类型沿用账号自己的冷却开关。关闭类型开关只停止新增冷却，已开始的冷却继续到期。</div>
           <div className="task-auto-empty">当前 {overloadRule.windowMinutes || "—"} 分钟固定格达到 {overloadRule.threshold || "—"} 次，或图表累计达到 {overloadRule.threshold ? Number(overloadRule.threshold) * 3 : "—"} 次，冷却 {overloadRule.cooldownMinutes || "—"} 分钟；到期及时恢复。</div>
+          <div className="task-auto-empty">过载冷却账号手动启用后清除旧冷却记录，并重新检测一次降智。手动启用或冷却到期恢复后，先按降智处理，直到新的有效检测结果更新；检测失败继续保留该状态。</div>
           <label className="task-auto-action-option"><input type="checkbox" checked={resetAfterCooldown} disabled={saving}
             onChange={event => setResetAfterCooldown(event.target.checked)} /><span>冷却前登出所有设备，结束后重登授权</span></label>
           <div className="task-auto-empty">默认关闭。开启后，触发冷却时先暂停调度并登出所有设备，确认登出后开始冷却；到期重新登录 Web、完成 Codex 授权并更新原号池凭据，成功后恢复调度，失败保持暂停。整个流程沿用原绑定 IP，不轮换密码或 2FA。</div>
