@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ModelFingerprintService, normalizeFingerprintSettings } from "../src/model-fingerprint.mjs";
+import { ModelFingerprintService, normalizeFingerprintSettings, fingerprintRoundConclusion } from "../src/model-fingerprint.mjs";
 import { DEFAULT_REGEX_PRECHECK, normalizeRegexPrecheck } from "../shared/regex-precheck.mjs";
 import { evaluateRegexPrecheck } from "../src/regex-precheck.mjs";
 import { CANDY_PROMPT } from "../src/candy-test.mjs";
@@ -15,9 +15,11 @@ const rule = { enabled: true, model: "quick-model", prompt: "Reply with the veri
 const full = Array.from({length:100}, (_, i) => i + 1).join(",");
 const account = { id: 1, email: "a@test", type: "oauth", status: "active", schedulable: true, group_ids: ["10"], credentials: { access_token: "fixture-secret" } };
 let service, calls, detectorCalls, answer, fallbackAnswer, verdicts, recovery, groups, fail, held, release, twoTargets;
+let fallbackError, fingerprintAnswer, fingerprintProbability, completed;
 function create() {
   calls = []; detectorCalls = 0; answer = "ready"; fallbackAnswer = "最终答案：21";
   verdicts = []; recovery = []; groups = []; fail = null; held = false; release = null; twoTargets = false;
+  fallbackError = null; fingerprintAnswer = full; fingerprintProbability = .99; completed = [];
   return new ModelFingerprintService({ filePath: path.join(root, "state.json"),
     getContext: () => ({ backend: "pool", routing: "current", config: { baseUrl: "https://pool.test", adminApiKey: "fixture-secret" }, profiles: [{id:"default",groupIds:["10"]}], jobs: [] }),
     listTargets: async () => [account, ...(twoTargets ? [{ ...account, id: 2 }] : [])].map(a => ({ ...a, profileId: "default" })),
@@ -28,12 +30,14 @@ function create() {
       if (held) await new Promise(resolve => { release = resolve; signal.addEventListener("abort", resolve, { once: true }); });
       signal.throwIfAborted();
       if (model === rule.model) { if (fail) throw fail; return twoTargets && a.id === 2 ? "NOT READY" : answer; }
-      return prompt === CANDY_PROMPT ? fallbackAnswer : full;
+      if (fallbackError) throw fallbackError;
+      return prompt === CANDY_PROMPT ? fallbackAnswer : fingerprintAnswer;
     },
     challenges: () => Array.from({length:3}, () => ({ prompt: "numeric fixture", expected_count: 100 })),
-    detectorLoader: async () => { detectorCalls++; return { builtAt: "fixture", analyze: () => ({ prediction: "fallback-model", prediction_name: "fallback-model", probability: .99, probability_status: "reference_calibrated", decision: "scored", used_outputs: 3, results: [{ model: "fallback-model", display_name: "fallback-model" }] }) }; },
+    detectorLoader: async () => { detectorCalls++; return { builtAt: "fixture", analyze: () => ({ prediction: "fallback-model", prediction_name: "fallback-model", probability: fingerprintProbability, probability_status: "reference_calibrated", decision: "scored", used_outputs: 3, results: [{ model: "fallback-model", display_name: "fallback-model" }] }) }; },
     updateGroups: async (_c, id, ids) => groups.push({ id, ids }),
     onVerdict: (_email, _at, status) => verdicts.push(status),
+    onCompleted: (_email, round) => completed.push(structuredClone(round)),
     onAccountFailure: async (_email, detail) => recovery.push(detail.code),
     retryDelay: async () => {},
   });
@@ -109,9 +113,9 @@ try {
     answer="ready"; const state=await run(); assert.equal(state.result.method,"fingerprint");
     assert.equal(state.result.precheck.status,"match"); assert.equal(state.result.precheck.fallbackExecuted,true);
   });
-  await test("auth-quota-and-incomplete-responses-do-not-score-or-consume-fallback", async () => {
+  await test("auth-quota-and-banned-prechecks-stop-without-fallback", async () => {
     await service.saveSettings(settings);
-    for (const [code,httpStatus] of [["AUTH",401],["QUOTA",429],["INCOMPLETE",200]]) {
+    for (const [code,httpStatus] of [["AUTH",401],["QUOTA",429],["BANNED",403]]) {
       const before=service.sequence(account.email,"free").position,count=calls.length;
       fail=Object.assign(Error("fixture-secret"),{fingerprintFailure:true,code,httpStatus,fingerprintReply:"READY",retryable:false});
       const state=await run(); assert.equal(state.result.status,"error"); assert.equal(state.result.method,"regex");
@@ -119,7 +123,7 @@ try {
       assert.equal(state.result.precheck.sequenceAdvanced,false);
       assert(!JSON.stringify(state).includes("fixture-secret"));
     }
-    assert.deepEqual(recovery,["AUTH","QUOTA"]); fail=null;
+    assert.deepEqual(recovery,["AUTH","QUOTA","BANNED"]); fail=null;
   });
   await test("multiple-remote-rows-require-all-prechecks-and-fallbacks", async () => {
     twoTargets=true; answer="READY"; fallbackAnswer="最终答案：21";
@@ -131,19 +135,22 @@ try {
     await service.saveSettings({...settings,precheck:{...rule,enabled:false}}); const count=calls.length;
     const state=await run(); assert.equal(state.result.method,"fingerprint"); assert.equal(calls.length-count,3); assert(!state.result.precheck);
   });
-  await test("regex-timeout-keeps-complete-answer-without-retry-or-fallback", async () => {
+  await test("regex-timeout-retains-answer-and-uses-configured-fallback", async () => {
     await service.saveSettings({...settings,failureRetries:2,precheck:{...rule,pattern:"^(a+)+$"}});
-    answer="a".repeat(30000)+"!"; const count=calls.length, position=service.sequence(account.email,"free").position;
-    const state=await run(); assert.equal(calls.length-count,1); assert.equal(state.result.status,"error");
-    assert.equal(state.result.models[0].failure.code,"REGEX_TIMEOUT"); assert.equal(state.sequence.position,position);
-    assert.equal(service.historyDetail(account.email,state.result.id).record.models[0].requests[0].response,answer);
+    answer="a".repeat(30000)+"!"; const count=calls.length, method=service.sequence(account.email,"free").method;
+    const state=await run(); assert.equal(calls.length-count,method === 'candy' ? 2 : 4); assert.equal(state.result.status,"match");
+    assert.equal(state.result.precheck.status,"error"); assert.equal(state.result.precheck.models[0].failure.code,"REGEX_TIMEOUT");
+    assert.equal(service.historyDetail(account.email,state.result.id).record.precheck.models[0].requests[0].response,answer);
   });
   await test("failed-reference-load-retains-precheck-transcript-without-advancing", async () => {
     await service.saveSettings({...settings,testSequence:{first:"fingerprint",fingerprint:1,candy:0}});
     answer="BAD"; service.detectorPromise=null; service.detectorLoader=async()=>{throw Error("参考库失败");};
-    await assert.rejects(run(),e=>e.status===502);
+    await run();
     const state=service.snapshot(account.email,"free"),detail=service.historyDetail(account.email,state.result.id).record;
-    assert.equal(state.result.status,"error"); assert.equal(state.result.requestCount,1); assert.equal(state.sequence.position,1);
+    assert.equal(state.result.status,"mismatch"); assert.equal(state.result.precheck.fallbackStatus,"error");
+    assert.equal(state.result.precheck.fallbackFailure.code,"REFERENCE"); assert.equal(state.result.precheck.degradedByFallback,true);
+    assert.equal(state.result.requestCount,1); assert.equal(state.sequence.position,1);
+    assert.equal(completed.at(-1).status,"mismatch"); assert(groups.some(g=>g.ids.length===0));
     assert.equal(detail.precheck.models[0].requests[0].response,"BAD"); assert.equal(detail.models.length,0);
   });
   await test("changing-rule-cancels-active-sample-without-new-verdict", async () => {
@@ -174,6 +181,64 @@ try {
       assert.equal(state.result.precheck.fallbackMethod,method); assert.equal(state.sequence.position,next);
     }
     assert.equal(calls.length-count,4,"skipped slots must not issue any fallback request");
+  });
+  await test("combined-conclusion-matrix-preserves-explicit-pass-and-raw-evidence", () => {
+    for (const preStatus of ["match", "mismatch", "unknown", "error"]) {
+      for (const fallbackStatus of ["match", "mismatch", "unknown", "error"]) {
+        const precheck = {status:preStatus,fallbackExecuted:true};
+        const result=fingerprintRoundConclusion(fallbackStatus,precheck);
+        assert.equal(result.status,preStatus !== "match" && ["unknown","error"].includes(fallbackStatus) ? "mismatch" : fallbackStatus);
+        assert.equal(result.precheck.fallbackStatus,fallbackStatus);
+        assert.equal(precheck.degradedByFallback,undefined,"mutated stage evidence");
+      }
+    }
+    for (const status of ["unknown","error"]) {
+      assert.equal(fingerprintRoundConclusion(status,null).status,status);
+      assert.equal(fingerprintRoundConclusion(status,{status:"error",fallbackExecuted:false}).status,status);
+    }
+  });
+  await test("uncertain-precheck-and-failed-or-unknown-candy-or-fingerprint-become-degraded", async () => {
+    for (const method of ["candy", "fingerprint"]) for (const preStatus of ["mismatch", "error"]) for (const fallbackStatus of ["unknown", "error"]) {
+      await service.stop(); service=create();
+      await service.saveSettings({...settings,testSequence:{first:method,candy:method === 'candy' ? 1 : 0,fingerprint:method === 'fingerprint' ? 1 : 0}});
+      answer="BAD";
+      if(preStatus === 'error') fail=Object.assign(Error('fixture-secret'),{fingerprintFailure:true,code:'INCOMPLETE',retryable:false});
+      if(fallbackStatus === 'error') fallbackError=Object.assign(Error('fixture-secret'),{fingerprintFailure:true,code:'NETWORK',retryable:false});
+      else {fallbackAnswer='尚未确定答案';fingerprintProbability=.55;}
+      const state=await run(), result=state.result;
+      assert.equal(result.status,'mismatch'); assert.equal(result.precheck.status,preStatus); assert.equal(result.precheck.fallbackStatus,fallbackStatus);
+      assert.equal(result.precheck.degradedByFallback,true); assert.equal(result.models[0].status,fallbackStatus);
+      assert.deepEqual(verdicts,['mismatch']); assert.equal(completed.at(-1).status,'mismatch'); assert(groups.some(g=>g.ids.length===0));
+      assert.equal(result.precheck.sequenceAdvanced,fallbackStatus==='unknown');
+      const id=result.id,detail=service.historyDetail(account.email,id).record;
+      assert.equal(detail.models[0].status,fallbackStatus); assert(detail.precheck.models[0].requests.length);
+      assert(!JSON.stringify(state).includes('fixture-secret'));
+      await service.stop();service=create();await service.load();
+      assert.equal(service.snapshot(account.email,'free').result.status,'mismatch');
+      assert.equal(service.historyDetail(account.email,id).record.precheck.degradedByFallback,true);
+    }
+  });
+  await test("short-fingerprint-fallback-remains-unscorable-but-round-is-degraded",async()=>{
+    await service.stop();service=create();
+    await service.saveSettings({...settings,testSequence:{first:'fingerprint',fingerprint:1,candy:0}});
+    answer='BAD';fingerprintAnswer='1,2';
+    const state=await run();assert.equal(state.result.status,'mismatch');assert.equal(state.result.models[0].status,'unknown');
+    assert.equal(state.result.precheck.sequenceAdvanced,false);assert.equal(state.result.precheck.fallbackStatus,'unknown');
+  });
+  await test("passing-precheck-does-not-turn-uncertain-optional-fallback-into-degradation",async()=>{
+    await service.stop();service=create();
+    await service.saveSettings({...settings,precheck:{...rule,skipFallbackOnPass:false},testSequence:{first:'candy',candy:1,fingerprint:0}});
+    fallbackAnswer='未确认';let state=await run();assert.equal(state.result.status,'unknown');assert.equal(state.result.precheck.degradedByFallback,false);
+    fallbackError=Object.assign(Error('fixture-secret'),{fingerprintFailure:true,code:'NETWORK',retryable:false});
+    state=await run();assert.equal(state.result.status,'error');assert.equal(state.result.precheck.degradedByFallback,false);
+    await service.saveSettings({...settings,precheck:{...rule,enabled:false}});
+    state=await run();assert.equal(state.result.status,'error');assert(!state.result.precheck);
+  });
+  await test("empty-precheck-with-passing-fallback-is-not-degraded",async()=>{
+    await service.stop();service=create();
+    await service.saveSettings({...settings,testSequence:{first:'candy',candy:1,fingerprint:0}});
+    answer='';const state=await run();assert.equal(state.result.precheck.status,'error');assert.equal(state.result.status,'match');
+    assert.equal(state.result.precheck.fallbackStatus,'match');assert.equal(state.result.precheck.degradedByFallback,false);
   });
   await test("new-conversation-request-has-only-this-prompt-and-no-continuation", async () => {
     const bodies=[];

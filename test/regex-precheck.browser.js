@@ -55,6 +55,11 @@ async page => {
   const regexModel={model:'quick-model',method:'regex',accountId:'42',status:'mismatch',regexMatched:true,pattern:'BAD',flags:'i',degradedWhen:'match',reason:'命中正则，疑似降智，待兜底确认'};
   const request={sample:1,attempt:1,method:'regex',prompt:'独立提示词 <script>window.__regexXss=1</script>',response:'BAD',status:'success',accepted:true,regexMatched:true,assessmentStatus:'mismatch',durationMs:500,startedAt:'2026-11-26T10:00:00Z'};
   const records=[
+    {id:'combined-unknown',method:'candy',status:'mismatch',checkedAt:'2026-11-26T12:00:02Z',source:'manual',transcriptVersion:1,requestCount:2,
+      precheck:{status:'mismatch',fallbackMethod:'candy',fallbackExecuted:true,fallbackStatus:'unknown',degradedByFallback:true,models:[regexModel]},
+      models:[{model:'fallback-model',method:'candy',accountId:'42',status:'unknown',expectedAnswer:21,extractedFinalAnswer:null,reason:'未能提取明确的最终答案'}]},
+    {id:'combined-error',method:'fingerprint',status:'mismatch',checkedAt:'2026-11-26T11:00:02Z',source:'manual',transcriptVersion:1,requestCount:1,
+      precheck:{status:'mismatch',fallbackMethod:'fingerprint',fallbackExecuted:true,fallbackStatus:'error',degradedByFallback:true,models:[regexModel],fallbackFailure:{code:'REFERENCE',message:'参考库加载失败'}},models:[]},
     {id:'fallback',method:'candy',status:'match',checkedAt:'2026-11-26T10:00:02Z',source:'manual',transcriptVersion:1,requestCount:2,
       precheck:{status:'mismatch',fallbackMethod:'candy',fallbackExecuted:true,models:[regexModel]},
       models:[{model:'fallback-model',method:'candy',accountId:'42',status:'match',expectedAnswer:21,extractedFinalAnswer:21,usedOutputs:1,reason:'糖果题最终答案为21'}]},
@@ -83,7 +88,7 @@ async page => {
     check((await history.innerText()).includes('已跳过兜底，轮换进度已推进'),'new shortcut advancement missing');
     check((await history.innerText()).includes('已跳过兜底，轮换进度保留'),'legacy shortcut should retain its original meaning');
     check(detailReads.length===0,'eager transcript load');
-    await history.getByText('Prompt 与回答（2 次请求）',{exact:true}).click();
+    await history.getByRole('listitem').filter({hasText:'已进入糖果兜底'}).getByText('Prompt 与回答（2 次请求）',{exact:true}).click();
     await history.getByText(/前置正则 · 请求 1/).click();
     await history.locator('.fingerprint-request-prompt').first().waitFor();
     check(detailReads.length===1,'transcript should load once');
@@ -93,6 +98,19 @@ async page => {
     await page.setViewportSize({width:375,height:812});
     check(await history.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'history horizontal overflow');
     await page.screenshot({path:evidence+'/precheck-history-mobile.png'});
+  });
+  await test('combined-degradation-shows-rule-and-raw-fallback-reason',async()=>{
+    const history=page.getByRole('dialog',{name:/最近 6 轮归因结果/});
+    check(await history.getByText('按规则判为降智',{exact:true}).count()===2,'combined verdict labels missing');
+    const unknown=history.getByRole('listitem').filter({hasText:'糖果兜底证据不足，本轮按降智处理'});
+    check((await unknown.innerText()).includes('未能提取明确的最终答案'),'raw unknown evidence lost');
+    const failed=history.getByRole('listitem').filter({hasText:'指纹兜底失败，本轮按降智处理'});
+    check((await failed.innerText()).includes('参考库加载失败'),'raw setup failure lost');
+    await page.setViewportSize({width:1440,height:1000}); await unknown.scrollIntoViewIfNeeded();
+    await page.screenshot({path:evidence+'/combined-verdict-desktop.png'});
+    await page.setViewportSize({width:375,height:812}); await unknown.scrollIntoViewIfNeeded();
+    check(await history.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'combined verdict horizontal overflow');
+    await page.screenshot({path:evidence+'/combined-verdict-mobile.png'});
   });
   await test('runtime-health',async()=>{
     check(new URL(page.url()).hostname==='127.0.0.1','wrong page'); check((await page.title()).includes('Helper'),'wrong title');

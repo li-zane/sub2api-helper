@@ -13,6 +13,7 @@ let child, headers, logs = "", samples = 0;
 const precheckPrompt = "This is a standalone verification request. Ignore all other conversations: reply with exactly READY and nothing else.";
 let precheckReply = "READY";
 let candyReply = "最终答案：21";
+let candyFailure = false;
 const account = { id: 42, name: "fingerprint@example.test", email: "fingerprint@example.test", platform: "openai", type: "oauth", status: "active", schedulable: true, group_ids: [10, 20, 99], credentials: { email: "fingerprint@example.test", plan_type: "free", access_token: "private-fixture-token", chatgpt_account_id: "fixture-account" }, extra: {} };
 const calls = [], transcriptInputs = [], transcriptReplies = [];
 const pool = http.createServer(async (req, res) => {
@@ -34,6 +35,10 @@ const inference = http.createServer(async (req, res) => {
   assert(body.input[0].content[0].text.length > 70); assert.notEqual(body.input[0].content[0].text, "hi");
   assert.equal(body.input.length, 1); assert.equal(body.input[0].role, 'user'); assert.equal(body.store, false);
   assert.equal(body.previous_response_id, undefined); assert.equal(body.conversation, undefined);
+  if (body.input[0].content[0].text === CANDY_PROMPT && candyFailure) {
+    res.writeHead(503, {"content-type":"application/json"});
+    return res.end(JSON.stringify({error:{message:"Temporary inference failure"}}));
+  }
   const reply = body.input[0].content[0].text === precheckPrompt ? precheckReply : body.input[0].content[0].text === CANDY_PROMPT ? candyReply : Array.from({ length: 332 }, (_, i) => i % 355 + 1).join(", ");
   transcriptReplies.push(reply);
   res.setHeader("content-type", "text/event-stream");
@@ -172,7 +177,8 @@ try {
     assert.equal(samples-before,1); assert.equal(state.result.method,'regex'); assert.equal(state.result.status,'match'); assert.equal(state.sequence.method,'fingerprint');
     assert.equal(state.result.sequencePosition,1); assert.equal(state.result.precheck.sequenceAdvanced,true);
     precheckReply='OTHER'; before=samples; state=await check();
-    assert.equal(samples-before,4); assert.equal(state.result.method,'fingerprint'); assert.equal(state.result.status,'unknown');
+    assert.equal(samples-before,4); assert.equal(state.result.method,'fingerprint'); assert.equal(state.result.status,'mismatch');
+    assert.equal(state.result.precheck.fallbackStatus,'unknown'); assert.equal(state.result.precheck.degradedByFallback,true);
     assert.equal(state.result.precheck.status,'mismatch'); assert.equal(state.result.requestCount,4); assert.equal(state.sequence.method,'candy');
     const detail = (await get(fingerprintRoute+'/history?round='+state.result.id)).record;
     assert.equal(detail.precheck.models[0].requests[0].prompt,precheckPrompt);
@@ -211,6 +217,22 @@ try {
     const fallbackPass=await detect();
     assert.equal(fallbackPass.modelFingerprint.result.precheck.status,'mismatch');
     assert.equal(account.schedulable,true,'passing final verdict does not pause');
+    await post('/api/model-fingerprint/settings',{patch:{failureRetries:0}});
+    for (const fallbackStatus of ['unknown','error']) {
+      candyReply='尚未确定最终答案'; candyFailure=fallbackStatus==='error';
+      const combined=await detect(), result=combined.modelFingerprint.result;
+      assert.equal(result.status,'mismatch'); assert.equal(result.precheck.fallbackStatus,fallbackStatus);
+      assert.equal(result.precheck.degradedByFallback,true); assert.equal(result.models[0].status,fallbackStatus);
+      await waitFor(async()=>!account.schedulable && (await currentJob()).degradationCooldown.phase==='cooling');
+      const detail=(await get(fingerprintRoute+'/history?round='+result.id)).record;
+      assert.equal(detail.precheck.models[0].requests[0].response,'OTHER');
+      assert.equal(detail.models[0].requests.length,1);
+      if (fallbackStatus==='error') assert.equal(detail.models[0].failure.httpStatus,503);
+      else assert.equal(detail.models[0].requests[0].response,candyReply);
+      assert.equal((await post(`/api/sub2api/accounts/${job.id}/schedulable`,{enabled:true})).status,200);
+      await waitFor(async()=>account.schedulable && !(await currentJob()).degradationCooldown.paused);
+    }
+    candyFailure=false;
     await post('/api/model-fingerprint/settings',{patch:{precheck:{enabled:false}}});
     assert.equal((await post(`/api/jobs/${job.id}/tags`,{validity:'轮转'})).status,200);
     candyReply='最终答案：22'; await detect();
@@ -257,7 +279,7 @@ try {
     assert.equal((await currentJob()).degradationCooldown.paused,false,'manual stop releases cooldown ownership');
     await stop(); await start();
     assert.equal(account.schedulable,false,'restart must preserve manual stop');
-    console.log('DEGRADATION_COOLDOWN_HTTP_PASS final candy verdict; type switches; settings validation/concurrent patches; durable pause; no relogin or IP change; deadline restart/direct resume; manual stop');
+    console.log('DEGRADATION_COOLDOWN_HTTP_PASS final candy verdict; uncertain/failed fallback treated as degraded; raw evidence; type switches; settings validation/concurrent patches; durable pause; no relogin or IP change; deadline restart/direct resume; manual stop');
   }
   if (process.argv.includes("--serve")) {
     await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20] }], planTypeBindings: { free: "default" } });

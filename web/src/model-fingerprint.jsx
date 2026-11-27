@@ -112,7 +112,7 @@ function RegexPrecheckFields({ value, onChange, disabled }) {
     <label className="settings-field"><span>检测回答的正则表达式</span><textarea aria-label="前置正则表达式" rows={2} maxLength={2000} value={rule.pattern} disabled={inactive} placeholder={"例如：最终答案[：:]\\s*21（不含两侧 /）"} onChange={e => patch({ pattern: e.target.value })} /></label>
     <label className="settings-field"><span>正则标志（可留空）</span><input aria-label="前置正则标志" maxLength={4} value={rule.flags} disabled={inactive} placeholder="i 忽略大小写；m 多行；s 跨行；u Unicode" onChange={e => patch({ flags: e.target.value })} /></label>
     <label className="task-auto-action-option"><input type="checkbox" checked={rule.skipFallbackOnPass} disabled={inactive} onChange={e => patch({ skipFallbackOnPass: e.target.checked })} /><span>前置未降智时跳过糖果／指纹兜底</span></label>
-    <p className="empty-inline-note">疑似降智时始终执行兜底。每轮完成检测都推进下方轮换进度，前置通过并跳过兜底也计一轮。网络错误、空回答或未完成回答记为异常，不按“未命中”判分。</p>
+    <p className="empty-inline-note">前置未确认不降智时进入兜底；兜底失败或证据不足，本轮按降智处理，兜底通过则判为不降智。前置通过并跳过兜底也推进轮换进度。两阶段保留原始错误与回答；认证、额度或账号不可用时沿用停止规则。</p>
   </section>;
 }
 
@@ -742,7 +742,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
           const { time, date } = formatTimelineTime(record.checkedAt);
           const isCandy = record.method === "candy";
           const statusKey = record.status || "unknown";
-          const statusText = record.method === "regex" ? precheckTitle(record.status) : isCandy
+          const statusText = record.precheck?.degradedByFallback ? "按规则判为降智" : record.method === "regex" ? precheckTitle(record.status) : isCandy
             ? (record.status === "match" ? "通过" : record.status === "mismatch" ? "未通过" : record.status === "unknown" ? "证据不足" : "检测失败")
             : (TITLES[record.status] || "证据不足");
 
@@ -785,7 +785,10 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
                 <span className={`fingerprint-status ${record.status}`}>{statusText}</span>
               </div>
               {record.precheck && <div className="fingerprint-precheck-summary">
-                <p className="fingerprint-transcript-note">{precheckTitle(record.precheck.status)} · {record.precheck.fallbackExecuted ? `已进入${methodName(record.precheck.fallbackMethod)}兜底，以下方兜底结论为准` : record.precheck.status === "match" ? record.precheck.sequenceAdvanced ? "已跳过兜底，轮换进度已推进" : "已跳过兜底，轮换进度保留" : "本轮前置异常，未执行兜底"}</p>
+                <p className="fingerprint-transcript-note">{precheckTitle(record.precheck.status)} · {record.precheck.degradedByFallback
+                  ? `前置未确认不降智，${methodName(record.precheck.fallbackMethod)}兜底${record.precheck.fallbackStatus === "error" ? "失败" : "证据不足"}，本轮按降智处理`
+                  : record.precheck.fallbackExecuted ? `已进入${methodName(record.precheck.fallbackMethod)}兜底，以下方兜底结论为准` : record.precheck.status === "match" ? record.precheck.sequenceAdvanced ? "已跳过兜底，轮换进度已推进" : "已跳过兜底，轮换进度保留" : "本轮前置异常，未执行兜底"}</p>
+                {record.precheck.fallbackFailure && <p className="proxy-quality-error">兜底：{record.precheck.fallbackFailure.message}</p>}
                 {record.precheck.models && <AttributionModels models={record.precheck.models} parentStatus={record.precheck.status} method="regex" />}
               </div>}
               <AttributionModels models={record.models || []} parentStatus={record.status} method={record.method || "fingerprint"} />

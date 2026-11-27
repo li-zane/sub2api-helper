@@ -101,6 +101,13 @@ export function aggregateFingerprint(results) {
   return results.some(item => item.status === "mismatch") ? "mismatch" : "match";
 }
 
+export function fingerprintRoundConclusion(status, precheck) {
+  if (!precheck?.fallbackExecuted) return { status, ...(precheck ? { precheck } : {}) };
+  const degradedByFallback = precheck.status !== "match" && ["unknown", "error"].includes(status);
+  return { status: degradedByFallback ? "mismatch" : status,
+    precheck: { ...precheck, fallbackStatus: status, degradedByFallback } };
+}
+
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
   constructor({ onVerdict = () => {}, onCompleted = async () => {}, dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolNumberJobs, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
@@ -470,7 +477,8 @@ export class ModelFingerprintService {
         }
         const status = aggregateFingerprint(results);
         precheck = { status, fallbackMethod: step.method, fallbackExecuted: false, skipFallbackOnPass: config.precheck.skipFallbackOnPass, sequenceAdvanced: false };
-        if (status === 'mismatch' || status === 'match' && !config.precheck.skipFallbackOnPass) {
+        const accountUnavailable = results.some(result => ["AUTH", "QUOTA", "BANNED", "CREDENTIALS", "ACCOUNT_PAUSED", "ACCOUNT_MISSING"].includes(result.failure?.code));
+        if (!accountUnavailable && (status !== 'match' || !config.precheck.skipFallbackOnPass)) {
           precheck.models = results.splice(0);
           precheck.fallbackExecuted = true;
           method = step.method; entry.activeMethod = method; this.onChange();
@@ -478,8 +486,19 @@ export class ModelFingerprintService {
       }
       if (!config.precheck.enabled || precheck.fallbackExecuted) {
         // The reference bank is loaded only when this round actually needs it.
-        const detector = method === 'fingerprint' ? await this.detector(controller.signal) : null;
+        let detector = null;
+        if (method === 'fingerprint') {
+          try { detector = await this.detector(controller.signal); }
+          catch (error) {
+            controller.signal.throwIfAborted();
+            if (!precheck?.fallbackExecuted || precheck.status === "match") throw error;
+            // Keep a failed fallback setup as evidence for the combined rule.
+            // Do not fabricate model requests or advance the sequence.
+            precheck.fallbackFailure = fingerprintFailure(error);
+          }
+        }
         sampling: for (const account of accounts) {
+          if (precheck?.fallbackFailure) break;
           for (const model of config.models) {
             controller.signal.throwIfAborted();
             if (this.isBlocked(email, { manual })) return this.snapshot(email, planType);
@@ -502,7 +521,8 @@ export class ModelFingerprintService {
         // precheck pass that skips fallback. Failed requests keep their slot.
         const sequenceAdvanced = results.length > 0 && results.every(r => r.samplingComplete || method === 'candy' && r.responseComplete);
         if (precheck) precheck.sequenceAdvanced = sequenceAdvanced;
-        this.recordResult(entry, { signature, backend, method, ...(precheck ? { precheck } : {}), sequencePosition:method === 'regex' && !sequenceAdvanced ? null : step.position, usage:aggregateRequestUsage(roundModels({precheck,models:results})), identities, routingIdentities, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, status: aggregateFingerprint(results), models: results });
+        const conclusion = fingerprintRoundConclusion(precheck?.fallbackFailure ? "error" : aggregateFingerprint(results), precheck);
+        this.recordResult(entry, { signature, backend, method, ...conclusion, sequencePosition:method === 'regex' && !sequenceAdvanced ? null : step.position, usage:aggregateRequestUsage(roundModels({precheck,models:results})), identities, routingIdentities, checkedAt: new Date(this.now()).toISOString(), durationMs: this.now() - startedAt, source, models: results });
         if (overloadResumeId && entry.overloadResume?.id === overloadResumeId) entry.overloadResume.recheckPending = false;
         this.onVerdict(email, entry.result.checkedAt, entry.result.status, entry.result);
         if (importRunId) entry.lastImportRunId = importRunId;
