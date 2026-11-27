@@ -70,6 +70,7 @@ try {
     accountProxyCooldownMinutes: 60,
     overloadAutoCooldown: { windowMinutes: 15, threshold: 10, cooldownMinutes: 60 },
     webSessionMonitor: { enabled: false, intervalMinutes: 15, autoRelogin: true, retryMinutes: 60 },
+    proxyRotation: { enabled: false, intervalMinutes: 60, relogin: false, rotateMatched: true, rotateMismatched: true },
     monitoring: DEFAULT_MONITORING,
     autoActions: {
       self_serve_business_prolite: ["rotate-logout-reauthorize-upload"],
