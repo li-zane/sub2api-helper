@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { chmodSync } from "node:fs";
+import { ProxyActivity } from "./proxy-activity.mjs";
 import {
   normalizeAccountCost,
   accountProfitCents,
@@ -17,7 +18,7 @@ const iso = (time) =>
 const failure = (status, msg) => Object.assign(Error(msg), { status });
 const QUALITY_PAGE_SIZE = 50;
 const QUALITY_STATUSES = new Set(["match", "mismatch", "unknown", "error"]);
-const QUALITY_METHODS = new Set(["fingerprint", "candy"]);
+const QUALITY_METHODS = new Set(["fingerprint", "candy", "regex"]);
 const QUALITY_SOURCES = new Set(["manual", "scheduled", "import"]);
 
 export class OperationsBook {
@@ -31,6 +32,7 @@ export class OperationsBook {
     const db = (this.db = new DatabaseSync(this.file));
     chmodSync(this.file, 0o600);
     db.exec("PRAGMA busy_timeout=3000; PRAGMA journal_mode=WAL;");
+    this.proxyActivity = new ProxyActivity(db);
     db.exec(`
       CREATE TABLE IF NOT EXISTS proxy_rules(pool TEXT NOT NULL,id INTEGER NOT NULL,blocked INTEGER NOT NULL,PRIMARY KEY(pool,id));
       CREATE TABLE IF NOT EXISTS ips(pool TEXT NOT NULL,ip TEXT NOT NULL,added TEXT,cost INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(pool,ip));

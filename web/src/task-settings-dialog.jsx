@@ -11,6 +11,7 @@ import { trapModalTab } from "./accessible-dialog.jsx";
 import { HelpTip } from "./help-tip.jsx";
 import { CustomSelect } from "./custom-select.jsx";
 import { CodexCliUaSettings } from "./codex-cli-ua-settings.jsx";
+import { DEFAULT_PROXY_ROTATION, normalizeProxyRotation } from "../../shared/proxy-rotation-settings.mjs";
 
 const DEFAULT_TASK_AUTO_ACTION_OPTIONS = [
   { value: "authorize-codex", label: "Codex 授权" },
@@ -40,6 +41,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
   const [resetAfterCooldown, setResetAfterCooldown] = useState(settings.overloadAutoCooldown?.reauthorizeAfterCooldown === true);
   const [webMonitor, setWebMonitor] = useState(() => ({ enabled: settings.webSessionMonitor?.enabled === true, autoRelogin: settings.webSessionMonitor?.autoRelogin !== false, intervalMinutes: String(settings.webSessionMonitor?.intervalMinutes || 15), retryMinutes: String(settings.webSessionMonitor?.retryMinutes || 60) }));
   const [accountProxyMode, setAccountProxyMode] = useState(() => ["sub2api", "plan"].includes(settings.accountProxyMode) ? settings.accountProxyMode : "global");
+  const [rotation, setRotation] = useState(() => ({ ...DEFAULT_PROXY_ROTATION, ...settings.proxyRotation }));
   const [codexAuthMode, setCodexAuthMode] = useState(() => settings.codexAuthMode || "local");
   const [autoRows, setAutoRows] = useState(() => taskAutoActionRows(settings.autoActions));
   const [saving, setSaving] = useState(false);
@@ -76,6 +78,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
     setWebMonitor({ enabled: false, autoRelogin: true, intervalMinutes: "15", retryMinutes: "60" });
     setMonitoring(Object.fromEntries(TASK_SETTINGS_MONITOR_FIELDS.map(field => [field.key, String(field.default)])));
     setAccountProxyMode("global");
+    setRotation({ ...DEFAULT_PROXY_ROTATION });
     setCodexAuthMode("local");
     setError("");
   }
@@ -134,8 +137,9 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
       setError("WebSession 检测间隔需为 1–1440 分钟，重登重试间隔需为 15–1440 分钟");
       return;
     }
-    let monitoringValues;
+    let monitoringValues, proxyRotation;
     try {
+      proxyRotation = normalizeProxyRotation({ ...rotation, intervalMinutes: Number(rotation.intervalMinutes) });
       if (Object.values(monitoring).some(value => !String(value).trim())) throw new Error("请填写全部自动监控参数");
       const normalized = normalizeMonitoring(
         Object.fromEntries(Object.entries(monitoring).map(([key, value]) => [key, Number(value)])),
@@ -147,7 +151,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
     setSaving(true);
     setError("");
     try {
-      await onSave(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, monitoring: monitoringValues }, initialSettings.current));
+      await onSave(taskSettingsPatch({ maxActiveJobs: value, loginTimeoutMinutes, smsTimeoutMinutes, displayTimeZone: validTimeZone, poolPriceMultiplier, autoActions, accountProxyMode, codexAuthMode, overloadAutoCooldown, webSessionMonitor, proxyRotation, monitoring: monitoringValues }, initialSettings.current));
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -283,6 +287,22 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
             {codexAuthMode === "cli" && <p className="cli-auth-note">每次授权使用独立临时环境，凭据导出后清理；授权不再读写网关 UA。</p>}
             {request && <CodexCliUaSettings request={request} disabled={saving} onSyncBusy={setUaSyncing} />}
           </div>
+        </section>
+        <section className="task-auto-settings" aria-labelledby="proxy-rotation-title">
+          <div className="section-title-row">
+            <RefreshCw size={15} className="task-section-icon" aria-hidden="true" />
+            <h3 id="proxy-rotation-title">账号 IP 定时轮换</h3>
+          </div>
+          <div className="task-checkbox-group">
+            <label className="task-auto-action-option"><input type="checkbox" checked={rotation.enabled} disabled={saving} onChange={e => setRotation(v => ({ ...v, enabled: e.target.checked }))} /><span>启用账号 IP 定时轮换</span></label>
+            <label className="task-auto-action-option"><input type="checkbox" checked={rotation.relogin} disabled={saving || !rotation.enabled} onChange={e => setRotation(v => ({ ...v, relogin: e.target.checked }))} /><span>换绑后重新登录并授权</span></label>
+            <label className="task-auto-action-option"><input type="checkbox" checked={rotation.rotateMismatched} disabled={saving || !rotation.enabled} onChange={e => setRotation(v => ({ ...v, rotateMismatched: e.target.checked }))} /><span>轮换降智账号</span></label>
+            <label className="task-auto-action-option"><input type="checkbox" checked={rotation.rotateMatched} disabled={saving || !rotation.enabled} onChange={e => setRotation(v => ({ ...v, rotateMatched: e.target.checked }))} /><span>轮换未降智账号</span></label>
+          </div>
+          <label className="settings-field" htmlFor="proxy-rotation-interval"><span>IP 轮换间隔（分钟）</span><input id="proxy-rotation-interval" type="number" min="1" max="43200" step="1" value={rotation.intervalMinutes} disabled={saving || !rotation.enabled} onChange={e => setRotation(v => ({ ...v, intervalMinutes: e.target.value }))} /></label>
+          <p className="task-auto-empty">默认关闭。需使用 Sub2API 均衡分配或按 PlanType 授权模式。未勾选重登时，仅更新本地绑定与号池后续请求出口，保留当前登录凭据。</p>
+          <p className="task-auto-empty">优先选择未绑定 IP，再按历史绑定账号数由少到多、上次使用时间由早到晚选择；全部已绑定时从历史数量开始比较。同一出口的多个协议节点合并计算，排除当前出口与停止分配的 IP。</p>
+          <p className="task-auto-empty">开启或修改规则后等待一个完整间隔。仅使用当前有效的降智检测结果；尚未检测或结果过期时跳过。忙碌、冷却、暂停巡检的账号延后处理，关闭页面后仍由服务端执行。</p>
         </section>
         <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">
           <div className="section-title-row">

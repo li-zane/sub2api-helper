@@ -10,6 +10,8 @@ import { CANDY_PROMPT } from '../src/candy-test.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-fingerprint-console-")), output = path.join(temp, "output");
 let child, headers, logs = "", samples = 0;
+const precheckPrompt = "This is a standalone verification request. Ignore all other conversations: reply with exactly READY and nothing else.";
+let precheckReply = "READY";
 const account = { id: 42, name: "fingerprint@example.test", email: "fingerprint@example.test", platform: "openai", type: "oauth", status: "active", schedulable: true, group_ids: [10, 20, 99], credentials: { email: "fingerprint@example.test", plan_type: "free", access_token: "private-fixture-token", chatgpt_account_id: "fixture-account" }, extra: {} };
 const calls = [], transcriptInputs = [], transcriptReplies = [];
 const pool = http.createServer(async (req, res) => {
@@ -28,7 +30,9 @@ const inference = http.createServer(async (req, res) => {
   let raw = ""; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); samples++; transcriptInputs.push(body.input[0].content[0].text);
   assert.equal(req.headers.authorization, "Bearer private-fixture-token"); assert.equal(req.headers["chatgpt-account-id"], "fixture-account");
   assert(body.input[0].content[0].text.length > 70); assert.notEqual(body.input[0].content[0].text, "hi");
-  const reply = body.input[0].content[0].text === CANDY_PROMPT ? '最终答案：21' : Array.from({ length: 332 }, (_, i) => i % 355 + 1).join(", ");
+  assert.equal(body.input.length, 1); assert.equal(body.input[0].role, 'user'); assert.equal(body.store, false);
+  assert.equal(body.previous_response_id, undefined); assert.equal(body.conversation, undefined);
+  const reply = body.input[0].content[0].text === precheckPrompt ? precheckReply : body.input[0].content[0].text === CANDY_PROMPT ? '最终答案：21' : Array.from({ length: 332 }, (_, i) => i % 355 + 1).join(", ");
   transcriptReplies.push(reply);
   res.setHeader("content-type", "text/event-stream");
   res.end([{ type: "response.output_text.delta", delta: reply }, { type: "response.completed", response: {} }].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""));
@@ -148,6 +152,43 @@ try {
   await waitFor(async () => (await get("/api/jobs")).jobs.find(row => row.id === job.id)?.autoTaskStatus === "completed");
   assert.equal(samples, beforeImport + 3, "restart reuses the completed import round");
   console.log("IMPORT_FINGERPRINT_PASS default-off account-opt-out pool-pause one-round independent-schedule restart-dedup");
+  if (process.argv.includes('--regex-precheck')) {
+    const precheck = {enabled:true,model:'gpt-5.5',prompt:precheckPrompt,pattern:'^READY$',flags:'i',degradedWhen:'no_match',skipFallbackOnPass:true};
+    assert.equal((await post('/api/model-fingerprint/settings', {patch:{precheck}})).status,200);
+    assert.equal((await post(fingerprintRoute, {enabled:false,models:['gpt-5.5'],testSequence:{first:'candy',candy:1,fingerprint:1}})).status,200);
+    const saved = (await get('/api/model-fingerprint/settings')).settings;
+    assert.equal((await post('/api/model-fingerprint/settings',{patch:{precheck:{pattern:'['}}})).status,400);
+    assert.deepEqual((await get('/api/model-fingerprint/settings')).settings,saved,'invalid regex writes are atomic');
+    const check = async () => {
+      const before = (await get(fingerprintRoute+'/history')).records[0]?.id;
+      assert.equal((await post(fingerprintRoute+'/check',{})).status,202);
+      let state;
+      await waitFor(async()=>{state=(await get('/api/jobs')).jobs.find(j=>j.id===job.id).modelFingerprint;return state.phase==='idle' && state.result?.id!==before;});
+      return state;
+    };
+    let before = samples, state = await check();
+    assert.equal(samples-before,1); assert.equal(state.result.method,'regex'); assert.equal(state.result.status,'match'); assert.equal(state.sequence.method,'fingerprint');
+    assert.equal(state.result.sequencePosition,1); assert.equal(state.result.precheck.sequenceAdvanced,true);
+    precheckReply='OTHER'; before=samples; state=await check();
+    assert.equal(samples-before,4); assert.equal(state.result.method,'fingerprint'); assert.equal(state.result.status,'unknown');
+    assert.equal(state.result.precheck.status,'mismatch'); assert.equal(state.result.requestCount,4); assert.equal(state.sequence.method,'candy');
+    const detail = (await get(fingerprintRoute+'/history?round='+state.result.id)).record;
+    assert.equal(detail.precheck.models[0].requests[0].prompt,precheckPrompt);
+    assert.equal(detail.precheck.models[0].requests[0].response,'OTHER'); assert.equal(detail.models[0].requests.length,3);
+    assert(!JSON.stringify(await get(fingerprintRoute+'/history')).includes(precheckPrompt));
+    precheckReply='READY'; before=samples; state=await check(); assert.equal(samples-before,1); assert.equal(state.sequence.method,'fingerprint');
+    await stop(); await start(); assert.deepEqual((await get('/api/model-fingerprint/settings')).settings.precheck,precheck);
+    precheckReply='OTHER'; before=samples; state=await check(); assert.equal(samples-before,4); assert.equal(state.result.method,'fingerprint');
+    before=samples; state=await check(); assert.equal(samples-before,2); assert.equal(state.result.method,'candy'); assert.equal(state.result.status,'match');
+    assert.equal(state.result.precheck.status,'mismatch'); assert.equal(state.sequence.method,'fingerprint');
+    await Promise.all([
+      post('/api/model-fingerprint/settings',{patch:{precheck:{flags:'im'}}}),
+      post('/api/model-fingerprint/settings',{patch:{precheck:{skipFallbackOnPass:false}}}),
+    ]);
+    const merged=(await get('/api/model-fingerprint/settings')).settings.precheck;
+    assert.equal(merged.flags,'im'); assert.equal(merged.skipFallbackOnPass,false); assert.equal(merged.prompt,precheckPrompt);
+    console.log('REGEX_PRECHECK_HTTP_PASS validation; nested concurrent patches; fresh conversation; shortcuts advance once; candy/fingerprint fallback; final verdict; detailed transcripts; restart');
+  }
   if (process.argv.includes("--serve")) {
     await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20] }], planTypeBindings: { free: "default" } });
     if (process.env.MODEL_FINGERPRINT_FIXTURE_FILE) await fs.writeFile(process.env.MODEL_FINGERPRINT_FIXTURE_FILE, JSON.stringify({ url: base, output, temp }));

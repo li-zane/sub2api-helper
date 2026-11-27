@@ -58,6 +58,6 @@ Environment=IPROYAL_CREDENTIALS_FILE=%d/iproyal.json
 | --- | --- | --- |
 | 库存归属 | `GET https://apid.iproyal.com/v1/orders/proxies?product_id=14&page=1&per_page=20&sort_order=desc` | `data[].ip`、`data[].order_id`、分页元数据 |
 | 订单余额 | `GET https://apid.iproyal.com/v1/orders/{order_id}/bandwidth` | `gb_limit`、`gb_used`、`gb_balance` |
-| 订单价格 | `GET https://apid.iproyal.com/v1/orders/{order_id}` | `id`、`amount_with_vat`/`amount`、`order_product.quantity`、`order_product.product_plan.duration` |
+| 订单详情 | `GET https://apid.iproyal.com/v1/orders/{order_id}` | 实付价格、购买数量和周期，以及实际到期时间 `order_product.expire_date`。卡片以北京时间显示到期日期和剩余有效期。 |
 
 这些路径来自 Dashboard。服务端将请求固定到该域，并禁止重定向。上游更改路径或响应格式时，面板会报告巡检失败。

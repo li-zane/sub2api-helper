@@ -18,6 +18,26 @@ try {
     ns = "pool";
   assert.equal(beijingDay(before), "2026-01-02");
   assert.equal(beijingDay(added), "2026-01-03");
+  const pool = "activity-fixture";
+  const row = { id: 9, email: acct, ip: "192.0.2.10", lastUsedAt: before };
+  const t = Date.parse(added);
+  b.proxyActivity.observe(pool, 1, [row, { ...row, id: 10 }], t);
+  assert.deepEqual(b.proxyActivity.byIp(pool).get(row.ip), { historicalAccountCount: 1, lastRequestAt: null });
+  const used = new Date(t + 1000).toISOString();
+  b.proxyActivity.observe(pool, 2, [{ ...row, lastUsedAt: used }, { ...row, email: "another@example.test", id: 11 }], t + 2000);
+  b.proxyActivity.noteBinding(pool, row.ip, acct.toUpperCase());
+  assert.deepEqual(b.proxyActivity.byIp(pool).get(row.ip), { historicalAccountCount: 2, lastRequestAt: used });
+  const other = { ...row, ip: "192.0.2.20", lastUsedAt: used };
+  b.proxyActivity.observe(pool, 3, [other], t + 3000);
+  b.proxyActivity.observe(pool, 2, [row], t + 4000);
+  assert.deepEqual(b.proxyActivity.byIp(pool).get(other.ip), { historicalAccountCount: 1, lastRequestAt: null });
+  b.proxyActivity.observe(pool, 4, [{ ...other, lastUsedAt: 'invalid' }], t + 5000);
+  assert.equal(b.proxyActivity.byIp(pool).get(other.ip).lastRequestAt, null);
+  b.proxyActivity.observe(pool, 5, [], t + 6000);
+  const backfill = { ...row, ip: '192.0.2.30', lastUsedAt: used, accountUpdatedAt: added, proxyUpdatedAt: before };
+  b.proxyActivity.observe(pool, 6, [backfill], t + 7000);
+  assert.equal(b.proxyActivity.byIp(pool).get(backfill.ip).lastRequestAt, used);
+  assert.equal(b.proxyActivity.byIp("other-backend").size, 0);
   b.savePolicy(ns, 12, "test-ip", added, {
     allocationPaused: true,
     ipCostCny: "3.81",
@@ -40,6 +60,7 @@ try {
   b.close();
   b = new OperationsBook(file, () => now);
   b.open();
+  assert.deepEqual(b.proxyActivity.byIp(pool).get(row.ip), { historicalAccountCount: 2, lastRequestAt: used });
   assert(b.paused(acct));
   assert(b.isBlocked(ns, 12));
   assert.equal(b.ledger().ipCount, 1);
@@ -155,6 +176,8 @@ try {
   assert.equal(new Set([...recent.records, ...earlier.records].map(row => row.id)).size, 60);
   assert.deepEqual(recent.records.slice(0, 2).map(row => row.status), ["error", "mismatch"]);
   assert.throws(() => b.qualityPage(acct, "wrong"), /分页参数无效/);
+  b.recordQuality("regex-only@example.test", repeatedAt, "match", {id:"regex-pass",method:"regex",source:"manual"});
+  assert.equal(b.qualityPage("regex-only@example.test").records[0].method, "regex");
   let finish, captured;
   const gate = new Promise((r) => (finish = r)),
     target = { pool: ns, id: "7" };

@@ -102,7 +102,20 @@ export function IproyalPatrol({ request, onUpdated }) {
   </section>;
 }
 
-export function IproyalBalance({ record }) {
+const expiryDate = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'medium', timeStyle: 'short' });
+
+function orderValidity(expiresAt, now) {
+  const end = Date.parse(expiresAt);
+  if (!Number.isFinite(end)) return '有效期待查';
+  if (end <= now) return '订单已到期';
+  const minutes = Math.floor((end - now) / 60000);
+  const hours = Math.floor(minutes / 60);
+  if (hours >= 24) return `有效期剩余 ${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
+  if (hours) return `有效期剩余 ${hours} 小时 ${minutes % 60} 分钟`;
+  return minutes ? `有效期剩余 ${minutes} 分钟` : '有效期不足 1 分钟';
+}
+
+export function IproyalBalance({ record, now }) {
   if (!record) return null;
   if (record.status !== 'matched') return <small>{record.status === 'ambiguous' ? '订单归属冲突' : '未匹配当前 IPRoyal 库存'}</small>;
   const time = record.at ? new Date(record.at).toLocaleString() : '';
@@ -111,5 +124,9 @@ export function IproyalBalance({ record }) {
     IPRoyal · {text}{record.stale ? '（待刷新）' : ''}
     {Number.isFinite(record.thresholdGb) && ` · 阈值 ${record.thresholdGb} GB（${record.ipCount} IP）`}
     {record.autoAllocationPaused && ' · 自动暂停分配'}
-    {record.cost && ` · $${record.cost.usdPerIp.toFixed(2)}/IP · ${record.cost.days} 天${record.costStale ? '（价格待刷新）' : ''}`}</small>;
+    {record.cost && ` · $${record.cost.usdPerIp.toFixed(2)}/IP · ${record.cost.days} 天${record.costStale ? '（价格待刷新）' : ''}`}
+    <span className="proxy-order-validity">{orderValidity(record.expiresAt, now)}
+      {Number.isFinite(Date.parse(record.expiresAt)) && <time dateTime={record.expiresAt}> · {expiryDate.format(new Date(record.expiresAt))} 到期（北京时间）</time>}
+      {record.expiryStale && record.expiresAt && ' · 待刷新'}
+    </span></small>;
 }

@@ -12,7 +12,9 @@ async page => {
     { id: 9, name: 'Solo node', protocol: 'https', host: 'solo.test', port: 8443, ipAddress: '203.0.113.9', username: '', hasPassword: false, accountCount: 0 },
   ];
   nodes.forEach(node => { node.status = 'active'; node.allocationPaused = false; node.ipCostCny = 3.8; });
-  nodes[0].iproyal = { status: 'matched', order: '987', gb_balance: 0, at: Date.now() };
+  nodes[0].iproyal = { status: 'matched', order: '987', gb_balance: 0, at: Date.now(),
+    expiresAt: new Date(Date.now() + 49 * 3600000).toISOString() };
+  for (const node of nodes.slice(0, 2)) Object.assign(node, { historicalAccountCount: 7, lastRequestAt: '2026-11-21T02:15:00.000Z' });
   let patrolEnabled = false, rejectPolicy = false;
   const patrolSettings = { enabled: false, intervalMinutes: 5, autoPause: false, thresholdGbPerIp: 10, syncCost: false, usdToCny: null };
   const settingsWrites = [];
@@ -92,6 +94,9 @@ async page => {
     await section.getByRole('button', { name: '立即巡检' }).click();
     await toggle.uncheck();
     await parent.getByText(/剩余 0\.00 GB/).waitFor();
+    await parent.getByText(/有效期剩余 2 天/).waitFor();
+    await parent.getByText('历史绑定 7 个账号', { exact: true }).waitFor();
+    check(await parent.locator('time[datetime="2026-11-21T02:15:00.000Z"]').count() === 1, 'shared exit should display one request timestamp');
     await page.screenshot({ path: evidence + '/iproyal-patrol.png' });
   });
   await test('patrol settings save interval, order threshold and exchange rate while preserving dirty draft', async () => {

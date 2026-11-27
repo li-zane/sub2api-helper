@@ -12,9 +12,9 @@ function settingsPatch(next, previous, nested) {
 }
 
 export function taskSettingsPatch(next, previous) {
-  return settingsPatch(next, previous, ["monitoring", "webSessionMonitor", "overloadAutoCooldown"]);
+  return settingsPatch(next, previous, ["monitoring", "webSessionMonitor", "overloadAutoCooldown", "proxyRotation"]);
 }
 
 export function fingerprintSettingsPatch(next, previous) {
-  return settingsPatch(next, previous, ["matchedConcurrency", "matchedPriority", "testSequence"]);
+  return settingsPatch(next, previous, ["matchedConcurrency", "matchedPriority", "testSequence", "precheck"]);
 }

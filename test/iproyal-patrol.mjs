@@ -30,7 +30,8 @@ try {
     if (!u.pathname.endsWith('/bandwidth')) {
       const order = Number(u.pathname.split('/').at(-1));
       return Response.json({ id: order, amount: 10, amount_with_vat: 12.15,
-        order_product: { quantity: order === 901 ? 2 : 1, product_plan: { duration: 30, price: 1.8 } } });
+        order_product: { quantity: order === 901 ? 2 : 1, expire_date: order === 901 ? '2026-12-22T08:27:22.000000Z' : null,
+          product_plan: { duration: 30, price: 1.8 } } });
     }
     const order = u.pathname.split('/').at(-2);
     calls.push(order);
@@ -64,6 +65,9 @@ try {
   assert.deepEqual(nodes.map(n => n.name), ['901-2', '901-1', '902', 'keep']);
   assert.equal(patrol.lookup('pool', rows[2].ip).gb_balance, 0);
   assert.equal(patrol.lookup('pool', rows[0].ip).cost.usdPerIp, 6.075);
+  assert.equal(patrol.lookup('pool', rows[0].ip).expiresAt, '2026-12-22T08:27:22.000Z');
+  assert.equal(patrol.lookup('pool', rows[1].ip).expiresAt, '2026-12-22T08:27:22.000Z');
+  assert.equal(patrol.lookup('pool', rows[2].ip).expiresAt, undefined);
   assert.equal(patrol.lookup('other', rows[2].ip), null);
   assert.equal(patrol.lookup('pool', nodes[3].host).status, 'unmatched');
   assert(!/never-cache-this|fixture-only|fixture=x/.test(await fs.readFile(path.join(root, 'iproyal-cache.json'), 'utf8')));

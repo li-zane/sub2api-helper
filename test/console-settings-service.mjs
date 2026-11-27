@@ -50,6 +50,8 @@ try {
   await testSettings.load();
   assert.equal(testSettings.current.maxActiveJobs, 7);
   assert.equal(Object.hasOwn(testSettings.publicSettings(false), "proxyUrl"), false);
+  assert.equal(testSettings.publicSettings().proxyRotation.enabled, false);
+  await assert.rejects(testSettings.save({ proxyRotation: { intervalMinutes: 0 } }), { status: 400 });
   await assert.rejects(testSettings.save({ codexAuthMode: "sub2api" }), { status: 409 });
   await assert.rejects(testSettings.save({ monitoring: { overloadConcurrency: 0 } }), { status: 400 });
 
@@ -99,6 +101,11 @@ try {
   assert.equal(restarted.current.monitoringSettings.overloadIntervalSeconds, 60);
   assert.equal(restarted.current.monitoringSettings.usageTotalsConcurrency, 3);
   assert.equal(restarted.publicProxySettings().allowDirectFallback, true);
+  await restarted.save({ proxyRotation: { enabled: true, intervalMinutes: 45, relogin: false } });
+  await restarted.save({ proxyRotation: { rotateMatched: false } });
+  assert.deepEqual(restarted.publicSettings().proxyRotation, { enabled: true, intervalMinutes: 45, relogin: false, rotateMatched: false, rotateMismatched: true });
+  const reloaded = create(); await reloaded.load();
+  assert.deepEqual(reloaded.publicSettings().proxyRotation, restarted.publicSettings().proxyRotation);
   console.log("CONSOLE_SETTINGS_SERVICE_PASS serialized patches; proxy ordering; private projection; write and linked-save rollback; retry; shutdown drain; legacy reload");
 } finally {
   await fs.rm(root, { recursive: true, force: true });

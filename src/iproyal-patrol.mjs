@@ -66,16 +66,21 @@ export async function dashboardSource(file, fetchImpl = fetch) {
       if (!fields.every(k => Number.isFinite(v?.[k]) && v[k] >= 0)) throw fault(502, 'IPRoyal 流量响应缺少有效数值');
       return Object.fromEntries(fields.map(k => [k, v[k]]));
     },
-    async orderCost(order) {
+    async orderDetails(order) {
       if (!/^[1-9]\d*$/.test(order)) throw fault(400, '订单号无效');
       const v = await get(order);
+      if (String(v?.id) !== order) throw fault(502, 'IPRoyal 订单详情编号不匹配');
       const quantity = v?.order_product?.quantity;
       const days = v?.order_product?.product_plan?.duration;
       const amount = v?.amount_with_vat ?? v?.amount;
-      if (String(v?.id) !== order || !Number.isInteger(quantity) || quantity < 1 ||
-          typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0 ||
-          !Number.isInteger(days) || days < 1) throw fault(502, 'IPRoyal 订单价格或周期格式无效');
-      return { amountUsd: amount, quantity, days, usdPerIp: amount / quantity };
+      const validCost = Number.isInteger(quantity) && quantity > 0 && Number.isFinite(amount) &&
+        amount >= 0 && Number.isInteger(days) && days > 0;
+      const rawExpiry = v.order_product?.expire_date;
+      const end = typeof rawExpiry === 'string' && /(?:Z|[+-]\d\d:\d\d)$/i.test(rawExpiry) ? Date.parse(rawExpiry) : NaN;
+      return {
+        cost: validCost ? { amountUsd: amount, quantity, days, usdPerIp: amount / quantity } : null,
+        expiresAt: Number.isFinite(end) ? new Date(end).toISOString() : null,
+      };
     },
   };
 }
@@ -171,9 +176,19 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
         state.orders[order] = { ...state.orders[order], stale: true };
         recordFailure(e);
       }
-      if (api.orderCost) {
-        try { state.orders[order] = { ...state.orders[order], cost: await api.orderCost(order), costAt: now(), costStale: false }; }
-        catch (e) { state.orders[order].costStale = true; recordFailure(e); }
+      if (api.orderDetails) {
+        const usage = state.orders[order];
+        try {
+          const { cost, expiresAt } = await api.orderDetails(order);
+          usage.costStale = !cost;
+          if (cost) Object.assign(usage, { cost, costAt: now() });
+          else recordFailure(fault(502, 'IPRoyal 订单价格或周期待刷新'));
+          usage.expiryStale = !expiresAt;
+          if (expiresAt) Object.assign(usage, { expiresAt, expiryObservedAt: now() });
+        } catch (e) {
+          usage.costStale = usage.expiryStale = true;
+          recordFailure(e);
+        }
       }
     }
     if (!valid(key, revision)) return;
@@ -247,6 +262,7 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
       const usage = cache.orders[link.order];
       const thresholdGb = settings.thresholdGbPerIp * link.ipCount;
       return { status: 'matched', order: link.order, ...usage, ipCount: link.ipCount, thresholdGb,
+        expiryStale: !usage?.expiryObservedAt || usage.expiryStale || now() - usage.expiryObservedAt > 2 * settings.intervalMinutes * 60000,
         autoAllocationPaused: settings.autoPause && Number.isFinite(thresholdGb) && Number.isFinite(usage?.gb_balance) && usage.gb_balance <= thresholdGb,
         costSyncEnabled: settings.syncCost,
         stale: !usage?.at || usage.stale || now() - usage.at > 2 * settings.intervalMinutes * 60000 };

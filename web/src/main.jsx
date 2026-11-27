@@ -2458,10 +2458,8 @@ function App() {
                   {(accountProxyDistribution.length > 0 || accountProxyDirectCount > 0) && (
                     <div className="proxy-distribution-container" aria-label="代理 IP 账号分配">
                       <div className="proxy-distribution-grid">
-                        {proxyDistributionByIp(accountProxyDistribution).map((proxy) => (
-                          <ProxyManagementCard request={proxyDialogRequest} onPolicySaved={acceptProxyPolicy} key={proxy.ipAddress} group={proxy} changes={proxyStatusChanges}
-                            editDisabled={proxySettingsSaving} onEdit={setEditingProxies} onToggle={setManagedProxyStatus} />
-                        ))}
+                        <ProxyManagementCards proxies={accountProxyDistribution} request={proxyDialogRequest} onPolicySaved={acceptProxyPolicy}
+                          changes={proxyStatusChanges} editDisabled={proxySettingsSaving} onEdit={setEditingProxies} onToggle={setManagedProxyStatus} />
                         <div className={`proxy-segment-bar unassigned ${accountProxyDirectCount > 0 ? "has-unassigned" : ""}`}>
                           <div className="proxy-segment-col segment-name" title="直连">
                             <span className="segment-name-label">直连</span>
@@ -6573,7 +6571,16 @@ function proxyDistributionByIp(proxies) {
   return [...groups.values()];
 }
 
-function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, request, onPolicySaved }) {
+function ProxyManagementCards({ proxies, ...props }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(timer);
+  }, []);
+  return proxyDistributionByIp(proxies).map(group => <ProxyManagementCard key={group.ipAddress} group={group} now={now} {...props} />);
+}
+
+function ProxyManagementCard({ group, now, changes, editDisabled, onEdit, onToggle, request, onPolicySaved }) {
   const { ipAddress, nodes, names, accountCount, activeNodeCount, inactiveNodeCount } = group;
   const allActive = activeNodeCount === nodes.length;
   const allInactive = inactiveNodeCount === nodes.length;
@@ -6590,6 +6597,13 @@ function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, r
         <span className={`segment-count-pill ${accountCount > 0 ? "has-count" : "zero-count"}`}>{accountCount} 个 OAuth 账号</span>
       </div>
     </div>
+    <div className="proxy-management-history">
+      <span title="从开始记录起按账号去重，相同出口的多个节点合并统计">历史绑定 {nodes[0].historicalAccountCount ?? '—'} 个账号</span>
+      <span>最近使用 {nodes[0].lastRequestAt
+        ? <time dateTime={nodes[0].lastRequestAt}>{formatDateTime(nodes[0].lastRequestAt)}</time>
+        : '暂无请求记录'}</span>
+      <IproyalBalance record={nodes[0].iproyal} now={now} />
+    </div>
     <ul className="proxy-management-nodes">
       {nodes.map(node => {
         const enabled = node.status === "active";
@@ -6604,7 +6618,6 @@ function ProxyManagementCard({ group, changes, editDisabled, onEdit, onToggle, r
           <div className="proxy-management-node-row">
             <div className="proxy-management-node-info" title={description}>
               <span className="proxy-management-node-name">{node.name}</span>
-              <IproyalBalance record={node.iproyal} />
               {protocol && <span className="proxy-management-protocol">{protocol}</span>}
               {showEndpoint && <span className="proxy-management-endpoint">{[endpoint, `#${node.id}`].filter(Boolean).join(" · ")}</span>}
             </div>

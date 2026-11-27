@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-account-proxy-mode-"));
@@ -33,6 +35,7 @@ const protocolWrapper = path.join(temp, "protocol-wrapper.mjs");
 const failLogin = path.join(temp, "fail-login");
 const pauseLogin = path.join(temp, "pause-login");
 let rejectCredentialUpdates = false;
+let rejectProxyUpdateAccountId = null;
 let consoleChild;
 let consoleLogs = "";
 let headers;
@@ -85,6 +88,7 @@ const sub2 = http.createServer(async (req, res) => {
     if (index < 0) return send(res, 404, { message: "fixture account not found" });
     if (req.method === "GET") return send(res, 200, { data: accounts[index] });
     const update = JSON.parse(body || "{}");
+    if (id === rejectProxyUpdateAccountId && Object.hasOwn(update, "proxy_id")) return send(res, 503, { message: "fixture proxy write failure" });
     if (rejectCredentialUpdates && update.credentials) return send(res, 503, { message: "fixture credential sync failure" });
     accountUpdates.push({ id, body: update });
     accounts[index] = { ...accounts[index], ...structuredClone(update) };
@@ -347,6 +351,88 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   assert(!proxies.some(proxy => proxy.id === replacement.id));
   console.log("ROW_IP_SWITCH_PASS exact-node direct-relogin pool-sync delete-blocked-until-relogin");
 
+  const bindOnlyNode = { id: 5, name: "Binding only", protocol: "http", host: "bind-only.invalid", port: 8080, ip_address: "198.51.100.50", status: "active" };
+  proxies.push(bindOnlyNode);
+  const duplicate = { ...structuredClone(accounts.find(a => a.id === accountId)), id: nextAccountId++ };
+  accounts.push(duplicate);
+  const beforeBindingOnly = structuredClone(accounts.filter(a => [accountId, duplicate.id].includes(a.id)));
+  const traceBeforeBindingOnly = (await readTrace()).length, logoutBeforeBindingOnly = oauthRequests.length;
+  const attemptBeforeBindingOnly = (await page()).jobs.find(j => j.id === target.id).attempt;
+  rejectProxyUpdateAccountId = duplicate.id;
+  response = await post(bindingRoute, { proxyId: bindOnlyNode.id, relogin: false });
+  assert.equal(response.status, 502, JSON.stringify(response.body));
+  assert.equal((await page()).jobs.find(j => j.id === target.id).assignedProxyId, null, "failed remote write preserves local route");
+  assert.deepEqual(accounts.filter(a => [accountId, duplicate.id].includes(a.id)), beforeBindingOnly, "partial remote write is compensated");
+  rejectProxyUpdateAccountId = null;
+  response = await post(bindingRoute, { proxyId: bindOnlyNode.id, relogin: false });
+  assert.equal(response.status, 202, JSON.stringify(response.body));
+  assert.equal(response.body.job.assignedProxyId, bindOnlyNode.id);
+  assert.equal(response.body.job.attempt, attemptBeforeBindingOnly, "binding-only must not log in");
+  assert.equal((await readTrace()).length, traceBeforeBindingOnly);
+  assert.equal(oauthRequests.length, logoutBeforeBindingOnly, "binding-only must not revoke sessions");
+  for (const previous of beforeBindingOnly) {
+    const actual = accounts.find(a => a.id === previous.id);
+    assert.deepEqual(actual, { ...previous, proxy_id: bindOnlyNode.id }, "all matching rows change only proxy_id");
+  }
+  accounts.splice(accounts.findIndex(a => a.id === duplicate.id), 1);
+  response = await post(`/api/jobs/${target.id}/regenerate`, {});
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  await waitFor(async () => { const current = (await page()).jobs.find(j => j.id === target.id); return current.attempt > attemptBeforeBindingOnly && current.status === "completed" && !current.poolRefreshAction; });
+  const nextRoute = (await readTrace()).at(-1);
+  assert.equal(new URL(nextRoute.proxy).hostname, bindOnlyNode.host, "next helper request uses the newly bound proxy");
+  assert.equal(Number(nextRoute.oauthProxyId), bindOnlyNode.id, "next OAuth request uses the newly bound proxy");
+  await stopConsole(); await startConsole();
+  assert.equal((await page()).jobs.find(j => j.id === target.id).assignedProxyId, bindOnlyNode.id, "binding-only persists across restart");
+  assert.equal(accounts.find(a => a.id === accountId).proxy_id, bindOnlyNode.id);
+  console.log("BINDING_ONLY_PASS all matching rows; credentials preserved; no logout/login; next helper/OAuth route; restart");
+
+  // Seed a current detection and an already-due persisted deadline. The real
+  // scheduler must select a free exit and mutate both routes after restart.
+  const rotation = { enabled: true, intervalMinutes: 60, relogin: false, rotateMatched: false, rotateMismatched: true };
+  assert.equal((await post('/api/task-settings', { proxyRotation: rotation })).status, 200);
+  const rotationJob = (await page()).jobs.find(j => j.id === target.id);
+  await stopConsole();
+  const supplier = JSON.parse(await fs.readFile(path.join(output, 'sub2api-settings.json'), 'utf8'));
+  const detector = JSON.parse(await fs.readFile(path.join(output, 'model-fingerprint.json'), 'utf8').catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+    return JSON.stringify({version:1,groupPolicyVersion:2,settings:{},accounts:{}});
+  }));
+  const backend = createHash('sha256').update(`${sub2Url}\0fixture-key`).digest('hex').slice(0,24);
+  const signature = JSON.stringify({ models: rotationJob.modelFingerprint.models, minProbability: rotationJob.modelFingerprint.minProbability,
+    planType: (rotationJob.planType || 'unknown').toLowerCase(), backend,
+    routing: JSON.stringify({bindings:supplier.planTypeBindings || {},profiles:(supplier.profiles || []).map(p => [p.id,p.groupIds])}) });
+  detector.accounts[target.email] = { result: { id: 'fixture-rotation', status: 'mismatch', checkedAt: new Date().toISOString(), signature, models: [] } };
+  await fs.writeFile(path.join(output, 'model-fingerprint.json'), JSON.stringify(detector));
+  const scheduleDb = new DatabaseSync(path.join(output, 'helper-operations.sqlite'));
+  scheduleDb.prepare('INSERT OR REPLACE INTO proxy_rotation_due VALUES(?,?,?,?)').run(backend, createHash('sha256').update(target.email).digest('hex'), JSON.stringify(rotation), 0);
+  for (const [id, ip] of [[6,'198.51.100.60'],[7,'198.51.100.70']]) {
+    proxies.push({id,name:'Free '+id,protocol:'http',host:'free-'+id+'.invalid',port:8080,ip_address:ip,status:'active'});
+  }
+  for (const email of ['old-a','old-b']) scheduleDb.prepare('INSERT OR IGNORE INTO proxy_account_history VALUES(?,?,?,NULL)').run(backend, '198.51.100.60', email);
+  scheduleDb.close();
+  const noLoginBeforeScheduled = (await readTrace()).length;
+  await startConsole();
+  await waitFor(async () => (await page()).jobs.find(j => j.id === target.id).assignedProxyId === 7);
+  assert.equal(accounts.find(a => a.id === accountId).proxy_id, 7, 'scheduled rotation updates actual pool route');
+  assert.equal((await readTrace()).length, noLoginBeforeScheduled, 'scheduled binding-only does not log in');
+  assert.equal((await post('/api/task-settings', { proxyRotation: { enabled: false } })).status, 200);
+  console.log('SCHEDULED_IP_ROTATION_PASS current mismatch filter; persisted due; free exit; history ordering; actual pool route; no relogin');
+  const reloginRotation = {...rotation,relogin:true};
+  assert.equal((await post('/api/task-settings', {proxyRotation:reloginRotation})).status, 200);
+  await stopConsole();
+  const reloginDb = new DatabaseSync(path.join(output, 'helper-operations.sqlite'));
+  reloginDb.prepare('INSERT OR REPLACE INTO proxy_rotation_due VALUES(?,?,?,?)').run(backend, createHash('sha256').update(target.email).digest('hex'), JSON.stringify(reloginRotation), 0);
+  reloginDb.close();
+  proxies.push({id:8,name:'Relogin exit',protocol:'http',host:'relogin-exit.invalid',port:8080,ip_address:'198.51.100.80',status:'active'});
+  const beforeScheduledRelogin = (await readTrace()).length;
+  await startConsole();
+  await waitFor(async () => { const current = (await page()).jobs.find(j => j.id === target.id); return current?.assignedProxyId === 8 && current.status === 'completed' && !current.poolRefreshAction && accounts.find(a => a.id === accountId).proxy_id === 8 && (await readTrace()).length > beforeScheduledRelogin; });
+  assert.equal(accounts.find(a => a.id === accountId).proxy_id, 8);
+  assert.equal((await readTrace()).length, beforeScheduledRelogin + 1, 'scheduled relogin starts exactly once');
+  assert.equal(new URL((await readTrace()).at(-1).proxy).hostname, 'relogin-exit.invalid');
+  assert.equal((await post('/api/task-settings', {proxyRotation:{enabled:false}})).status, 200);
+  console.log('SCHEDULED_IP_RELOGIN_PASS new exit; logout; exactly one login; pool credentials and route synchronized');
+
   // Remote OAuth must also pin a matching global proxy, even when direct fallback is enabled.
   await fs.writeFile(failLogin, "1");
   const globalProxy = `http://b:secret-b@${proxies[2].host}:${proxies[2].port}`;
@@ -444,7 +530,7 @@ async function listen(server, port) {
 
 async function close(server) {
   if (!server.listening) return;
-  await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
 }
 
 async function readBody(req) {

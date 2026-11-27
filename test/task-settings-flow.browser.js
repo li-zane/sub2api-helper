@@ -46,6 +46,27 @@ async page => {
     check(JSON.stringify(payload)===JSON.stringify({monitoring:{overloadIntervalSeconds:600}}),'not a sparse patch: '+JSON.stringify(payload));
     const current=await api();check(current.monitoring.overloadConcurrency===77&&current.webSessionMonitor.retryMinutes===120,'concurrent values overwritten');d=await open();
   });
+  await test('proxy-rotation-persists-independent-controls-and-sparse-patches', async () => {
+    const section = d.locator('section[aria-labelledby="proxy-rotation-title"]');
+    check(!await section.getByRole('checkbox', {name:'启用账号 IP 定时轮换',exact:true}).isChecked(), 'rotation must default off');
+    await section.getByRole('checkbox', {name:'启用账号 IP 定时轮换',exact:true}).check();
+    await section.locator('#proxy-rotation-interval').fill('45');
+    await section.getByRole('checkbox', {name:'轮换未降智账号',exact:true}).uncheck();
+    await section.getByRole('checkbox', {name:'换绑后重新登录并授权',exact:true}).check();
+    await section.scrollIntoViewIfNeeded();
+    await page.screenshot({path:evidence+'/proxy-rotation-desktop.png'});
+    const payload = await save(d);
+    check(JSON.stringify(payload)===JSON.stringify({proxyRotation:{enabled:true,intervalMinutes:45,relogin:true,rotateMatched:false}}), 'rotation patch: '+JSON.stringify(payload));
+    d = await open();
+    check(await d.locator('#proxy-rotation-interval').inputValue()==='45', 'interval lost');
+    check(await d.getByRole('checkbox',{name:'轮换降智账号',exact:true}).isChecked(), 'degraded switch lost');
+    await api({proxyRotation:{intervalMinutes:75}});
+    await d.getByRole('checkbox',{name:'换绑后重新登录并授权',exact:true}).uncheck();
+    const patch = await save(d);
+    check(JSON.stringify(patch)===JSON.stringify({proxyRotation:{relogin:false}}), 'independent edit overwrote interval');
+    check((await api()).proxyRotation.intervalMinutes===75, 'newer interval overwritten');
+    d = await open();
+  });
   await test('folded-concurrency-keeps-edits-and-validates-before-request',async()=>{
     const details=d.locator('.task-overload-advanced'),summary=details.locator('summary');await summary.focus();await page.keyboard.press('Enter');
     await details.locator('#monitor-overloadCooldownConcurrency').fill('0');const before=await page.evaluate(()=>window.fixtureTaskSettingWrites.length);await d.getByRole('button',{name:'保存设置',exact:true}).click();check(await page.evaluate(()=>window.fixtureTaskSettingWrites.length)===before,'invalid value sent');
@@ -64,7 +85,10 @@ async page => {
     await page.setViewportSize({width:375,height:812});d=await open();await d.locator('.task-overload-settings').scrollIntoViewIfNeeded();await d.locator('.task-overload-advanced > summary').click();
     check(await d.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'dialog horizontal overflow');
     check(await d.locator('.task-overload-settings input').evaluateAll(nodes=>nodes.every(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth+1;})),'overload inputs overflow');
-    await page.screenshot({path:evidence+'/task-settings-overload-mobile.png'});await page.keyboard.press('Escape');await d.waitFor({state:'hidden'});
+    await page.screenshot({path:evidence+'/task-settings-overload-mobile.png'});
+    await d.locator('section[aria-labelledby="proxy-rotation-title"]').scrollIntoViewIfNeeded();
+    await page.screenshot({path:evidence+'/proxy-rotation-mobile.png'});
+    await page.keyboard.press('Escape');await d.waitFor({state:'hidden'});
     check(await page.getByRole('button',{name:'任务设置',exact:true}).evaluate(el=>el===document.activeElement),'focus not restored');check(!errors.length,errors.join('; '));
   });
   await test("saves the one-time import check for the selected PlanType", async () => {

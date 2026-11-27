@@ -87,6 +87,7 @@ import { createProxyImporter, listAllSub2ApiProxies } from "./sub2api-proxy-crea
 import { createProxyEditor } from "./sub2api-proxy-edit.mjs";
 import { addressOf, createIproyalPatrol, dashboardSource } from "./iproyal-patrol.mjs";
 import { poolAccountError } from "../web/src/pool-account-error.mjs";
+import { ProxyRotation, rankRotationExits, rebindPoolProxies } from "./proxy-rotation.mjs";
 
 export function createConsoleApp(options = {}) {
   options = { host: "127.0.0.1", port: 4399, ...options };
@@ -221,6 +222,7 @@ export function createConsoleApp(options = {}) {
   const cliUaSettings = createCliUaSettings({ root: path.join(OUTPUT_ROOT, "codex-cli-profiles"),
     getConfig: () => sub2ApiSettingsConfig, ...(options.cliUaProbe ? { probe: options.cliUaProbe } : {}) });
   const book = new OperationsBook(path.join(OUTPUT_ROOT, "helper-operations.sqlite"));
+  let proxyObservationSequence = 0;
   const poolKey = config => String(config?.baseUrl || "").trim().replace(/\/+$/, "");
   const allocationBlocked = (config, id) => book.isBlocked(poolKey(config), id) || iproyal.isBlocked(monitorBackendIdentity(config), id);
   const inspectionPaused = email => book.paused(accountLoginEmails.key(email));
@@ -256,10 +258,18 @@ export function createConsoleApp(options = {}) {
   });
   const publicTaskSettings = consoleSettings.publicSettings;
   const handleSettingsRoute = createConsoleSettingsRoutes({ settings: consoleSettings, readJson, sendJson, httpError });
+  const profileProxyWrites = new Set(), proxyBindingPoolIds = new Set();
   const requestProfileSync = limitPoolRequests((config, endpoint, options = {}) => {
     const accountId = /^\/api\/v1\/admin\/accounts\/(\d+)(?:\/|$)/.exec(endpoint)?.[1];
     if (accountId && sessionResetPoolIdPaused(accountId, config)) throw httpError(409, "一键重登期间暂停套餐与分组同步");
-    return requestSub2Api(config, endpoint, options);
+    const writesProxy = options.method === "PUT" && Object.hasOwn(JSON.parse(options.body || "{}"), "proxy_id");
+    if (writesProxy && proxyBindingPoolIds.has(`${monitorBackendIdentity(config)}:${accountId}`)) throw httpError(409, "IP 换绑期间暂停代理同步");
+    const work = requestSub2Api(config, endpoint, options);
+    if (writesProxy) {
+      profileProxyWrites.add(work);
+      void work.finally(() => profileProxyWrites.delete(work)).catch(() => {});
+    }
+    return work;
   }, () => consoleSettings.current.monitoringSettings.profileSyncConcurrency);
   const SUB2API_MONITOR_PATH = path.join(OUTPUT_ROOT, SUB2API_MONITOR_FILENAME);
   const SUB2API_SETTINGS_PATH = path.join(OUTPUT_ROOT, SUB2API_SETTINGS_FILENAME);
@@ -310,6 +320,18 @@ export function createConsoleApp(options = {}) {
   const activeWebSessionCheckAccounts = new Map();
   let accountProxyAssignmentPromise = Promise.resolve();
   const accountProxyReservations = new Map();
+  const proxyRotation = new ProxyRotation({
+    getSettings: () => consoleSettings.current.proxyRotation,
+    canRun: () => !shuttingDown && !dispatchPaused() && ["sub2api", "plan"].includes(consoleSettings.current.accountProxyMode)
+      && Boolean(sub2ApiSettingsConfig?.baseUrl && sub2ApiSettingsConfig?.adminApiKey),
+    getAccounts: () => ({ pool: monitorBackendIdentity(sub2ApiSettingsConfig), accounts: listUniqueJobs().filter(j => !j.deleted && j.resultSaved) }),
+    eligible: rotationEligible,
+    rotate: (job, settings, current) => withEmailJobLock(job.email, () => switchJobProxyBinding(job, null, { automatic: true, relogin: settings.relogin, current })),
+    onError: (error, job) => {
+      if (job && !job.deleted) { appendJobLog(job, `[proxy-rotation] 轮换失败，稍后重试：${error.message}\n`); touch(job); }
+      else console.error("[proxy-rotation] 到期任务扫描失败");
+    },
+  });
   const poolRefreshTimers = new Map();
   const poolRefreshOperations = new Set();
   const accountSecurityChecks = new Set();
@@ -745,7 +767,7 @@ export function createConsoleApp(options = {}) {
       const busyJobs = [...jobs.values()].filter(j => !j.deleted && (isActive(j.status) || j.autoTaskStatus === "running")).length;
       const busyWorkers = chatStore.work.size + Number(Boolean(financeWork)) + Number(iproyal.status().running) + admittedWrites + emailJobLocks.size + activeWebSessionChecks + manualWebSessionCheckOperations.size
         + sessionResetStarts.size + poolRefreshOperations.size + sub2ApiAutoRepairPromises.size + accountSecurityChecks.size
-        + modelFingerprint.inFlight.size + modelFingerprint.runningTasks.size + accountDataSyncOperations.size
+        + modelFingerprint.inFlight.size + modelFingerprint.runningTasks.size + accountDataSyncOperations.size + Number(Boolean(proxyRotation.running))
         + [webSessionMonitor.running, modelFingerprint.ticking, overloadMonitor.running, overloadCooldown.running, sub2ApiMonitorPromise].filter(Boolean).length;
       sendJson(res, 200, { paused: dispatchPaused(), ready: dispatchStarted && !shuttingDown, busyJobs, busyWorkers });
       return;
@@ -1343,6 +1365,7 @@ export function createConsoleApp(options = {}) {
     if (req.method === "POST" && requestUrl.pathname === "/api/sub2api/options") {
       const body = await readJson(req);
       const config = normalizeSub2ApiConfig(body.config);
+      const observation = ++proxyObservationSequence;
       const [groupPayload, proxyPayload] = await Promise.all([
         listSub2ApiTargetGroups(config),
         body.includeInactiveProxies === true
@@ -1352,6 +1375,9 @@ export function createConsoleApp(options = {}) {
       const listing = await listSub2ApiAccounts(config, { withMeta: true });
       const proxyCounts = new Map();
       const proxiesById = new Map(normalizeSub2ApiProxyList(proxyPayload).map((proxy) => [proxy.id, proxy]));
+      const activityPool = monitorBackendIdentity(config);
+      if (listing.complete) observePoolBindings(config, observation, listing.accounts, proxiesById);
+      const activity = book.proxyActivity.byIp(activityPool);
       publicProxyCatalog = { backend: monitorBackendIdentity(config), proxies: new Map([...proxiesById.values()].map((proxy) => [proxy.id, publicSub2ApiProxy(proxy)])) };
       const countedEmails = new Set();
       let directAccountCount = 0;
@@ -1390,6 +1416,8 @@ export function createConsoleApp(options = {}) {
           ...publicSub2ApiProxy(proxy),
           iproyal: iproyal.lookup(monitorBackendIdentity(config), addressOf(proxy)) ?? undefined,
           ...book.policy(poolKey(config),proxy.id,proxyIpKey(proxy)),
+          historicalAccountCount: activity.get(proxyIpKey(proxy))?.historicalAccountCount ?? (listing.complete ? 0 : null),
+          lastRequestAt: activity.get(proxyIpKey(proxy))?.lastRequestAt ?? null,
           accountCount: proxyCounts.get(proxyIpKey(proxy)) || 0,
           availableForBinding: Boolean(proxy.url) && !isSub2ApiProxyExpired(proxy) && !allocationBlocked(config,proxy.id),
         })),
@@ -1946,9 +1974,10 @@ export function createConsoleApp(options = {}) {
       return;
     }
     if (req.method === "POST" && action === "proxy-binding") {
-      const { proxyId } = await readJson(req);
+      const { proxyId, relogin = true } = await readJson(req);
       if (!Number.isSafeInteger(proxyId) || proxyId < 0) throw httpError(400, "代理节点 ID 无效");
-      await withEmailJobLock(job.email, () => switchJobProxyBinding(job, proxyId));
+      if (typeof relogin !== "boolean") throw httpError(400, "重登选项必须为布尔值");
+      await withEmailJobLock(job.email, () => switchJobProxyBinding(job, proxyId, { relogin }));
       sendJson(res, 202, { job: publicJob(job) });
       return;
     }
@@ -7184,10 +7213,12 @@ export function createConsoleApp(options = {}) {
     if (sub2ApiAccountStatusPromise) return sub2ApiAccountStatusPromise;
     sub2ApiAccountStatusPromise = (async () => {
       const versions = new Map([...jobs.values()].map((job) => [job.id, job.remarkRevision]));
+      const observation = ++proxyObservationSequence;
       const listing = await listSub2ApiAccounts(config, { withMeta: true });
       if (!listing.complete) throw new Error("Sub2API 账号列表不完整，已保留本地备注和状态");
       const remoteAccounts = listing.accounts;
-      await listSub2ApiProxies(config).catch(() => []);
+      const proxies = await listSub2ApiProxies(config).catch(() => null);
+      if (proxies) observePoolBindings(config, observation, remoteAccounts, new Map(proxies.map(proxy => [proxy.id, proxy])));
       await importSub2ApiPoolOnlyAccounts(remoteAccounts);
       await reconcileSub2ApiAccountBans(config, remoteAccounts);
       await reconcileSessionResetPoolPauses(config, remoteAccounts);
@@ -7343,7 +7374,8 @@ export function createConsoleApp(options = {}) {
         if (dispatchPaused()) { schedule(kind); return; }
         const operation = (async () => {
           const config = sub2ApiSettingsConfig || sub2ApiMonitorConfig;
-          const state = await loadSub2ApiAccountStatus();
+          // Read the upstream last_used_at along with this scheduled usage refresh.
+          const state = await loadSub2ApiAccountStatus({ forceRefresh: kind === 1 });
           if (kind === 1) await synchronizeCachedUsageTotals(config, state, { forceRefresh: true });
           if (kind === 2) await synchronizeCachedResetCredits(config, state);
         })().catch(() => {}).finally(() => {
@@ -7359,6 +7391,9 @@ export function createConsoleApp(options = {}) {
     schedule(0); schedule(1); schedule(2);
   }
   function* taskSettingsRuntimeSteps(previous, next, { timeouts, webMonitor, cooldownRule }) {
+    if (JSON.stringify(previous.proxyRotation) !== JSON.stringify(next.proxyRotation) || previous.accountProxyMode !== next.accountProxyMode) {
+      yield ["proxyRotation", () => proxyRotation.reset()];
+    }
     const differs = (...keys) => keys.some(key => previous.monitoringSettings[key] !== next.monitoringSettings[key]);
     const overloadChanged = differs("overloadIntervalSeconds", "overloadConcurrency");
     if (timeouts) yield ["timeouts", () => loginTimeouts.reschedule()];
@@ -8079,49 +8114,148 @@ export function createConsoleApp(options = {}) {
     accountProxyReservations.delete(job.email.toLowerCase());
     await saveStoredLoginCredentials(job.email, job);
     await saveJobMetadata(job);
+    if (proxy && job.resultSaved && sub2ApiSettingsConfig) {
+      book.proxyActivity.noteBinding(monitorBackendIdentity(sub2ApiSettingsConfig), proxyIpKey(proxy), accountLoginEmails.key(job.email));
+    }
   }
 
-  async function switchJobProxyBinding(job, proxyId) {
+  function rotationEligible(job, settings, locked = false) {
+    const email = accountLoginEmails.key(job.email);
+    if (job.deleted || !job.resultSaved || !canStartAccountTask(job) || job.child || job.proxyBindingInProgress
+      || accountAutomationBlocked(email) || inspectionPaused(email) || sessionResetAutomationPaused(email)
+      || overloadCooldown.isPaused(email) || (!locked && emailJobLocks.has(email))
+      || modelFingerprint.inFlight.has(email) || job.poolRefreshAction || webSessionCheckPending(job)
+      || ["pending", "queued", "running"].includes(job.autoTaskStatus)) return false;
+    if ([...jobs.forAccount(email)].some(j => !j.deleted && (isActive(j.status) || j.child || j.poolRefreshAction || webSessionCheckPending(j)))) return false;
+    if (settings.relogin && (!canLogoutAllSessions(job) || automaticLoginBlocked(job, "oauth") || automaticLoginBlocked(job, "web"))) return false;
+    const verdict = modelFingerprint.groupResult(email, getJobPlanType(job) || "unknown")?.status;
+    return verdict === "match" ? settings.rotateMatched : verdict === "mismatch" && settings.rotateMismatched;
+  }
+
+  async function selectRotationProxy(config, job) {
+    const sequence = ++proxyObservationSequence;
+    const listing = await listSub2ApiAccounts(config, { withMeta: true });
+    if (!listing.complete) throw httpError(409, "Sub2API 账号列表不完整，已停止轮换");
+    const proxies = normalizeSub2ApiProxyList(await listAllSub2ApiProxies(requestSub2Api, config));
+    const byId = new Map(proxies.map(p => [p.id, p]));
+    observePoolBindings(config, sequence, listing.accounts, byId);
+    const currentIps = new Set(), occupiedIps = new Set();
+    const email = accountLoginEmails.key(job.email), backend = monitorBackendIdentity(config);
+    const add = (id, current) => {
+      const proxy = byId.get(normalizeStoredProxyId(id));
+      if (proxy) { const ip = proxyIpKey(proxy); occupiedIps.add(ip); if (current) currentIps.add(ip); }
+    };
+    // Count every remote reference, including disabled rows and protocol aliases.
+    for (const row of listing.accounts) add(row.proxy_id, accountLoginEmails.key(sub2ApiAccountEmail(row)) === email);
+    for (const local of jobs.values()) if (!local.deleted) add(local.assignedProxyId, accountLoginEmails.key(local.email) === email);
+    for (const [owner, reservation] of accountProxyReservations) {
+      if (reservation.backend === backend && reservation.expiresAt > Date.now()) add(reservation.proxyId, owner === email);
+    }
+    const available = proxy => {
+      const expiry = Date.parse(iproyal.lookup(backend, proxyIpKey(proxy))?.expiresAt);
+      return proxy.url && !isSub2ApiProxyExpired(proxy) && !allocationBlocked(config, proxy.id)
+        && (!Number.isFinite(expiry) || expiry > Date.now());
+    };
+    return rankRotationExits({ proxies, currentIps, occupiedIps, activity: book.proxyActivity.byIp(backend), ipOf: proxyIpKey, available })[0] || null;
+  }
+
+  async function switchJobProxyBinding(job, proxyId, { relogin = true, automatic = false, current = () => true } = {}) {
     if (!["sub2api", "plan"].includes(consoleSettings.current.accountProxyMode)) {
       throw httpError(409, "请先保存 Sub2API 或按 PlanType 授权的代理模式");
     }
     const config = sub2ApiSettingsConfig;
     if (!config?.baseUrl || !config?.adminApiKey) throw httpError(409, "请先配置 Sub2API 后端和管理员 API Key");
+    // Status refresh may import pool-only accounts and enter the assignment
+    // queue itself. Complete it before taking that queue for the switch.
     const poolState = await loadSub2ApiAccountStatus({ forceRefresh: true }).catch(() => {
       throw httpError(502, "号池状态读取失败，请稍后重试");
     });
-    if (!poolState.fetchedAt || poolState.backend !== monitorBackendIdentity(config)) {
-      throw httpError(409, "号池后端已变化，请重新选择");
-    }
-    const pool = getSub2ApiAccountStatusForJob(job, poolState);
-    if (!canLogoutAllSessions(job) || job.poolRefreshAction || webSessionCheckPending(job)
-      || ["pending", "queued", "running"].includes(job.autoTaskStatus)) {
-      throw httpError(409, "请先完成当前任务，并确认账号有可用的登录会话");
-    }
-    if (pool.accountBlocked || pool.rateLimited || pool.quotaRestricted || usageRestricted(pool.usage)
-      || overloadCooldown.isPaused(job.email)) {
-      throw httpError(409, "账号当前受限，请在账号状态恢复后再更换绑定");
-    }
-    const previous = [...new Set([job.assignedProxyId, ...(pool.proxyIds || [])].map(normalizeStoredProxyId).filter(Boolean))];
-    if ((proxyId && previous.length === 1 && previous[0] === proxyId) || (!proxyId && !previous.length)) {
-      throw httpError(409, "请选择一个不同的绑定");
-    }
     const operation = accountProxyAssignmentPromise.catch(() => {}).then(async () => {
-      const proxy = proxyId ? (await listSub2ApiProxies(config)).find(item => item.id === proxyId) : null;
+      if (automatic && (!current() || !rotationEligible(job, consoleSettings.current.proxyRotation, true))) return false;
+      if (!poolState.fetchedAt || poolState.backend !== monitorBackendIdentity(config)) {
+        throw httpError(409, "号池后端已变化，请重新选择");
+      }
+      const pool = getSub2ApiAccountStatusForJob(job, poolState);
+      if (!(relogin ? canLogoutAllSessions(job) : canForceRelogin(job)) || job.child || job.poolRefreshAction || webSessionCheckPending(job)
+        || ["pending", "queued", "running"].includes(job.autoTaskStatus)) {
+        throw httpError(409, "请先完成当前任务，并确认账号有可用的登录会话");
+      }
+      if (pool.accountBlocked || pool.rateLimited || pool.quotaRestricted || usageRestricted(pool.usage)
+        || overloadCooldown.isPaused(job.email)) {
+        throw httpError(409, "账号当前受限，请在账号状态恢复后再更换绑定");
+      }
+      if (automatic && pool.inPool && pool.enabled === false) return false;
+      const previous = [...new Set([job.assignedProxyId, ...(pool.proxyIds || [])].map(normalizeStoredProxyId).filter(Boolean))];
+      const proxy = automatic ? await selectRotationProxy(config, job)
+        : proxyId ? (await listSub2ApiProxies(config)).find(item => item.id === proxyId) : null;
+      if (automatic && !proxy) return false;
+      if (automatic) proxyId = proxy.id;
+      if ((proxyId && previous.length === 1 && previous[0] === proxyId) || (!proxyId && !previous.length)) {
+        throw httpError(409, "请选择一个不同的绑定");
+      }
       if (proxyId && allocationBlocked(config,proxyId) && !previous.includes(proxyId)) throw httpError(409,"所选代理已停用新分配");
       if (proxyId && (!proxy?.url || isSub2ApiProxyExpired(proxy))) throw httpError(409, "所选代理已不可用，请重新选择");
       if (monitorBackendIdentity(config) !== monitorBackendIdentity(sub2ApiSettingsConfig)) throw httpError(409, "号池后端已变化，请重新选择");
+      if (automatic && (!current() || !rotationEligible(job, consoleSettings.current.proxyRotation, true))) return false;
+      if (!relogin) {
+        await switchBindingOnly(job, proxy, config);
+        return true;
+      }
       await revokeAllAccountSessions({ ...job, proxyUrl: proxy?.url || null, fixedProxy: true });
       job.manualProxyBinding = true;
       job.proxyMoveFromIds = previous.filter(id => id !== proxyId);
       job.proxyFallbackActive = false;
       await saveJobProxyBinding(job, proxy);
       appendJobLog(job, `[proxy-switch] 已选择${proxy ? `代理 #${proxy.id}` : "直连（解除绑定）"}，开始重新登录。\n`);
-      await forceReloginJob(job, { proxyUrl: job.proxyUrl }, { poolRefreshAction: "switch-proxy" });
+      await forceReloginJob(job, { proxyUrl: job.proxyUrl }, { poolRefreshAction: "switch-proxy", automatic });
       await saveJobMetadata(job);
+      return true;
     });
     accountProxyAssignmentPromise = operation;
     return operation;
+  }
+
+  async function switchBindingOnly(job, proxy, config) {
+    const related = [...jobs.forAccount(job.email)].filter(j => !j.deleted);
+    const fields = ["authorizationProxySelected", "assignedProxyId", "boundIp", "boundProxyName", "proxyUrl", "fixedProxy", "manualProxyBinding", "proxyMoveFromIds", "proxyFallbackActive"];
+    const previous = related.map(j => [j, Object.fromEntries(fields.map(key => [key, j[key]]))]);
+    const backend = monitorBackendIdentity(config), ids = [];
+    for (const j of related) j.proxyBindingInProgress = true;
+    try {
+      const listing = await listSub2ApiAccounts(config, { withMeta: true });
+      if (!listing.complete) throw httpError(409, "Sub2API 账号列表不完整，已停止换绑");
+      const rows = listing.accounts.filter(a => a.platform === "openai" && a.type === "oauth"
+        && accountLoginEmails.key(sub2ApiAccountEmail(a)) === accountLoginEmails.key(job.email));
+      for (const row of rows) { const key = `${backend}:${row.id}`; ids.push(key); proxyBindingPoolIds.add(key); }
+      await Promise.allSettled([...profileProxyWrites]);
+      if (backend !== monitorBackendIdentity(sub2ApiSettingsConfig)) throw httpError(409, "号池后端已变化，已停止换绑");
+      // Refresh after existing profile writes have settled.
+      const fresh = await Promise.all(rows.map(row => getSub2ApiAccount(config, row.id)));
+      if (fresh.some(row => !row || accountLoginEmails.key(sub2ApiAccountEmail(row)) !== accountLoginEmails.key(job.email)
+        || row.platform !== "openai" || row.type !== "oauth")) throw httpError(409, "号池账号已删除或身份变化，已停止换绑");
+      await rebindPoolProxies({
+        rows: fresh, proxyId: proxy?.id || 0,
+        identityOf: sub2ApiAccountEmail,
+        read: id => getSub2ApiAccount(config, id),
+        write: (id, target) => requestSub2Api(config, `/api/v1/admin/accounts/${id}`, { method: "PUT", body: JSON.stringify({ proxy_id: target }) }),
+        saveLocal: async () => {
+          if (backend !== monitorBackendIdentity(sub2ApiSettingsConfig)) throw httpError(409, "号池后端已变化，绑定已回退");
+          for (const j of related) {
+            j.manualProxyBinding = true; j.proxyMoveFromIds = []; j.proxyFallbackActive = false;
+            await saveJobProxyBinding(j, proxy);
+          }
+        },
+        restoreLocal: async () => {
+          for (const [j, saved] of previous) { Object.assign(j, saved); await saveStoredLoginCredentials(j.email, j); await saveJobMetadata(j); }
+        },
+      });
+      appendJobLog(job, `[proxy-switch] 已${proxy ? `换绑到代理 #${proxy.id}` : "解除代理绑定"}，本地与号池后续请求使用新出口，登录凭据保持不变。\n`);
+      touch(job);
+    } finally {
+      for (const j of related) j.proxyBindingInProgress = false;
+      for (const id of ids) proxyBindingPoolIds.delete(id);
+      invalidateSub2ApiAccountStatusCache();
+    }
   }
 
   // Resolve a discovered plan, or reapply a known plan before any relogin request.
@@ -8206,6 +8340,28 @@ export function createConsoleApp(options = {}) {
 
   function proxyIpKey(proxy) {
     return String(proxy.ipAddress || proxy.host || proxy.id).trim().toLowerCase();
+  }
+
+  function observePoolBindings(config, sequence, accounts, proxiesById) {
+    const pool = monitorBackendIdentity(config);
+    const rows = [];
+    for (const account of accounts) {
+      if (account.platform !== "openai" || account.type !== "oauth" || !normalizeSub2ApiAccountId(account.id)) continue;
+      const proxy = proxiesById.get(normalizeStoredProxyId(account.proxy_id));
+      rows.push({
+        id: account.id, email: sub2ApiAccountEmail(account), ip: proxy ? proxyIpKey(proxy) : null,
+        lastUsedAt: account.last_used_at, accountUpdatedAt: account.updated_at, proxyUpdatedAt: proxy?.updated_at,
+      });
+    }
+    const localBindings = [];
+    if (["sub2api", "plan"].includes(consoleSettings.current.accountProxyMode)
+        && pool === monitorBackendIdentity(sub2ApiSettingsConfig)) {
+      for (const job of listUniqueJobs()) {
+        const proxy = proxiesById.get(normalizeStoredProxyId(job.assignedProxyId));
+        if (job.resultSaved && proxy) localBindings.push({ ip: proxyIpKey(proxy), email: accountLoginEmails.key(job.email) });
+      }
+    }
+    book.proxyActivity.observe(pool, sequence, rows, Date.now(), localBindings);
   }
 
   async function deleteUnusedSub2ApiProxy(config, proxyId, body) {
@@ -8402,6 +8558,7 @@ export function createConsoleApp(options = {}) {
   }
 
   function codexChecksBlocked(email) {
+    if (findJobByEmail(email)?.proxyBindingInProgress) return true;
     if (sessionResetAutomationPaused(email)) return true;
     if (pendingCodexBlocks.has(String(email).toLowerCase()) || accountAutomationBlocked(email)) return true;
     const state = getSub2ApiAccountStatusForJob({ email });
@@ -9093,7 +9250,7 @@ export function createConsoleApp(options = {}) {
   }
 
   function canStartAccountTask(job) {
-    return !job.webLoginPreviousState && ["completed", "failed", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available"].includes(job.status);
+    return !job.proxyBindingInProgress && !job.webLoginPreviousState && ["completed", "failed", "mfa_failed", "banned", "canceled", "reauth_required", "resume_available"].includes(job.status);
   }
 
   function canForceRelogin(job) {
@@ -9319,7 +9476,8 @@ export function createConsoleApp(options = {}) {
   }
 
   function accountSyncBlocked(account) {
-    return accountAutomationBlocked(sub2ApiAccountEmail(account)) || sessionResetAutomationPaused(sub2ApiAccountEmail(account)) || Boolean(sub2ApiPermanentAccountFailure(account));
+    return accountAutomationBlocked(sub2ApiAccountEmail(account)) || sessionResetAutomationPaused(sub2ApiAccountEmail(account))
+      || Boolean(findJobByEmail(sub2ApiAccountEmail(account))?.proxyBindingInProgress) || Boolean(sub2ApiPermanentAccountFailure(account));
   }
 
   function sub2ApiPermanentAccountFailure(account) {
@@ -11649,6 +11807,7 @@ export function createConsoleApp(options = {}) {
       shuttingDown = true;
       clearTimeout(financeTimer);
       await iproyal.stop();
+      await proxyRotation.stop();
       await Promise.allSettled([financeWork, chatStore.stop()].filter(Boolean));
       clearTimeout(startupDispatchTimer);
       loginTimeouts.close();
@@ -11722,6 +11881,7 @@ export function createConsoleApp(options = {}) {
   async function startRuntime() {
     await fs.mkdir(OUTPUT_ROOT, { recursive: true });
     book.open();
+    proxyRotation.load(book.db);
     smsProviderSettingsState = await loadSmsSettings(SMS_SETTINGS_PATH);
     await smsCancellations.load();
     await consoleSettings.load();
@@ -11840,6 +12000,7 @@ export function createConsoleApp(options = {}) {
       scheduleAccountDataSync();
       scheduleFinance();
       iproyal.start();
+      proxyRotation.start();
       dispatchStarted = true;
     };
     await startDispatch();

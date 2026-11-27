@@ -7,6 +7,8 @@ const FAILURE_MESSAGES = {
   EMPTY: "模型未返回可评分文本", SHORT_OUTPUT: "模型已结束回答，但有效数字不足，已保留原文", CANDY_UNCLEAR: "糖果测试未能明确提取最终答案", ACCOUNT_PAUSED: "账号已暂停或状态异常，本轮跳过",
   ACCOUNT_MISSING: "账号尚未加入 Sub2API 号池", CREDENTIALS: "账号缺少可用模型凭据",
   PROXY: "账号绑定的代理不可用", REFERENCE: "指纹参考库加载失败或超时", UNKNOWN: "检测未完成，请检查账号配置及网络",
+  REGEX_TIMEOUT: "前置正则匹配超时，请简化表达式", REGEX_INVALID: "前置正则匹配失败，请检查表达式",
+  REGEX_INPUT_LIMIT: "回答超过前置正则检测的文本上限，本轮未评分",
 };
 function failure(code, { httpStatus = null, retryable = false, upstreamCode = null } = {}) {
   return Object.assign(new Error(FAILURE_MESSAGES[code]), { fingerprintFailure: true, code, httpStatus, retryable, upstreamCode });

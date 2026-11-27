@@ -81,8 +81,14 @@ flowchart TB
 | `webSessionMonitor.intervalMinutes` | 15 分钟 | 1–1440；账号检测间隔。 |
 | `webSessionMonitor.retryMinutes` | 60 分钟 | 15–1440；同账号自动重登冷却。 |
 | `webSessionMonitor.autoRelogin` | 开启 | 仅在定时巡检已启用时生效；关闭后只检测不补登。 |
+| `proxyRotation.enabled` | 关闭 | [账号 IP 定时轮换](proxy-rotation.md)，按降智结果分类启用。 |
+| `proxyRotation.intervalMinutes` | 60 分钟 | 1–43200；账号换绑间隔。 |
+| `proxyRotation.relogin` | 关闭 | 默认仅换绑；开启后重新登录并授权。 |
+| `proxyRotation.rotateMatched` / `rotateMismatched` | 开启 | 总开关启用后，分别选择未降智／降智账号。未知结果跳过。 |
 | `modelFingerprint.intervalMinutes` | 360 分钟 | 5–43200；降智默认间隔。 |
 | `modelFingerprint.maxConcurrentAccounts` | 3 | 1–16；独立账号队列，不共用登录槽位。 |
+| `modelFingerprint.precheck.enabled` | 关闭 | 在糖果／指纹前执行[前置正则检测](regex-precheck.md)，模型、提示词和命中方向可配置。 |
+| `modelFingerprint.precheck.skipFallbackOnPass` | 开启 | 前置通过时跳过兜底，仍推进一轮；疑似降智则由本轮对应的糖果／指纹确认。 |
 
 降智默认关闭且模型列表为空。检测间隔、并发、模型、概率门槛和参与检测的 PlanType 统一在降智检测设置中管理，任务设置不重复展示。通过添加／移除 PlanType 启停自动检测，未添加类型即使旧账号开关为启用也不自动检测，手动立即检测仍受号池资格限制。旧 planDefaults 中为 true 的类型自动迁移，分组加入规则单独配置，与 PlanType 列表和独立并发同时生效。
 
@@ -116,7 +122,7 @@ flowchart TB
 
 任务设置将次数同步间隔与并发放在“号池与用量同步”，自动冷却触发规则留在“过载”，暂停/恢复并发在“冷却操作并发”中展开。按 PlanType“自动开启过载统计”只控制账号开关，统计与冷却可独立启用。单项同步失败时保留该项数据与原时间范围，不妨碍另一项更新；页面提示同步异常，悬浮可查看不同的统计区间。
 
-`POST /api/task-settings` 支持局部更新，`monitoring`、`webSessionMonitor` 和 `overloadAutoCooldown` 的省略字段保留当前值，并发保存也在写入时合并。前端只提交修改过的值，普通保存不强制巡检；实际修改 Web 巡检规则或冷却规则时才唤醒对应任务。无效请求不改变已保存配置。恢复默认覆盖基础与监控参数（含接码时限、号池价格倍率），保留 PlanType 自动任务和独立降智配置，点击保存后才生效。
+`POST /api/task-settings` 支持局部更新，`monitoring`、`webSessionMonitor`、`overloadAutoCooldown` 和 `proxyRotation` 的省略字段保留当前值，并发保存也在写入时合并。前端只提交修改过的值，普通保存不强制巡检；实际修改 Web 巡检规则或冷却规则时才唤醒对应任务。无效请求不改变已保存配置。恢复默认覆盖基础与监控参数（含接码时限、号池价格倍率、IP 轮换），保留 PlanType 自动任务和独立降智配置，点击保存后才生效。
 
 ## 恢复资格与人工决定
 

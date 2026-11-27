@@ -9,6 +9,7 @@ import { DEFAULT_OVERLOAD_COOLDOWN, normalizeOverloadCooldown } from "./overload
 import { DEFAULT_WEB_SESSION_MONITOR, normalizeWebSessionMonitor } from "./web-session-monitor.mjs";
 import { normalizeFingerprintSettings } from "./model-fingerprint.mjs";
 import { normalizeCodexAuthMode } from "./sub2api-oauth.mjs";
+import { DEFAULT_PROXY_ROTATION, normalizeProxyRotation } from "../shared/proxy-rotation-settings.mjs";
 
 const DEFAULT_MAX_ACTIVE_JOBS = 4;
 const MAX_ACTIVE_JOBS_LIMIT = 20;
@@ -24,7 +25,7 @@ const LATE_TASK_AUTO_ACTIONS = ["enable-overload-detection", "enable-overload-co
 export const TASK_AUTO_ACTIONS = new Set(Object.keys(TASK_AUTO_ACTION_LABELS));
 const PROXY_MODES = ["global", "sub2api", "plan"];
 const FINGERPRINT_FIELDS = ["models", "intervalMinutes", "minProbability", "maxConcurrentAccounts", "testSequence"];
-const FINGERPRINT_NESTED_FIELDS = ["matchedConcurrency", "matchedPriority", "testSequence"];
+const FINGERPRINT_NESTED_FIELDS = ["matchedConcurrency", "matchedPriority", "testSequence", "precheck"];
 
 const object = value => value && typeof value === "object" && !Array.isArray(value);
 const changed = (before, after) => JSON.stringify(before) !== JSON.stringify(after);
@@ -100,6 +101,7 @@ export function createConsoleSettings({
     accountProxyCooldownMinutes: 60, monitoringSettings: { ...monitoringDefaults },
     taskAutoActions: Object.create(null), overloadAutoCooldownSettings: { ...DEFAULT_OVERLOAD_COOLDOWN },
     webSessionMonitorSettings: { ...DEFAULT_WEB_SESSION_MONITOR },
+    proxyRotation: { ...DEFAULT_PROXY_ROTATION },
   };
   let current = defaults, writes = Promise.resolve(), closed = false;
   const pendingTaskSteps = new Map();
@@ -134,6 +136,7 @@ export function createConsoleSettings({
         accountProxyCooldownMinutes: normalizeCooldownMinutes(saved.accountProxyCooldownMinutes),
         overloadAutoCooldownSettings: normalizeOverloadCooldown(saved.overloadAutoCooldown),
         webSessionMonitorSettings: normalizeWebSessionMonitor(saved.webSessionMonitor),
+        proxyRotation: normalizeProxyRotation(saved.proxyRotation),
         monitoringSettings: normalizeSavedMonitoring(saved, monitoringDefaults),
       };
     } catch (error) {
@@ -204,6 +207,7 @@ export function createConsoleSettings({
       normalize("loginTimeoutMinutes", normalizeLoginTimeoutMinutes);
       normalize("monitoring", value => normalizeMonitoring(value, previous.monitoringSettings), "monitoringSettings");
       merge("webSessionMonitor", "webSessionMonitorSettings", normalizeWebSessionMonitor, "WebSession 巡检设置必须为对象");
+      merge("proxyRotation", "proxyRotation", normalizeProxyRotation, "IP 轮换设置必须是对象");
       let fingerprint = null;
       if (has("modelFingerprint")) {
         if (!object(patch.modelFingerprint)) throw errorWithStatus(400, "降智检测默认规则必须为对象");

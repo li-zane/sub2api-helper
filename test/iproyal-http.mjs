@@ -33,7 +33,7 @@ let balance = 0;
 const source = async () => ({
   identity: 'fixture', inventory: async () => [node.host, '203.0.113.18', '203.0.113.19'].map(ip => ({ ip, order: '8123' })),
   bandwidth: async () => ({ gb_limit: 100, gb_used: 100 - balance, gb_balance: balance }),
-  orderCost: async () => ({ amountUsd: 9, quantity: 3, days: 30, usdPerIp: 3 }),
+  orderDetails: async () => ({ cost: { amountUsd: 9, quantity: 3, days: 30, usdPerIp: 3 }, expiresAt: '2027-01-01T00:00:00.000Z' }),
 });
 await fs.mkdir(path.join(root, 'web', 'dist'), { recursive: true });
 await fs.writeFile(path.join(root, 'web', 'dist', 'index.html'), '<title>fixture</title>');
@@ -60,6 +60,11 @@ try {
   await settled();
   assert.deepEqual(writes, [{ name: '8123-1' }]);
   assert.equal((await listing()).proxies[0].iproyal.gb_balance, 0);
+  assert.equal((await listing()).proxies[0].iproyal.expiresAt, '2027-01-01T00:00:00.000Z');
+  boundAccount.last_used_at = new Date().toISOString();
+  const observed = (await listing()).proxies[0];
+  assert.equal(observed.historicalAccountCount, 1);
+  assert.equal(observed.lastRequestAt, boundAccount.last_used_at);
   assert.equal((await listing()).proxies[0].name, '8123-1');
   assert.equal((await listing()).proxies[0].availableForBinding, true);
   await api(policy, 'PUT', { allocationPaused: true, ipCostCny: 1 });

@@ -9,6 +9,7 @@ import { trapModalTab } from "./accessible-dialog.jsx";
 import { displayDateTime } from "./display-time.mjs";
 import { useDisplayTimeZone } from "./use-display-time.jsx";
 import { fingerprintSettingsPatch } from "./task-settings-form.mjs";
+import { DEFAULT_REGEX_PRECHECK, normalizeRegexPrecheck } from "../../shared/regex-precheck.mjs";
 
 export const ModelFingerprintPolicyContext = createContext(null);
 
@@ -25,6 +26,8 @@ const formatPlanAlias = (plan, mapping) => {
 };
 
 const TITLES = { match: "指纹一致", mismatch: "疑似不一致", unknown: "证据不足", error: "请求失败" };
+const methodName = method => method === "regex" ? "前置正则" : method === "candy" ? "糖果" : "指纹";
+const precheckTitle = status => ({ match: "前置通过", mismatch: "疑似降智", unknown: "证据不足", error: "检测异常" })[status] || "证据不足";
 const toText = models => (models || []).map(m => m.expected === m.model ? m.model : `${m.model} => ${m.expected}`).join("\n");
 const fromText = text => text.split(/\n/).map(line => line.trim()).filter(Boolean).map(line => { const [model, ...parts] = line.split("=>"); return { model: model.trim(), expected: parts.join("=>").trim() || model.trim() }; });
 
@@ -91,16 +94,38 @@ function Dialog({ title, subtitle, onClose, closeDisabled = false, returnFocusRe
   </dialog>;
 }
 
+function RegexPrecheckFields({ value, onChange, disabled }) {
+  const rule = { ...DEFAULT_REGEX_PRECHECK, ...value };
+  const patch = fields => onChange({ ...rule, ...fields });
+  const inactive = disabled || !rule.enabled;
+  return <section className="fingerprint-section regex-precheck-settings" aria-label="前置正则检测">
+    <div className="section-title-row"><h3>前置简单检测</h3><HelpTip label="前置正则检测说明">每个账号先使用指定模型和提示词发起独立请求，只含本轮提示词，不携带历史上下文。根据完整回答是否命中正则，决定通过或进入糖果／指纹兜底；最终结论以实际完成的最后阶段为准。</HelpTip></div>
+    <label className="task-auto-action-option"><input type="checkbox" checked={rule.enabled} disabled={disabled} onChange={e => patch({ enabled: e.target.checked })} /><span>启用前置正则检测</span></label>
+    <div className="fingerprint-three-fields">
+      <label className="settings-field"><span>前置检测模型</span><input aria-label="前置检测模型" value={rule.model} maxLength={160} disabled={inactive} placeholder="模型 ID 或已配置的模型别名" onChange={e => patch({ model: e.target.value })} /></label>
+      <label className="settings-field"><span>降智判断条件</span><CustomSelect aria-label="降智判断条件" value={rule.degradedWhen} disabled={inactive} onChange={e => patch({ degradedWhen: e.target.value })}>
+        <option value="match">命中正则时疑似降智</option><option value="no_match">未命中正则时疑似降智</option>
+      </CustomSelect></label>
+    </div>
+    <label className="settings-field"><span>前置提示词（独立新对话）</span><textarea aria-label="前置提示词" rows={4} maxLength={16000} value={rule.prompt} disabled={inactive} placeholder="填写要发送给模型的完整提示词" onChange={e => patch({ prompt: e.target.value })} /></label>
+    <label className="settings-field"><span>检测回答的正则表达式</span><textarea aria-label="前置正则表达式" rows={2} maxLength={2000} value={rule.pattern} disabled={inactive} placeholder={"例如：最终答案[：:]\\s*21（不含两侧 /）"} onChange={e => patch({ pattern: e.target.value })} /></label>
+    <label className="settings-field"><span>正则标志（可留空）</span><input aria-label="前置正则标志" maxLength={4} value={rule.flags} disabled={inactive} placeholder="i 忽略大小写；m 多行；s 跨行；u Unicode" onChange={e => patch({ flags: e.target.value })} /></label>
+    <label className="task-auto-action-option"><input type="checkbox" checked={rule.skipFallbackOnPass} disabled={inactive} onChange={e => patch({ skipFallbackOnPass: e.target.checked })} /><span>前置未降智时跳过糖果／指纹兜底</span></label>
+    <p className="empty-inline-note">疑似降智时始终执行兜底。每轮完成检测都推进下方轮换进度，前置通过并跳过兜底也计一轮。网络错误、空回答或未完成回答记为异常，不按“未命中”判分。</p>
+  </section>;
+}
+
 function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
   const [text, setText] = useState(() => toText(value.models));
   const testSequence = value.testSequence || { first: "fingerprint", fingerprint: 1, candy: 0 };
   return <section className="fingerprint-defaults" aria-label="默认降智检测规则">
+    <RegexPrecheckFields value={value.precheck} onChange={precheck => onChange({ ...value, precheck })} disabled={disabled} />
     <div className="fingerprint-field-group">
       <label className="settings-field">
         <span className="field-label-row">
           <span>默认检测模型（每行一个，最多 8 个）</span>
           <HelpTip title="默认降智检测规则" label="查看默认降智检测规则说明">
-            每个模型每轮发送 3 条数字指纹提示词，会使用账号额度、网络和本机评分资源。不同账号按并发上限执行，同一账号的请求依次进行；提高并发会增加瞬时资源占用。名称可写为“请求模型 =&gt; 参考库指纹名称”。参考库中的合并类（如 gpt-6-astra/6.1-sol）匹配表示属于该类，不区分其单个模型。归因是参考库内的统计排序，不等同于模型身份或智力证明。
+            此处配置糖果／指纹使用的模型。指纹每模型发送 3 条提示词，糖果每模型发送 1 条。前置检测通过并跳过兜底时不请求这些模型。不同账号按并发上限执行，同一账号依次请求。名称可写为“请求模型 =&gt; 参考库指纹名称”。合并参考类的匹配不区分类内模型。
           </HelpTip>
         </span>
         <textarea aria-label="默认检测模型" rows={2} value={text} disabled={disabled} placeholder={"模型 ID\n模型别名 => 预期指纹名称"} onChange={event => { setText(event.target.value); onChange({ ...value, models: fromText(event.target.value) }); }} />
@@ -125,7 +150,7 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
       <div className="section-title-row">
         <h3>检测轮换</h3>
         <HelpTip title="检测轮换" label="查看检测轮换说明">
-          每个到期检测周期执行一种测试，各账号独立保存进度。按首项和次数循环，如指纹 1 轮后进行糖果 N 轮。指纹每轮采样 3 次；糖果每模型只采集 1 份完整回答，可重试临时请求失败。完整回答后进入下一步，答案未通过或证据不足不重测。次数不能同时为 0。
+          各账号独立保存糖果／指纹进度，按首项和次数循环。每轮完成检测后进入下一步，前置通过并跳过兜底也推进；需要兜底时使用本轮对应的方法。指纹每轮采样 3 次；糖果每模型只采集 1 份完整回答，可重试临时请求失败。完整糖果回答后进入下一步，答案未通过或证据不足不重测。次数不能同时为 0。
         </HelpTip>
       </div>
       <div className="fingerprint-three-fields">
@@ -168,7 +193,7 @@ function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
       </div>
     </div>
     <div className="fingerprint-section">
-      <div className="section-title-row"><h3>检测失败重试</h3><HelpTip label="检测失败重试说明">指纹和糖果共用重试次数、间隔。过载、网络、超时等临时失败仅重试当前样本，指纹有效数字不足也按此规则补采，已成功的样本不重跑。重试次数不含首次请求，0 表示关闭。明确不通过、指纹归因证据不足、糖果完整回答但答案不明确、401/403、429、封禁或额度错误不重试。重试共用本轮账号并发，不增加一轮检测，全部尝试和用量保存在本轮详情。</HelpTip></div>
+      <div className="section-title-row"><h3>检测失败重试</h3><HelpTip label="检测失败重试说明">前置、指纹和糖果共用重试次数、间隔。过载、网络、超时等临时失败仅重试当前样本，指纹有效数字不足也按此规则补采，已成功的样本不重跑。重试次数不含首次请求，0 表示关闭。明确不通过、正则匹配异常、指纹归因证据不足、糖果完整回答但答案不明确、401/403、429、封禁或额度错误不重试。重试共用本轮账号并发，不增加一轮检测，全部尝试和用量保存在本轮详情。</HelpTip></div>
       <div className="fingerprint-three-fields">
         <label className="settings-field"><span>失败重试次数</span><input aria-label="检测失败重试次数" type="number" min="0" max="5" step="1" value={value.failureRetries ?? 1} disabled={disabled} onChange={event => onChange({ ...value, failureRetries: event.target.value === "" ? "" : Number(event.target.value) })} /></label>
         <label className="settings-field"><span>重试间隔（秒）</span><input aria-label="检测失败重试间隔（秒）" type="number" min="1" max="300" step="1" value={value.failureRetryDelaySeconds ?? 5} disabled={disabled} onChange={event => onChange({ ...value, failureRetryDelaySeconds: event.target.value === "" ? "" : Number(event.target.value) })} /></label>
@@ -191,6 +216,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8,
         failureRetries: 1, failureRetryDelaySeconds: 5,
         testSequence: { first: "fingerprint", fingerprint: 1, candy: 0 },
+        precheck: { ...DEFAULT_REGEX_PRECHECK },
         groupPolicies: {},
         ...rawSettings,
         enabledPlanTypes: readEnabledPlanTypes(rawSettings),
@@ -251,6 +277,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         minProbability: data.settings.minProbability ?? 0.8,
         failureRetries,
         failureRetryDelaySeconds,
+        precheck: normalizeRegexPrecheck(data.settings.precheck),
         testSequence: { first: seq.first, fingerprint: fp, candy: cd },
         enabledPlanTypes: enabledPlans,
         groupPolicies: data.settings.groupPolicies || {},
@@ -342,7 +369,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         <div className="section-title-row">
           <h3>号池分组加入规则</h3>
           <HelpTip title="号池分组加入规则" label="查看号池分组加入规则说明">
-            默认加入按方案保留；不降智加入依据最近一轮检测，指纹或糖果通过即可加入（本轮指定模型需全部通过）。明确未通过时移出条件组；证据不足或请求失败保留已有分组，新账号通过后才加入。不改其它分组，独立并发设置仍单独生效。
+            默认加入按方案保留；不降智加入依据本轮最终结论：前置通过并跳过兜底，或糖果／指纹全部指定模型通过。前置疑似降智时等待兜底，最终明确未通过才移出条件组；证据不足或请求失败保留已有分组，新账号通过后才加入。不改其它分组，独立并发设置仍单独生效。
           </HelpTip>
         </div>
         {data.groupsError && <p role="status" className="proxy-quality-error">{data.groupsError}，已配置的规则会保留。</p>}
@@ -374,6 +401,14 @@ function AttributionModels({ models, parentStatus, method = "fingerprint" }) {
     const isMatch = modelStatus === "match";
     const isMismatch = modelStatus === "mismatch";
     const isError = modelStatus === "error";
+
+    if (r.method === "regex" || method === "regex") return <div key={index} className={`fingerprint-timeline-model status-${modelStatus}`}>
+      <div className="fingerprint-model-stream"><strong className="model-name-text">{r.model}</strong><span className={`model-status-tag ${modelStatus}`}>{precheckTitle(modelStatus)}</span></div>
+      <p className="fingerprint-transcript-note">{r.reason || r.error || "前置检测未完成"}</p>
+      {r.pattern && <p className="fingerprint-transcript-note regex-rule-text">正则：<code>{r.pattern}</code> · 标志：{r.flags || "无"} · {r.degradedWhen === "no_match" ? "未命中" : "命中"}时疑似降智</p>}
+      {r.failure && <p className="proxy-quality-error">{r.failure.code}：{r.failure.message}</p>}
+      <div className="fingerprint-timeline-meta">远端账号 ID：{r.accountId || "—"} · 独立单条提示词</div>
+    </div>;
 
     if (isCandy) {
       const extracted = r.extractedFinalAnswer != null ? r.extractedFinalAnswer : (isError ? (r.failure?.code || "检测失败") : "未提取");
@@ -547,31 +582,33 @@ function RoundRequests({ jobId, token, record }) {
     {open && <div className="fingerprint-transcript-content">
       {!data && !error && <p role="status">正在读取采样原文…</p>}
       {error && <div role="alert" className="proxy-quality-error">{error} <button type="button" className="secondary-button compact-btn" onClick={() => setRetry(n => n + 1)}>重试读取</button></div>}
-      {data?.models?.map((model, i) => {
-        const isCandyModel = record.method === "candy" || model.method === "candy";
+      {[...(data?.precheck?.models || []), ...(data?.models || [])].map((model, i) => {
+        const isRegexModel = model.method === "regex";
+        const isCandyModel = !isRegexModel && (record.method === "candy" || model.method === "candy");
         return <section className="fingerprint-request-model" key={i}>
           <h4>{model.model}<small>号池账号 {model.accountId || "—"}</small></h4>
           {model.requests?.map((request, j) => {
             const isCandyReq = isCandyModel || request.method === "candy";
             return <details className="fingerprint-sample" key={j}>
               <summary>
-                {isCandyReq
+                {isRegexModel ? `前置正则 · 请求 ${request.attempt} · ${request.status === "error" ? "检测异常" : precheckTitle(request.assessmentStatus)}` : isCandyReq
                   ? `糖果题 · 请求 ${request.attempt} · ${request.status === "error" ? "请求失败" : request.accepted ? `有效 (答案 ${request.extractedFinalAnswer ?? "—"})` : "未提取有效答案"}`
                   : `样本 ${request.sample} · 请求 ${request.attempt} · ${request.status === "error" ? "请求失败" : request.accepted ? "有效" : "数字不足"}`}
                 <span>
-                  {isCandyReq
+                  {isRegexModel ? (request.regexMatched === undefined ? "未评分" : request.regexMatched ? "命中正则" : "未命中正则") : isCandyReq
                     ? (request.extractedFinalAnswer != null ? `最终答案: ${request.extractedFinalAnswer}` : "期望: 21")
                     : `${request.count ?? 0} / ${request.expectedCount ?? "—"} 个数字`}
                 </span>
               </summary>
               <p className="fingerprint-transcript-note">
                 {displayDateTime(request.startedAt)} · {((request.durationMs || 0) / 1000).toFixed(1)}s
-                {!isCandyReq && ` · 最低有效数字数 ${request.minimumCount ?? "—"}`}
+                {!isCandyReq && !isRegexModel && ` · 最低有效数字数 ${request.minimumCount ?? "—"}`}
                 {isCandyReq && ` · 题型: 单题问答`}
+                {isRegexModel && " · 独立新对话，无历史上下文"}
               </p>
               {request.failure && <p className="proxy-quality-error">{request.failure.code}{request.failure.httpStatus ? ` · HTTP ${request.failure.httpStatus}` : ""}：{request.failure.message}</p>}
               <strong>Prompt</strong><pre className="fingerprint-request-prompt" tabIndex={0}>{request.prompt}</pre>
-              <strong>{request.status === "error" && request.response ? "回答（未完成，未参与评分）" : "回答"}</strong>
+              <strong>{request.status === "error" && request.response ? "回答（检测异常，未参与评分）" : "回答"}</strong>
               {request.response === null ? <p className="fingerprint-transcript-note">本次请求未收到回答正文。</p> : <pre className="fingerprint-request-response" tabIndex={0}>{request.response || "（空回答）"}</pre>}
             </details>;
           })}
@@ -657,7 +694,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
         )}
         {(data?.phase === "running" || data?.phase === "queued") && (
           <span className="history-phase-pill">
-            · {data.phase === "running" ? `正在检测 (${data.runningMethod === "candy" ? "糖果" : "指纹"})` : `排队中 (#${data.queuePosition ?? 1})`}
+            · {data.phase === "running" ? `正在检测 (${methodName(data.runningMethod)})` : `排队中 (#${data.queuePosition ?? 1})`}
           </span>
         )}
       </div>
@@ -690,7 +727,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
           const { time, date } = formatTimelineTime(record.checkedAt);
           const isCandy = record.method === "candy";
           const statusKey = record.status || "unknown";
-          const statusText = isCandy
+          const statusText = record.method === "regex" ? precheckTitle(record.status) : isCandy
             ? (record.status === "match" ? "通过" : record.status === "mismatch" ? "未通过" : record.status === "unknown" ? "证据不足" : "检测失败")
             : (TITLES[record.status] || "证据不足");
 
@@ -705,7 +742,7 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
                   <span className="node-date">{date}</span>
                   <span className="node-meta-sep">·</span>
                   <span className={`node-method-badge ${isCandy ? "method-candy" : "method-fingerprint"}`}>
-                    {isCandy ? "糖果" : "指纹"}
+                    {methodName(record.method)}
                   </span>
                   {record.sequencePosition != null && (
                     <span className="node-sequence-pos">#{record.sequencePosition}</span>
@@ -732,6 +769,10 @@ function FingerprintHistoryDialog({ job, token, onClose }) {
                 </div>
                 <span className={`fingerprint-status ${record.status}`}>{statusText}</span>
               </div>
+              {record.precheck && <div className="fingerprint-precheck-summary">
+                <p className="fingerprint-transcript-note">{precheckTitle(record.precheck.status)} · {record.precheck.fallbackExecuted ? `已进入${methodName(record.precheck.fallbackMethod)}兜底，以下方兜底结论为准` : record.precheck.status === "match" ? record.precheck.sequenceAdvanced ? "已跳过兜底，轮换进度已推进" : "已跳过兜底，轮换进度保留" : "本轮前置异常，未执行兜底"}</p>
+                {record.precheck.models && <AttributionModels models={record.precheck.models} parentStatus={record.precheck.status} method="regex" />}
+              </div>}
               <AttributionModels models={record.models || []} parentStatus={record.status} method={record.method || "fingerprint"} />
               <RoundRequests jobId={job.id} token={token} record={record} />
               {record.error && <p className="proxy-quality-error timeline-record-error">{record.error}</p>}
@@ -808,6 +849,7 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
       return state.sequence?.method === "candy" ? "排队中（糖果）" : "排队中";
     }
     if (checking || checkPending) {
+      if (state.runningMethod === "regex") return "正在检测（前置正则）";
       if (state.runningMethod === "candy") return "正在检测（糖果）";
       if (state.runningMethod === "fingerprint") return "正在检测（指纹）";
       return "正在检测";
@@ -832,7 +874,8 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
         const isCandy = round?.method === "candy";
         let statusText = "暂无检测记录";
         if (round) {
-          if (isCandy) {
+          if (round.method === "regex") statusText = precheckTitle(round.status);
+          else if (isCandy) {
             statusText = round.status === "match" ? "糖果通过" : round.status === "mismatch" ? "糖果未通过" : round.status === "unknown" ? "证据不足" : "检测失败";
           } else {
             statusText = round.status === "match" ? "指纹匹配 (通过)" : round.status === "mismatch" ? "指纹不匹配 (不一致)" : round.status === "unknown" ? "证据不足" : "检测失败";
@@ -926,6 +969,7 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
       {result && <section className="fingerprint-section">
         <h3>最近模型归因</h3>
         {result.models?.map((r, i) => {
+          if (r.method === "regex") return <p key={i}>{r.model} → {precheckTitle(r.status)}<small className="fingerprint-reference">{r.reason || r.error}</small></p>;
           const isCandy = result.method === "candy" || r.method === "candy";
           return <p key={i}>
             {r.model} → {isCandy ? (r.extractedFinalAnswer != null ? `答案 ${r.extractedFinalAnswer}` : r.error || "未提取") : (r.predictionName || r.prediction || r.error || "未知")} · {isCandy ? (r.status === "match" ? "通过" : r.status === "mismatch" ? "未通过" : r.status === "unknown" ? "证据不足" : "检测失败") : (TITLES[r.status] || "证据不足")} {r.probability != null ? `(${(r.probability * 100).toFixed(1)}%)` : ""}

@@ -4659,6 +4659,19 @@ dialog.batch-dialog::backdrop {
   list-style: none;
 }
 
+.proxy-management-history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.proxy-management-history > small { flex-basis: 100%; }
+.proxy-order-validity { display: block; }
+
 .proxy-management-node + .proxy-management-node {
   border-top: 1px solid var(--line);
 }
@@ -8928,6 +8941,20 @@ select option {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   align-items: stretch;
+}
+
+.fingerprint-settings-dialog .regex-precheck-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fingerprint-settings-dialog .regex-precheck-settings .fingerprint-three-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.regex-rule-text { overflow-wrap: anywhere; }
+.fingerprint-precheck-summary { border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px; }
+@media (max-width: 640px) {
+  .fingerprint-settings-dialog .regex-precheck-settings .fingerprint-three-fields { grid-template-columns: minmax(0, 1fr); }
 }
 
 .fingerprint-settings-dialog .section-title-row h3 {

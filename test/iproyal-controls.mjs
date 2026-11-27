@@ -23,7 +23,10 @@ try {
     source: async () => ({ identity: 'account',
       inventory: async () => Array.from({ length: 5 }, (_, i) => ({ ip: `192.0.2.${i + 1}`, order: '900' })),
       bandwidth: async () => { if (broken) throw Error('private detail'); return { gb_balance: balance, gb_limit: 100, gb_used: 100 - balance }; },
-      orderCost: async () => { if (priceBroken) throw Error('private detail'); return { amountUsd: 12.15, quantity: 5, days: 30, usdPerIp: 2.43 }; },
+      orderDetails: async () => {
+        if (priceBroken) throw Error('private detail');
+        return { cost: { amountUsd: 12.15, quantity: 5, days: 30, usdPerIp: 2.43 }, expiresAt: '2027-01-01T00:00:00.000Z' };
+      },
     }),
   };
   patrol = createIproyalPatrol(options);
@@ -48,6 +51,8 @@ try {
   assert(patrol.isBlocked('pool', 1), 'API failure preserves last known gate');
   assert.equal(costs.length, costCount, 'stale price must not overwrite local cost');
   assert(patrol.lookup('pool', nodes[0].host).costStale);
+  assert.equal(patrol.lookup('pool', nodes[0].host).expiresAt, '2027-01-01T00:00:00.000Z');
+  assert(patrol.lookup('pool', nodes[0].host).expiryStale);
   assert(!patrol.status().message.includes('private detail'));
   await patrol.stop();
   patrol = createIproyalPatrol(options); await patrol.load();
