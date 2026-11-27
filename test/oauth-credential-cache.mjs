@@ -6,12 +6,13 @@ const start = source.indexOf('  async function recoverSub2ApiAuthorization(');
 const end = source.indexOf('  async function synchronizePoolRefresh(', start);
 const create = new Function('scope', `with (scope) { return (${source.slice(start, end).trim()}); }`);
 
-function fixture({ enabled = true, status = 'active', manuallyDisabled = false } = {}) {
+function fixture({ enabled = true, status = 'active', manuallyDisabled = false, degradationPaused = false } = {}) {
   const row = { id: 7, email: 'cache@example.test', status, schedulable: enabled, error_message: status === 'error' ? '401 token_revoked' : '' };
   const job = { poolRefreshRecovery: null }, writes = [];
   let oldCache = true, failClear = false;
   const scope = {
     overloadCooldown: { lock: (_email, run) => run(), isPaused: () => false, isManuallyDisabled: () => manuallyDisabled },
+    degradationCooldown: { isPaused: () => degradationPaused },
     accountAutomationBlocked: () => false, sub2ApiAccountEmail: account => account.email,
     monitorBackendIdentity: () => 'backend', sessionResetAutomationPaused: () => false,
     sub2ApiAccountSchedulable: account => account.schedulable,
@@ -50,4 +51,11 @@ for (const manuallyDisabled of [false, true]) {
   assert.equal(test.stale(), false);
   assert.equal(test.row.schedulable, !manuallyDisabled, 'authorization recovery ignored explicit disable');
 }
-console.log('OAUTH_CREDENTIAL_CACHE_PASS active enabled/disabled cache invalidation; uncertain-clear durable disabled intent; auth-error recovery; manual-disable preserved');
+for (const status of ['active', 'error']) {
+  const test = fixture({ enabled: false, status, degradationPaused: true });
+  await test.run();
+  assert.equal(test.stale(), false, 'cooldown prevented credential cache invalidation');
+  assert.equal(test.row.schedulable, false, 'credential recovery resumed a cooling account');
+  assert(!test.writes.includes(true), 'credential recovery briefly enabled a cooling account');
+}
+console.log('OAUTH_CREDENTIAL_CACHE_PASS active enabled/disabled cache invalidation; uncertain-clear durable disabled intent; auth-error recovery; manual-disable and degradation cooldown preserved');
