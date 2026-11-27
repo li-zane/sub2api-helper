@@ -1,6 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { LoaderCircle, RefreshCw, X } from "lucide-react";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
+import { displayDateTime } from "./display-time.mjs";
+import { useDisplayTimeZone } from "./use-display-time.jsx";
 import "./bound-ip-dialog.css";
 
 export function BoundIpDialog({ job, loadOptions, request, blockedReason, onClose, onStarted }) {
@@ -64,6 +66,7 @@ export function BoundIpDialog({ job, loadOptions, request, blockedReason, onClos
     </div>
     <div className="bound-ip-dialog-body">
       <p className="bound-ip-account">{job.email}</p>
+      <BoundIpHistory key={job.id} job={job} request={request} optionsLoaded={Boolean(options)} />
       {unavailable && <p className="bound-ip-notice" role="status">{unavailable}</p>}
       {readError ? <div role="alert" className="bound-ip-notice">
         <span>{readError}</span>
@@ -105,4 +108,47 @@ export function BoundIpDialog({ job, loadOptions, request, blockedReason, onClos
       </button>
     </div>
   </AccessibleDialog>;
+}
+
+function BoundIpHistory({ job, request, optionsLoaded }) {
+  useDisplayTimeZone();
+  const titleId = useId();
+  const [history, setHistory] = useState(null);
+  const [error, setError] = useState("");
+  const [reload, setReload] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setError("");
+    // Read saved history immediately, then refresh when the options request
+    // finishes recording the latest pool bindings. History still works offline.
+    void request(`/api/jobs/${encodeURIComponent(job.id)}/proxy-history`, { signal: controller.signal }).then(data => {
+      if (!controller.signal.aborted) setHistory(data.history);
+    }).catch(error => {
+      if (!controller.signal.aborted) setError(error.message || "读取历史 IP 失败");
+    });
+    return () => controller.abort();
+  }, [job.id, request, optionsLoaded, reload]);
+  const currentIps = new Set((job.boundProxies || []).map(proxy => proxy.ipAddress).filter(Boolean));
+  return <section className="bound-ip-history" aria-labelledby={titleId}>
+    <div className="bound-ip-history-heading">
+      <h3 id={titleId}>历史使用的 IP</h3>
+      {history && <span>共 {history.length} 个</span>}
+    </div>
+    <p className="bound-ip-notice">按出口 IP 去重，保留已记录的绑定。</p>
+    {error && <div role="alert" className="bound-ip-history-error">
+      <span>{error}</span>
+      <button type="button" className="secondary-button" onClick={() => setReload(value => value + 1)}>重试历史记录</button>
+    </div>}
+    {!history && !error && <p className="bound-ip-notice" role="status">正在读取历史 IP…</p>}
+    {history?.length === 0 && <p className="bound-ip-notice">暂无历史 IP 记录</p>}
+    {history?.length > 0 && <ul className="bound-ip-history-list" aria-label="历史 IP 列表">
+      {history.map(item => <li key={item.ipAddress}>
+        <div className="bound-ip-history-heading">
+          <strong>{item.ipAddress}</strong>
+          {currentIps.has(item.ipAddress) && <small>当前绑定</small>}
+        </div>
+        <span>{item.lastRequestAt ? `上次使用：${displayDateTime(item.lastRequestAt)}` : "暂无请求时间记录"}</span>
+      </li>)}
+    </ul>}
+  </section>;
 }

@@ -1777,7 +1777,7 @@ export function createConsoleApp(options = {}) {
       return;
     }
 
-    const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|authorize|retry|regenerate|relogin|proxy-binding|session-reset|web-login|web-session-check|setup-2fa|replace-2fa|add-password|replace-password|security-state|credentials|email|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
+    const match = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(input|cancel|authorize|retry|regenerate|relogin|proxy-binding|proxy-history|session-reset|web-login|web-session-check|setup-2fa|replace-2fa|add-password|replace-password|security-state|credentials|email|usage|logs|download|sms-number|luban-number|sessions(?:\/(?:logout|logout-all))?|workspaces(?:\/switch)?))?$/.exec(requestUrl.pathname);
     if (!match) {
       sendJson(res, 404, { error: "Not found" });
       return;
@@ -1793,6 +1793,12 @@ export function createConsoleApp(options = {}) {
     if (req.method !== "GET" && activeSessionReset(job) && !["input", "cancel", "sms-number", "luban-number"].includes(action))
       throw httpError(409, "会话重建正在进行，请等待 Web、OAuth 和号池更新全部完成");
     if (/^(?:sessions|workspaces)(?:\/|$)/.test(action || "")) assertAccountWebActionsAllowed(job);
+    if (req.method === "GET" && action === "proxy-history") {
+      sendJson(res, 200, { history: book.proxyActivity.byAccount(
+        monitorBackendIdentity(sub2ApiSettingsConfig), accountLoginEmails.emails(job.email),
+      ) });
+      return;
+    }
     if (req.method === "GET" && action === "logs") {
       if (requestUrl.searchParams.has("view")) {
         if (requestUrl.searchParams.get("view") === "credentials") await reloadMissingJobCredentials(job);

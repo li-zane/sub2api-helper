@@ -18,6 +18,7 @@ export class ProxyActivity {
         pool TEXT NOT NULL, remote TEXT NOT NULL, account TEXT NOT NULL, ip TEXT NOT NULL, since INTEGER NOT NULL,
         PRIMARY KEY(pool,remote)
       );
+      CREATE INDEX IF NOT EXISTS proxy_account_history_account ON proxy_account_history(pool,account);
     `);
     this.pairs = db.prepare(`INSERT INTO proxy_account_history VALUES(?,?,?,?)
       ON CONFLICT(pool,ip,account) DO UPDATE SET last_request=excluded.last_request
@@ -27,6 +28,7 @@ export class ProxyActivity {
     this.unbind = db.prepare("DELETE FROM proxy_observed_binding WHERE pool=? AND remote=?");
     this.stats = db.prepare(`SELECT ip,COUNT(*) AS historicalAccountCount,MAX(last_request) AS lastRequest
       FROM proxy_account_history WHERE pool=? GROUP BY ip`);
+    this.accountHistory = db.prepare("SELECT ip,last_request FROM proxy_account_history WHERE pool=? AND account=?");
   }
 
   noteBinding(pool, ip, email) {
@@ -70,5 +72,20 @@ export class ProxyActivity {
   byIp(pool) {
     return new Map(this.stats.all(pool).map(({ ip, historicalAccountCount, lastRequest }) =>
       [ip, { historicalAccountCount, lastRequestAt: lastRequest == null ? null : new Date(lastRequest).toISOString() }]));
+  }
+
+  byAccount(pool, emails) {
+    const history = new Map();
+    // Include former login emails without exposing account identifiers or
+    // double-counting the same exit after an email change.
+    for (const email of new Set((Array.isArray(emails) ? emails : [emails]).filter(Boolean).map(email => email.toLowerCase()))) {
+      for (const { ip, last_request } of this.accountHistory.all(pool, identity(email))) {
+        if (!history.has(ip) || last_request != null && (history.get(ip) == null || last_request > history.get(ip))) {
+          history.set(ip, last_request);
+        }
+      }
+    }
+    return [...history].sort(([a, ta], [b, tb]) => (tb ?? -Infinity) - (ta ?? -Infinity) || a.localeCompare(b))
+      .map(([ipAddress, lastRequest]) => ({ ipAddress, lastRequestAt: lastRequest == null ? null : new Date(lastRequest).toISOString() }));
   }
 }

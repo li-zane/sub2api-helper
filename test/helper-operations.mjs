@@ -38,6 +38,21 @@ try {
   b.proxyActivity.observe(pool, 6, [backfill], t + 7000);
   assert.equal(b.proxyActivity.byIp(pool).get(backfill.ip).lastRequestAt, used);
   assert.equal(b.proxyActivity.byIp("other-backend").size, 0);
+  const accountIps = [
+    { ipAddress: "192.0.2.10", lastRequestAt: used },
+    { ipAddress: "192.0.2.30", lastRequestAt: used },
+    { ipAddress: "192.0.2.20", lastRequestAt: null },
+  ];
+  assert.deepEqual(b.proxyActivity.byAccount(pool, acct.toUpperCase()), accountIps);
+  b.proxyActivity.noteBinding(pool, "192.0.2.40", "renamed@example.test");
+  b.proxyActivity.noteBinding(pool, row.ip, "renamed@example.test");
+  b.proxyActivity.observe(pool, 7, [{ ...row, id: 99, email: "unrelated@example.test", ip: "192.0.2.99" }], t + 8000);
+  assert.deepEqual(b.proxyActivity.byAccount(pool, acct), accountIps, "remote deletion keeps only this account's history");
+  assert.deepEqual(b.proxyActivity.byAccount(pool, [acct, "renamed@example.test", acct]), [
+    ...accountIps, { ipAddress: "192.0.2.40", lastRequestAt: null },
+  ], "former/current email histories merge by exit and preserve request times");
+  assert.deepEqual(b.proxyActivity.byAccount("other-backend", acct), []);
+  assert.deepEqual(b.proxyActivity.byAccount(pool, "unknown@example.test"), []);
   b.savePolicy(ns, 12, "test-ip", added, {
     allocationPaused: true,
     ipCostCny: "3.81",
@@ -60,7 +75,8 @@ try {
   b.close();
   b = new OperationsBook(file, () => now);
   b.open();
-  assert.deepEqual(b.proxyActivity.byIp(pool).get(row.ip), { historicalAccountCount: 2, lastRequestAt: used });
+  assert.deepEqual(b.proxyActivity.byIp(pool).get(row.ip), { historicalAccountCount: 3, lastRequestAt: used });
+  assert.deepEqual(b.proxyActivity.byAccount(pool, acct), accountIps, "account IP history survives restart");
   assert(b.paused(acct));
   assert(b.isBlocked(ns, 12));
   assert.equal(b.ledger().ipCount, 1);

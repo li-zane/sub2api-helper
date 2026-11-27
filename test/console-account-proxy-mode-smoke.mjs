@@ -311,6 +311,18 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
 
   const bound = (await page()).jobs.find(job => job.id === target.id);
   const bindingRoute = `/api/jobs/${target.id}/proxy-binding`;
+  const historyRoute = `${base}/api/jobs/${target.id}/proxy-history`;
+  assert.equal((await fetch(historyRoute)).status, 403, "history requires console authentication");
+  const readIpHistory = async () => {
+    const result = await fetch(historyRoute, { headers });
+    assert.equal(result.status, 200);
+    const { history } = await result.json();
+    assert(history.every(item => Object.keys(item).sort().join() === "ipAddress,lastRequestAt"), "history exposes only IP and request time");
+    assert.equal(history.length, new Set(history.map(item => item.ipAddress)).size, "history deduplicates shared exits");
+    return history;
+  };
+  const historyBeforeSwitch = await readIpHistory();
+  assert(historyBeforeSwitch.some(item => item.ipAddress === bound.boundProxies[0].ipAddress));
   const invalid = await post(bindingRoute, { proxyId: -1 });
   assert.equal(invalid.status, 400, `ROW_IP_SWITCH_ROUTE actual=${invalid.status}`);
   const remoteBefore = accounts.find(account => account.id === accountId).proxy_id;
@@ -349,6 +361,7 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   const removed = await fetch(replacementUrl, { method: "DELETE", headers, body: JSON.stringify({ revision: replacementEdit.revision }) });
   assert.equal(removed.status, 200, await removed.text());
   assert(!proxies.some(proxy => proxy.id === replacement.id));
+  assert((await readIpHistory()).some(item => item.ipAddress === replacement.ip_address), "deleted proxy remains in account history");
   console.log("ROW_IP_SWITCH_PASS exact-node direct-relogin pool-sync delete-blocked-until-relogin");
 
   const bindOnlyNode = { id: 5, name: "Binding only", protocol: "http", host: "bind-only.invalid", port: 8080, ip_address: "198.51.100.50", status: "active" };
@@ -384,6 +397,10 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   await stopConsole(); await startConsole();
   assert.equal((await page()).jobs.find(j => j.id === target.id).assignedProxyId, bindOnlyNode.id, "binding-only persists across restart");
   assert.equal(accounts.find(a => a.id === accountId).proxy_id, bindOnlyNode.id);
+  const historyAfterRestart = await readIpHistory();
+  for (const ip of [replacement.ip_address, bindOnlyNode.ip_address, ...historyBeforeSwitch.map(item => item.ipAddress)]) {
+    assert(historyAfterRestart.some(item => item.ipAddress === ip), "manual and binding-only history persists across restart: " + ip);
+  }
   console.log("BINDING_ONLY_PASS all matching rows; credentials preserved; no logout/login; next helper/OAuth route; restart");
 
   // Seed a current detection and an already-due persisted deadline. The real
@@ -432,6 +449,12 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   assert.equal(new URL((await readTrace()).at(-1).proxy).hostname, 'relogin-exit.invalid');
   assert.equal((await post('/api/task-settings', {proxyRotation:{enabled:false}})).status, 200);
   console.log('SCHEDULED_IP_RELOGIN_PASS new exit; logout; exactly one login; pool credentials and route synchronized');
+  const finalHistory = await readIpHistory();
+  for (const ip of ["198.51.100.70", "198.51.100.80"]) assert(finalHistory.some(item => item.ipAddress === ip), "automatic rotation history: " + ip);
+  const otherJob = (await page()).jobs.find(job => job.email.startsWith("concurrent-"));
+  const otherHistory = await (await fetch(`${base}/api/jobs/${otherJob.id}/proxy-history`, { headers })).json();
+  assert(!otherHistory.history.some(item => [replacement.ip_address, bindOnlyNode.ip_address, "198.51.100.70", "198.51.100.80"].includes(item.ipAddress)), "account histories remain isolated");
+  console.log('ACCOUNT_IP_HISTORY_PASS authenticated; shared-exit dedupe; manual and automatic switching; deleted proxy; restart; account isolation');
 
   // Remote OAuth must also pin a matching global proxy, even when direct fallback is enabled.
   await fs.writeFile(failLogin, "1");

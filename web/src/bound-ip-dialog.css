@@ -56,3 +56,54 @@
   color: var(--muted);
   font-size: 12px;
 }
+
+.bound-ip-history {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.bound-ip-history-heading,
+.bound-ip-history-error {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  overflow-wrap: anywhere;
+}
+
+.bound-ip-history h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bound-ip-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 150px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+}
+
+.bound-ip-history-list li {
+  min-width: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.bound-ip-history-list strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.bound-ip-history span,
+.bound-ip-history small {
+  color: var(--muted);
+  font-size: 12px;
+}
