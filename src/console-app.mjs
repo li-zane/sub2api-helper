@@ -72,6 +72,7 @@ import { TAG_OPTION_KEYS, readAccountTags, patchAccountTags, writeAccountTags } 
 import { DEFAULT_FINGERPRINT_POOL_POLICY, FINGERPRINT_POOL_FIELDS, FINGERPRINT_POOL_TIERS, fingerprintPoolNumber, fingerprintPoolTierValues, isLegacyFingerprintConcurrency } from "../shared/fingerprint-pool-policy.mjs";
 import { createAccountTagCatalog } from "./account-tag-catalog.mjs";
 import { OverloadCooldown } from "./overload-cooldown.mjs";
+import { DegradationCooldown } from "./degradation-cooldown.mjs";
 import { ModelFingerprintService } from "./model-fingerprint.mjs";
 import { createFingerprintSampler, createFingerprintAccountReader, fingerprintFailure } from "./model-fingerprint-request.mjs";
 import { WebSessionMonitor } from "./web-session-monitor.mjs";
@@ -263,6 +264,7 @@ export function createConsoleApp(options = {}) {
     const accountId = /^\/api\/v1\/admin\/accounts\/(\d+)(?:\/|$)/.exec(endpoint)?.[1];
     if (accountId && sessionResetPoolIdPaused(accountId, config)) throw httpError(409, "一键重登期间暂停套餐与分组同步");
     const writesProxy = options.method === "PUT" && Object.hasOwn(JSON.parse(options.body || "{}"), "proxy_id");
+    if (writesProxy && degradationCooldown.ownsPoolPause(accountId, config)) throw httpError(409, "降智冷却期间保持原 IP 绑定");
     if (writesProxy && proxyBindingPoolIds.has(`${monitorBackendIdentity(config)}:${accountId}`)) throw httpError(409, "IP 换绑期间暂停代理同步");
     const work = requestSub2Api(config, endpoint, options);
     if (writesProxy) {
@@ -422,7 +424,7 @@ export function createConsoleApp(options = {}) {
       await loadSub2ApiAccountStatus();
       return listUniqueJobs();
     },
-    isBusy: job => inspectionPaused(job.email) || shuttingDown || !canLoginWeb(job, { maintenance: true }) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
+    isBusy: job => inspectionPaused(job.email) || degradationCooldown.isPaused(job.email) || shuttingDown || !canLoginWeb(job, { maintenance: true }) || job.status === "canceled" || Boolean(job.webSessionMaintenancePause),
     hasSession: async job => {
       try { await fs.access(webSessionPathForJob(job)); return true; }
       catch (error) { return error.code !== "ENOENT"; } // Permissions/I/O errors must reach the probe, not trigger a login.
@@ -467,7 +469,7 @@ export function createConsoleApp(options = {}) {
     },
     lock: (job, fn) => withEmailJobLock(job.email, fn),
     repair: async (job, { reason }) => {
-      if (dispatchPaused() || inspectionPaused(job.email)) return false;
+      if (dispatchPaused() || inspectionPaused(job.email) || degradationCooldown.isPaused(job.email)) return false;
       const webOnly = !job.resultSaved || webSessionNeedsLogin(reason);
       if (!webOnly && sessionResetAutomationPaused(job.email)) return false;
       if (automaticLoginBlocked(job, webOnly ? "web" : "oauth")) return false;
@@ -512,7 +514,7 @@ export function createConsoleApp(options = {}) {
     dispatchPaused,
     getMonitoringSettings: () => ({ intervalMs: consoleSettings.current.monitoringSettings.overloadIntervalSeconds * 1000, concurrency: consoleSettings.current.monitoringSettings.overloadCooldownConcurrency }),
     isBlocked: email => accountAutomationBlocked(email) || sessionResetAutomationPaused(email),
-    isCountBlocked: email=>inspectionPaused(email) || codexChecksBlocked(email),
+    isCountBlocked: email=>inspectionPaused(email) || degradationCooldown.isPaused(email) || codexChecksBlocked(email),
     filePath: path.join(OUTPUT_ROOT, "overload-cooldown.json"),
     getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig,
     backendIdentity: monitorBackendIdentity,
@@ -544,10 +546,35 @@ export function createConsoleApp(options = {}) {
   const accountSessionResets = new AccountSessionResets(path.join(OUTPUT_ROOT, "account-session-resets.json"));
   const sessionResetStarts = new Map();
 
+  const degradationCooldown = new DegradationCooldown({
+    filePath: path.join(OUTPUT_ROOT, "degradation-cooldown.json"), dispatchPaused,
+    getConfig: () => sub2ApiSettingsConfig || sub2ApiMonitorConfig, backendIdentity: monitorBackendIdentity,
+    getRule: () => modelFingerprint.settings.degradationCooldown,
+    getValidity: email => { const job = findJobByEmail(email); return readAccountTags(job?.remark || "", job?.accountTagsCleared).validity; },
+    sharedLock: (email, action) => overloadCooldown.lock(email, action),
+    isBlocked: email => accountAutomationBlocked(email) || sessionResetAutomationPaused(email) || overloadCooldown.isPaused(email),
+    canStart: email => !inspectionPaused(email) && !shuttingDown && !findJobByEmail(email)?.proxyBindingInProgress,
+    getMonitoringSettings: () => ({ intervalMs: 30_000, concurrency: consoleSettings.current.monitoringSettings.overloadCooldownConcurrency }),
+    request: requestSub2Api, onChange: invalidateSub2ApiAccountStatusCache,
+    listAccounts: async config => {
+      const listing = await listSub2ApiAccounts(config, { withMeta: true });
+      if (!listing.complete) throw Error("号池账号列表不完整，降智冷却等待重试");
+      const mapping = new Map();
+      for (const account of listing.accounts) {
+        const email = sub2ApiAccountEmail(account), id = normalizeSub2ApiAccountId(account.id);
+        if (!email || !id || account.platform !== "openai" || account.type !== "oauth" || account.status !== "active") continue;
+        mapping.set(email, [...(mapping.get(email) || []), { id, enabled: sub2ApiAccountSchedulable(account) === true,
+          canCount: !accountRateLimit(account).limited && !usageRestricted(normalizeSub2ApiUsage(account))
+            && !overloadCooldown.isManuallyDisabled(email, id, config) }]);
+      }
+      return mapping;
+    },
+  });
+
   const fingerprintAccountReader = createFingerprintAccountReader(requestSub2Api);
   async function readFingerprintAccount(config, id) {
     const account = await fingerprintAccountReader(config, id);
-    return { ...account, group_ids: sub2ApiAccountGroupIds(account), fingerprintCooling: overloadCooldown.ownsPause(sub2ApiAccountEmail(account), account.id) };
+    return { ...account, group_ids: sub2ApiAccountGroupIds(account), fingerprintCooling: overloadCooldown.ownsPause(sub2ApiAccountEmail(account), account.id) || degradationCooldown.ownsPause(sub2ApiAccountEmail(account), account.id) };
   }
   const fingerprintSampler = createFingerprintSampler({ getAccount: readFingerprintAccount, getProxies: listSub2ApiProxies,
     testUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_FINGERPRINT_TEST_URL : undefined });
@@ -587,9 +614,13 @@ export function createConsoleApp(options = {}) {
   }});
   const modelFingerprint = new ModelFingerprintService({
     onVerdict: (email, at, status, round) => book.recordQuality(email, at, status, round),
+    onCompleted: async (email, round) => {
+      try { await degradationCooldown.observeVerdict(email, round); }
+      catch { console.error("[degradation-cooldown] 冷却状态保存失败，等待后续检测重试"); }
+    },
     dispatchPaused,
     isBlocked: (email, { manual = false } = {}) => {
-      if (!manual && inspectionPaused(email)) return true;
+      if (!manual && (inspectionPaused(email) || degradationCooldown.isPaused(email))) return true;
       if (manual && manualFingerprintAllowed(findJobByEmail(email))) return false;
       if (codexChecksBlocked(email)) return true;
       const job = findJobByEmail(email), state = job && getSub2ApiAccountStatusForJob(job);
@@ -608,7 +639,7 @@ export function createConsoleApp(options = {}) {
       const listing = await listSub2ApiAccounts(config, { withMeta: true });
       if (!listing.complete) throw new Error("Sub2API 账号列表不完整");
       const limited = new Set(listing.accounts.filter(a => accountRateLimit(a).limited || usageRestricted(normalizeSub2ApiUsage(a))).map(sub2ApiAccountEmail));
-      return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && (sub2ApiAccountSchedulable(a) === true || manual && a.status === "active" && overloadCooldown.ownsPause(sub2ApiAccountEmail(a), a.id)) && !limited.has(sub2ApiAccountEmail(a))).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
+      return listing.accounts.filter(a => a.platform === "openai" && sub2ApiAccountEmail(a) && (sub2ApiAccountSchedulable(a) === true || manual && a.status === "active" && (overloadCooldown.ownsPause(sub2ApiAccountEmail(a), a.id) || degradationCooldown.ownsPause(sub2ApiAccountEmail(a), a.id))) && !limited.has(sub2ApiAccountEmail(a))).map(a => ({ id: a.id, email: sub2ApiAccountEmail(a), profileId: resolveSub2ApiConfigForAccount(config, a).profileId }));
     },
     getAccount: readFingerprintAccount, getPoolAccount: getSub2ApiAccount, sample: fingerprintSampler,
     getPoolNumberJobs: () => listUniqueJobs().filter(job => !job.deleted && !isActive(job.status))
@@ -768,7 +799,7 @@ export function createConsoleApp(options = {}) {
       const busyWorkers = chatStore.work.size + Number(Boolean(financeWork)) + Number(iproyal.status().running) + admittedWrites + emailJobLocks.size + activeWebSessionChecks + manualWebSessionCheckOperations.size
         + sessionResetStarts.size + poolRefreshOperations.size + sub2ApiAutoRepairPromises.size + accountSecurityChecks.size
         + modelFingerprint.inFlight.size + modelFingerprint.runningTasks.size + accountDataSyncOperations.size + Number(Boolean(proxyRotation.running))
-        + [webSessionMonitor.running, modelFingerprint.ticking, overloadMonitor.running, overloadCooldown.running, sub2ApiMonitorPromise].filter(Boolean).length;
+        + [webSessionMonitor.running, modelFingerprint.ticking, overloadMonitor.running, overloadCooldown.running, degradationCooldown.running, sub2ApiMonitorPromise].filter(Boolean).length;
       sendJson(res, 200, { paused: dispatchPaused(), ready: dispatchStarted && !shuttingDown, busyJobs, busyWorkers });
       return;
     }
@@ -1560,7 +1591,8 @@ export function createConsoleApp(options = {}) {
       const state = await loadSub2ApiAccountStatus({ forceRefresh: true });
       const entry = state.accounts.get(job.email.toLowerCase());
       if (!entry?.accountIds?.length) throw httpError(409, `${job.email} 尚未加入 Sub2API 号池`);
-      await overloadCooldown.manualOverride(job.email, entry.accountIds, () => {
+      await overloadCooldown.manualOverride(job.email, entry.accountIds, async () => {
+        await degradationCooldown.manualOverrideLocked(job.email, entry.accountIds);
         if (body.enabled && sessionResetAutomationPaused(job.email)) throw httpError(409, "一键重登尚未成功，号池保持暂停");
         return Promise.all(entry.accountIds.map((accountId) => requestSub2Api(
         config,
@@ -3283,7 +3315,7 @@ export function createConsoleApp(options = {}) {
       try {
         for (const account of records) {
           current();
-          if (!(state.resumeAccountIds || []).includes(String(account.id)) || overloadCooldown.isPaused(job.email)
+          if (!(state.resumeAccountIds || []).includes(String(account.id)) || overloadCooldown.isPaused(job.email) || degradationCooldown.isPaused(job.email)
             || overloadCooldown.isManuallyDisabled(job.email, account.id, config)) continue;
           // Restore scheduling opt-in; Sub2API still gates serving by quota and
           // rate limits, and its auto-reset worker requires this opt-in.
@@ -5319,7 +5351,7 @@ export function createConsoleApp(options = {}) {
         credentials,
         extra,
         status: "active",
-        schedulable: !overloadCooldown.isPaused(sub2ApiAccountEmail(account)),
+        schedulable: !overloadCooldown.isPaused(sub2ApiAccountEmail(account)) && !degradationCooldown.isPaused(sub2ApiAccountEmail(account)),
         group_ids: fingerprintGroupIds(accountConfig, account, accountConfig.groupIds.length ? accountConfig.groupIds : (account.group_ids || [])),
         ...proxyFields,
         ...(accountConfig.concurrency !== null ? { concurrency: accountConfig.concurrency } : {}),
@@ -6336,7 +6368,7 @@ export function createConsoleApp(options = {}) {
         if (shuttingDown) throw httpError(503, "服务正在关闭，已停止号池巡检");
         const allRemoteAccounts = accountListing.accounts;
         if (accountListing.complete) {
-          await fallBackExpiredSub2ApiProxies(config, profileState, allRemoteAccounts.filter(r=>!inspectionPaused(sub2ApiAccountEmail(r))), summary);
+          await fallBackExpiredSub2ApiProxies(config, profileState, allRemoteAccounts.filter(r=>!inspectionPaused(sub2ApiAccountEmail(r)) && !degradationCooldown.isPaused(sub2ApiAccountEmail(r))), summary);
           const previousPlanTypes = sub2ApiMonitorState.planTypesBackend === backend
             ? normalizeSub2ApiPlanTypeState(sub2ApiMonitorState.planTypes)
             : Object.create(null);
@@ -8129,7 +8161,7 @@ export function createConsoleApp(options = {}) {
     const email = accountLoginEmails.key(job.email);
     if (job.deleted || !job.resultSaved || !canStartAccountTask(job) || job.child || job.proxyBindingInProgress
       || accountAutomationBlocked(email) || inspectionPaused(email) || sessionResetAutomationPaused(email)
-      || overloadCooldown.isPaused(email) || (!locked && emailJobLocks.has(email))
+      || overloadCooldown.isPaused(email) || degradationCooldown.isPaused(email) || (!locked && emailJobLocks.has(email))
       || modelFingerprint.inFlight.has(email) || job.poolRefreshAction || webSessionCheckPending(job)
       || ["pending", "queued", "running"].includes(job.autoTaskStatus)) return false;
     if ([...jobs.forAccount(email)].some(j => !j.deleted && (isActive(j.status) || j.child || j.poolRefreshAction || webSessionCheckPending(j)))) return false;
@@ -8187,7 +8219,7 @@ export function createConsoleApp(options = {}) {
         throw httpError(409, "请先完成当前任务，并确认账号有可用的登录会话");
       }
       if (pool.accountBlocked || pool.rateLimited || pool.quotaRestricted || usageRestricted(pool.usage)
-        || overloadCooldown.isPaused(job.email)) {
+        || overloadCooldown.isPaused(job.email) || degradationCooldown.isPaused(job.email)) {
         throw httpError(409, "账号当前受限，请在账号状态恢复后再更换绑定");
       }
       if (automatic && pool.inPool && pool.enabled === false) return false;
@@ -8564,7 +8596,7 @@ export function createConsoleApp(options = {}) {
   }
 
   function codexChecksBlocked(email) {
-    if (findJobByEmail(email)?.proxyBindingInProgress) return true;
+    if (findJobByEmail(email)?.proxyBindingInProgress || degradationCooldown.isPaused(email)) return true;
     if (sessionResetAutomationPaused(email)) return true;
     if (pendingCodexBlocks.has(String(email).toLowerCase()) || accountAutomationBlocked(email)) return true;
     const state = getSub2ApiAccountStatusForJob({ email });
@@ -8587,7 +8619,7 @@ export function createConsoleApp(options = {}) {
   }
 
   function codexMonitoringAllowed(job, poolState = sub2ApiAccountStatusCache) {
-    if (sessionResetAutomationPaused(job.email)) return false;
+    if (sessionResetAutomationPaused(job.email) || degradationCooldown.isPaused(job.email)) return false;
     const state = getSub2ApiAccountStatusForJob(job, poolState);
     return !pendingCodexBlocks.has(String(job.email).toLowerCase()) && !accountAutomationBlocked(job.email) && state.remoteStatus !== "error" && !state.rateLimited && !state.quotaRestricted && !usageRestricted(state.usage) && state.inPool === true && state.enabled === true;
   }
@@ -8596,7 +8628,7 @@ export function createConsoleApp(options = {}) {
     if (!job || job.deleted || pendingCodexBlocks.has(String(job.email).toLowerCase()) || accountAutomationBlocked(job.email)) return false;
     const state = getSub2ApiAccountStatusForJob(job, poolState);
     if (state.inPool !== true || state.remoteStatus === "error" || state.rateLimited || state.quotaRestricted || usageRestricted(state.usage)) return false;
-    return state.enabled === true || state.remoteStatus === "active" && (state.accountIds || []).some(id => overloadCooldown.ownsPause(job.email, id));
+    return state.enabled === true || state.remoteStatus === "active" && (state.accountIds || []).some(id => overloadCooldown.ownsPause(job.email, id) || degradationCooldown.ownsPause(job.email, id));
   }
   async function assertCodexMonitoringAllowed(job) {
     const poolState = await loadSub2ApiAccountStatus({ forceRefresh: true });
@@ -8646,7 +8678,7 @@ export function createConsoleApp(options = {}) {
   }
 
   function getAutoRepairEligibility(job) {
-    if (inspectionPaused(job.email)) return {eligible:false,reason:"账号已暂停 helper 自动巡检"};
+    if (inspectionPaused(job.email) || degradationCooldown.isPaused(job.email)) return {eligible:false,reason:"账号已暂停巡检或正在降智冷却"};
     if (job.autoRepairBlocked) return { eligible: false, reason: "账号已确认封禁、删除或永久停用" };
     if (automaticLoginBlocked(job, "oauth")) return { eligible: false, reason: loginAutomationPauseMessage(accountLoginPause(job)) };
     if (!job.lastAuthAutomated) return { eligible: false, reason: job.lastAuthAutomationReason || "上次授权不是全自动完成" };
@@ -8895,6 +8927,7 @@ export function createConsoleApp(options = {}) {
       sub2apiQuotaRestricted: sub2ApiStatus.quotaRestricted === true || usageRestricted(sub2ApiStatus.usage),
       overloadDetection: { ...overloadState, enabled: codexEligible && overloadState.enabled },
       overloadAutoCooldown: { ...cooldownState, enabled: codexEligible && cooldownState.enabled },
+      degradationCooldown: degradationCooldown.snapshot(job.email),
       modelFingerprint: { ...fingerprintState, enabled: codexEligible && fingerprintState.enabled },
       lastError: oauthErrorMessage(job.lastError),
       poolOnly: Boolean(job.poolOnly),
@@ -9427,6 +9460,7 @@ export function createConsoleApp(options = {}) {
       if (overloadMonitor.snapshot(email).enabled) await overloadMonitor.setEnabled(email, false);
       const cooldown = overloadCooldown.accounts.get(email);
       if (cooldown?.enabled || cooldown?.resumeAccountIds?.length) await overloadCooldown.blockAccount(email);
+      await degradationCooldown.blockAccount(email);
       const override = modelFingerprint.snapshot(email).override;
       if (override.enabled !== false) await modelFingerprint.saveOverride(email, { ...override, enabled: false });
       try {
@@ -9687,7 +9721,7 @@ export function createConsoleApp(options = {}) {
       if (!freshCredentials && !monitorRepair && !authError && !pending) return;
       const keepDisabled = intent?.schedulable === false || freshCredentials && !monitorRepair && !authError && !pending
         && sub2ApiAccountSchedulable(account) === false;
-      const schedulable = !keepDisabled && !sessionResetAutomationPaused(email) && !overloadCooldown.isPaused(email)
+      const schedulable = !keepDisabled && !sessionResetAutomationPaused(email) && !overloadCooldown.isPaused(email) && !degradationCooldown.isPaused(email)
         && !overloadCooldown.isManuallyDisabled(email, accountId, config);
       if (recoveryJob) {
         recoveryJob.poolRefreshRecovery = { ...recoveryJob.poolRefreshRecovery, [recoveryKey]: schedulable ? true : { schedulable: false } };
@@ -9854,6 +9888,7 @@ export function createConsoleApp(options = {}) {
     await poolUploadIntents.forgetEmail(email);
     await overloadMonitor.remove(email);
     await overloadCooldown.remove(email);
+    await degradationCooldown.remove(email);
     await accountSessionResets.remove(email);
     await modelFingerprint.remove(email);
     const matching = [...jobs.values()].filter((job) => job.email.toLowerCase() === email);
@@ -11827,6 +11862,7 @@ export function createConsoleApp(options = {}) {
       await Promise.allSettled([
         overloadMonitor.stop(),
         overloadCooldown.stop(),
+        degradationCooldown.stop(),
         modelFingerprint.stop(),
         webSessionMonitor.stop(),
         ...manualWebSessionCheckOperations,
@@ -11900,6 +11936,7 @@ export function createConsoleApp(options = {}) {
     await accountLoginEmails.load();
     await overloadMonitor.load();
     await overloadCooldown.load();
+    await degradationCooldown.load();
     await accountSessionResets.load();
     await modelFingerprint.load();
     for (const [email, entry] of modelFingerprint.accounts) {
@@ -11996,6 +12033,7 @@ export function createConsoleApp(options = {}) {
       requestSub2ApiStatusRefresh();
       overloadMonitor.start();
       overloadCooldown.start();
+      degradationCooldown.start();
       modelFingerprint.setTickMs(consoleSettings.current.monitoringSettings.fingerprintScanIntervalSeconds * 1000);
       modelFingerprint.start();
       // Pending import checks suppress scheduled scans; start their runner only

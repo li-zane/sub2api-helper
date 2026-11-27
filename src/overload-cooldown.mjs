@@ -22,8 +22,9 @@ export function normalizeOverloadCooldown(value = DEFAULT_OVERLOAD_COOLDOWN) {
 }
 
 export class OverloadCooldown {
-  constructor({ dispatchPaused = () => false, filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, afterPause = null, beforeResume = () => ({ status: "completed" }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  constructor({ dispatchPaused = () => false, retryBlocked = false, filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings = () => ({ intervalMs: 60_000, concurrency: DEFAULT_POOL_SYNC_CONCURRENCY }), isBlocked = () => false, isCountBlocked = () => false, onChange = () => {}, onNeedCounts = () => {}, afterPause = null, beforeResume = () => ({ status: "completed" }), now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
     this.dispatchPaused = dispatchPaused;
+    this.retryBlocked = retryBlocked;
     Object.assign(this, { filePath, getConfig, backendIdentity, getSettings, listAccounts, request, getMonitoringSettings, isBlocked, isCountBlocked, onChange, onNeedCounts, afterPause, beforeResume, now, setTimer, clearTimer });
     this.request = limitPoolRequests(request, () => this.getMonitoringSettings().concurrency);
     this.accounts = new Map();
@@ -205,11 +206,11 @@ export class OverloadCooldown {
       this.running = null;
       if (this.stopped) return;
       if (this.rerun) { this.trigger(); return; }
-      const pending = [...this.accounts].filter(([email, entry]) => !this.isBlocked(email) && entry.resumeAccountIds?.length).map(([, entry]) => entry);
+      const pending = [...this.accounts].filter(([email, entry]) => (this.retryBlocked || !this.isBlocked(email)) && entry.resumeAccountIds?.length);
       if (!pending.length) return;
       // Each account has a durable deadline; one timer wakes the nearest one.
       // Only unfinished/failed mutations retry at the shared statistics cadence.
-      const due = pending.map(entry => entry.lastError || entry.phase !== "cooling" || !entry.enabled && !entry.restrictionPaused
+      const due = pending.map(([email, entry]) => this.isBlocked(email) || entry.lastError || entry.phase !== "cooling" || !entry.enabled && !entry.restrictionPaused
         ? this.getMonitoringSettings().intervalMs : Math.max(100, Date.parse(entry.coolingUntil) - this.now()));
       const delay = this.dispatchPaused() ? 5000 : Math.max(100, Math.min(...due));
       this.timer = this.setTimer(() => this.trigger(), delay);

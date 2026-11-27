@@ -25,7 +25,7 @@ const LATE_TASK_AUTO_ACTIONS = ["enable-overload-detection", "enable-overload-co
 export const TASK_AUTO_ACTIONS = new Set(Object.keys(TASK_AUTO_ACTION_LABELS));
 const PROXY_MODES = ["global", "sub2api", "plan"];
 const FINGERPRINT_FIELDS = ["models", "intervalMinutes", "minProbability", "maxConcurrentAccounts", "testSequence"];
-const FINGERPRINT_NESTED_FIELDS = ["matchedConcurrency", "matchedPriority", "testSequence", "precheck"];
+const FINGERPRINT_NESTED_FIELDS = ["matchedConcurrency", "matchedPriority", "testSequence", "precheck", "degradationCooldown"];
 
 const object = value => value && typeof value === "object" && !Array.isArray(value);
 const changed = (before, after) => JSON.stringify(before) !== JSON.stringify(after);

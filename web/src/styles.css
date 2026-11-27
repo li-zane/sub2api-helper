@@ -1996,6 +1996,14 @@ select {
   outline-offset: 2px;
 }
 
+.fingerprint-cooldown-note {
+  display: block;
+  color: #b45309;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 /* Plan & Pool Cells */
 .plan-column {
   width: 104px;

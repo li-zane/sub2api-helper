@@ -12,6 +12,7 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-fingerprint-console
 let child, headers, logs = "", samples = 0;
 const precheckPrompt = "This is a standalone verification request. Ignore all other conversations: reply with exactly READY and nothing else.";
 let precheckReply = "READY";
+let candyReply = "最终答案：21";
 const account = { id: 42, name: "fingerprint@example.test", email: "fingerprint@example.test", platform: "openai", type: "oauth", status: "active", schedulable: true, group_ids: [10, 20, 99], credentials: { email: "fingerprint@example.test", plan_type: "free", access_token: "private-fixture-token", chatgpt_account_id: "fixture-account" }, extra: {} };
 const calls = [], transcriptInputs = [], transcriptReplies = [];
 const pool = http.createServer(async (req, res) => {
@@ -20,6 +21,7 @@ const pool = http.createServer(async (req, res) => {
   res.setHeader("content-type", "application/json");
   const send = value => res.end(JSON.stringify({ code: 0, data: value }));
   if (req.url.startsWith("/api/v1/admin/accounts?")) return send({ items: [account], total: 1, pages: 1 });
+  if (req.url === "/api/v1/admin/accounts/42/schedulable") { account.schedulable = JSON.parse(raw).schedulable; return send(account); }
   if (req.url === "/api/v1/admin/accounts/42") { if (req.method === "PUT") Object.assign(account, JSON.parse(raw)); const { access_token, ...redacted } = account.credentials; return send({ ...account, credentials: redacted }); }
   if (req.url === "/api/v1/admin/accounts/data?ids=42&include_proxies=true") return send({ accounts: [account], proxies: [] });
   if (req.url.includes("/groups/all")) return send([{ id: 10, name: "默认组", platform: "openai" }, { id: 20, name: "验证组", platform: "openai" }]);
@@ -32,7 +34,7 @@ const inference = http.createServer(async (req, res) => {
   assert(body.input[0].content[0].text.length > 70); assert.notEqual(body.input[0].content[0].text, "hi");
   assert.equal(body.input.length, 1); assert.equal(body.input[0].role, 'user'); assert.equal(body.store, false);
   assert.equal(body.previous_response_id, undefined); assert.equal(body.conversation, undefined);
-  const reply = body.input[0].content[0].text === precheckPrompt ? precheckReply : body.input[0].content[0].text === CANDY_PROMPT ? '最终答案：21' : Array.from({ length: 332 }, (_, i) => i % 355 + 1).join(", ");
+  const reply = body.input[0].content[0].text === precheckPrompt ? precheckReply : body.input[0].content[0].text === CANDY_PROMPT ? candyReply : Array.from({ length: 332 }, (_, i) => i % 355 + 1).join(", ");
   transcriptReplies.push(reply);
   res.setHeader("content-type", "text/event-stream");
   res.end([{ type: "response.output_text.delta", delta: reply }, { type: "response.completed", response: {} }].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""));
@@ -188,6 +190,74 @@ try {
     const merged=(await get('/api/model-fingerprint/settings')).settings.precheck;
     assert.equal(merged.flags,'im'); assert.equal(merged.skipFallbackOnPass,false); assert.equal(merged.prompt,precheckPrompt);
     console.log('REGEX_PRECHECK_HTTP_PASS validation; nested concurrent patches; fresh conversation; shortcuts advance once; candy/fingerprint fallback; final verdict; detailed transcripts; restart');
+  }
+  if (process.argv.includes("--degradation-cooldown")) {
+    const cooldown = { enabled: true, longTerm: true, rotating: false, cooldownMinutes: 2 };
+    assert.equal((await get('/api/model-fingerprint/settings')).settings.degradationCooldown.enabled, false);
+    assert.equal((await post('/api/model-fingerprint/settings', {patch:{degradationCooldown:{cooldownMinutes:0}}})).status,400);
+    assert.equal((await post('/api/model-fingerprint/settings', {patch:{precheck:{enabled:false},degradationCooldown:cooldown}})).status,200);
+    await post(fingerprintRoute,{enabled:false,models:['gpt-5.5'],testSequence:{first:'candy',candy:1,fingerprint:0}});
+    const currentJob = async () => (await get('/api/jobs')).jobs.find(j=>j.id===job.id);
+    const detect = async () => {
+      const before = (await currentJob()).modelFingerprint.result?.id;
+      assert.equal((await post(fingerprintRoute+'/check',{})).status,202);
+      await waitFor(async()=>{const j=await currentJob();return j.modelFingerprint.phase==='idle' && j.modelFingerprint.result?.id!==before;});
+      return currentJob();
+    };
+    const tagResult = await post(`/api/jobs/${job.id}/tags`,{validity:'长效'});
+    assert.equal(tagResult.status,200,JSON.stringify(tagResult.data));
+    await post('/api/model-fingerprint/settings',{patch:{precheck:{enabled:true,model:'gpt-5.5',prompt:precheckPrompt,pattern:'^READY$',flags:'',degradedWhen:'no_match',skipFallbackOnPass:true}}});
+    precheckReply='OTHER'; candyReply='最终答案：21';
+    const fallbackPass=await detect();
+    assert.equal(fallbackPass.modelFingerprint.result.precheck.status,'mismatch');
+    assert.equal(account.schedulable,true,'passing final verdict does not pause');
+    await post('/api/model-fingerprint/settings',{patch:{precheck:{enabled:false}}});
+    assert.equal((await post(`/api/jobs/${job.id}/tags`,{validity:'轮转'})).status,200);
+    candyReply='最终答案：22'; await detect();
+    assert.equal(account.schedulable,true,'rotating switch off');
+    assert.equal((await post(`/api/jobs/${job.id}/tags`,{validity:'长效'})).status,200);
+    const identity = structuredClone({credentials:account.credentials,proxy:account.proxy_id});
+    const mismatch = await detect();
+    assert.equal(mismatch.modelFingerprint.result?.status,'mismatch',JSON.stringify(mismatch.modelFingerprint.result));
+    assert.equal(mismatch.accountTags.validity,'长效');
+    await waitFor(async()=>!(account.schedulable) && (await currentJob()).degradationCooldown.phase==='cooling').catch(async error=>{
+      const j=await currentJob(); error.message += JSON.stringify({cooldown:j.degradationCooldown,result:j.modelFingerprint.result?.status,settings:(await get('/api/model-fingerprint/settings')).settings.degradationCooldown}); throw error;
+    });
+    const first = (await currentJob()).degradationCooldown;
+    assert.equal(first.cooldownMinutes,2); assert.equal(first.validity,'长效');
+    assert.equal((await currentJob()).canCheckModelFingerprint,true,'explicit diagnostic still available during rest');
+    candyReply='最终答案：21'; await detect();
+    assert.equal(account.schedulable,false,'passing manual check must not end rest early');
+    candyReply='最终答案：22'; await detect();
+    assert.equal((await currentJob()).degradationCooldown.coolingUntil,first.coolingUntil,'manual mismatch must not extend existing deadline');
+    const sampleCount=samples;
+    await stop(); await start();
+    assert.equal((await currentJob()).degradationCooldown.coolingUntil,first.coolingUntil,'restart keeps deadline');
+    assert.equal(samples,sampleCount,'restart does not probe resting account');
+    assert.deepEqual({credentials:account.credentials,proxy:account.proxy_id},identity,'rest preserves credentials and IP');
+    await stop();
+    const file=path.join(output,'degradation-cooldown.json');
+    let saved=JSON.parse(await fs.readFile(file,'utf8'));
+    saved.accounts[account.email].coolingUntil=new Date(Date.now()-1000).toISOString();
+    await fs.writeFile(file,JSON.stringify(saved));
+    await start();
+    await waitFor(async()=>account.schedulable && !(await currentJob()).degradationCooldown.paused);
+    assert.equal(samples,sampleCount,'expiry resumes directly without recheck');
+    await Promise.all([
+      post('/api/model-fingerprint/settings',{patch:{degradationCooldown:{longTerm:false}}}),
+      post('/api/model-fingerprint/settings',{patch:{degradationCooldown:{rotating:true}}}),
+    ]);
+    const merged=(await get('/api/model-fingerprint/settings')).settings.degradationCooldown;
+    assert.deepEqual(merged,{...cooldown,longTerm:false,rotating:true});
+    await detect(); assert.equal(account.schedulable,true,'long-term switch off');
+    await post(`/api/jobs/${job.id}/tags`,{validity:'轮转'});
+    await detect(); await waitFor(async()=>!account.schedulable && (await currentJob()).degradationCooldown.paused);
+    assert.equal((await currentJob()).degradationCooldown.validity,'轮转');
+    assert.equal((await post(`/api/sub2api/accounts/${job.id}/schedulable`,{enabled:false})).status,200);
+    assert.equal((await currentJob()).degradationCooldown.paused,false,'manual stop releases cooldown ownership');
+    await stop(); await start();
+    assert.equal(account.schedulable,false,'restart must preserve manual stop');
+    console.log('DEGRADATION_COOLDOWN_HTTP_PASS final candy verdict; type switches; settings validation/concurrent patches; durable pause; no relogin or IP change; deadline restart/direct resume; manual stop');
   }
   if (process.argv.includes("--serve")) {
     await post("/api/sub2api/settings", { config, profiles: [{ id: "default", name: "Free", groupIds: [10, 20] }], planTypeBindings: { free: "default" } });

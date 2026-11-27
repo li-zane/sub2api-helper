@@ -10,6 +10,7 @@ import { displayDateTime } from "./display-time.mjs";
 import { useDisplayTimeZone } from "./use-display-time.jsx";
 import { fingerprintSettingsPatch } from "./task-settings-form.mjs";
 import { DEFAULT_REGEX_PRECHECK, normalizeRegexPrecheck } from "../../shared/regex-precheck.mjs";
+import { DEFAULT_DEGRADATION_COOLDOWN, normalizeDegradationCooldown } from "../../shared/degradation-cooldown-settings.mjs";
 
 export const ModelFingerprintPolicyContext = createContext(null);
 
@@ -118,8 +119,20 @@ function RegexPrecheckFields({ value, onChange, disabled }) {
 function FingerprintDefaultsFields({ value, onChange, disabled = false }) {
   const [text, setText] = useState(() => toText(value.models));
   const testSequence = value.testSequence || { first: "fingerprint", fingerprint: 1, candy: 0 };
+  const cooling = { ...DEFAULT_DEGRADATION_COOLDOWN, ...value.degradationCooldown };
+  const patchCooling = patch => onChange({ ...value, degradationCooldown: { ...cooling, ...patch } });
   return <section className="fingerprint-defaults" aria-label="默认降智检测规则">
     <RegexPrecheckFields value={value.precheck} onChange={precheck => onChange({ ...value, precheck })} disabled={disabled} />
+    <section className="fingerprint-section" aria-label="降智冷却">
+      <div className="section-title-row"><h3>降智冷却</h3><HelpTip label="降智冷却说明">最终检测结论为降智时，暂停账号接收号池请求，保持 IP 和登录状态。冷却到期直接恢复本次暂停的账号。检测异常、证据不足和未标记类型的账号不触发；手动停用优先。关闭开关只停止新增冷却，已经开始的冷却按原定时间结束。</HelpTip></div>
+      <label className="task-auto-action-option"><input type="checkbox" checked={cooling.enabled} disabled={disabled} onChange={e => patchCooling({ enabled: e.target.checked })} /><span>启用降智冷却</span></label>
+      <div className="fingerprint-number-grid">
+        <label className="task-auto-action-option"><input type="checkbox" checked={cooling.longTerm} disabled={disabled || !cooling.enabled} onChange={e => patchCooling({ longTerm: e.target.checked })} /><span>长效账号降智后冷却</span></label>
+        <label className="task-auto-action-option"><input type="checkbox" checked={cooling.rotating} disabled={disabled || !cooling.enabled} onChange={e => patchCooling({ rotating: e.target.checked })} /><span>轮转账号降智后冷却</span></label>
+      </div>
+      <label className="settings-field"><span>冷却时长（分钟）</span><input aria-label="降智冷却时长（分钟）" type="number" min="1" max="43200" step="1" disabled={disabled || !cooling.enabled} value={cooling.cooldownMinutes} onChange={e => patchCooling({ cooldownMinutes: e.target.value })} /></label>
+      <p className="fingerprint-transcript-note">按账号的“时效”标签区分长效／轮转。到期直接恢复；冷却期间暂停自动探测，可手动检测。</p>
+    </section>
     <div className="fingerprint-field-group">
       <label className="settings-field">
         <span className="field-label-row">
@@ -217,6 +230,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         failureRetries: 1, failureRetryDelaySeconds: 5,
         testSequence: { first: "fingerprint", fingerprint: 1, candy: 0 },
         precheck: { ...DEFAULT_REGEX_PRECHECK },
+        degradationCooldown: { ...DEFAULT_DEGRADATION_COOLDOWN },
         groupPolicies: {},
         ...rawSettings,
         enabledPlanTypes: readEnabledPlanTypes(rawSettings),
@@ -278,6 +292,7 @@ export function FingerprintSettingsButton({ token, planTypes = [], planTypeMappi
         failureRetries,
         failureRetryDelaySeconds,
         precheck: normalizeRegexPrecheck(data.settings.precheck),
+        degradationCooldown: normalizeDegradationCooldown(data.settings.degradationCooldown),
         testSequence: { first: seq.first, fingerprint: fp, candy: cd },
         enabledPlanTypes: enabledPlans,
         groupPolicies: data.settings.groupPolicies || {},
@@ -801,7 +816,7 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
   const planInEnabledList = !hasPlanList || effectivePlanList.some(plan => normalizePlanName(plan) === normalizedPlanType);
   const planBlocked = eligible && hasPlanList && !planInEnabledList;
   const effectiveEnabled = eligible && planInEnabledList && state?.enabled === true;
-  const cooling = ["pausing", "cooling"].includes(job.overloadAutoCooldown?.phase);
+  const cooling = ["pausing", "cooling"].includes(job.overloadAutoCooldown?.phase) || job.degradationCooldown?.paused;
   const retainedHistory = !eligible && (cooling || job.sub2apiRateLimited === true || job.sub2apiQuotaRestricted === true || usageRestricted(job.sub2apiUsage));
   if (!state) return <span className="muted">—</span>;
   async function update(body, check = false) {
@@ -886,6 +901,11 @@ export function ModelFingerprintCell({ job, token, onError, enabledPlanTypes }) 
         return <button key={round ? `${round.checkedAt}-${index}` : `empty-${index}`} type="button" className={`fingerprint-round ${status}`} aria-label={label} title={label} onClick={() => setShowHistory(true)} />;
       })}
     </div>
+    {job.degradationCooldown?.paused && <span className="fingerprint-cooldown-note" role="status"
+      title={job.degradationCooldown.lastError || "保持 IP 和登录状态，到期直接恢复本次暂停的账号"}>
+      {job.degradationCooldown.lastError ? "降智冷却 · 等待重试" : job.degradationCooldown.phase === "resuming" ? "降智冷却 · 正在恢复" : `降智冷却至 ${displayDateTime(job.degradationCooldown.coolingUntil)}`}
+    </span>}
+    {job.degradationCooldown?.lastError && !job.degradationCooldown.paused && <span className="fingerprint-cooldown-note" role="status">降智冷却未启动：{job.degradationCooldown.lastError}</span>}
     {showHistory && <FingerprintHistoryDialog job={job} token={token} onClose={() => setShowHistory(false)} />}
     {editing && <Dialog title={`${job.email} 降智检测`} closeDisabled={busy} onClose={() => setEditing(false)}><form className="fingerprint-form" onSubmit={e => {
       e.preventDefault();

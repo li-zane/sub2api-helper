@@ -1,0 +1,97 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { DegradationCooldown } from "../src/degradation-cooldown.mjs";
+import { DEFAULT_DEGRADATION_COOLDOWN, normalizeDegradationCooldown } from "../shared/degradation-cooldown-settings.mjs";
+import { ModelFingerprintService } from "../src/model-fingerprint.mjs";
+
+const dir = await fs.mkdtemp(path.join(os.tmpdir(), "degradation-cooldown-"));
+const email = "cooling@example.test", filePath = path.join(dir, "state.json");
+let now = Date.parse("2026-11-27T00:00:00Z"), rule = normalizeDegradationCooldown(), validity = "长效";
+let backend = "pool-a", blocked = false, canStart = true, incomplete = false, failPause = false, failResume = false;
+let records = [{ id: "1", enabled: true }, { id: "2", enabled: false }, { id: "3", enabled: true }];
+let timerCallback, timerDelay;
+const calls = [];
+const options = { filePath, getConfig: () => ({ baseUrl: backend, adminApiKey: "fixture" }), backendIdentity: c => c.baseUrl,
+  getRule: () => rule, getValidity: () => validity, isBlocked: () => blocked, canStart: () => canStart,
+  now: () => now, setTimer: (callback, delay) => { timerCallback = callback; timerDelay = delay; return { unref() {} }; }, clearTimer: () => {},
+  listAccounts: async () => { if (incomplete) throw Error("incomplete listing"); return new Map([[email, structuredClone(records)]]); },
+  request: async (config, url, request) => {
+    assert.equal(config.baseUrl, backend);
+    assert.match(url, /^\/api\/v1\/admin\/accounts\/\d+\/schedulable$/);
+    const id = url.split('/').at(-2), enabled = JSON.parse(request.body).schedulable;
+    const saved = JSON.parse(await fs.readFile(filePath, "utf8")).accounts[email];
+    assert(saved.resumeAccountIds.includes(id), "ownership must persist before any remote write");
+    if (!enabled && failPause && id === "3" || enabled && failResume) throw Error("fixture write failed");
+    records.find(r => r.id === id).enabled = enabled;
+    calls.push([id, enabled]);
+  } };
+let service = new DegradationCooldown(options);
+const round = (id, status = "mismatch") => ({ id, status, backend });
+const settle = async () => { await service.running; if (service.running) await service.running; };
+try {
+  assert.deepEqual(rule, DEFAULT_DEGRADATION_COOLDOWN);
+  const detector = new ModelFingerprintService({ filePath:path.join(dir,'fingerprint.json'), getContext:()=>({jobs:[],profiles:[]}), listTargets:async()=>[] });
+  const savedRule = normalizeDegradationCooldown({enabled:true,longTerm:true,cooldownMinutes:90});
+  await detector.saveSettings({degradationCooldown:savedRule},{applyRuntime:false});
+  await detector.saveSettings({models:['fixture']},{applyRuntime:false});
+  assert.deepEqual(detector.settings.degradationCooldown,savedRule,'older clients must preserve the cooldown policy');
+  await detector.stop();
+  for (const value of [null, [], {enabled:"yes"}, {longTerm:1}, {rotating:null}, {cooldownMinutes:0}, {cooldownMinutes:""}, {cooldownMinutes:true}, {cooldownMinutes:43201}]) assert.throws(() => normalizeDegradationCooldown(value));
+  service.start();
+  await service.observeVerdict(email, round("off"));
+  assert.equal(calls.length, 0);
+  rule = normalizeDegradationCooldown({enabled:true,longTerm:true,rotating:false,cooldownMinutes:2});
+  for (const status of ["match", "unknown", "error"]) await service.observeVerdict(email, round(status, status));
+  validity = "轮转"; await service.observeVerdict(email, round("wrong-type"));
+  validity = ""; await service.observeVerdict(email, round("untagged"));
+  validity = "长效"; canStart = false; await service.observeVerdict(email, round("blocked-start")); canStart = true;
+  await service.observeVerdict(email, {...round("old-backend"),backend:"old"});
+  assert.equal(calls.length, 0);
+  failPause = true;
+  await service.observeVerdict(email, round("long-term")); await settle();
+  assert.equal(service.snapshot(email).paused, true);
+  assert.equal(service.ownsPoolPause('1',options.getConfig()),true);
+  assert.equal(service.ownsPoolPause('2',options.getConfig()),false);
+  assert.equal(service.ownsPoolPause('1',{baseUrl:'other'}),false);
+  assert(service.snapshot(email).lastError);
+  assert.equal(service.snapshot(email).coolingUntil, "2026-11-27T00:02:00.000Z");
+  assert.deepEqual(records.map(r=>r.enabled), [false,false,true]);
+  failPause = false; await service.refresh(); await settle();
+  assert.deepEqual(records.map(r=>r.enabled), [false,false,false]);
+  const deadline = service.snapshot(email).coolingUntil;
+  now += 30_000;
+  await service.observeVerdict(email, round("manual-during-rest")); await settle();
+  assert.equal(service.snapshot(email).coolingUntil, deadline, "new diagnostic must not extend active rest");
+  rule = {...rule,enabled:false};
+  await service.refresh(); await settle();
+  assert.equal(service.snapshot(email).paused, true, "switch off stops new cooldowns without early restoration");
+  await service.stop(); service = new DegradationCooldown(options); await service.load(); service.start(); await settle();
+  assert.equal(service.snapshot(email).coolingUntil, deadline);
+  backend = "pool-b"; now += 120_000;
+  const count = calls.length; await service.refresh(); await settle(); assert.equal(calls.length,count,"wrong backend must not resume IDs");
+  backend = "pool-a"; incomplete = true; await service.refresh(); await settle();
+  assert.equal(service.snapshot(email).paused,true,"incomplete list must retain ownership"); incomplete = false;
+  failResume = true; await service.refresh(); await settle(); assert.equal(service.snapshot(email).paused,true);
+  failResume = false; await service.refresh(); await settle();
+  assert.equal(service.snapshot(email).paused,false);
+  assert.deepEqual(records.map(r=>r.enabled),[true,false,true],"restore only rows this cooldown paused");
+  rule = {...rule,enabled:true,rotating:true,longTerm:false}; validity = "轮转";
+  await service.observeVerdict(email, round("long-term")); assert.equal(service.snapshot(email).paused,false,"same round never restarts after resume");
+  await service.observeVerdict(email, round("rotating")); await settle();
+  assert.equal(service.snapshot(email).validity,"轮转");
+  blocked = true; now += 120_000; await service.refresh(); await settle();
+  assert.equal(timerDelay,60_000,'blocked expiry must retain a bounded retry timer');
+  assert.equal(records.find(r=>r.id==='3').enabled,false);
+  blocked = false; timerCallback(); await settle();
+  assert.equal(service.snapshot(email).paused,false,'temporary maintenance ending resumes without another detection');
+  await service.observeVerdict(email, round('manual-override')); await settle();
+  await service.lock(email,()=>service.manualOverrideLocked(email,["1"]));
+  now += 120_000; await service.refresh(); await settle();
+  assert.deepEqual(records.map(r=>r.enabled),[false,false,true],"manual stop takes ownership away from timer");
+  await service.observeVerdict(email, round("ban")); await settle();
+  await service.blockAccount(email); now += 120_000; await service.refresh(); await settle();
+  assert.equal(records.find(r=>r.id==='3').enabled,false,"permanent stop never resumes");
+  console.log("DEGRADATION_COOLDOWN_PASS default-off; type switches; final verdict only; durable partial pause; restart; fixed deadline; direct resume; manual priority; no session/IP writes; backend isolation; retry");
+} finally { await service.stop(); await fs.rm(dir,{recursive:true,force:true}); }

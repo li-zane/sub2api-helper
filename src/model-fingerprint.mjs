@@ -7,9 +7,10 @@ import { fingerprintFailure, fingerprintRecovery } from "./model-fingerprint-req
 import { CANDY_PROMPT, CANDY_PROMPT_SHA256, gradeCandy, DEFAULT_TEST_SEQUENCE, normalizeTestSequence, sequenceStep, aggregateRequestUsage } from "./candy-test.mjs";
 import { DEFAULT_REGEX_PRECHECK, normalizeRegexPrecheck } from "../shared/regex-precheck.mjs";
 import { evaluateRegexPrecheck } from "./regex-precheck.mjs";
+import { DEFAULT_DEGRADATION_COOLDOWN, normalizeDegradationCooldown } from "../shared/degradation-cooldown-settings.mjs";
 
 const invalid = message => Object.assign(new Error(message), { status: 400 });
-export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, failureRetries: 1, failureRetryDelaySeconds: 5, precheck: DEFAULT_REGEX_PRECHECK, testSequence: DEFAULT_TEST_SEQUENCE, enabledPlanTypes: [], matchedConcurrency: { enabled: false, value: 10 }, matchedPriority: { enabled: false, value: 1 }, groupPolicies: {} });
+export const DEFAULT_FINGERPRINT_SETTINGS = Object.freeze({ models: [], intervalMinutes: 360, maxConcurrentAccounts: 3, minProbability: 0.8, failureRetries: 1, failureRetryDelaySeconds: 5, precheck: DEFAULT_REGEX_PRECHECK, degradationCooldown: DEFAULT_DEGRADATION_COOLDOWN, testSequence: DEFAULT_TEST_SEQUENCE, enabledPlanTypes: [], matchedConcurrency: { enabled: false, value: 10 }, matchedPriority: { enabled: false, value: 1 }, groupPolicies: {} });
 const isPoolInteger = value => Number.isInteger(value) && value >= 0 && value <= 10000;
 const poolNumberPolicies = {
   concurrency: { setting: "matchedConcurrency", label: "并发", update: "updateConcurrency", valid: isPoolInteger },
@@ -66,7 +67,7 @@ export function normalizeFingerprintSettings(raw = {}) {
       groupPolicies[profile][id] = mode;
     }
   }
-  return { models, intervalMinutes: interval(raw.intervalMinutes ?? 360), maxConcurrentAccounts, minProbability, failureRetries, failureRetryDelaySeconds, precheck: normalizeRegexPrecheck(raw.precheck), testSequence: normalizeTestSequence(raw.testSequence), enabledPlanTypes, matchedConcurrency: { enabled: matchedConcurrency.enabled, value: matchedConcurrency.value }, matchedPriority: { enabled: matchedPriority.enabled, value: matchedPriority.value }, groupPolicies };
+  return { models, intervalMinutes: interval(raw.intervalMinutes ?? 360), maxConcurrentAccounts, minProbability, failureRetries, failureRetryDelaySeconds, precheck: normalizeRegexPrecheck(raw.precheck), degradationCooldown: normalizeDegradationCooldown(raw.degradationCooldown), testSequence: normalizeTestSequence(raw.testSequence), enabledPlanTypes, matchedConcurrency: { enabled: matchedConcurrency.enabled, value: matchedConcurrency.value }, matchedPriority: { enabled: matchedPriority.enabled, value: matchedPriority.value }, groupPolicies };
 }
 export function normalizeFingerprintOverride(raw = {}) {
   if (raw.enabled != null && typeof raw.enabled !== "boolean") throw invalid("账号检测开关必须为布尔值或继承");
@@ -102,9 +103,10 @@ export function aggregateFingerprint(results) {
 
 // The reference data is public; only data files are downloaded. Replies are scored locally.
 export class ModelFingerprintService {
-  constructor({ onVerdict = () => {}, dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolNumberJobs, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
+  constructor({ onVerdict = () => {}, onCompleted = async () => {}, dispatchPaused = () => false, filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolNumberJobs, getPoolAccount = getAccount, isBlocked = () => false, onChange = () => {}, onAccountFailure = async () => {}, now = Date.now, detectorLoader, challenges = generateChallenges, retryDelay = (ms, signal) => delay(ms, undefined, { signal }) }) {
     this.dispatchPaused = dispatchPaused;
     this.onVerdict = onVerdict;
+    this.onCompleted = onCompleted;
     Object.assign(this, { filePath, getContext, listTargets, getAccount, sample, updateConcurrency, updatePriority, updateGroups, getPoolNumberDefaults, getPoolNumberPolicy, getPoolNumberJobs, getPoolAccount, isBlocked, onChange, onAccountFailure, now, challenges, retryDelay });
     this.manualChecks = new Set();
     this.settings = normalizeFingerprintSettings(); this.accounts = new Map(); this.active = new Map(); this.queued = new Map(); this.inFlight = new Map(); this.runningTasks = new Set(); this.writePromise = Promise.resolve(); this.mutationPromise = Promise.resolve(); this.revision = 0; this.stopped = true; this.closing = false;
@@ -234,6 +236,7 @@ export class ModelFingerprintService {
       matchedPriority: this.settings.matchedPriority,
       groupPolicies: this.settings.groupPolicies,
       precheck: this.settings.precheck,
+      degradationCooldown: this.settings.degradationCooldown,
       ...raw,
     });
     const samplingSettings = settings => [settings.models, settings.minProbability, settings.intervalMinutes, settings.enabledPlanTypes, settings.testSequence, settings.precheck];
@@ -401,7 +404,7 @@ export class ModelFingerprintService {
     const previous = this.accounts.get(email) || { override: normalizeFingerprintOverride() };
     const entry = { ...previous, activeMethod:method, lastAttemptAt: new Date(this.now()).toISOString(), nextCheckAt: new Date(this.now() + config.intervalMinutes * 60000).toISOString(), lastError: null };
     this.accounts.set(email, entry);
-    let recoveryFailure = null;
+    let recoveryFailure = null, completedRound = null;
     const results = [];
     try {
       await this.mutate(async () => { controller.signal.throwIfAborted(); await this.persist(); });
@@ -474,6 +477,7 @@ export class ModelFingerprintService {
         entry.groupSyncPending = ["match", "mismatch"].includes(entry.result.status);
         entry.groupSyncError = null;
         await this.persist();
+        completedRound = entry.result;
       });
       await this.reconcile(email, planType, targets, revision);
     } catch (error) {
@@ -499,6 +503,9 @@ export class ModelFingerprintService {
           await this.mutate(() => this.persist());
         }
       }
+    }
+    if (completedRound && completedRound.id === entry.result?.id && !controller.signal.aborted && revision === this.revision && backend === this.getContext().backend) {
+      await this.onCompleted(email, completedRound);
     }
     return this.snapshot(email, planType);
   }

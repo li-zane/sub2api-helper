@@ -16,5 +16,5 @@ export function taskSettingsPatch(next, previous) {
 }
 
 export function fingerprintSettingsPatch(next, previous) {
-  return settingsPatch(next, previous, ["matchedConcurrency", "matchedPriority", "testSequence", "precheck"]);
+  return settingsPatch(next, previous, ["matchedConcurrency", "matchedPriority", "testSequence", "precheck", "degradationCooldown"]);
 }
