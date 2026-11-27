@@ -21,7 +21,7 @@ async (page) => {
     ['邮箱列表筛选', () => page.getByRole('button', { name: '邮箱列表筛选', exact: true })],
     ['PlanType 映射', () => page.getByRole('button', { name: '配置 PlanType 映射', exact: true })],
     ['任务设置', () => page.getByRole('button', { name: '任务设置', exact: true })],
-    ['账号备注', () => row().getByRole('button', { name: '编辑 review-1@example.test 的备注', exact: true })],
+    ['账号备注', () => row().getByRole('button', { name: '查看 review-1@example.test 的备注', exact: true })],
     ['账号凭据', () => row().getByRole('button', { name: '查看或修改账号凭据', exact: true })],
     ['已登录设备与会话', () => row().getByRole('button', { name: '查看已登录设备和会话', exact: true })],
     ['工作空间', () => row().getByRole('button', { name: '查看并切换工作空间', exact: true })],
@@ -35,6 +35,7 @@ async (page) => {
     for (const [name, trigger] of cases) {
       await test(`modal-${name}-${viewport.width}-position-focus-Escape`, async () => {
         const button = trigger(); await button.click();
+        if (name === '账号备注') await page.getByRole('dialog', { name: 'review-1@example.test 的完整备注', exact: true }).getByRole('button', { name: '编辑备注', exact: true }).click();
         const modal = page.getByRole('dialog', { name, exact: typeof name === 'string' });
         try {
           await modal.waitFor(); await page.waitForTimeout(220);

@@ -15,9 +15,11 @@ async page => {
     check(await page.evaluate(()=>window.__accountCopies.at(-1))==='review-1@example.test','wrong table email');
     check(!await row.getByRole('checkbox').isChecked(),'copy changed selection');await clear();
   });
-  const cases=[['账号凭据','查看或修改账号凭据'],['已登录设备与会话','查看已登录设备和会话'],['工作空间','查看并切换工作空间'],['账号日志与凭据','查看协议日志'],['账号备注','编辑 review-1@example.test 的备注'],['账号成本','编辑 review-1@example.test 的账号成本']];
+  const cases=[['账号凭据','查看或修改账号凭据'],['已登录设备与会话','查看已登录设备和会话'],['工作空间','查看并切换工作空间'],['账号日志与凭据','查看协议日志'],['账号备注','查看 review-1@example.test 的备注'],['账号成本','编辑 review-1@example.test 的账号成本']];
   for(const [title,trigger] of cases)await test('account-copy-in-'+title,async()=>{
-    await row.getByRole('button',{name:trigger,exact:true}).click();const dialog=page.getByRole('dialog',{name:title,exact:true});await dialog.waitFor();await page.waitForTimeout(300);
+    await row.getByRole('button',{name:trigger,exact:true}).click();
+    if(title==='账号备注')await page.getByRole('dialog',{name:'review-1@example.test 的完整备注',exact:true}).getByRole('button',{name:'编辑备注',exact:true}).click();
+    const dialog=page.getByRole('dialog',{name:title,exact:true});await dialog.waitFor();await page.waitForTimeout(300);
     const before=await dialog.boundingBox();await dialog.getByRole('button',{name:'复制账号名 review-1@example.test',exact:true}).first().click();
     check(await page.evaluate(()=>window.__accountCopies.at(-1))==='review-1@example.test','wrong modal email');
     const toast=page.locator('.task-toast').filter({hasText:'账号已复制'}).last();await toast.waitFor();
@@ -58,7 +60,9 @@ async page => {
   });
   await test('copy-failure-is-error-toast-and-clipboard-can-recover',async()=>{
     await page.evaluate(()=>navigator.clipboard.writeText=async()=>{throw Error('fixture denied');});
-    await row.getByRole('button',{name:'编辑 review-1@example.test 的备注',exact:true}).click();const dialog=page.getByRole('dialog',{name:'账号备注',exact:true});
+    await row.getByRole('button',{name:'查看 review-1@example.test 的备注',exact:true}).click();
+    await page.getByRole('dialog',{name:'review-1@example.test 的完整备注',exact:true}).getByRole('button',{name:'编辑备注',exact:true}).click();
+    const dialog=page.getByRole('dialog',{name:'账号备注',exact:true});
     await dialog.getByRole('button',{name:'复制账号名 review-1@example.test',exact:true}).click();await page.locator('.task-toast.error').filter({hasText:'账号复制失败'}).waitFor();
     await page.evaluate(()=>navigator.clipboard.writeText=async text=>window.__accountCopies.push(text));await clear();await page.keyboard.press('Escape');
   });

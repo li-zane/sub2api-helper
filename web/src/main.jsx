@@ -2,6 +2,7 @@ import { version as projectVersion } from "../../package.json";
 import { apiFetch } from "./console-request.mjs";
 import { DEFAULT_PLAN_TYPE_MAPPING, normalizePlanTypeMapping, formatPlanTypeLabel } from "./plan-type-label.mjs";
 import { RemarkDialog } from "./remark-dialog.jsx";
+import { AccountRemark } from "./account-remark.jsx";
 import { AccountTags } from "./account-tags.jsx";
 import { deferredDialog } from "./deferred-dialog.jsx";
 import { useConsoleSettings } from "./use-console-settings.jsx";
@@ -3919,12 +3920,7 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
               )}
               {remarksAvailable && (
                 <div className="account-meta-line account-remark-line">
-                  <button type="button" className={`account-remark-button ${job.remark ? "has-remark" : ""}`} onClick={onOpenRemark}
-                    aria-label={`编辑 ${job.email} 的备注`} aria-describedby={job.remark ? `account-remark-text-${job.id}` : undefined}
-                    title={job.remark ? undefined : "添加备注"}>
-                    <FileText size={13} aria-hidden="true" />
-                    {job.remark && <span className="account-remark-text" id={`account-remark-text-${job.id}`}>{job.remark}</span>}
-                  </button>
+                  <AccountRemark key={job.id} job={job} onEdit={onOpenRemark} />
                 </div>
               )}
             </div>
