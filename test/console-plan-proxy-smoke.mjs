@@ -163,9 +163,11 @@ process.disconnect(); process.stdin.destroy();
   namedProxy.name = "测试出口备注";
   await post("/api/sub2api/options", { config: { baseUrl: poolBase, adminApiKey: "fixture-key" } });
   const namedJob = (await jobs()).find((item) => item.email === "plus-a@example.test");
-  assert.deepEqual(namedJob.boundProxies, [{ id: namedProxy.id, name: "测试出口备注", ipAddress: namedProxy.ip_address }], "binding display follows the current Sub2API name");
+  // Diagnostics can complete between reads; this regression checks binding identity and names.
+  const bindingIdentity = nodes => nodes.map(({ id, name, ipAddress }) => ({ id, name, ipAddress }));
+  assert.deepEqual(bindingIdentity(namedJob.boundProxies), [{ id: namedProxy.id, name: "测试出口备注", ipAddress: namedProxy.ip_address }], "binding display follows the current Sub2API name");
   const statusNames = await (await fetch(`${base}/api/sub2api/account-status?refresh=1`, { headers })).json();
-  assert.deepEqual(statusNames.accounts["plus-a@example.test"].boundProxies, namedJob.boundProxies, "status polling preserves current proxy names");
+  assert.deepEqual(bindingIdentity(statusNames.accounts["plus-a@example.test"].boundProxies), bindingIdentity(namedJob.boundProxies), "status polling preserves current proxy names");
   assert.equal(JSON.stringify(page).includes("fixture-key"), false);
   const free = page.find((item) => item.email === "free-a@example.test");
   assert.equal(free.canSwitchProxy, true);
