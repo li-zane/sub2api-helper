@@ -119,6 +119,37 @@ async page => {
     await page.screenshot({ path: evidence + '/iproyal-settings-mobile.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
   });
+  await test('per-IP usage cooldown settings persist and individual cooldown renders independently', async () => {
+    const section = parent.getByRole('region', { name: 'IPRoyal 巡检', exact: true });
+    await section.getByRole('switch', { name: '单 IP 新增用量超限时冷却', exact: true }).check();
+    await section.getByRole('combobox', { name: '单 IP 用量阈值单位', exact: true }).click();
+    await section.getByRole('option', { name: 'GB（1000 MB）', exact: true }).click();
+    await section.getByLabel('新增用量阈值', { exact: true }).fill('50');
+    await section.getByLabel('用量冷却时间（分钟）', { exact: true }).fill('30');
+    await section.getByRole('button', { name: '保存巡检设置', exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('.iproyal-settings-actions button:not(:disabled)'));
+    check(patrolSettings.usageCooldownEnabled && patrolSettings.usageUnit === 'GB' && patrolSettings.usageThreshold === 50 && patrolSettings.usageCooldownMinutes === 30, 'cooldown settings lost');
+    await page.setViewportSize({ width: 375, height: 812 });
+    await section.getByLabel('新增用量阈值', { exact: true }).scrollIntoViewIfNeeded();
+    check(await section.evaluate(el => el.scrollWidth <= el.clientWidth + 1), 'cooldown form overflow');
+    await page.screenshot({ path: evidence + '/iproyal-usage-settings-mobile.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await section.getByLabel('新增用量阈值', { exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: evidence + '/iproyal-usage-settings-desktop.png' });
+    const card = parent.locator('.proxy-management-card').filter({ has: page.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true }) });
+    const record = { ...nodes[0].iproyal, autoAllocationPaused: true, usageCooldownPaused: true,
+      ipUsage: { deltaMb: 51000, triggerMb: 51000, at: Date.now(), since: Date.now() - 300000, cooldownUntil: Date.now() + 1800000 } };
+    for (const node of nodes.slice(0, 2)) node.iproyal = structuredClone(record);
+    await parent.getByRole('button', { name: '读取代理', exact: true }).click();
+    await card.getByText(/单 IP 新增上报：51000.00 MB/).waitFor();
+    check(await card.getByRole('switch', { name: '参与分配 · HTTP node · #7', exact: true }).isDisabled(), 'cooled IP remains selectable');
+    check(await card.getByRole('switch', { name: '参与分配 · SOCKS node · #8', exact: true }).isDisabled(), 'protocol alias did not cool down');
+    check(await parent.getByRole('switch', { name: '参与分配 · Solo node · #9', exact: true }).isEnabled(), 'cooldown leaked to other IP');
+    await card.scrollIntoViewIfNeeded(); await page.screenshot({ path: evidence + '/iproyal-usage-cooldown-desktop.png' });
+    for (const node of nodes.slice(0, 2)) { node.iproyal.autoAllocationPaused = false; node.iproyal.usageCooldownPaused = false; node.iproyal.ipUsage.cooldownUntil = null; }
+    await parent.getByRole('button', { name: '读取代理', exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('[aria-label="参与分配 · HTTP node · #7"]')?.disabled);
+  });
   await test('allocation and shared IP cost edit inline, failure keeps draft and controls remain independent', async () => {
     const card = parent.locator('.proxy-management-card').filter({ has: page.getByRole('button', { name: '编辑代理 203.0.113.7', exact: true }) });
     const toggle = card.getByRole('switch', { name: '参与分配 · HTTP node · #7', exact: true });

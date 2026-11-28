@@ -23,9 +23,9 @@ export function ProxyAllocationControl({ node, request, onSaved, disabled }) {
     <button type="button" role="switch" className="proxy-management-switch"
       aria-label={`参与分配 · ${node.name} · #${node.id}`} aria-checked={!node.allocationPaused && !auto}
       aria-busy={pending} disabled={disabled || pending || auto}
-      title={auto ? '订单余额达到阈值，巡检自动暂停新分配' : '仅影响新分配，已有绑定继续使用'}
+      title={auto ? node.iproyal?.usageCooldownPaused ? '单 IP 新增用量超限，冷却期间暂停新分配和轮转选入' : '订单余额达到阈值，巡检自动暂停新分配' : '仅影响新分配，已有绑定继续使用'}
       onClick={() => save({ allocationPaused: !node.allocationPaused })}>
-      <span className="proxy-management-switch-text">{pending ? '保存中' : auto ? '流量暂停' : '参与分配'}</span>
+      <span className="proxy-management-switch-text">{pending ? '保存中' : node.iproyal?.usageCooldownPaused ? '用量冷却' : auto ? '流量暂停' : '参与分配'}</span>
       <span className="proxy-management-switch-track" aria-hidden="true"><span className="proxy-management-switch-thumb" /></span>
     </button>
     {node.allocationPaused && auto && <small>手动暂停已保留</small>}

@@ -14,7 +14,8 @@ async page => {
   ];
   let bound = 1, rejected = false, failList = false, failHistory = false, emptyHistory = false;
   const history = [
-    { ipAddress: "203.0.113.7", lastRequestAt: "2026-11-26T08:00:00.000Z" },
+    { ipAddress: "203.0.113.7", lastRequestAt: "2026-11-26T08:00:00.000Z", nodes: [{ id: 1, name: 'Seattle old node' }],
+      quality: { checkedAt: '2026-11-26T07:00:00Z', exits: [{ city: 'Seattle', country: 'United States', riskScore: 5 }] } },
     { ipAddress: "203.0.113.4", lastRequestAt: "2026-11-25T08:00:00.000Z" },
     { ipAddress: "2001:db8:1234:5678:abcd:ef01:2345:6789", lastRequestAt: null },
   ];
@@ -120,6 +121,16 @@ async page => {
     check(submissions.at(-1) === 0, "unbind did not request direct mode");
     check(errors.length === 0 && (await page.title()).includes("Helper") && page.url().startsWith("http://127.0.0.1:"), errors.join("; ") || "page identity failed");
     check(await page.locator("vite-error-overlay").count() === 0, "framework overlay visible");
+  });
+  await test('history-search-finds-saved-name-city-and-IP', async () => {
+    await entry.click();
+    const search = historySection.getByRole('searchbox', { name: '搜索账号代理记录' });
+    await search.fill('Seattle');
+    check(await historySection.getByRole('listitem').count() === 1, 'city history filter');
+    await historySection.getByText('Seattle old node · #1').waitFor();
+    await search.fill('203.0.113.4'); check(await historySection.getByRole('listitem').count() === 1, 'IP history filter');
+    await search.fill('nonexistent'); await historySection.getByText('没有匹配的历史记录').waitFor();
+    await dialog.getByRole('button', { name: '取消', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
   });
   await test("history-stays-readable-when-proxy-catalog-is-offline", async () => {
     failList = true;

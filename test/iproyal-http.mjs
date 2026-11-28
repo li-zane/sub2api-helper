@@ -29,10 +29,16 @@ const remote = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ data }));
 });
 await new Promise(resolve => remote.listen(0, '127.0.0.1', resolve));
-let balance = 0;
+let balance = 0, usedMb = 1000;
 const source = async () => ({
   identity: 'fixture', inventory: async () => [node.host, '203.0.113.18', '203.0.113.19'].map(ip => ({ ip, order: '8123' })),
   bandwidth: async () => ({ gb_limit: 100, gb_used: 100 - balance, gb_balance: balance }),
+  ipUsage: async (_order, _ip, window) => {
+    const days = {};
+    for (let at = Date.parse(window.from); at <= Date.parse(window.to); at += 86400000) days[new Date(at).toISOString().slice(0, 10)] = 0;
+    days[window.to] = usedMb;
+    return { ...window, days };
+  },
   orderDetails: async () => ({ cost: { amountUsd: 9, quantity: 3, days: 30, usdPerIp: 3 }, expiresAt: '2027-01-01T00:00:00.000Z' }),
 });
 await fs.mkdir(path.join(root, 'web', 'dist'), { recursive: true });
@@ -91,6 +97,26 @@ try {
   await api(policy, 'PUT', { allocationPaused: true });
   await api(route, 'PUT', { autoPause: false }); await settled();
   assert.equal((await listing()).proxies[0].availableForBinding, false, 'disabling auto pause preserves manual choice');
+  await api(policy, 'PUT', { allocationPaused: false });
+  await api(route, 'PUT', { usageCooldownEnabled: true, usageThreshold: 50, usageUnit: 'MB', usageCooldownMinutes: 60 }); await settled();
+  assert.equal((await listing()).proxies[0].iproyal.ipUsage.deltaMb, null);
+  usedMb += 51; await api(route, 'POST'); await settled();
+  record = (await listing()).proxies[0];
+  assert.equal(record.iproyal.ipUsage.deltaMb, 51);
+  assert.equal(record.iproyal.usageCooldownPaused, true);
+  assert.equal(record.availableForBinding, false);
+  const usageBlocked = await fetch(base + '/api/jobs/batch', { method: 'POST',
+    headers: { 'x-console-token': token, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'cooldown@example.test' }) });
+  assert.equal(usageBlocked.status, 409);
+  assert.equal(boundAccount.proxy_id, 17);
+  assert(writes.every(patch => Object.keys(patch).join() === 'name'));
+  await api(policy, 'PUT', { allocationPaused: true });
+  await api(route, 'PUT', { usageCooldownEnabled: false }); await settled();
+  assert.equal((await listing()).proxies[0].iproyal.usageCooldownPaused, false);
+  assert.equal((await listing()).proxies[0].availableForBinding, false, 'usage toggle preserves manual pause');
+  await api(policy, 'PUT', { allocationPaused: false });
+  assert.equal((await listing()).proxies[0].availableForBinding, true);
+  console.log('IPROYAL_USAGE_HTTP_PASS saved settings; per-IP delta; new assignment blocked; existing binding preserved; disabling releases only automatic gate');
   assert.equal((await api(route)).intervalMinutes, 13);
   assert.equal((await api(route, 'PUT', { enabled: false })).enabled, false);
   console.log('IPROYAL_HTTP_PASS');

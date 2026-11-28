@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { IPROYAL_DEFAULTS, iproyalSettings } from '../shared/iproyal-settings.mjs';
+import { observeIpUsage, usagePolicy, usageWindow } from './iproyal-ip-usage.mjs';
 
 const DAY = 86_400_000;
 const fault = (status, message) => Object.assign(new Error(message), { status, patrolMessage: message });
@@ -66,6 +67,22 @@ export async function dashboardSource(file, fetchImpl = fetch) {
       if (!fields.every(k => Number.isFinite(v?.[k]) && v[k] >= 0)) throw fault(502, 'IPRoyal 流量响应缺少有效数值');
       return Object.fromEntries(fields.map(k => [k, v[k]]));
     },
+    async ipUsage(order, ip, window) {
+      if (!/^[1-9]\d*$/.test(order) || !isIP(ip)) throw fault(400, '订单号或 IP 无效');
+      const validDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
+      if (!validDate(window?.from) || !validDate(window?.to) || window.from > window.to || Date.parse(window.to) - Date.parse(window.from) !== 6 * DAY) throw fault(400, '用量查询周期无效');
+      const query = new URLSearchParams({ date_from: window.from, date_to: window.to, time_zone: 'Asia/Shanghai',
+        measurement_unit: 'MB', rounding_decimal: '2', 'ip_addresses[]': ip });
+      const result = await get(order + '/data-usage?' + query);
+      const days = {};
+      for (let at = Date.parse(window.from); at <= Date.parse(window.to); at += DAY) {
+        const day = new Date(at).toISOString().slice(0, 10), amount = result?.data?.[day];
+        if (!Number.isFinite(amount) || amount < 0) throw fault(502, 'IPRoyal 单 IP 用量响应不完整');
+        days[day] = amount;
+      }
+      // remaining is shared order balance, never an individual IP counter.
+      return { ...window, days };
+    },
     async orderDetails(order) {
       if (!/^[1-9]\d*$/.test(order)) throw fault(400, '订单号无效');
       const v = await get(order);
@@ -117,7 +134,7 @@ async function save(file, data) {
     await fs.rename(temp, file);
   } finally { await fs.rm(temp, { force: true }); }
 }
-const empty = key => ({ key, checked: {}, orders: {}, slots: {}, inventoryAt: 0, nodeIps: {} });
+const empty = key => ({ key, checked: {}, orders: {}, slots: {}, inventoryAt: 0, nodeIps: {}, ipUsage: {} });
 
 export function createIproyalPatrol({ root, source, target, canRun, list, rename, syncCost = async () => {},
   now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
@@ -157,7 +174,7 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
       try {
         const idx = indexInventory(await api.inventory(), state.slots);
         state.checked = Object.fromEntries(ips.map(ip => [ip, idx[ip] ?? null]));
-        if (state.source !== api.identity) state.orders = {};
+        if (state.source !== api.identity) { state.orders = {}; state.ipUsage = {}; }
         state.source = api.identity;
         state.inventoryAt = now();
       } catch (e) {
@@ -169,6 +186,7 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
     state.checked = Object.fromEntries(ips.filter(ip => Object.hasOwn(state.checked, ip)).map(ip => [ip, state.checked[ip]]));
     const orders = new Set(Object.values(state.checked).map(v => v?.order).filter(Boolean));
     state.orders = Object.fromEntries(Object.entries(state.orders).filter(([id]) => orders.has(id)));
+    state.ipUsage = Object.fromEntries(Object.entries(state.ipUsage || {}).filter(([ip, item]) => item.order === state.checked[ip]?.order));
     for (const order of orders) {
       if (!valid(key, revision)) return;
       try { state.orders[order] = { ...state.orders[order], ...await api.bandwidth(order), at: now(), stale: false }; }
@@ -190,6 +208,22 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
           recordFailure(e);
         }
       }
+    }
+    if (!inventoryFailed && api.ipUsage) {
+      const pending = ips.filter(ip => state.checked[ip]?.order);
+      const window = usageWindow(now());
+      await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+        while (pending.length && valid(key, revision)) {
+          const ip = pending.shift(), order = state.checked[ip].order;
+          try {
+            const sample = await api.ipUsage(order, ip, window);
+            state.ipUsage[ip] = { ...observeIpUsage(state.ipUsage[ip], sample, config, now()), order };
+          } catch (e) {
+            state.ipUsage[ip] = { ...state.ipUsage[ip], order, stale: true };
+            recordFailure(e);
+          }
+        }
+      }));
     }
     if (!valid(key, revision)) return;
     state.nodeIps = Object.fromEntries(nodes.map(node => [node.id, addressOf(node)]));
@@ -242,6 +276,7 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
     configure(value) {
       const next = settingsQueue.then(async () => {
         const changed = iproyalSettings(typeof value === 'boolean' ? { enabled: value } : value, settings);
+        const resetUsage = changed.enabled !== settings.enabled || usagePolicy(changed) !== usagePolicy(settings);
         if (changed.enabled && !target()) throw fault(409, '请先保存 Sub2API 后端配置');
         if (changed.enabled) await source();
         await save(settingsFile, changed);
@@ -249,6 +284,12 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
         generation++;
         schedule();
         await work;
+        if (resetUsage) {
+          const state = structuredClone(cache);
+          for (const sample of Object.values(state.ipUsage || {})) { sample.policy = null; sample.cooldownUntil = 0; }
+          await save(cacheFile, state);
+          cache = state;
+        }
         if (settings.enabled) void run();
         return status();
       });
@@ -261,16 +302,23 @@ export function createIproyalPatrol({ root, source, target, canRun, list, rename
       if (!link || link.ambiguous) return { status: link ? 'ambiguous' : 'unmatched' };
       const usage = cache.orders[link.order];
       const thresholdGb = settings.thresholdGbPerIp * link.ipCount;
+      const individual = cache.ipUsage?.[ip];
+      const usageCooldownPaused = Boolean(settings.usageCooldownEnabled && individual?.policy === usagePolicy(settings) && individual.cooldownUntil > now());
+      const balanceAllocationPaused = settings.autoPause && Number.isFinite(thresholdGb) && Number.isFinite(usage?.gb_balance) && usage.gb_balance <= thresholdGb;
       return { status: 'matched', order: link.order, ...usage, ipCount: link.ipCount, thresholdGb,
+        ipUsage: individual?.at ? { deltaMb: individual.deltaMb, totalMb: individual.totalMb, from: individual.from, to: individual.to,
+          at: individual.at, since: individual.since, baselineReason: individual.baselineReason,
+          stale: individual.stale || now() - individual.at > 2 * settings.intervalMinutes * 60000,
+          cooldownUntil: usageCooldownPaused ? individual.cooldownUntil : null, triggerMb: individual.triggerMb } : null,
+        usageCooldownPaused, balanceAllocationPaused,
         expiryStale: !usage?.expiryObservedAt || usage.expiryStale || now() - usage.expiryObservedAt > 2 * settings.intervalMinutes * 60000,
-        autoAllocationPaused: settings.autoPause && Number.isFinite(thresholdGb) && Number.isFinite(usage?.gb_balance) && usage.gb_balance <= thresholdGb,
+        autoAllocationPaused: balanceAllocationPaused || usageCooldownPaused,
         costSyncEnabled: settings.syncCost,
         stale: !usage?.at || usage.stale || now() - usage.at > 2 * settings.intervalMinutes * 60000 };
     },
     isBlocked(key, id) {
-      if (!settings.enabled || !settings.autoPause || cache.key !== key) return false;
-      const ip = cache.nodeIps?.[id], link = cache.checked[ip], usage = cache.orders[link?.order];
-      return Boolean(link?.ipCount && Number.isFinite(usage?.gb_balance) && usage.gb_balance <= settings.thresholdGbPerIp * link.ipCount);
+      if (!settings.enabled || cache.key !== key) return false;
+      return Boolean(this.lookup(key, cache.nodeIps?.[id])?.autoAllocationPaused);
     },
   };
 }

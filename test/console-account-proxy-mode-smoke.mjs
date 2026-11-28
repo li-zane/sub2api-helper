@@ -9,6 +9,18 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { ProxyDiagnostics } from '../src/proxy-diagnostics.mjs';
+
+function seedCities(db, backend, nodes, cityOf = () => 'Seattle') {
+  const records = new ProxyDiagnostics({ service: {} }); records.load(db);
+  for (const proxy of nodes) {
+    const url = new URL(`${proxy.protocol}://${proxy.host}:${proxy.port}`);
+    url.username = proxy.username || ''; url.password = proxy.password || '';
+    const node = { ...proxy, ipAddress: proxy.ip_address, url: url.toString() };
+    records.save(backend, node, { checkedAt: new Date().toISOString(), status: 'ok', stable: true,
+      exits: [{ ip: proxy.ip_address, countryCode: 'US', region: 'Washington', city: cityOf(proxy), riskScore: 10 }] });
+  }
+}
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "tosub2-account-proxy-mode-"));
@@ -317,7 +329,8 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
     const result = await fetch(historyRoute, { headers });
     assert.equal(result.status, 200);
     const { history } = await result.json();
-    assert(history.every(item => Object.keys(item).sort().join() === "ipAddress,lastRequestAt"), "history exposes only IP and request time");
+    assert(history.every(item => Object.keys(item).every(key => ['ipAddress', 'lastRequestAt', 'nodes', 'quality'].includes(key))), 'history exposes only public proxy details');
+    assert(!JSON.stringify(history).includes('secret-'), 'history omits proxy credentials');
     assert.equal(history.length, new Set(history.map(item => item.ipAddress)).size, "history deduplicates shared exits");
     return history;
   };
@@ -426,6 +439,7 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
     proxies.push({id,name:'Free '+id,protocol:'http',host:'free-'+id+'.invalid',port:8080,ip_address:ip,status:'active'});
   }
   for (const email of ['old-a','old-b']) scheduleDb.prepare('INSERT OR IGNORE INTO proxy_account_history VALUES(?,?,?,NULL)').run(backend, '198.51.100.60', email);
+  seedCities(scheduleDb, backend, proxies);
   scheduleDb.close();
   const noLoginBeforeScheduled = (await readTrace()).length;
   await startConsole();
@@ -439,8 +453,9 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   await stopConsole();
   const reloginDb = new DatabaseSync(path.join(output, 'helper-operations.sqlite'));
   reloginDb.prepare('INSERT OR REPLACE INTO proxy_rotation_due VALUES(?,?,?,?)').run(backend, createHash('sha256').update(target.email).digest('hex'), JSON.stringify(reloginRotation), 0);
-  reloginDb.close();
   proxies.push({id:8,name:'Relogin exit',protocol:'http',host:'relogin-exit.invalid',port:8080,ip_address:'198.51.100.80',status:'active'});
+  seedCities(reloginDb, backend, proxies);
+  reloginDb.close();
   const beforeScheduledRelogin = (await readTrace()).length;
   await startConsole();
   await waitFor(async () => { const current = (await page()).jobs.find(j => j.id === target.id); return current?.assignedProxyId === 8 && current.status === 'completed' && !current.poolRefreshAction && accounts.find(a => a.id === accountId).proxy_id === 8 && (await readTrace()).length > beforeScheduledRelogin; });
@@ -449,6 +464,28 @@ if (await fs.stat(${JSON.stringify(failLogin)}).then(() => true, () => false)) {
   assert.equal(new URL((await readTrace()).at(-1).proxy).hostname, 'relogin-exit.invalid');
   assert.equal((await post('/api/task-settings', {proxyRotation:{enabled:false}})).status, 200);
   console.log('SCHEDULED_IP_RELOGIN_PASS new exit; logout; exactly one login; pool credentials and route synchronized');
+  // Exercise the real scheduler with only cross-city alternatives, and wait for
+  // its persisted retry deadline so an unchanged binding alone cannot false-pass.
+  assert.equal((await post('/api/task-settings', { proxyRotation: rotation })).status, 200);
+  await stopConsole();
+  const noCityDb = new DatabaseSync(path.join(output, 'helper-operations.sqlite'));
+  const rotationAccountKey = createHash('sha256').update(target.email).digest('hex');
+  noCityDb.prepare('INSERT OR REPLACE INTO proxy_rotation_due VALUES(?,?,?,?)').run(backend, rotationAccountKey, JSON.stringify(rotation), 0);
+  seedCities(noCityDb, backend, proxies, proxy => proxy.id === 8 ? 'Seattle' : 'Portland');
+  noCityDb.close();
+  const updatesBeforeNoCity = accountUpdates.filter(item => item.id === accountId).length;
+  const loginsBeforeNoCity = (await readTrace()).length;
+  await startConsole();
+  const retryDb = new DatabaseSync(path.join(output, 'helper-operations.sqlite'), { readOnly: true });
+  try {
+    await waitFor(() => retryDb.prepare('SELECT due FROM proxy_rotation_due WHERE pool=? AND account=?').get(backend, rotationAccountKey)?.due > 0);
+  } finally { retryDb.close(); }
+  assert.equal((await page()).jobs.find(job => job.id === target.id).assignedProxyId, 8);
+  assert.equal(accounts.find(account => account.id === accountId).proxy_id, 8);
+  assert.equal(accountUpdates.filter(item => item.id === accountId).length, updatesBeforeNoCity, 'no cross-city binding write');
+  assert.equal((await readTrace()).length, loginsBeforeNoCity, 'no login when no same-city exit exists');
+  assert.equal((await post('/api/task-settings', { proxyRotation: { enabled: false } })).status, 200);
+  console.log('SCHEDULED_SAME_CITY_SKIP_PASS real scheduler scanned; no same-city candidate; local/pool route unchanged; no account write; no login');
   const finalHistory = await readIpHistory();
   for (const ip of ["198.51.100.70", "198.51.100.80"]) assert(finalHistory.some(item => item.ipAddress === ip), "automatic rotation history: " + ip);
   const otherJob = (await page()).jobs.find(job => job.email.startsWith("concurrent-"));

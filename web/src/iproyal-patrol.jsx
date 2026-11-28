@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { IPROYAL_DEFAULTS, iproyalSettings } from '../../shared/iproyal-settings.mjs';
+import { CustomSelect } from './custom-select.jsx';
 
 const route = '/api/iproyal/patrol';
 
@@ -54,6 +55,8 @@ export function IproyalPatrol({ request, onUpdated }) {
     try {
       patch = iproyalSettings({ ...form, enabled: Boolean(state.enabled), intervalMinutes: Number(form.intervalMinutes),
         thresholdGbPerIp: form.thresholdGbPerIp === '' ? NaN : Number(form.thresholdGbPerIp),
+        usageThreshold: form.usageThreshold === '' ? NaN : Number(form.usageThreshold),
+        usageCooldownMinutes: form.usageCooldownMinutes === '' ? NaN : Number(form.usageCooldownMinutes),
         usdToCny: form.usdToCny === '' || form.usdToCny === null ? null : Number(form.usdToCny) });
     } catch (e) { setError(e.message); return; }
     if (await change({ method: 'PUT', body: JSON.stringify(patch) })) setDraft(null);
@@ -85,6 +88,16 @@ export function IproyalPatrol({ request, onUpdated }) {
       <label>单 IP 剩余流量阈值（GB）<input type="number" min="0" max="1000000" step="any" required disabled={pending || !state}
         value={form.thresholdGbPerIp} onChange={e => edit('thresholdGbPerIp', e.target.value)} /></label>
       <small>订单阈值 = 单 IP 阈值 × 订单全部独立 IP 数。余额 ≤ 阈值时暂停该订单的新分配；余额恢复后自动解除，手动暂停保持。</small>
+      <label className="iproyal-check"><input type="checkbox" role="switch" checked={form.usageCooldownEnabled} disabled={pending || !state}
+        onChange={e => edit('usageCooldownEnabled', e.target.checked)} />单 IP 新增用量超限时冷却</label>
+      <label>用量单位<CustomSelect aria-label="单 IP 用量阈值单位" value={form.usageUnit} disabled={pending || !state}
+        onChange={e => edit('usageUnit', e.target.value)} options={[{ value: 'MB', label: 'MB' }, { value: 'GB', label: 'GB（1000 MB）' }]} /></label>
+      <label>新增用量阈值<input type="number" min="0.000001" max="1000000" step="any" required disabled={pending || !state}
+        value={form.usageThreshold} onChange={e => edit('usageThreshold', e.target.value)} /></label>
+      <label>用量冷却时间（分钟）<input type="number" min="1" max="43200" step="1" required disabled={pending || !state}
+        value={form.usageCooldownMinutes} onChange={e => edit('usageCooldownMinutes', e.target.value)} /></label>
+      <small>自上次成功统计以来，单个 IP 新增上报用量大于阈值时，暂停该 IP 的新分配及轮转选入；冷却到期自动恢复，手动暂停保持。首次读取只建立基线。</small>
+      <small>IPRoyal 用量更新可能延迟 24 小时；这里统计新增上报量，并非实时流量。冷却期间继续统计，已有账号保持原绑定。</small>
       <label className="iproyal-check"><input type="checkbox" role="switch" checked={form.syncCost} disabled={pending || !state}
         onChange={e => edit('syncCost', e.target.checked)} />巡检同步 IP 成本</label>
       <label>美元兑人民币汇率<input type="number" min="0.000001" max="1000" step="any" required={form.syncCost} disabled={pending || !state}
@@ -119,11 +132,17 @@ export function IproyalBalance({ record, now }) {
   if (!record) return null;
   if (record.status !== 'matched') return <small>{record.status === 'ambiguous' ? '订单归属冲突' : '未匹配当前 IPRoyal 库存'}</small>;
   const time = record.at ? new Date(record.at).toLocaleString() : '';
-  const text = Number.isFinite(record.gb_balance) ? `剩余 ${record.gb_balance.toFixed(2)} GB` : '余额待查';
-  return <small title={`订单 ${record.order}，同单共享。${time ? '上次成功更新 ' + time : ''}`}>
+  const text = Number.isFinite(record.gb_balance) ? `订单剩余 ${record.gb_balance.toFixed(2)} GB` : '订单余额待查';
+  const usage = record.ipUsage;
+  return <small title={`订单 ${record.order}，剩余额度同单共享；单 IP 新增上报量独立统计，数据可能延迟 24 小时。${time ? '上次成功更新 ' + time : ''}`}>
     IPRoyal · {text}{record.stale ? '（待刷新）' : ''}
     {Number.isFinite(record.thresholdGb) && ` · 阈值 ${record.thresholdGb} GB（${record.ipCount} IP）`}
     {record.autoAllocationPaused && ' · 自动暂停分配'}
+    <span className="proxy-order-validity">单 IP 新增上报：{usage?.deltaMb != null ? `${usage.deltaMb.toFixed(2)} MB` : usage ? '基线已建立，等待下次统计' : '等待首次统计'}
+      {usage?.stale && '（待刷新）'}
+      {usage?.at && <span> · {usage.since ? `${expiryDate.format(new Date(usage.since))} 至 ` : '统计于 '}{expiryDate.format(new Date(usage.at))}</span>}
+      {record.usageCooldownPaused && usage?.cooldownUntil && <strong> · 用量冷却中{usage.triggerMb != null ? `（触发新增 ${usage.triggerMb.toFixed(2)} MB）` : ''}，{Math.max(0, Math.ceil((usage.cooldownUntil - now) / 60000))} 分钟后恢复（{expiryDate.format(new Date(usage.cooldownUntil))}）</strong>}
+    </span>
     {record.cost && ` · $${record.cost.usdPerIp.toFixed(2)}/IP · ${record.cost.days} 天${record.costStale ? '（价格待刷新）' : ''}`}
     <span className="proxy-order-validity">{orderValidity(record.expiresAt, now)}
       {Number.isFinite(Date.parse(record.expiresAt)) && <time dateTime={record.expiresAt}> · {expiryDate.format(new Date(record.expiresAt))} 到期（北京时间）</time>}

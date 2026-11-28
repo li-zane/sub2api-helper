@@ -21,6 +21,13 @@ try {
     assert.equal(init.redirect, 'error');
     assert.equal(init.headers.Authorization, 'Bearer fixture-only');
     assert.equal(init.headers.Cookie, 'fixture=x');
+    if (u.pathname.endsWith('/data-usage')) {
+      assert(rows.some(row => row.ip === u.searchParams.get('ip_addresses[]')));
+      assert.equal(u.searchParams.get('measurement_unit'), 'MB');
+      const data = {};
+      for (let at = Date.parse(u.searchParams.get('date_from')); at <= Date.parse(u.searchParams.get('date_to')); at += 86400000) data[new Date(at).toISOString().slice(0, 10)] = 10;
+      return Response.json({ data, remaining: { gb_used: 999999 } });
+    }
     if (u.pathname.endsWith('/proxies')) {
       const page = Number(u.searchParams.get('page'));
       calls.push('page' + page);

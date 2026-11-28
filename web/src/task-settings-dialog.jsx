@@ -306,7 +306,7 @@ export function TaskSettingsDialog({ settings, availablePlanTypes, planTypeMappi
           </div>
           <label className="settings-field" htmlFor="proxy-rotation-interval"><span>IP 轮换间隔（分钟）</span><input id="proxy-rotation-interval" type="number" min="1" max="43200" step="1" value={rotation.intervalMinutes} disabled={saving || !rotation.enabled} onChange={e => setRotation(v => ({ ...v, intervalMinutes: e.target.value }))} /></label>
           <p className="task-auto-empty">默认关闭。需使用 Sub2API 均衡分配或按 PlanType 授权模式。未勾选重登时，仅更新本地绑定与号池后续请求出口，保留当前登录凭据。</p>
-          <p className="task-auto-empty">优先选择未绑定 IP，再按历史绑定账号数由少到多、上次使用时间由早到晚选择；全部已绑定时从历史数量开始比较。同一出口的多个协议节点合并计算，排除当前出口与停止分配的 IP。</p>
+          <p className="task-auto-empty">先筛选已检测确认的同城出口，再优先选择未绑定 IP，按历史绑定账号数由少到多、上次使用时间由早到晚选择。城市未知或没有同城可用 IP 时保留原绑定。同一出口的多个协议节点合并计算，排除当前出口与停止分配的 IP。</p>
           <p className="task-auto-empty">开启或修改规则后等待一个完整间隔。仅使用当前有效的降智检测结果；尚未检测或结果过期时跳过。忙碌、冷却、暂停巡检的账号延后处理，关闭页面后仍由服务端执行。</p>
         </section>
         <section className="task-auto-settings" aria-labelledby="web-session-monitor-title">

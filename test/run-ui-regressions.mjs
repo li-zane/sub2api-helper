@@ -53,6 +53,7 @@ try {
   const scriptPath = process.env.UI_TEST_SCRIPT || (process.argv.includes("--credential-copy") ? "test/credential-copy.browser.js" : process.argv.includes("--subscriptions") ? "test/subscription-history.browser.js" : process.argv.includes("--popup-audit") ? "test/popup-audit.browser.js" : process.argv.includes("--task-settings-layout") ? "test/task-settings-layout.browser.js" : process.argv.includes("--task-settings-scroll") ? "test/task-settings-scroll.browser.js" : process.argv.includes("--frontend-components") ? "test/frontend-components.browser.js" : process.argv.includes("--frontend-performance") ? "test/frontend-performance.browser.js" : process.argv.includes("--antigravity-review") ? "test/antigravity-review.browser.js" : process.argv.includes("--codex-status") ? "test/codex-status.browser.js" : process.argv.includes("--account-usage") ? "test/account-usage-ui.browser.js" : process.argv.includes("--recent-operation") ? "test/recent-operation.browser.js" : "test/ui-regressions.browser.js");
   // The CLI sandbox has no Node globals; inject the path as a JavaScript literal.
   const requestedScript = process.env.UI_TEST_SCRIPT || new Map([
+    ["--proxy-diagnostics", "test/proxy-diagnostics.browser.js"],
     ["--account-tags", "test/account-tags.browser.js"],
     ["--subscription-notices", "test/subscription-changes.browser.js"],
     ["--task-settings-flow", "test/task-settings-flow.browser.js"],

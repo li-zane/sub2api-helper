@@ -45,6 +45,7 @@ import { hasJobTotpKey, isReauthorizationComplete, isTotpRotationComplete, postA
 import { DirectTlsProfileProbe, proxySupportsSessionRotation } from "./tls-transport.mjs";
 import { OverloadMonitor } from "./overload-monitor.mjs";
 import { ProxyQualityService } from "./proxy-quality.mjs";
+import { ProxyDiagnostics, confirmedExit } from "./proxy-diagnostics.mjs";
 import { normalizeResetCredits, createResetCreditsReader } from "./sub2api-reset-credits.mjs";
 import { DEFAULT_MONITORING } from "../web/src/monitor-settings.mjs";
 import { IMPORT_FINGERPRINT_ACTION, isRedundantTaskUpload, isRedundantTaskAuthorization } from "../web/src/task-auto-actions.mjs";
@@ -88,7 +89,7 @@ import { createProxyImporter, listAllSub2ApiProxies } from "./sub2api-proxy-crea
 import { createProxyEditor } from "./sub2api-proxy-edit.mjs";
 import { addressOf, createIproyalPatrol, dashboardSource } from "./iproyal-patrol.mjs";
 import { poolAccountError } from "../web/src/pool-account-error.mjs";
-import { ProxyRotation, rankRotationExits, rebindPoolProxies } from "./proxy-rotation.mjs";
+import { ProxyRotation, rankRotationExits, rebindPoolProxies, rotationCityKey } from "./proxy-rotation.mjs";
 
 export function createConsoleApp(options = {}) {
   options = { host: "127.0.0.1", port: 4399, ...options };
@@ -280,11 +281,23 @@ export function createConsoleApp(options = {}) {
   let smsProviderSettingsState;
   const poolUploadIntents = new PoolUploadIntents({ filePath: path.join(OUTPUT_ROOT, "pool-upload-intents.json") });
   const credentialStore = createCredentialStore();
-  const proxyQualityService = new ProxyQualityService({
+  const proxyQualityService = options.proxyQualityService || new ProxyQualityService({
     exitUrl: process.env.TOSUB2_PROXY_EXIT_CHECK_URL,
     chatgptUrl: process.env.NODE_ENV === "test" ? process.env.TOSUB2_PROXY_CHATGPT_CHECK_URL : undefined,
     profile: process.env.TOSUB2_TLS_PROFILE || DEFAULT_TLS_PROFILE,
     timeoutMs: process.env.NODE_ENV === "test" ? process.env.TOSUB2_PROXY_CHECK_TIMEOUT_MS : undefined,
+  });
+  const proxyDiagnostics = new ProxyDiagnostics({ service: proxyQualityService,
+    canRun: () => !shuttingDown && !dispatchPaused(),
+    onResult: (pool, proxy, result) => {
+      if (pool !== monitorBackendIdentity(sub2ApiSettingsConfig)) return;
+      const ip = confirmedExit(result)?.ip || proxy.ipAddress;
+      for (const job of jobs.values()) {
+        if (!job.deleted && Number(job.assignedProxyId) === proxy.id && job.proxyUrl === proxy.url) {
+          book.proxyActivity.noteBinding(pool, ip, accountLoginEmails.key(job.email));
+        }
+      }
+    },
   });
   const consoleToken = crypto.randomBytes(24).toString("base64url");
   const jobs = new JobStore();
@@ -801,7 +814,7 @@ export function createConsoleApp(options = {}) {
       const busyJobs = [...jobs.values()].filter(j => !j.deleted && (isActive(j.status) || j.autoTaskStatus === "running")).length;
       const busyWorkers = chatStore.work.size + Number(Boolean(financeWork)) + Number(iproyal.status().running) + admittedWrites + emailJobLocks.size + activeWebSessionChecks + manualWebSessionCheckOperations.size
         + sessionResetStarts.size + poolRefreshOperations.size + sub2ApiAutoRepairPromises.size + accountSecurityChecks.size
-        + modelFingerprint.inFlight.size + modelFingerprint.runningTasks.size + accountDataSyncOperations.size + Number(Boolean(proxyRotation.running))
+        + modelFingerprint.inFlight.size + modelFingerprint.runningTasks.size + accountDataSyncOperations.size + Number(Boolean(proxyRotation.running)) + proxyDiagnostics.pending.size
         + [webSessionMonitor.running, modelFingerprint.ticking, overloadMonitor.running, overloadCooldown.running, degradationCooldown.running, sub2ApiMonitorPromise].filter(Boolean).length;
       sendJson(res, 200, { paused: dispatchPaused(), ready: dispatchStarted && !shuttingDown, busyJobs, busyWorkers });
       return;
@@ -950,15 +963,21 @@ export function createConsoleApp(options = {}) {
       const body = await readJson(req);
       let proxyUrl;
       let target;
+      let selectedProxy;
+      const diagnosticConfig = sub2ApiSettingsConfig;
       if (body.target === "global") {
         proxyUrl = consoleSettings.current.globalProxyUrl;
         target = { type: "global", name: "全局代理" };
       } else if (body.target === "sub2api") {
         const proxyId = normalizeStoredProxyId(body.proxyId);
         if (!proxyId) throw httpError(400, "请选择有效的代理节点");
-        const proxy = (await listSub2ApiProxies()).find(item => item.id === proxyId);
+        let proxy = (await listSub2ApiProxies(diagnosticConfig)).find(item => item.id === proxyId);
+        if (!proxy) {
+          try { proxy = normalizeSub2ApiProxyList(await listAllSub2ApiProxies(requestSub2Api, diagnosticConfig)).find(item => item.id === proxyId); } catch {}
+        }
         if (!proxy) throw httpError(404, "代理节点不存在，请重新读取代理");
         proxyUrl = proxy.url;
+        selectedProxy = proxy;
         target = { type: "sub2api", proxyId, name: proxy.name };
       } else throw httpError(400, "请选择全局代理或 Sub2API 代理节点");
       if (!proxyUrl) throw httpError(409, "请先保存有效的代理地址");
@@ -966,7 +985,9 @@ export function createConsoleApp(options = {}) {
       const stop = () => { if (!res.writableEnded) controller.abort(); };
       res.once("close", stop);
       try {
-        const result = await proxyQualityService.check(proxyUrl, { signal: controller.signal, rotateSession: body.target === "global" });
+        const result = selectedProxy
+          ? await proxyDiagnostics.check(monitorBackendIdentity(diagnosticConfig), selectedProxy, { signal: controller.signal })
+          : await proxyQualityService.check(proxyUrl, { signal: controller.signal, rotateSession: true });
         if (!res.destroyed) sendJson(res, 200, { target, result });
       } finally { res.off("close", stop); }
       return;
@@ -1364,10 +1385,14 @@ export function createConsoleApp(options = {}) {
 
     if (req.method === "POST" && requestUrl.pathname === "/api/sub2api/proxies") {
       const body = await readJson(req);
-      const result = await importSub2ApiProxies(sub2ApiSettingsConfig, body);
+      const config = sub2ApiSettingsConfig;
+      const result = await importSub2ApiProxies(config, body);
       void iproyal.run();
       // Refresh cached choices independently; creation results must survive a read failure.
-      try { await listSub2ApiProxies(); } catch {}
+      try {
+        const proxies = await listSub2ApiProxies(config);
+        proxyDiagnostics.enqueue(monitorBackendIdentity(config), proxies);
+      } catch {}
       sendJson(res, 200, result);
       return;
     }
@@ -1412,7 +1437,7 @@ export function createConsoleApp(options = {}) {
       const activityPool = monitorBackendIdentity(config);
       if (listing.complete) observePoolBindings(config, observation, listing.accounts, proxiesById);
       const activity = book.proxyActivity.byIp(activityPool);
-      publicProxyCatalog = { backend: monitorBackendIdentity(config), proxies: new Map([...proxiesById.values()].map((proxy) => [proxy.id, publicSub2ApiProxy(proxy)])) };
+      publicProxyCatalog = { backend: monitorBackendIdentity(config), proxies: new Map([...proxiesById.values()].map((proxy) => [proxy.id, publicSub2ApiProxy(proxy, config)])) };
       const countedEmails = new Set();
       let directAccountCount = 0;
       for (const account of listing.accounts) {
@@ -1447,11 +1472,11 @@ export function createConsoleApp(options = {}) {
       sendJson(res, 200, {
         groups: groupPayload,
         proxies: [...proxiesById.values()].map((proxy) => ({
-          ...publicSub2ApiProxy(proxy),
+          ...publicSub2ApiProxy(proxy, config),
           iproyal: iproyal.lookup(monitorBackendIdentity(config), addressOf(proxy)) ?? undefined,
           ...book.policy(poolKey(config),proxy.id,proxyIpKey(proxy)),
-          historicalAccountCount: activity.get(proxyIpKey(proxy))?.historicalAccountCount ?? (listing.complete ? 0 : null),
-          lastRequestAt: activity.get(proxyIpKey(proxy))?.lastRequestAt ?? null,
+          historicalAccountCount: activity.get(proxyHistoryIp(config, proxy))?.historicalAccountCount ?? (listing.complete ? 0 : null),
+          lastRequestAt: activity.get(proxyHistoryIp(config, proxy))?.lastRequestAt ?? null,
           accountCount: proxyCounts.get(proxyIpKey(proxy)) || 0,
           availableForBinding: Boolean(proxy.url) && !isSub2ApiProxyExpired(proxy) && !allocationBlocked(config,proxy.id),
         })),
@@ -1829,9 +1854,9 @@ export function createConsoleApp(options = {}) {
       throw httpError(409, "会话重建正在进行，请等待 Web、OAuth 和号池更新全部完成");
     if (/^(?:sessions|workspaces)(?:\/|$)/.test(action || "")) assertAccountWebActionsAllowed(job);
     if (req.method === "GET" && action === "proxy-history") {
-      sendJson(res, 200, { history: book.proxyActivity.byAccount(
-        monitorBackendIdentity(sub2ApiSettingsConfig), accountLoginEmails.emails(job.email),
-      ) });
+      const pool = monitorBackendIdentity(sub2ApiSettingsConfig);
+      sendJson(res, 200, { history: book.proxyActivity.byAccount(pool, accountLoginEmails.emails(job.email))
+        .map(item => ({ ...item, ...proxyDiagnostics.exit(pool, item.ipAddress) })) });
       return;
     }
     if (req.method === "GET" && action === "logs") {
@@ -8027,7 +8052,7 @@ export function createConsoleApp(options = {}) {
     });
   }
 
-  function publicSub2ApiProxy(proxy) {
+  function publicSub2ApiProxy(proxy, config = sub2ApiSettingsConfig) {
     return {
       id: proxy.id,
       name: proxy.name,
@@ -8036,13 +8061,14 @@ export function createConsoleApp(options = {}) {
       port: proxy.port,
       ipAddress: proxy.ipAddress,
       status: proxy.status,
+      ...proxyDiagnostics.summary(monitorBackendIdentity(config), proxy),
     };
   }
 
   async function listSub2ApiProxies(config = sub2ApiSettingsConfig) {
     if (!config?.baseUrl || !config?.adminApiKey) throw httpError(409, "请先配置 Sub2API 后端和管理员 API Key");
     const proxies = normalizeSub2ApiProxyList(await requestSub2Api(config, "/api/v1/admin/proxies/all"));
-    publicProxyCatalog = { backend: monitorBackendIdentity(config), proxies: new Map(proxies.map((proxy) => [proxy.id, publicSub2ApiProxy(proxy)])) };
+    publicProxyCatalog = { backend: monitorBackendIdentity(config), proxies: new Map(proxies.map((proxy) => [proxy.id, publicSub2ApiProxy(proxy, config)])) };
     return proxies;
   }
 
@@ -8056,7 +8082,8 @@ export function createConsoleApp(options = {}) {
     return [...new Set(proxyIds.map(normalizeStoredProxyId).filter(Boolean))].map((id) => {
       const proxy = catalog.get(id);
       const local = normalizeStoredProxyId(job?.assignedProxyId) === id ? job : null;
-      return { id, name: proxy?.name || local?.boundProxyName || `代理 ${id}`, ipAddress: proxy?.ipAddress || local?.boundIp || null };
+      return { id, name: proxy?.name || local?.boundProxyName || `代理 ${id}`, ipAddress: proxy?.detectedIpAddress || proxy?.ipAddress || local?.boundIp || null,
+        city: proxy?.city || null, region: proxy?.region || null, country: proxy?.country || null, quality: proxy?.quality || null };
     });
   }
 
@@ -8156,8 +8183,10 @@ export function createConsoleApp(options = {}) {
     accountProxyReservations.delete(job.email.toLowerCase());
     await saveStoredLoginCredentials(job.email, job);
     await saveJobMetadata(job);
-    if (proxy && job.resultSaved && sub2ApiSettingsConfig) {
-      book.proxyActivity.noteBinding(monitorBackendIdentity(sub2ApiSettingsConfig), proxyIpKey(proxy), accountLoginEmails.key(job.email));
+    if (proxy && sub2ApiSettingsConfig) {
+      const pool = monitorBackendIdentity(sub2ApiSettingsConfig);
+      proxyDiagnostics.enqueue(pool, [proxy]);
+      book.proxyActivity.noteBinding(pool, proxyHistoryIp(sub2ApiSettingsConfig, proxy), accountLoginEmails.key(job.email));
     }
   }
 
@@ -8191,11 +8220,14 @@ export function createConsoleApp(options = {}) {
     const proxies = normalizeSub2ApiProxyList(await listAllSub2ApiProxies(requestSub2Api, config));
     const byId = new Map(proxies.map(p => [p.id, p]));
     observePoolBindings(config, sequence, listing.accounts, byId);
-    const currentIps = new Set(), occupiedIps = new Set();
+    const currentIps = new Set(), occupiedIps = new Set(), currentCities = new Set();
     const email = accountLoginEmails.key(job.email), backend = monitorBackendIdentity(config);
     const add = (id, current) => {
       const proxy = byId.get(normalizeStoredProxyId(id));
-      if (proxy) { const ip = proxyIpKey(proxy); occupiedIps.add(ip); if (current) currentIps.add(ip); }
+      if (proxy) {
+        const ip = proxyHistoryIp(config, proxy); occupiedIps.add(ip);
+        if (current) { currentIps.add(ip); currentCities.add(rotationCityKey(proxyDiagnostics.summary(backend, proxy))); }
+      } else if (current && id) currentCities.add(null);
     };
     // Count every remote reference, including disabled rows and protocol aliases.
     for (const row of listing.accounts) add(row.proxy_id, accountLoginEmails.key(sub2ApiAccountEmail(row)) === email);
@@ -8208,7 +8240,10 @@ export function createConsoleApp(options = {}) {
       return proxy.url && !isSub2ApiProxyExpired(proxy) && !allocationBlocked(config, proxy.id)
         && (!Number.isFinite(expiry) || expiry > Date.now());
     };
-    return rankRotationExits({ proxies, currentIps, occupiedIps, activity: book.proxyActivity.byIp(backend), ipOf: proxyIpKey, available })[0] || null;
+    proxyDiagnostics.enqueue(backend, proxies.filter(available));
+    return rankRotationExits({ proxies, currentIps, occupiedIps, activity: book.proxyActivity.byIp(backend),
+      ipOf: proxy => proxyHistoryIp(config, proxy), available, currentCities,
+      cityOf: proxy => rotationCityKey(proxyDiagnostics.summary(backend, proxy)) })[0] || null;
   }
 
   async function switchJobProxyBinding(job, proxyId, { relogin = true, automatic = false, current = () => true } = {}) {
@@ -8240,7 +8275,10 @@ export function createConsoleApp(options = {}) {
       const previous = [...new Set([job.assignedProxyId, ...(pool.proxyIds || [])].map(normalizeStoredProxyId).filter(Boolean))];
       const proxy = automatic ? await selectRotationProxy(config, job)
         : proxyId ? (await listSub2ApiProxies(config)).find(item => item.id === proxyId) : null;
-      if (automatic && !proxy) return false;
+      if (automatic && !proxy) {
+        appendJobLog(job, '[proxy-rotation] 暂无已确认城市相同的可用出口，保留当前 IP 绑定。\n');
+        return false;
+      }
       if (automatic) proxyId = proxy.id;
       if ((proxyId && previous.length === 1 && previous[0] === proxyId) || (!proxyId && !previous.length)) {
         throw httpError(409, "请选择一个不同的绑定");
@@ -8386,12 +8424,17 @@ export function createConsoleApp(options = {}) {
     job.boundIp = proxy.ipAddress;
     job.boundProxyName = proxy.name;
     job.proxyFallbackActive = false;
+    proxyDiagnostics.enqueue(monitorBackendIdentity(sub2ApiSettingsConfig), [proxy]);
     await saveStoredLoginCredentials(job.email, job);
     await saveJobMetadata(job);
   }
 
   function proxyIpKey(proxy) {
     return String(proxy.ipAddress || proxy.host || proxy.id).trim().toLowerCase();
+  }
+
+  function proxyHistoryIp(config, proxy) {
+    return confirmedExit(proxyDiagnostics.get(monitorBackendIdentity(config), proxy))?.ip || proxyIpKey(proxy);
   }
 
   function observePoolBindings(config, sequence, accounts, proxiesById) {
@@ -8401,7 +8444,7 @@ export function createConsoleApp(options = {}) {
       if (account.platform !== "openai" || account.type !== "oauth" || !normalizeSub2ApiAccountId(account.id)) continue;
       const proxy = proxiesById.get(normalizeStoredProxyId(account.proxy_id));
       rows.push({
-        id: account.id, email: sub2ApiAccountEmail(account), ip: proxy ? proxyIpKey(proxy) : null,
+        id: account.id, email: sub2ApiAccountEmail(account), ip: proxy ? proxyHistoryIp(config, proxy) : null,
         lastUsedAt: account.last_used_at, accountUpdatedAt: account.updated_at, proxyUpdatedAt: proxy?.updated_at,
       });
     }
@@ -8410,10 +8453,16 @@ export function createConsoleApp(options = {}) {
         && pool === monitorBackendIdentity(sub2ApiSettingsConfig)) {
       for (const job of listUniqueJobs()) {
         const proxy = proxiesById.get(normalizeStoredProxyId(job.assignedProxyId));
-        if (job.resultSaved && proxy) localBindings.push({ ip: proxyIpKey(proxy), email: accountLoginEmails.key(job.email) });
+        if (job.resultSaved && proxy) localBindings.push({ ip: proxyHistoryIp(config, proxy), email: accountLoginEmails.key(job.email) });
       }
     }
     book.proxyActivity.observe(pool, sequence, rows, Date.now(), localBindings);
+    const boundIds = new Set(accounts.filter(account => account.platform === 'openai' && account.type === 'oauth')
+      .map(account => normalizeStoredProxyId(account.proxy_id)));
+    if (pool === monitorBackendIdentity(sub2ApiSettingsConfig)) {
+      for (const job of jobs.values()) if (!job.deleted) boundIds.add(normalizeStoredProxyId(job.assignedProxyId));
+    }
+    proxyDiagnostics.enqueue(pool, [...proxiesById.values()].filter(proxy => boundIds.has(proxy.id) || !isSub2ApiProxyExpired(proxy)));
   }
 
   async function deleteUnusedSub2ApiProxy(config, proxyId, body) {
@@ -11880,7 +11929,7 @@ export function createConsoleApp(options = {}) {
         modelFingerprint.stop(),
         webSessionMonitor.stop(),
         ...manualWebSessionCheckOperations,
-        proxyQualityService.close(),
+        proxyDiagnostics.close(),
         sub2ApiMonitorPromise,
         ...accountDataSyncOperations,
         ...accountSecurityChecks,
@@ -11937,6 +11986,7 @@ export function createConsoleApp(options = {}) {
   async function startRuntime() {
     await fs.mkdir(OUTPUT_ROOT, { recursive: true });
     book.open();
+    proxyDiagnostics.load(book.db);
     proxyRotation.load(book.db);
     smsProviderSettingsState = await loadSmsSettings(SMS_SETTINGS_PATH);
     await smsCancellations.load();

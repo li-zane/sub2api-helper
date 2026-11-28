@@ -1,109 +1,407 @@
-.bound-ip-dialog {
-  width: min(510px, calc(100vw - 24px));
-  max-height: calc(100dvh - 30px);
+/* ==========================================================================
+   Bound IP Switch Dialog & Account History
+   ========================================================================== */
+
+dialog.batch-dialog.bound-ip-dialog {
+  color-scheme: light;
+  width: min(580px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  color: var(--ink);
+}
+
+.bound-ip-dialog .dialog-header {
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+}
+
+.bound-ip-dialog .dialog-footer {
+  margin-top: 14px;
+  padding-top: 12px;
 }
 
 .bound-ip-dialog-body {
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 
-.bound-ip-account,
+.bound-ip-dialog-body form {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.bound-ip-account {
+  margin: 0;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
 .bound-ip-notice {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
-.bound-ip-options {
-  border: 0;
-  padding: 0;
+.bound-ip-notice[role="status"] {
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.bound-ip-notice[role="alert"],
+.bound-ip-history-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--danger-line);
+  border-radius: 9px;
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+/* Search Fields */
+.bound-ip-search {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
   margin: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bound-ip-search input {
   min-width: 0;
-  max-height: 43dvh;
-  overflow: auto;
+  width: 100%;
+  height: 34px;
+  padding: 0 12px 0 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2386868b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 11px center;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 400;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.bound-ip-search input::placeholder {
+  color: var(--subtle);
+}
+
+.bound-ip-search input:hover {
+  border-color: rgba(0, 0, 0, 0.24);
+}
+
+.bound-ip-search input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Account History Section */
+.bound-ip-history {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--surface-subtle);
   display: grid;
   gap: 8px;
 }
 
-.bound-ip-option-group {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 8px 10px;
-}
-
-.bound-ip-option-heading,
-.bound-ip-option {
+.bound-ip-history-heading {
   display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 6px 10px;
-  overflow-wrap: anywhere;
-}
-
-.bound-ip-option-heading {
+  align-items: center;
   justify-content: space-between;
-  margin-bottom: 4px;
-}
-
-.bound-ip-option {
-  padding: 5px 0;
-}
-
-.bound-ip-option-heading span,
-.bound-ip-option small {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.bound-ip-history {
+  flex-wrap: wrap;
+  gap: 6px 8px;
   min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
-  display: grid;
-  gap: 6px;
-}
-
-.bound-ip-history-heading,
-.bound-ip-history-error {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px 10px;
   overflow-wrap: anywhere;
 }
 
 .bound-ip-history h3 {
   margin: 0;
   font-size: 13px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.bound-ip-history > .bound-ip-history-heading > span {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .bound-ip-history-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0 2px 0 0;
   max-height: 150px;
-  overflow: auto;
+  overflow-y: auto;
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .bound-ip-history-list li {
   min-width: 0;
-  padding-top: 6px;
-  border-top: 1px solid var(--line);
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  display: grid;
+  gap: 3px;
+}
+
+.bound-ip-history-list li:has(> .bound-ip-history-heading small) {
+  border-color: var(--emerald-line);
+  background: linear-gradient(180deg, rgba(236, 253, 245, 0.45) 0%, var(--surface) 100%);
+  box-shadow: inset 3px 0 0 var(--emerald);
 }
 
 .bound-ip-history-list strong {
-  font-size: 13px;
-  font-weight: 500;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
-.bound-ip-history span,
-.bound-ip-history small {
+.bound-ip-history-heading small {
+  padding: 1px 7px;
+  border: 1px solid var(--emerald-line);
+  border-radius: 999px;
+  background: var(--emerald-soft);
+  color: var(--emerald-strong);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.bound-ip-history-names {
+  display: block;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.bound-ip-history-names:empty {
+  display: none;
+}
+
+.bound-ip-location {
+  display: block;
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.bound-ip-history-list li > span:not([class]) {
+  display: block;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* Target Binding Options */
+.bound-ip-options {
+  border: 0;
+  padding: 0 2px 0 0;
+  margin: 0;
+  min-width: 0;
+  max-height: min(38dvh, 300px);
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+}
+
+.bound-ip-option-group {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+  display: grid;
+  gap: 6px;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.bound-ip-option-group:has(input:checked) {
+  border-color: var(--accent-line);
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.45) 0%, var(--surface) 100%);
+}
+
+.bound-ip-option-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bound-ip-option-heading strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.bound-ip-option-heading span {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.bound-ip-option-group > .bound-ip-location {
+  margin-top: -2px;
+  color: var(--ink-2);
+}
+
+.bound-ip-option {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--ink);
+  font-size: 12.5px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.bound-ip-option:hover:not(:has(input:disabled)) {
+  border-color: var(--accent-line);
+  background: var(--surface);
+}
+
+.bound-ip-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.bound-ip-option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.72;
+  background: var(--surface-muted);
+}
+
+.bound-ip-option input[type="radio"] {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: inherit;
+}
+
+.bound-ip-option small {
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid var(--emerald-line);
+  border-radius: 999px;
+  background: var(--emerald-soft);
+  color: var(--emerald-strong);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  dialog.batch-dialog.bound-ip-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+    padding: 16px 14px;
+    border-radius: 14px;
+  }
+
+  .bound-ip-dialog .dialog-header {
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+  }
+
+  .bound-ip-dialog-body {
+    gap: 10px;
+  }
+
+  .bound-ip-history {
+    padding: 10px;
+    gap: 6px;
+  }
+
+  .bound-ip-history-list {
+    max-height: 136px;
+  }
+
+  .bound-ip-options {
+    max-height: min(30dvh, 225px);
+  }
+
+  .bound-ip-option-group {
+    padding: 8px 10px;
+    gap: 5px;
+  }
+
+  .bound-ip-option {
+    min-height: 40px;
+  }
+
+  .bound-ip-dialog .dialog-footer {
+    margin-top: 10px;
+    padding-top: 10px;
+    gap: 8px;
+  }
+
+  .bound-ip-dialog .dialog-footer button {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bound-ip-search input,
+  .bound-ip-option-group,
+  .bound-ip-option {
+    transition: none;
+  }
 }

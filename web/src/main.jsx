@@ -77,7 +77,10 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import { logoutAccountSessions, proxySwitchSelectionState } from "./account-session-actions.mjs";
-import { ProxyQualityPanel } from "./proxy-quality.jsx";
+import { ProxyQualityPanel, ProxyQualityCheck } from "./proxy-quality.jsx";
+import { proxyMatches } from './proxy-search.mjs';
+import { allocatableIpCount } from './proxy-availability.mjs';
+import './proxy-inventory.css';
 import { WebLoginBatch } from "./web-login-batch.jsx";
 import { FingerprintSettingsButton, ModelFingerprintPolicyContext, readEnabledPlanTypes } from "./model-fingerprint.jsx";
 import { FingerprintPoolPolicyPanel } from "./fingerprint-pool-policy-panel.jsx";
@@ -210,6 +213,8 @@ function App() {
   const uploadNotice = taskNotice.text;
   const setUploadNotice = text => setTaskNotice(current => ({ text, revision: current.revision + 1 }));
   const [accountProxyDistribution, setAccountProxyDistribution] = useState([]);
+  const [accountProxyDistributionReady, setAccountProxyDistributionReady] = useState(false);
+  const availableProxyIpCount = allocatableIpCount(accountProxyDistribution);
   const proxyDistributionVersion = useRef(0);
   const [accountProxyDirectCount, setAccountProxyDirectCount] = useState(0);
   const [directPublicIp, setDirectPublicIp] = useState(null);
@@ -315,6 +320,7 @@ function App() {
   }, [acceptTaskSettings]);
 
   useEffect(() => {
+    setAccountProxyDistributionReady(false);
     if (!token || !["sub2api", "plan"].includes(accountProxyMode) || !hasUsableSub2ApiSettings(sub2apiSettings)) return undefined;
     let stopped = false;
     const refresh = async () => {
@@ -325,6 +331,7 @@ function App() {
         });
         if (stopped || version !== proxyDistributionVersion.current) return;
         setAccountProxyDistribution(Array.isArray(data.proxies) ? data.proxies : []);
+        setAccountProxyDistributionReady(true);
         setAccountProxyDirectCount(data.directAccountCount || 0);
         if (data.directIp) setDirectPublicIp(data.directIp);
       } catch (error) {
@@ -332,9 +339,9 @@ function App() {
       }
     };
     void refresh();
-    const timer = window.setInterval(refresh, 30_000);
+    const timer = window.setInterval(refresh, proxySettingsOpen ? 3000 : 30_000);
     return () => { stopped = true; window.clearInterval(timer); };
-  }, [token, accountProxyMode, sub2apiSettings]);
+  }, [token, accountProxyMode, sub2apiSettings, proxySettingsOpen]);
 
   useEffect(() => {
     if (!token || !proxySettingsOpen) return undefined;
@@ -579,6 +586,7 @@ function App() {
       const proxies = Array.isArray(data.proxies) ? data.proxies : [];
       if (version !== proxyDistributionVersion.current) return proxies;
       setAccountProxyDistribution(proxies);
+      setAccountProxyDistributionReady(true);
       setAccountProxyDirectCount(data.directAccountCount || 0);
       if (data.directIp) setDirectPublicIp(data.directIp);
       setProxySettingsError("");
@@ -1946,6 +1954,10 @@ function App() {
             <div className="provider-heading">
               <span className="provider-icon proxy"><Globe2 size={16} /></span>
               <strong>代理 IP</strong>
+              {["sub2api", "plan"].includes(accountProxyMode) && <span className={`provider-status-pill ${accountProxyDistributionReady && availableProxyIpCount > 0 ? 'ready' : 'pending'}`}
+                aria-label="可分配代理 IP 数量" title="按出口 IP 去重；至少一个节点可分配，且未冷却、未暂停、未停用、未过期。已有账号绑定不影响计数；具体账号轮转仍需匹配同城。">
+                {accountProxyDistributionReady ? `可分配 ${availableProxyIpCount} 个 IP` : '可分配 IP 待读取'}
+              </span>}
               <HelpTip title="代理 IP 与分配说明" label="查看代理 IP 说明">
                 <div>当前模式：{accountProxyMode === "plan" ? "动态登录 · 按 PlanType 授权" : accountProxyMode === "sub2api" ? "Sub2API 出口 IP 均衡分配" : "全局代理"}</div>
                 <div>支持 http://、https://、socks5:// 和 socks5h://；用户名中包含 -sid- 时会自动轮换会话编号。</div>
@@ -2447,6 +2459,10 @@ function App() {
                           : "新账号按出口 IP 均衡分配，已有绑定保持不变。"}
                       </HelpTip>
                     </span>
+                    <span className={`provider-status-pill ${accountProxyDistributionReady && availableProxyIpCount > 0 ? 'ready' : 'pending'}`}
+                      aria-label="可分配代理 IP 数量" title="按出口 IP 去重，排除冷却及其他不可分配节点；搜索不改变此总数。">
+                      {accountProxyDistributionReady ? `可分配 ${availableProxyIpCount} 个 IP` : '可分配 IP 待读取'}
+                    </span>
                     <button
                       type="button"
                       className="secondary-button compact-btn proxy-refresh-btn"
@@ -2460,6 +2476,7 @@ function App() {
                     <div className="proxy-distribution-container" aria-label="代理 IP 账号分配">
                       <div className="proxy-distribution-grid">
                         <ProxyManagementCards proxies={accountProxyDistribution} request={proxyDialogRequest} onPolicySaved={acceptProxyPolicy}
+                          onChecked={() => { void refreshAccountProxyDistribution().catch(() => {}); }}
                           changes={proxyStatusChanges} editDisabled={proxySettingsSaving} onEdit={setEditingProxies} onToggle={setManagedProxyStatus} />
                         <div className={`proxy-segment-bar unassigned ${accountProxyDirectCount > 0 ? "has-unassigned" : ""}`}>
                           <div className="proxy-segment-col segment-name" title="直连">
@@ -2531,13 +2548,13 @@ function App() {
 
               {proxySettingsError && <div className="dialog-error" role="alert"><CircleAlert size={15} />{proxySettingsError}</div>}
 
-              <ProxyQualityPanel
+              {accountProxyMode !== 'sub2api' && <ProxyQualityPanel
                 token={token}
                 mode={accountProxyMode}
-                proxies={accountProxyDistribution}
+                proxies={[]}
                 globalProxyUrl={accountProxyUrl}
                 dirty={proxySettingsDirty}
-              />
+              />}
             </div>
 
             <div className="dialog-footer">
@@ -6569,15 +6586,26 @@ function proxyDistributionByIp(proxies) {
 
 function ProxyManagementCards({ proxies, ...props }) {
   const [now, setNow] = useState(Date.now);
+  const [query, setQuery] = useState('');
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60000);
     return () => clearInterval(timer);
   }, []);
-  return proxyDistributionByIp(proxies).map(group => <ProxyManagementCard key={group.ipAddress} group={group} now={now} {...props} />);
+  const groups = proxyDistributionByIp(proxies), visible = groups.filter(group => proxyMatches(group, query));
+  return <>
+    <div className="proxy-inventory-toolbar">
+      <input type="search" aria-label="搜索代理列表" placeholder="搜索 IP、名称、城市或节点 ID" value={query} onChange={event => setQuery(event.target.value)} />
+      <span>{visible.length} / {groups.length} 个出口</span>
+    </div>
+    {visible.map(group => <ProxyManagementCard key={group.ipAddress} group={group} now={now} {...props} />)}
+    {!visible.length && <p className="proxy-inventory-empty">没有匹配的代理</p>}
+  </>;
 }
 
-function ProxyManagementCard({ group, now, changes, editDisabled, onEdit, onToggle, request, onPolicySaved }) {
+function ProxyManagementCard({ group, now, changes, editDisabled, onEdit, onToggle, request, onPolicySaved, onChecked }) {
   const { ipAddress, nodes, names, accountCount, activeNodeCount, inactiveNodeCount } = group;
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const diagnosticNode = nodes.find(node => node.id === selectedNodeId) || nodes[0];
   const allActive = activeNodeCount === nodes.length;
   const allInactive = inactiveNodeCount === nodes.length;
   const groupStatus = allActive ? "全部启用" : allInactive ? "全部停用" : `${activeNodeCount}/${nodes.length} 启用`;
@@ -6593,6 +6621,13 @@ function ProxyManagementCard({ group, now, changes, editDisabled, onEdit, onTogg
         <span className={`segment-count-pill ${accountCount > 0 ? "has-count" : "zero-count"}`}>{accountCount} 个 OAuth 账号</span>
       </div>
     </div>
+    {nodes.length > 1 && <div className="proxy-diagnostic-node"><span>检测节点</span>
+      <CustomSelect aria-label={`检测节点 · ${ipAddress}`} value={String(diagnosticNode.id)} onChange={event => setSelectedNodeId(Number(event.target.value))}
+        options={nodes.map(node => ({ value: String(node.id), label: `${node.name} · ${node.protocol.toUpperCase()} · #${node.id}` }))} />
+    </div>}
+    <ProxyQualityCheck key={`${diagnosticNode.id}:${diagnosticNode.host}:${diagnosticNode.port}`} compact request={request}
+      name={`${ipAddress} · ${diagnosticNode.name}`} target={{ target: 'sub2api', proxyId: diagnosticNode.id }}
+      disabled={editDisabled} pending={diagnosticNode.qualityPending} savedResult={diagnosticNode.quality} onChecked={onChecked} />
     <div className="proxy-management-history">
       <span title="从开始记录起按账号去重，相同出口的多个节点合并统计">历史绑定 {nodes[0].historicalAccountCount ?? '—'} 个账号</span>
       <span>最近使用 {nodes[0].lastRequestAt

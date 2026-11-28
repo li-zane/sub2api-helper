@@ -3,6 +3,7 @@ import { LoaderCircle, RefreshCw, X } from "lucide-react";
 import { AccessibleDialog } from "./accessible-dialog.jsx";
 import { displayDateTime } from "./display-time.mjs";
 import { useDisplayTimeZone } from "./use-display-time.jsx";
+import { proxyMatches } from './proxy-search.mjs';
 import "./bound-ip-dialog.css";
 
 export function BoundIpDialog({ job, loadOptions, request, blockedReason, onClose, onStarted }) {
@@ -14,6 +15,7 @@ export function BoundIpDialog({ job, loadOptions, request, blockedReason, onClos
   const [reload, setReload] = useState(0);
   const [target, setTarget] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState('');
   const pending = useRef(false);
 
   useEffect(() => {
@@ -73,12 +75,16 @@ export function BoundIpDialog({ job, loadOptions, request, blockedReason, onClos
         <button type="button" className="secondary-button" onClick={() => setReload(value => value + 1)}>重新读取</button>
       </div> : !options && <p className="bound-ip-notice" role="status">正在读取 IP 和绑定数量…</p>}
       {options && <form id={formId} onSubmit={submit}>
+        <label className="bound-ip-search">查找代理
+          <input type="search" aria-label="搜索可绑定代理" placeholder="IP、名称或城市" value={query} onChange={event => setQuery(event.target.value)} />
+        </label>
         <fieldset className="bound-ip-options" disabled={busy || Boolean(unavailable)}>
           <legend className="sr-only">目标绑定</legend>
-          {options.groups.map(group => <div className="bound-ip-option-group" key={group.ipAddress}>
+          {options.groups.filter(group => proxyMatches(group, query)).map(group => <div className="bound-ip-option-group" key={group.ipAddress}>
             <div className="bound-ip-option-heading">
               <strong>{group.ipAddress}</strong><span>已绑定 {group.accountCount} 个账号</span>
             </div>
+            <span className="bound-ip-location">{[...new Set(group.nodes.map(node => node.city).filter(Boolean))].join(' / ') || '城市待检测'}</span>
             {group.nodes.map(node => <label className="bound-ip-option" key={node.id}>
               <input type="radio" name={formId} value={node.id} disabled={isCurrent(Number(node.id)) || node.availableForBinding === false}
                 checked={target === Number(node.id)} onChange={() => setTarget(Number(node.id))} />
@@ -116,6 +122,7 @@ function BoundIpHistory({ job, request, optionsLoaded }) {
   const [history, setHistory] = useState(null);
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
+  const [query, setQuery] = useState('');
   useEffect(() => {
     const controller = new AbortController();
     setError("");
@@ -129,12 +136,16 @@ function BoundIpHistory({ job, request, optionsLoaded }) {
     return () => controller.abort();
   }, [job.id, request, optionsLoaded, reload]);
   const currentIps = new Set((job.boundProxies || []).map(proxy => proxy.ipAddress).filter(Boolean));
+  const visible = history?.filter(item => proxyMatches(item, query));
   return <section className="bound-ip-history" aria-labelledby={titleId}>
     <div className="bound-ip-history-heading">
       <h3 id={titleId}>历史使用的 IP</h3>
       {history && <span>共 {history.length} 个</span>}
     </div>
     <p className="bound-ip-notice">按出口 IP 去重，保留已记录的绑定。</p>
+    {history?.length > 0 && <label className="bound-ip-search">查找历史记录
+      <input type="search" aria-label="搜索账号代理记录" placeholder="IP、代理名称、城市" value={query} onChange={event => setQuery(event.target.value)} />
+    </label>}
     {error && <div role="alert" className="bound-ip-history-error">
       <span>{error}</span>
       <button type="button" className="secondary-button" onClick={() => setReload(value => value + 1)}>重试历史记录</button>
@@ -142,13 +153,17 @@ function BoundIpHistory({ job, request, optionsLoaded }) {
     {!history && !error && <p className="bound-ip-notice" role="status">正在读取历史 IP…</p>}
     {history?.length === 0 && <p className="bound-ip-notice">暂无历史 IP 记录</p>}
     {history?.length > 0 && <ul className="bound-ip-history-list" aria-label="历史 IP 列表">
-      {history.map(item => <li key={item.ipAddress}>
+      {visible.map(item => <li key={item.ipAddress}>
         <div className="bound-ip-history-heading">
           <strong>{item.ipAddress}</strong>
           {currentIps.has(item.ipAddress) && <small>当前绑定</small>}
         </div>
+        <span className="bound-ip-history-names">{item.nodes?.map(node => `${node.name} · #${node.id}`).join(' / ')}</span>
+        <span className="bound-ip-location">{[...new Set([item.quality?.exits?.[0]?.country, item.quality?.exits?.[0]?.region, item.quality?.exits?.[0]?.city].filter(Boolean))].join(' · ') || '暂无城市记录'}</span>
+        {item.quality && <span>风险分 {item.quality.exits?.[0]?.riskScore ?? '未知'} · 检测 {displayDateTime(item.quality.checkedAt)}</span>}
         <span>{item.lastRequestAt ? `上次使用：${displayDateTime(item.lastRequestAt)}` : "暂无请求时间记录"}</span>
       </li>)}
     </ul>}
+    {history?.length > 0 && !visible.length && <p className="bound-ip-notice">没有匹配的历史记录</p>}
   </section>;
 }

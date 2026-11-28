@@ -1,11 +1,21 @@
 import { createHash } from "node:crypto";
 
 // A node is a protocol endpoint; allocation is ranked at the shared exit level.
-export function rankRotationExits({ proxies, currentIps, occupiedIps, activity, ipOf, available }) {
+export function rotationCityKey(location) {
+  const clean = value => typeof value === 'string' ? value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase() : '';
+  const city = clean(location?.city), country = clean(location?.countryCode || location?.country);
+  return city && country ? JSON.stringify([country, clean(location?.region), city]) : null;
+}
+
+export function rankRotationExits({ proxies, currentIps, occupiedIps, activity, ipOf, available, currentCities, cityOf }) {
+  // The caller supplies confirmed locations. Unknown or conflicting current
+  // locations cannot establish a same-city destination.
+  if (currentCities && (currentCities.size !== 1 || currentCities.has(null))) return [];
+  const city = currentCities ? [...currentCities][0] : null;
   const exits = new Map();
   for (const proxy of proxies) {
     const ip = ipOf(proxy);
-    if (!ip || currentIps.has(ip) || !available(proxy)) continue;
+    if (!ip || currentIps.has(ip) || !available(proxy) || currentCities && cityOf(proxy) !== city) continue;
     if (!exits.has(ip) || proxy.id < exits.get(ip).id) exits.set(ip, proxy);
   }
   const time = ip => Date.parse(activity.get(ip)?.lastRequestAt) || 0;

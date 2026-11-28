@@ -28,25 +28,34 @@ export function ProxyQualityPanel({ token, mode, proxies, globalProxyUrl, dirty,
   </details>;
 }
 
-function ProxyQualityCheck({ token, name, target, disabled = false, hint }) {
+export function ProxyQualityCheck({ token, request, name, target, disabled = false, hint, compact = false, savedResult = null, pending = false, onChecked }) {
   useDisplayTimeZone();
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
+  const [latest, setLatest] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+  const result = latest && (!savedResult || latest.checkedAt >= savedResult.checkedAt) ? latest : savedResult;
   const [error, setError] = useState("");
   const controller = useRef(null);
   useEffect(() => () => controller.current?.abort(), []);
+  useEffect(() => { setLatest(null); }, [savedResult?.checkedAt]);
 
   async function check() {
-    if (controller.current || busy || disabled || !token) return;
+    if (controller.current || busy || disabled || (!token && !request)) return;
     const current = new AbortController();
     controller.current = current;
     setBusy(true);
     setError("");
     try {
-      const response = await fetch("/api/proxy-quality/check", { method: "POST", headers: { "x-console-token": token, "content-type": "application/json" }, body: JSON.stringify(target), signal: current.signal });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "检测失败，请重试");
-      setResult(data.result);
+      let data;
+      if (request) data = await request('/api/proxy-quality/check', { method: 'POST', body: JSON.stringify(target), signal: current.signal });
+      else {
+        const response = await fetch("/api/proxy-quality/check", { method: "POST", headers: { "x-console-token": token, "content-type": "application/json" }, body: JSON.stringify(target), signal: current.signal });
+        data = await response.json();
+        if (!response.ok) throw new Error(data.error || "检测失败，请重试");
+      }
+      setLatest(data.result);
+      setExpanded(true);
+      onChecked?.(data.result);
     } catch (requestError) {
       if (!current.signal.aborted) setError(requestError.message);
     } finally {
@@ -59,10 +68,10 @@ function ProxyQualityCheck({ token, name, target, disabled = false, hint }) {
     ? (result.sessionRotation === "rotated" ? "本次已轮换代理会话" : result.sessionRotation === "unsupported" ? "当前代理未识别到可轮换会话参数，按原地址检测" : "本次保持节点固定会话")
     : "";
 
-  return <section className="proxy-quality-check" aria-label={`${name} 代理质量`} aria-busy={busy}>
+  return <section className={`proxy-quality-check${compact ? ' is-compact' : ''}`} aria-label={`${name} 代理质量`} aria-busy={busy || pending}>
     <div className="proxy-quality-check-header">
       <div className="field-label-row">
-        <strong>{name}</strong>
+        <strong>{compact ? result?.stable === true ? result?.exits?.[0]?.city || '城市未知' : '城市待确认' : name}</strong>
         {(hint || sessionNote) && (
           <HelpTip title={`${name} 检测说明`} label={`查看 ${name} 检测说明`}>
             {hint && <div>{hint}</div>}
@@ -70,13 +79,22 @@ function ProxyQualityCheck({ token, name, target, disabled = false, hint }) {
           </HelpTip>
         )}
       </div>
-      <button type="button" className="secondary-button compact-btn" onClick={check} disabled={busy || disabled || !token} aria-label={`检测 ${name} 的代理质量`}>
+      {compact ? <div className="proxy-quality-actions">
+        <button type="button" className="secondary-button compact-btn" onClick={() => setExpanded(value => !value)} aria-expanded={expanded} aria-label={`查看 ${name} 的代理出口`}>
+          代理出口<ChevronDown size={13} aria-hidden="true" />
+        </button>
+        <button type="button" className="secondary-button compact-btn" onClick={check} disabled={busy || pending || disabled || (!token && !request)} aria-label={`检测 ${name} 的代理质量`}>
+          {busy && <LoaderCircle size={13} className="spin" aria-hidden="true" />}{busy ? "检测中…" : result ? "重新检测" : "质量检测"}
+        </button>
+      </div> : <button type="button" className="secondary-button compact-btn" onClick={check} disabled={busy || disabled || (!token && !request)} aria-label={`检测 ${name} 的代理质量`}>
         {busy && <LoaderCircle size={13} className="spin" aria-hidden="true" />}{busy ? "检测中…" : result ? "重新检测" : "检测质量"}
-      </button>
+      </button>}
     </div>
-    {busy && <span className="proxy-quality-help" role="status">正在检测出口、IP 信誉与 ChatGPT 延迟…</span>}
+    {(busy || pending) && <span className="proxy-quality-help" role="status">正在检测出口、IP 信誉与 ChatGPT 延迟…</span>}
+    {compact && <span className="proxy-quality-help">{result ? `最近检测 ${timeLabel(result.checkedAt)} · ${result.status === 'ok' ? result.stable ? '出口稳定' : '出口变化' : result.status === 'partial' ? '部分成功' : '检测失败'}` : pending ? '首次检测排队中' : '暂无检测记录'}</span>}
     {error && <p className="proxy-quality-error" role="alert">{error}</p>}
-    {result && <div className={`proxy-quality-result${busy ? " stale" : ""}`}>
+    {compact && expanded && !result && <p className="proxy-quality-help">完成质量检测后，这里会保存出口 IP、城市、风险分与延迟。</p>}
+    {result && (!compact || expanded) && <div className={`proxy-quality-result${busy ? " stale" : ""}`}>
       <div className="proxy-quality-metrics">
         <span><small>IPPure 耗时</small><strong>{result.latencyMs === null ? "—" : `${result.latencyMs} ms`}</strong></span>
         <span>
@@ -101,7 +119,7 @@ function ProxyQualityCheck({ token, name, target, disabled = false, hint }) {
   </section>;
 }
 
-function ProxyExit({ exit }) {
+export function ProxyExit({ exit }) {
   const location = [...new Set([exit.country, exit.region, exit.city].filter(Boolean))].join(" · ");
   const isp = [exit.provider, exit.asn].filter(Boolean).join(" · ");
   return <div className="proxy-quality-exit">
@@ -118,6 +136,7 @@ function ProxyExit({ exit }) {
       </div>
       <span className={`proxy-risk-badge ${exit.riskLevel}`}>{RISK_LABELS[exit.riskLevel]} {exit.riskScore === null ? "" : `· ${exit.riskScore}/100`}</span>
     </div>
+    {location && <p className="proxy-quality-location">{location}</p>}
     {exit.riskScore !== null && <meter min="0" max="100" low="34" high="67" optimum="0" value={exit.riskScore} aria-label={`${exit.ip} 风险分，越低越好`} />}
     {exit.error && <p className="proxy-quality-error">{exit.error}</p>}
   </div>;

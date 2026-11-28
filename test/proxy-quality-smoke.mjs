@@ -106,6 +106,11 @@ try {
   assert.equal((await post("/api/proxy-quality/check", { target: "sub2api", proxyId: "bad" })).status, 400);
   assert.equal((await post("/api/account-proxy-settings", { proxyUrl, allowDirectFallback: true })).status, 200);
   assert.equal((await post("/api/sub2api/settings", { config: { baseUrl: `http://127.0.0.1:${pool.address().port}`, adminApiKey: "fixture-key" } })).status, 200);
+  await waitFor(async () => {
+    const options = await post('/api/sub2api/options', {});
+    return options.body.proxies.every(node => node.quality?.status === 'ok' && !node.qualityPending);
+  });
+  proxyRequests.length = 0; chatgptRequests.length = 0; sampleNumber = 0;
   assert.equal((await post("/api/proxy-quality/check", { target: "sub2api", proxyId: 99 })).status, 404);
   const before = await (await fetch(`${base}/api/account-proxy-settings`, { headers })).json();
   const initialJobs = (await (await fetch(`${base}/api/jobs`, { headers })).json()).jobs;
