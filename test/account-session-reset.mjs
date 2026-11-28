@@ -11,6 +11,11 @@ try {
   await store.begin(email, { id: "fixture", proxyId: 3, proxyUrl: "http://fixture:8080", accountIds: ["7"] });
   assert(sessionResetPending(store.get(email))); assert(!JSON.stringify(store.publicState(email)).includes("proxyUrl"));
   assert(sessionResetBlocksAutomation(store.get(email)));
+  await store.save(email, { status: "recovering_web", webRecoveryAttempts: 1, webRecoveryAttemptId: "fixture-web" });
+  const recovering = new AccountSessionResets(path.join(dir, "reset.json")); await recovering.load();
+  assert(sessionResetPending(recovering.get(email))); assert(sessionResetBlocksAutomation(recovering.get(email)));
+  assert.equal(recovering.get(email).webRecoveryAttempts, 1);
+  assert(!Object.hasOwn(recovering.publicState(email), 'webRecoveryAttemptId'));
   await store.save(email, { poolPauseActive: true, resumeAccountIds: ["7"] });
   await store.fail(email, "fixture failure");
   assert(!sessionResetPending(store.get(email))); assert(sessionResetBlocksAutomation(store.get(email)));
@@ -61,5 +66,5 @@ try {
   cooldown.accounts.set(email, { enabled: false, backend: "fixture", phase: "resuming", resumeAccountIds: ["7"], coolingUntil: new Date(now - 1).toISOString() });
   enabled = false; await cooldown.refresh(); assert.equal(callbackCount, callsBefore, "disabling cooldown bypasses optional reset");
   await cooldown.stop();
-  console.log("SESSION_RESET_PASS durable stages/private route; credentials-only update; strict optional flag; cooldown waits for successful reset; failed/restarted reset stays paused; switch-off restores");
+  console.log("SESSION_RESET_PASS durable stages/private route; Web recovery persistence; credentials-only update; strict optional flag; cooldown waits for successful reset; failed/restarted reset stays paused; switch-off restores");
 } finally { await fs.rm(dir, { recursive: true, force: true }); }

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const pending = new Set(["queued", "logging_out", "cooling", "authorizing", "syncing"]);
+const pending = new Set(["queued", "recovering_web", "logging_out", "cooling", "authorizing", "syncing"]);
 export function sessionResetPending(state) { return pending.has(state?.status); }
 // A failed/canceled reset retains its pause until an explicit reset succeeds.
 export function sessionResetBlocksAutomation(state) {

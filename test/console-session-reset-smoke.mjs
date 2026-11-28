@@ -8,12 +8,13 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { seedWebSession } from "./account-web-fixture.mjs";
 
-for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSION_RESET_SCENARIO] : ["manual-proxy", "manual-direct", "automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "oauth-failure", "proxy-changed", "sync-retry", "sync-cancel", "sync-cancel-running", "quota-resume", "queued", "automation-paused", "local-oauth", "oauth-retry", "banned", "batch-default", "batch-delay", "batch-direct", "batch-cancel", "batch-mixed", "manual-disabled", "manual-disable-during-reset", "single-delay", "manual-logout-failure", "pause-failure", "restore-failure", "multi-sync-failure", "multi-original-off", "multi-restore-failure", "legacy-delay"])) {
+for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSION_RESET_SCENARIO] : ["manual-proxy", "manual-direct", "automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "oauth-failure", "proxy-changed", "sync-retry", "sync-cancel", "sync-cancel-running", "quota-resume", "queued", "automation-paused", "local-oauth", "oauth-retry", "banned", "batch-default", "batch-delay", "batch-direct", "batch-cancel", "batch-mixed", "manual-disabled", "manual-disable-during-reset", "single-delay", "manual-logout-failure", "pause-failure", "restore-failure", "multi-sync-failure", "multi-original-off", "multi-restore-failure", "legacy-delay", "expired-on-logout", "expired-automatic", "expired-before-reset", "expired-missing", "expired-recovery-failure", "expired-recovery-cancel", "expired-recovery-restart", "expired-cooldown-restart", "expired-still-unauthorized", "expired-route-changed", "expired-route-changed-restart"])) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "helper-reset-http-")), email = "reset@example.test";
   const id = "11111111-1111-4111-8111-111111111111", dir = path.join(temp, id), trace = path.join(temp, "trace.jsonl");
-  const automatic = ["automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "automation-paused"].includes(scenario), direct = ["manual-direct", "batch-direct"].includes(scenario);
+  const automatic = ["automatic", "automatic-overdue", "automatic-logout-first", "logout-failure", "automation-paused", "expired-automatic"].includes(scenario), direct = ["manual-direct", "batch-direct"].includes(scenario);
   const batch = scenario.startsWith("batch-"), delayed = ["batch-delay", "batch-cancel", "single-delay", "legacy-delay", "automatic-logout-first"].includes(scenario);
   const multi = scenario.startsWith("multi-"), disabled = ["manual-disabled", "manual-disable-during-reset"].includes(scenario);
+  const recoverWeb = scenario.startsWith('expired-'), degraded = scenario === 'expired-cooldown-restart';
   let failPause = scenario === "pause-failure", failRestore = ["restore-failure", "multi-restore-failure"].includes(scenario);
   let child, headers, logs = "", logouts = 0, updates = 0, creates = 0, failSync = ["sync-retry", "sync-cancel"].includes(scenario), cacheClears = 0;
   let webExpired = false, webProbes = 0;
@@ -23,6 +24,7 @@ for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSIO
   const mutations = [], row = { id: 7, platform: "openai", type: "oauth", name: email, status: "active", schedulable: !automatic && scenario !== "manual-disabled",
     proxy_id: direct ? 0 : 3, group_ids: [91], priority: 17, credentials: { email, access_token: "old", refresh_token: "old-refresh", plan_type: "plus", custom: "retain" } };
   const proxy = { id: 3, name: "Original", protocol: "http", host: "fixed.fixture", port: 8080, ip_address: "198.51.100.3", status: "active" };
+  if (degraded) row.schedulable = false;
   if (scenario === 'quota-resume') row.extra = { codex_7d_used_percent: 100, codex_7d_reset_at: new Date(Date.now() + 86400000).toISOString(), auto_reset_credit_enabled: true };
   const second = { ...structuredClone(row), id: 8, schedulable: scenario !== "multi-original-off" };
   const rows = multi ? [row, second] : [row];
@@ -35,6 +37,7 @@ for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSIO
       await append({ phase: "mail-baseline" });
       return json(res, []);
     }
+    if (recoverWeb && req.url === '/api/auth/session') return json(res, { user: { email }, accessToken: webAccessToken });
     if (scenario === "oauth-failure" && req.url === "/api/auth/session") {
       webProbes++;
       if (webExpired && !req.headers.cookie?.includes("fixture-web-renewed")) return json(res, {}, 401);
@@ -47,6 +50,10 @@ for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSIO
     }
     if (req.url === "/backend-api/accounts/logout_all") {
       assert(rows.every(a => a.schedulable === false), "logout ran while pool scheduling was still enabled");
+      if (recoverWeb && (!req.headers.cookie?.includes('fixture-web-renewed') || scenario === 'expired-still-unauthorized')) {
+        await append({ phase: 'logout-unauthorized' });
+        return json(res, { error: 'fixture expired session' }, 401);
+      }
       logouts++; await append({ phase: "logout" });
       const failed = ["logout-failure", "manual-logout-failure"].includes(scenario);
       return json(res, failed ? { error: "fixture logout rejected" } : { ok: true }, failed ? 503 : 200);
@@ -144,6 +151,7 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
         LOCALAPPDATA: temp, TOSUB2_CREDENTIAL_KEY: "ab".repeat(32), TOSUB2_LINUX_CREDENTIAL_ROOT: path.join(temp, "credentials"), TOSUB2_MAC_CREDENTIAL_ROOT: path.join(temp, "credentials"),
         SUB2API_MONITOR_ENABLED: "0", CHATGPT_BASE: officialBase, AUTH_BASE: officialBase, SESSION_RESET_TRACE: trace,
         SESSION_RESET_GATE: gate, SESSION_RESET_FAIL_OAUTH: ["oauth-failure", "oauth-retry"].includes(scenario) && !(await fs.access(gate+".retry").then(()=>true,()=>false)) ? "1" : "0", TOSUB2_SESSION_NATIVE_HTTP: "0",
+        SESSION_RESET_WEB_GATE: recoverWeb ? gate + '.web' : '', SESSION_RESET_FAIL_WEB: scenario === 'expired-recovery-failure' ? '1' : '0',
         ONBOARDING_PROTOCOL_SCRIPT: path.resolve("test/mock-session-reset-protocol.mjs") } });
     child.stdout.on("data", b => { logs += b; }); child.stderr.on("data", b => { logs += b; });
     await wait(async () => { try { const b = await fetch(base + "/api/bootstrap").then(r => r.json()); if (!b.token) return false; headers = { "x-console-token": b.token, "content-type": "application/json" }; return true; } catch { return false; } }, "startup");
@@ -154,6 +162,11 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
     const output = path.join(dir, "sub2api-import-oauth.json");
     await fs.writeFile(output, JSON.stringify({ type: "sub2api-data", accounts: [{ credentials: { ...row.credentials } }] }));
     await seedWebSession(output);
+    if (scenario === 'expired-missing') await fs.rm(path.join(dir, 'web-session.json'));
+    if (scenario === 'expired-before-reset') {
+      const file = path.join(dir, 'web-session.json'), session = JSON.parse(await fs.readFile(file, 'utf8'));
+      session.validation = { status: 'expired' }; await fs.writeFile(file, JSON.stringify(session));
+    }
     await fs.writeFile(path.join(dir, "job-meta.json"), JSON.stringify({ version: 1, email, status: scenario === "banned" ? "banned" : "completed", authorization_proxy_selected: true, assigned_proxy_id: direct ? null : 3,
       bound_ip: direct ? null : "198.51.100.3", last_auth_automated: true, last_auth_requirements: { emailOtp: true }, mail_api_url: officialBase + "/mail",
       ...(scenario === "automation-paused" ? { login_automation_pause: { reason: "mfa_failed", at: new Date().toISOString() } } : {}) }));
@@ -166,6 +179,9 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
     await fs.writeFile(path.join(temp, "task-settings.json"), JSON.stringify({ maxActiveJobs: 1, accountProxyMode: direct ? "global" : "plan", codexAuthMode: scenario === "local-oauth" ? "local" : "sub2api",
       overloadAutoCooldown: { windowMinutes: 15, threshold: 4, cooldownMinutes: 1, reauthorizeAfterCooldown: automatic }, monitoring: { overloadIntervalSeconds: 86400, accountStatusIntervalSeconds: 3600 } }));
     await fs.writeFile(path.join(temp, "sub2api-settings.json"), JSON.stringify({ version: 2, config: { ...config, proxyId: "direct" }, profiles: [{ id: "default", name: "Direct plan", proxyId: "direct", groupIds: [] }], activeProfileId: "default" }));
+    if (degraded) await fs.writeFile(path.join(temp, 'degradation-cooldown.json'), JSON.stringify({ version: 1, accounts: {
+      [email]: { enabled: true, backend, phase: 'cooling', resumeAccountIds: ['7'], coolingUntil: new Date(Date.now() + 86400000).toISOString(), cooldownMinutes: 720 },
+    } }));
     if (automatic) await fs.writeFile(path.join(temp, "overload-cooldown.json"), JSON.stringify({ version: 1, accounts: { [email]: { enabled: true, backend, phase: "cooling", resumeAccountIds: ["7"], coolingUntil: new Date(Date.now() + (scenario === "automatic-overdue" ? -1000 : 1800)).toISOString(),
       ...(scenario === 'automatic-logout-first' ? {phase:'pausing',coolingUntil:null,logoutBeforeCooldown:true,cooldownMinutes:1,resetRequestId:'fixture-logout-first',
         operation:{id:'fixture-cooldown-operation',startedAt:new Date().toISOString(),until:null,cooldownMinutes:1,finishedAt:null}} : {}) } } }));
@@ -208,6 +224,46 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
         assert.equal((await job()).status, "queued"); await new Promise(r => setTimeout(r, 120));
         assert.equal(logouts, 0, "logout happened outside shared queue slot");
         assert.equal((await api(`/api/jobs/${blockerId}/cancel`, {})).status, 200);
+      }
+    }
+    if (recoverWeb) {
+      await wait(async () => (await fs.readFile(trace, 'utf8')).includes('"phase":"web-only"'), 'expired Web session recovery never started');
+      assert.equal(logouts, 0); assert.equal(updates, 0); assert.equal(row.schedulable, false);
+      assert.equal(row.credentials.access_token, 'old');
+      assert.equal((await api(`/api/jobs/${id}/session-reset`, {})).status, 409);
+      if (scenario === 'expired-recovery-cancel') {
+        await api(`/api/jobs/${id}/cancel`, {}); await stop(); await start();
+        assert.equal((await job()).sessionReset.status, 'failed'); assert.equal((await job()).sessionReset.poolPaused, true);
+        assert.equal((await job()).poolRefreshAction, null); assert.equal(logouts, 0); assert.equal(updates, 0);
+        console.log('SESSION_RESET_WEB_RECOVERY_PASS canceled recovery stays paused after restart'); continue;
+      }
+      if (scenario.endsWith('restart')) {
+        await stop();
+        if (degraded) {
+          const file = path.join(temp, 'degradation-cooldown.json'), state = JSON.parse(await fs.readFile(file, 'utf8'));
+          state.accounts[email].coolingUntil = new Date(Date.now() - 1000).toISOString(); await fs.writeFile(file, JSON.stringify(state));
+        }
+        if (scenario === 'expired-route-changed-restart') proxy.ip_address = '198.51.100.99';
+        await start();
+        if (scenario === 'expired-route-changed-restart') {
+          assert.equal((await job()).sessionReset.status, 'failed'); assert.equal((await job()).sessionReset.poolPaused, true);
+          assert.equal(logouts, 0); assert.equal(updates, 0); assert.equal(row.schedulable, false);
+          console.log('SESSION_RESET_WEB_RECOVERY_PASS changed route after restart stops recovery while service stays ready'); continue;
+        }
+        await wait(async () => (await fs.readFile(trace, 'utf8')).split('"phase":"web-only"').length === 3, 'Web recovery did not resume after restart');
+        assert.equal(row.schedulable, false, 'expired degradation cooldown bypassed active recovery');
+      }
+      if (scenario === 'expired-route-changed') proxy.ip_address = '198.51.100.99';
+      await fs.writeFile(gate + '.web', 'continue');
+      if (['expired-recovery-failure', 'expired-still-unauthorized', 'expired-route-changed'].includes(scenario)) {
+        await wait(async () => (await job()).sessionReset?.status === 'failed', 'failed Web recovery did not stop reset');
+        assert.equal(logouts, 0); assert.equal(updates, 0); assert.equal(row.credentials.access_token, 'old');
+        assert.equal(row.schedulable, false); assert.equal((await job()).sessionReset.poolPaused, true);
+        const events = (await fs.readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse);
+        assert.equal(events.filter(e => e.phase === 'web-only').length, 1, 'unbounded Web recovery loop');
+        assert(!events.some(e => e.phase === 'oauth'));
+        await stop(); await start(); assert.equal((await job()).sessionReset.status, 'failed');
+        console.log(`SESSION_RESET_WEB_RECOVERY_PASS ${scenario} stopped before OAuth; original credentials and pause retained`); continue;
       }
     }
     if (delayed) {
@@ -270,6 +326,7 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
       await wait(async () => (await job()).sessionReset?.status === "failed", "logout failure state");
       assert.equal(logouts, 1); assert.equal(updates, 0); assert.equal(row.schedulable, false);
       assert(!((await fs.readFile(trace, "utf8")).includes('"phase":"web"')));
+      assert(!((await fs.readFile(trace, "utf8")).includes('"phase":"web-only"')), 'unconfirmed provider failure started Web recovery');
     } else {
       await wait(async () => (await fs.readFile(trace, "utf8")).includes('"phase":"oauth"'), "OAuth never started");
       assert.equal(logouts, 1); assert.equal(updates, 0);
@@ -284,6 +341,12 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
         assert.equal(webProbes, 0);
       }
       const events = (await fs.readFile(trace, "utf8")).trim().split("\n").map(JSON.parse), web = events.find(e => e.phase === "web"), transport = events.find(e => e.phase === "logout-route");
+      if (recoverWeb) {
+        const repaired = events.find(e => e.phase === 'web-only');
+        assert.equal(repaired.reused, false, 'recovery reused the rejected Web session');
+        assert.equal(repaired.fixed, '1'); assert.equal(repaired.proxy, 'http://fixed.fixture:8080/'); assert.equal(repaired.phased, '0');
+        assert(events.findIndex(e => e.phase === 'web-only') < events.findIndex(e => e.phase === 'logout'));
+      }
       assert(events.findIndex(e => e.phase === "mail-baseline") >= 0
         && events.findIndex(e => e.phase === "mail-baseline") < events.findIndex(e => e.phase === "logout"), "old mailbox OTPs were not excluded before logout and fresh login");
       assert.equal(web.reused, false, "fresh reset reused pre-logout Web"); assert.equal(web.fixed, "1"); assert.equal(web.phased, "0");
@@ -418,6 +481,7 @@ for(const Klass of [WebSessionMonitor,OverloadMonitor,OverloadCooldown,ModelFing
         }
         const expectedUpdates = scenario === "multi-restore-failure" ? 4 : scenario === "restore-failure" ? 2 : scenario === "multi-sync-failure" ? 3 : multi ? 2 : 1;
         assert.equal(updates, expectedUpdates); assert.equal(row.credentials.access_token, "reset-new-access"); assert.equal(row.credentials.custom, "retain");
+        if (degraded) await wait(async () => row.schedulable && !(await job()).degradationCooldown?.paused, 'finished recovery did not release overdue degradation cooldown');
         assert.equal(row.schedulable, !disabled, "original/manual disabled preference was not preserved");
         assert.equal((await job()).sessionReset.poolPaused, false);
         if (multi) assert.equal(second.schedulable, scenario !== "multi-original-off");

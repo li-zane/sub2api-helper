@@ -2426,6 +2426,13 @@ export function createConsoleApp(options = {}) {
         if (current() && route) launchJob(job, { mode, ...route });
         return;
       }
+      if (mode === "web_login" && activeSessionReset(job)?.status === "recovering_web") {
+        const route = await validateSessionResetRoute(job, activeSessionReset(job));
+        await ensureSessionResetPoolPaused(job);
+        if (job.mailApiUrl) await loadMailboxBaseline(job);
+        if (current()) launchJob(job, { mode, ...route, codexAuthMode: "local", sub2ApiOAuth: null });
+        return;
+      }
       const bannedWeb = mode === "web_login" && job.manualBannedWebLogin;
       const webOnlyDuringPoolPause = mode === "web_login" && sessionResetAutomationPaused(job.email);
       if (bannedWeb || webOnlyDuringPoolPause) {
@@ -2699,11 +2706,11 @@ export function createConsoleApp(options = {}) {
     const operation = job.logOperation;
     try { await job.phoneCredentialWrite; return await handleChildCloseRun(job, outcome); }
     finally {
-      if (!shuttingDown && activeSessionReset(job) && (outcome.code !== 0 || !job.runResultSaved)) {
+      if (!shuttingDown && activeSessionReset(job) && outcome.mode !== "web_login" && (outcome.code !== 0 || !job.runResultSaved)) {
         await accountSessionResets.fail(job.email, job.lastError || job.prompt || "会话重建未完成");
         overloadCooldown.trigger();
       }
-      if (operation && !(operation.type === "session_reset" && activeSessionReset(job)?.status === "syncing"))
+      if (operation && !(operation.type === "session_reset" && activeSessionReset(job)))
         finishAccountLogOperation(job, operation, outcome.code === 0 ? "completed" : "failed");
     }
   }
@@ -3112,23 +3119,28 @@ export function createConsoleApp(options = {}) {
     return ["expired", "web_workspace_unavailable", "missing"].includes(reason);
   }
 
-  async function startWebLogin(job, { maintenance = false, checkTask = null, initialImport = false } = {}) {
+  async function startWebLogin(job, { maintenance = false, checkTask = null, initialImport = false, sessionResetId = null } = {}) {
     if (maintenance && automaticLoginBlocked(job, "web")) throw httpError(409, loginAutomationPauseMessage(accountLoginPause(job)));
     const checking = Boolean(checkTask && manualWebSessionChecks.get(job.id) === checkTask);
+    const reset = activeSessionReset(job);
+    const recoveringReset = sessionResetId && reset?.id === sessionResetId && reset.status === "recovering_web";
+    if (sessionResetId && !recoveringReset) throw httpError(409, "会话重建已停止，Web 恢复不再执行");
     await automationBlockWrites.get(job.email.toLowerCase());
-    if (!canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
+    if (!recoveringReset && !canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号正在运行或有待完成的号池操作，暂不能登录 Web");
     await reloadMissingJobCredentials(job);
-    if (!canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号当前不能登录 Web");
-    if (!maintenance) { job.webSessionMaintenancePause = null; clearAutomaticLoginPause(job); }
+    if (!recoveringReset && !canLoginWeb(job, { maintenance, checking })) throw httpError(409, "账号当前不能登录 Web");
+    if (!maintenance && !recoveringReset) { job.webSessionMaintenancePause = null; clearAutomaticLoginPause(job); }
     const preserved = ["status", "prompt", "lastError", "completedAt", "startedAt", "attempt", "loginCheckpointAvailable",
       "securityCheckRequired", "restartRequired", "currentPhone", "phoneError", "proxyRiskRetryCount", "proxyConnectionFailureCount",
       "webSessionAvailable", "webSessionStatus", "webSessionVerifiedAt", "webSessionReadError", "webSessionContext"];
     const previousState = Object.fromEntries(preserved.map(key => [key, job[key]]));
+    if (recoveringReset) Object.assign(previousState, { status: "failed", prompt: "会话重建等待 Web 登录恢复", lastError: null });
     job.manualBannedWebLogin = !maintenance && accountAutomationBlocked(job.email);
     job.initialWebImport = initialImport;
     job.webLoginError = null;
     job.webLoginPlanType = null;
     job.webLoginAttemptId = crypto.randomUUID();
+    if (recoveringReset) await accountSessionResets.save(job.email, { webRecoveryAttemptId: job.webLoginAttemptId });
     if (checking) checkTask.loginAttemptId = job.webLoginAttemptId;
     let oldBytes = null;
     try { oldBytes = await fs.readFile(webSessionPathForJob(job)); }
@@ -3138,7 +3150,7 @@ export function createConsoleApp(options = {}) {
     job.webLoginOriginalHash = oldBytes ? crypto.createHash("sha256").update(oldBytes).digest("hex") : null;
     await recordCredentialHistory(path.dirname(job.outputPath), { type: "web_login", stage: "started", email: job.email,
       attemptId: job.webLoginAttemptId, before: oldSession, after: null });
-    if (oldBytes) await fs.writeFile(webLoginCandidatePath(job), oldBytes, { mode: 0o600 });
+    if (oldBytes && !recoveringReset) await fs.writeFile(webLoginCandidatePath(job), oldBytes, { mode: 0o600 });
     job.webLoginPreviousState = previousState;
     job.webLoginResultSaved = false;
     job.lastError = null;
@@ -3154,7 +3166,7 @@ export function createConsoleApp(options = {}) {
     job.proxySessionAttemptIds?.clear();
     job.proxyAttemptParserTail = "";
     await removePrivateFile(webLoginCheckpointPath(job));
-    recordJobOperation(job, initialImport ? "initial_web_login" : "web_login");
+    if (!recoveringReset) recordJobOperation(job, initialImport ? "initial_web_login" : "web_login");
     appendJobLog(job, "\n[web-login] 仅登录 ChatGPT Web；不执行 Codex 授权、刷新或号池上传。\n");
     enqueueJob(job, "web_login", "正在登录 ChatGPT Web");
     await saveJobMetadata(job);
@@ -3177,6 +3189,8 @@ export function createConsoleApp(options = {}) {
   }
   async function finishWebLogin(job, code, signal, message = null) {
     stopMailPolling(job);
+    const reset = accountSessionResets.get(job.email);
+    const resetRecovery = reset?.jobId === job.id && reset.webRecoveryAttemptId === job.webLoginAttemptId;
     let success = code === 0 && job.webLoginResultSaved;
     let webSession;
     if (success) {
@@ -3244,6 +3258,21 @@ export function createConsoleApp(options = {}) {
       check.error = success ? null : failure;
     }
     job.initialWebImport = false;
+    if (resetRecovery) {
+      if (success && reset.status === "recovering_web" && !shuttingDown && !accountAutomationBlocked(job.email)) {
+        await accountSessionResets.save(job.email, { status: "queued", error: null, webRecoveryAttemptId: null });
+        job.lastError = null; job.poolRefreshError = null;
+        appendJobLog(job, "[session-reset] Web 登录态已恢复，继续确认登出全部设备，再重新登录并完成授权。\n");
+        enqueueJob(job, "full", "Web 登录态已恢复，继续会话重建");
+      } else if (!shuttingDown) {
+        const canceled = failure === "Web 登录已取消";
+        const error = canceled ? "用户取消了会话重建" : success ? "会话重建已停止" : `Web 登录恢复失败：${failure}`;
+        await accountSessionResets.fail(job.email, error);
+        if (!accountAutomationBlocked(job.email)) job.status = canceled ? "canceled" : "failed";
+        job.lastError = error; job.poolRefreshError = error;
+        job.prompt = error;
+      }
+    }
     touch(job);
     await saveJobMetadata(job);
     if (success && (initialImport || job.autoTaskEligible) && !accountAutomationBlocked(job.email) && !poolPaused) await queueConfiguredTaskActions(job);
@@ -3388,7 +3417,6 @@ export function createConsoleApp(options = {}) {
     return canForceRelogin(job) && !sessionResetPending(state) && !job.autoRepairOperation
       && !webSessionCheckPending(job) && !["pending", "running"].includes(job.autoTaskStatus)
       && (!job.poolRefreshAction || job.poolRefreshAction === "session-reset" && job.poolRefreshError)
-      && Boolean(job.webSessionAvailable || state?.status === "failed" && state.logoutCompletedAt)
       && Boolean(sub2ApiSettingsConfig?.baseUrl && sub2ApiSettingsConfig?.adminApiKey)
       && (!requirePoolSnapshot || getSub2ApiAccountStatusForJob(job).inPool === true);
   }
@@ -3417,7 +3445,7 @@ export function createConsoleApp(options = {}) {
     cooldownMinutes = normalizeSessionResetDelay(cooldownMinutes);
     // The authoritative pool listing below also works before the first status
     // snapshot after restart, including an already-expired cooldown deadline.
-    if (!canResetAccountSessions(job, { requirePoolSnapshot: false })) throw httpError(409, "账号正在执行任务、缺少 Web 会话或尚未加入号池，暂不能重建会话");
+    if (!canResetAccountSessions(job, { requirePoolSnapshot: false })) throw httpError(409, "账号正在执行任务或尚未加入号池，暂不能重建会话");
     await reloadMissingJobCredentials(job);
     if (automatic) {
       const eligible = getAutoRepairEligibility(job);
@@ -3448,7 +3476,7 @@ export function createConsoleApp(options = {}) {
       accountIds: records.map(a => String(a.id)), cooldownMinutes, resumeAt: null,
       poolPauseActive: previous?.poolPauseActive === true,
       resumeAccountIds: previous?.poolPauseActive ? previous.resumeAccountIds || [] : [],
-      logoutCompletedAt });
+      logoutCompletedAt, webRecoveryAttempts: 0, webRecoveryAttemptId: null });
     try {
       await validateSessionResetRoute(job, state);
       await ensureSessionResetPoolPaused(job);
@@ -3490,6 +3518,16 @@ export function createConsoleApp(options = {}) {
     return { status: "pending" };
   }
 
+  async function recoverSessionResetWeb(job) {
+    const state = activeSessionReset(job);
+    if (!state || state.logoutCompletedAt) throw new Error("会话重建状态已变化，停止 Web 登录恢复");
+    if (state.webRecoveryAttempts >= 1) throw new Error("Web 登录恢复后登出仍返回会话失效，已停止本轮重建；请核查账号 Web 会话后重试");
+    await accountSessionResets.save(job.email, { status: "recovering_web", webRecoveryAttempts: (state.webRecoveryAttempts || 0) + 1, error: null });
+    appendJobLog(job, "[session-reset] 原 Web 登录态已失效或缺失，先使用原绑定 IP 恢复 Web 登录；号池保持暂停。\n");
+    await startWebLogin(job, { sessionResetId: state.id });
+    return null;
+  }
+
   async function prepareSessionResetLogin(job, current = () => true) {
     let state = activeSessionReset(job);
     const route = await validateSessionResetRoute(job, state);
@@ -3499,9 +3537,16 @@ export function createConsoleApp(options = {}) {
     if (!current()) return null;
     if (!state.logoutCompletedAt) {
       if (state.status === "logging_out") throw new Error("上次登出请求被中断，远端结果待确认；请手动检查会话后重试");
+      await inspectAccountWebSession(job);
+      if (!current()) return null;
+      if (["expired", "absent"].includes(job.webSessionStatus)) return recoverSessionResetWeb(job);
       await accountSessionResets.save(job.email, { status: "logging_out" });
       appendJobLog(job, "[session-reset] 1/4：使用原绑定 IP 登出所有设备与会话。\n");
-      await revokeAllAccountSessions(job);
+      try { await revokeAllAccountSessions(job); }
+      catch (error) {
+        if (current() && /^SESSION_TOKEN_EXPIRED:/.test(error.message)) return recoverSessionResetWeb(job);
+        throw error;
+      }
       state = await accountSessionResets.save(job.email, { logoutCompletedAt: new Date().toISOString(),
         resumeAt: state.cooldownMinutes ? new Date(Date.now() + state.cooldownMinutes * 60_000).toISOString() : null,
         status: "authorizing" });
@@ -3569,6 +3614,19 @@ export function createConsoleApp(options = {}) {
         const entry = await privateJsonIfPresent(path.join(path.dirname(job.outputPath), "operation-logs", `${state.logOperationId}.json`));
         if (entry?.type === "session_reset") restoreAccountLogOperation(job, entry);
       }
+      if (state.status === "recovering_web") {
+        try {
+          await validateSessionResetRoute(job, state);
+          await startWebLogin(job, { sessionResetId: state.id });
+        } catch (error) {
+          await accountSessionResets.fail(email, error);
+          job.webLoginPreviousState = null; job.queuedMode = null; job.queueRunId = null;
+          failJob(job, `恢复会话重建失败：${error.message}`);
+          job.poolRefreshError = job.lastError;
+          await saveJobMetadata(job);
+        }
+        continue;
+      }
       if (state.status === "syncing") {
         job.status = "completed"; job.poolRefreshAction = "session-reset"; job.poolRefreshReady = true;
         schedulePoolRefresh(job, 0); continue;
@@ -3613,6 +3671,7 @@ export function createConsoleApp(options = {}) {
     appendJobLog(job, "[session-reset] 4/4：已原位更新号池 Codex 凭据并恢复原启用状态；原先关闭的账号保持关闭，原 IP 绑定保持不变。\n");
     if (entry?.type === "session_reset") finishAccountLogOperation(job, entry, "completed");
     overloadCooldown.trigger();
+    degradationCooldown.trigger();
   }
 
   async function forceReloginJob(job, options = {}, context = {}) {

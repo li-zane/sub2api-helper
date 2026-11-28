@@ -32,6 +32,7 @@ export function SessionResetDialog({ count, onClose, onConfirm }) {
           value={minutes} disabled={busy} onChange={event => setMinutes(event.target.value)} required />
       </label>
       <p className="settings-note">登出所有设备后等待，再重登 Web、完成 Codex 授权并更新号池凭据。0 分钟立即继续，全程保留原 IP 绑定。</p>
+      <p className="settings-note">旧 Web 登录态失效或缺失时，先自动恢复一次 Web 登录，再继续登出与重登；期间号池保持暂停。</p>
       {error && <p className="dialog-error" role="alert">{error}</p>}
       <div className="dialog-footer">
         <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>取消</button>

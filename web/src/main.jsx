@@ -4221,7 +4221,7 @@ function JobRow({ job, token, onOpenChat, pricingAvailable, onOpenCost, poolPric
             disabled={rowBusy || !job.canResetSessions}
             title={job.canResetSessions ? "登出所有设备 → 重新登录 Web → Codex 授权 → 更新号池凭据；绑定 IP 保持不变" : mutationReason || job.sessionReset?.error || "需要有效 Web 会话且已加入号池，封禁账号不执行"}
             aria-label="登出设备并重登授权">
-            {['queued', 'logging_out', 'cooling', 'authorizing', 'syncing'].includes(job.sessionReset?.status) ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
+            {['queued', 'recovering_web', 'logging_out', 'cooling', 'authorizing', 'syncing'].includes(job.sessionReset?.status) ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
           </button>
           <button
             type="button"

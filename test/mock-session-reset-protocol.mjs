@@ -10,6 +10,10 @@ await append({ phase: webOnly ? "web-only" : "web", reused: Boolean(oldWeb), pro
   fixed: process.env.CHATGPT_PROXY_FIXED, phased: process.env.TOSUB2_PHASED_PROXY,
   mode: process.env.TOSUB2_CODEX_AUTH_MODE, oauthProxyId: process.env.TOSUB2_OAUTH_PROXY_ID });
 console.log("[1/5] Start ChatGPT web login");
+if (webOnly && process.env.SESSION_RESET_WEB_GATE) {
+  while (!await fs.access(process.env.SESSION_RESET_WEB_GATE).then(() => true, () => false)) await new Promise(r => setTimeout(r, 20));
+}
+if (webOnly && process.env.SESSION_RESET_FAIL_WEB === "1") { console.error("[error] fixture Web recovery rejected"); process.exit(1); }
 await seedWebSession(output, { filePath: process.env.TOSUB2_WEB_SESSION_PATH,
   ...(webOnly ? { cookieValue: "fixture-web-renewed" } : {}) });
 if (webOnly || process.env.SESSION_RESET_FAIL_OAUTH !== "1") console.log("[ok] Saved web session: " + process.env.TOSUB2_WEB_SESSION_PATH);
