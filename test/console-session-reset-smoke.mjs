@@ -94,7 +94,11 @@ for (const scenario of (process.env.SESSION_RESET_SCENARIO ? [process.env.SESSIO
   const config = { baseUrl: poolBase, adminApiKey: "fixture" }, backend = crypto.createHash("sha256").update(poolBase + "\0fixture").digest("hex").slice(0, 24);
   const slot = http.createServer(), port = await listen(slot); await new Promise(r => slot.close(r)); const base = `http://127.0.0.1:${port}`;
   const gate = path.join(temp, "continue");
+  // This fixture replaces the session transport's close method. Keep automatic
+  // diagnostics independent so they never start a real, unclosable TLS worker.
   const probe = `import fs from 'node:fs/promises';
+import {ProxyQualityService} from ${JSON.stringify(pathToFileURL(path.resolve('src/proxy-quality.mjs')).href)};
+ProxyQualityService.prototype.check=async function(){return {checkedAt:new Date().toISOString(),status:'failed',stable:null,exits:[]};};
 import {TlsFingerprintTransport} from ${JSON.stringify(pathToFileURL(path.resolve('src/tls-transport.mjs')).href)};
 TlsFingerprintTransport.prototype.configure=async function(proxy){if(this.rotateProxySessions!==false)throw Error('logout transport must be pinned');this.configuredProxy=proxy;await fs.appendFile(${JSON.stringify(trace)},JSON.stringify({phase:'transport',proxy})+'\\n');};
 TlsFingerprintTransport.prototype.fetch=async function(url,options){if(url.endsWith('/backend-api/accounts/logout_all'))await fs.appendFile(${JSON.stringify(trace)},JSON.stringify({phase:'logout-route',proxy:this.configuredProxy})+'\\n');return fetch(url,options);};
